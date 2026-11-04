@@ -1,0 +1,15 @@
+name: Verify
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check patch whitespace
+        run: git show --check --format=oneline HEAD
