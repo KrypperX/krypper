@@ -1,7 +1,7 @@
 # Krypper
 
-Krypper currently has a minimal local command-line entry point. It uses only
-Python's standard library and runs offline.
+Krypper is a local command-line tool. It uses only Python's standard library
+and runs offline.
 
 ## Local CLI
 
@@ -11,11 +11,16 @@ Build/check syntax:
 python3 -m py_compile krypper.py
 ```
 
-Run:
+Run from the directory containing the file you want to display:
 
 ```sh
-python3 krypper.py --help
+python3 krypper.py show README.md
 ```
+
+`show` writes the selected file to stdout. The path must be relative and resolve
+inside the current working directory. Only regular UTF-8 files up to 1 MiB are
+accepted; absolute paths, missing files, directories, invalid UTF-8, and paths
+that escape the current directory are rejected.
 
 Test:
 
@@ -23,9 +28,8 @@ Test:
 python3 -m unittest discover -s tests -v
 ```
 
-The CLI currently provides usage output and rejects unsupported arguments; it
-does not yet perform product operations. The build command checks Python syntax
-and does not produce a packaged executable.
+The build command checks Python syntax and does not produce a packaged
+executable.
 
 Contributions should go through reviewed pull requests and the existing required checks.
 
