@@ -272,6 +272,8 @@ def main(argv=None):
             listing.error(str(error))
     elif args.command == "write":
         if args.stdin:
+            if args.text:
+                writer.error("extra text is not allowed with --stdin")
             contents = sys.stdin.buffer.read(MAX_FILE_SIZE + 1)
             if len(contents) > MAX_FILE_SIZE:
                 writer.error("stdin exceeds 1 MiB")

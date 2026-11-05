@@ -336,6 +336,15 @@ class CliTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(b"stdin is not valid UTF-8", result.stderr)
 
+    def test_write_stdin_rejects_extra_text_without_creating_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = self.run_cli("write", "--stdin", "note.txt", "unexpected", cwd=directory, input="stdin text")
+
+            self.assertFalse(Path(directory, "note.txt").exists())
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("extra text is not allowed with --stdin", result.stderr)
+
     def test_write_creates_file_in_existing_nested_parent(self):
         with tempfile.TemporaryDirectory() as directory:
             Path(directory, "nested").mkdir()
