@@ -18,6 +18,7 @@ python3 krypper.py show README.md
 python3 krypper.py list
 python3 krypper.py list docs
 python3 krypper.py write notes/today.txt "Remember to review the change."
+python3 krypper.py write --stdin notes/from-pipe.txt < notes/draft.txt
 ```
 
 `show` writes the selected file to stdout. The path must be relative and resolve
@@ -37,7 +38,9 @@ current directory are rejected.
 existing file. The target path must be relative, remain inside the current
 directory, and have existing directory parents. Symlink path components and
 targets are refused. Text is limited to 1 MiB after UTF-8 encoding; the command
-does not create parent directories or contact a network service.
+does not create parent directories or contact a network service. Use
+`write --stdin <path>` to read UTF-8 text from standard input; input is limited
+to 1 MiB and invalid UTF-8 is rejected before a file is created.
 
 Test:
 
