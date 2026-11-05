@@ -141,7 +141,9 @@ def main(argv=None):
     listing.add_argument("path", nargs="?", default=".", help="relative directory inside the current directory")
     args = parser.parse_args(argv)
 
-    if args.command == "show":
+    if args.command is None:
+        parser.error("a command is required")
+    elif args.command == "show":
         try:
             sys.stdout.buffer.write(read_text_file(args.path).encode("utf-8"))
         except ValueError as error:

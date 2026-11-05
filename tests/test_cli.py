@@ -28,6 +28,14 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0)
         self.assertIn("usage: krypper", result.stdout)
+        self.assertIn("{show,list}", result.stdout)
+
+    def test_missing_command_prints_usage_and_fails(self):
+        result = self.run_cli()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("usage: krypper", result.stderr)
+        self.assertIn("{show,list}", result.stderr)
 
     def test_unsupported_argument_prints_error_and_usage(self):
         result = self.run_cli("--unsupported")
