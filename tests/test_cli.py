@@ -1,5 +1,6 @@
-import subprocess
+import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -173,6 +174,107 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, contents)
         self.assertEqual(result.stderr, "")
+
+    def test_list_defaults_to_current_directory_and_includes_hidden_entries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ("zeta", ".hidden", "alpha"):
+                (root / name).touch()
+
+            result = self.run_cli("list", cwd=directory)
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.splitlines(), [json.dumps(name) for name in (".hidden", "alpha", "zeta")])
+        self.assertEqual(result.stderr, "")
+
+    def test_list_selected_nested_directory_is_not_recursive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            selected = root / "nested"
+            selected.mkdir()
+            (selected / "file.txt").touch()
+            (selected / "child").mkdir()
+            (selected / "child" / "deeper.txt").touch()
+
+            (selected / "file.txt").write_text("entry contents", encoding="utf-8")
+            result = self.run_cli("list", "nested/", cwd=directory)
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.splitlines(), ['"child"', '"file.txt"'])
+        self.assertNotIn("entry contents", result.stdout)
+
+    def test_list_output_is_deterministic_and_escapes_control_characters(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            names = ("z-last", "line\nbreak", "a-first", "tab\tname")
+            for name in names:
+                (root / name).touch()
+
+            first = self.run_cli("list", cwd=directory)
+            second = self.run_cli("list", cwd=directory)
+
+        expected_names = sorted(names)
+        expected = [json.dumps(name) for name in expected_names]
+        self.assertEqual(first.returncode, 0)
+        self.assertEqual(first.stdout, "".join(f"{line}\n" for line in expected))
+        self.assertEqual(second.stdout, first.stdout)
+
+    def test_list_rejects_symlink_escape(self):
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside:
+            link = Path(directory) / "escape"
+            try:
+                link.symlink_to(outside, target_is_directory=True)
+            except (NotImplementedError, OSError) as error:
+                self.skipTest(f"symlinks are unavailable: {error}")
+
+            result = self.run_cli("list", "escape", cwd=directory)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("path must stay inside the current directory", result.stderr)
+
+    def test_list_does_not_follow_symlink_entries(self):
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside:
+            root = Path(directory)
+            (Path(outside) / "secret.txt").touch()
+            try:
+                (root / "linked-directory").symlink_to(outside, target_is_directory=True)
+            except (NotImplementedError, OSError) as error:
+                self.skipTest(f"symlinks are unavailable: {error}")
+
+            result = self.run_cli("list", cwd=directory)
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.splitlines(), ['"linked-directory"'])
+        self.assertNotIn("secret.txt", result.stdout)
+
+    def test_list_rejects_missing_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = self.run_cli("list", "missing", cwd=directory)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("file not found", result.stderr)
+
+    def test_list_rejects_non_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "file.txt").touch()
+            result = self.run_cli("list", "file.txt", cwd=directory)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not a directory", result.stderr)
+
+    def test_list_rejects_absolute_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = self.run_cli("list", str(Path(directory) / "child"), cwd=directory)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("absolute paths are not allowed", result.stderr)
+
+    def test_list_rejects_path_outside_current_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = self.run_cli("list", "..", cwd=directory)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("path must stay inside the current directory", result.stderr)
 
 
 if __name__ == "__main__":
