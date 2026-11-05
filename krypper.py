@@ -252,6 +252,7 @@ def main(argv=None):
     listing = commands.add_parser("list", help="list immediate directory entries")
     listing.add_argument("path", nargs="?", default=".", help="relative directory inside the current directory")
     writer = commands.add_parser("write", help="create a new UTF-8 text file")
+    writer.add_argument("--stdin", action="store_true", help="read text from standard input (up to 1 MiB)")
     writer.add_argument("path", help="relative file path inside the current directory")
     writer.add_argument("text", nargs=argparse.REMAINDER, help="text to write")
     args = parser.parse_args(argv)
@@ -270,10 +271,20 @@ def main(argv=None):
         except ValueError as error:
             listing.error(str(error))
     elif args.command == "write":
-        if not args.text:
-            writer.error("text is required")
+        if args.stdin:
+            contents = sys.stdin.buffer.read(MAX_FILE_SIZE + 1)
+            if len(contents) > MAX_FILE_SIZE:
+                writer.error("stdin exceeds 1 MiB")
+            try:
+                text = contents.decode("utf-8")
+            except UnicodeDecodeError:
+                writer.error("stdin is not valid UTF-8")
+        else:
+            if not args.text:
+                writer.error("text is required")
+            text = " ".join(args.text)
         try:
-            create_text_file(args.path, " ".join(args.text))
+            create_text_file(args.path, text)
         except ValueError as error:
             writer.error(str(error))
     return 0
