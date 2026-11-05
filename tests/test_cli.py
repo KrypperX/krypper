@@ -1,8 +1,12 @@
 import subprocess
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+import krypper
 
 
 CLI = Path(__file__).resolve().parents[1] / "krypper.py"
@@ -81,6 +85,49 @@ class CliTests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("path must stay inside the current directory", result.stderr)
+
+    def test_show_accepts_symlink_to_file_inside_current_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "note.txt").write_text("inside\n", encoding="utf-8")
+            link = root / "alias.txt"
+            try:
+                link.symlink_to(root / "note.txt")
+            except (NotImplementedError, OSError) as error:
+                self.skipTest(f"symlinks are unavailable: {error}")
+
+            result = self.run_cli("show", "alias.txt", cwd=directory)
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "inside\n")
+
+    def test_show_rejects_file_replaced_by_outside_symlink_before_open(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            selected = root / "note.txt"
+            selected.write_text("inside\n", encoding="utf-8")
+            outside = root.parent / f"{root.name}-outside.txt"
+            outside.write_text("outside\n", encoding="utf-8")
+            original_open = os.open
+            replaced = False
+
+            def replace_before_open(path, *args, **kwargs):
+                nonlocal replaced
+                if not replaced and os.fspath(path) in (str(selected), "note.txt"):
+                    replaced = True
+                    selected.unlink()
+                    selected.symlink_to(outside)
+                return original_open(path, *args, **kwargs)
+
+            previous_directory = Path.cwd()
+            os.chdir(root)
+            try:
+                with patch("krypper.os.open", side_effect=replace_before_open):
+                    with self.assertRaisesRegex(ValueError, "unable to read file"):
+                        krypper.read_text_file("note.txt")
+            finally:
+                os.chdir(previous_directory)
+                outside.unlink(missing_ok=True)
 
     def test_show_rejects_missing_file(self):
         with tempfile.TemporaryDirectory() as directory:
