@@ -28,14 +28,14 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0)
         self.assertIn("usage: krypper", result.stdout)
-        self.assertIn("{show,list}", result.stdout)
+        self.assertIn("{show,list,write}", result.stdout)
 
     def test_missing_command_prints_usage_and_fails(self):
         result = self.run_cli()
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("usage: krypper", result.stderr)
-        self.assertIn("{show,list}", result.stderr)
+        self.assertIn("{show,list,write}", result.stderr)
 
     def test_unsupported_argument_prints_error_and_usage(self):
         result = self.run_cli("--unsupported")
@@ -283,6 +283,167 @@ class CliTests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("path must stay inside the current directory", result.stderr)
+
+    def test_write_creates_utf8_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = self.run_cli("write", "note.txt", "Hello, café.", cwd=directory)
+
+            self.assertEqual(Path(directory, "note.txt").read_text(encoding="utf-8"), "Hello, café.")
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+
+    def test_write_creates_file_in_existing_nested_parent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "nested").mkdir()
+
+            result = self.run_cli("write", "nested/note.txt", "nested text", cwd=directory)
+
+            self.assertEqual(Path(directory, "nested", "note.txt").read_text(encoding="utf-8"), "nested text")
+
+        self.assertEqual(result.returncode, 0)
+
+    def test_write_accepts_dash_leading_text_and_unquoted_words(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = self.run_cli("write", "note.txt", "-draft", "with", "spaces", cwd=directory)
+
+            self.assertEqual(Path(directory, "note.txt").read_text(encoding="utf-8"), "-draft with spaces")
+
+        self.assertEqual(result.returncode, 0)
+
+    def test_write_refuses_to_replace_existing_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory, "note.txt")
+            target.write_text("keep this", encoding="utf-8")
+
+            result = self.run_cli("write", "note.txt", "replacement", cwd=directory)
+
+            self.assertEqual(target.read_text(encoding="utf-8"), "keep this")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("file already exists", result.stderr)
+
+    def test_write_rejects_absolute_and_outside_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "workspace"
+            root.mkdir()
+            outside = Path(directory) / "outside.txt"
+            outside.write_text("keep", encoding="utf-8")
+            absolute = self.run_cli("write", str(outside), "replacement", cwd=root)
+            traversal = self.run_cli("write", "../outside.txt", "replacement", cwd=root)
+
+            self.assertEqual(outside.read_text(encoding="utf-8"), "keep")
+            self.assertFalse((root / "outside.txt").exists())
+
+        self.assertNotEqual(absolute.returncode, 0)
+        self.assertIn("absolute paths are not allowed", absolute.stderr)
+        self.assertNotEqual(traversal.returncode, 0)
+        self.assertIn("path must stay inside the current directory", traversal.stderr)
+
+    def test_write_rejects_symlink_parent_and_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            nested = root / "nested"
+            nested.mkdir()
+            target = nested / "note.txt"
+            target.write_text("keep", encoding="utf-8")
+            parent_link = root / "linked"
+            target_link = root / "alias.txt"
+            try:
+                parent_link.symlink_to(nested, target_is_directory=True)
+                target_link.symlink_to(target)
+            except (NotImplementedError, OSError) as error:
+                self.skipTest(f"symlinks are unavailable: {error}")
+
+            parent_result = self.run_cli("write", "linked/new.txt", "text", cwd=directory)
+            target_result = self.run_cli("write", "alias.txt", "replacement", cwd=directory)
+
+            self.assertEqual(target.read_text(encoding="utf-8"), "keep")
+            self.assertTrue(target_link.is_symlink())
+            self.assertFalse((nested / "new.txt").exists())
+
+        self.assertNotEqual(parent_result.returncode, 0)
+        self.assertIn("symlink paths are not allowed", parent_result.stderr)
+        self.assertNotEqual(target_result.returncode, 0)
+        self.assertIn("file already exists", target_result.stderr)
+
+    def test_write_rejects_parent_swapped_to_symlink_before_open(self):
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside:
+            root = Path(directory)
+            (root / "nested").mkdir()
+            previous_directory = Path.cwd()
+            os.chdir(root)
+            original_open = os.open
+            swapped = False
+
+            def swap_parent_before_open(path, flags, *args, **kwargs):
+                nonlocal swapped
+                if path == "nested" and kwargs.get("dir_fd") is not None and not swapped:
+                    os.rename("nested", "moved")
+                    os.symlink(outside, "nested", target_is_directory=True)
+                    swapped = True
+                return original_open(path, flags, *args, **kwargs)
+
+            try:
+                with patch("krypper.os.open", side_effect=swap_parent_before_open):
+                    with self.assertRaisesRegex(ValueError, "invalid parent directory"):
+                        krypper.create_text_file("nested/new.txt", "text")
+            finally:
+                os.chdir(previous_directory)
+
+            self.assertTrue(swapped)
+            self.assertFalse(Path(outside, "new.txt").exists())
+            self.assertFalse(Path(directory, "moved", "new.txt").exists())
+
+    def test_write_rejects_missing_and_non_directory_parents(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "file.txt").touch()
+            missing = self.run_cli("write", "missing/note.txt", "text", cwd=directory)
+            not_directory = self.run_cli("write", "file.txt/note.txt", "text", cwd=directory)
+
+            self.assertFalse(Path(directory, "missing").exists())
+
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("parent directory not found", missing.stderr)
+        self.assertNotEqual(not_directory.returncode, 0)
+        self.assertIn("parent is not a directory", not_directory.stderr)
+
+    def test_write_enforces_encoded_one_mib_limit_without_creating_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            previous_directory = Path.cwd()
+            os.chdir(directory)
+            try:
+                krypper.create_text_file("limit.txt", "é" * (1024 * 1024 // 2))
+                with self.assertRaisesRegex(ValueError, "text exceeds 1 MiB"):
+                    krypper.create_text_file("too-large.txt", "é" * (1024 * 1024 // 2 + 1))
+            finally:
+                os.chdir(previous_directory)
+
+            self.assertEqual(Path(directory, "limit.txt").stat().st_size, 1024 * 1024)
+            self.assertFalse(Path(directory, "too-large.txt").exists())
+
+    def test_write_removes_partial_file_when_write_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            previous_directory = Path.cwd()
+            os.chdir(directory)
+            original_write = os.write
+            writes = 0
+
+            def fail_after_partial_write(fd, contents):
+                nonlocal writes
+                writes += 1
+                if writes == 1:
+                    return original_write(fd, contents[:3])
+                raise OSError("disk full")
+
+            try:
+                with patch("krypper.os.write", side_effect=fail_after_partial_write):
+                    with self.assertRaisesRegex(ValueError, "unable to write file"):
+                        krypper.create_text_file("partial.txt", "complete text")
+            finally:
+                os.chdir(previous_directory)
+
+            self.assertFalse(Path(directory, "partial.txt").exists())
 
 
 if __name__ == "__main__":

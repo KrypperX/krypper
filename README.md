@@ -17,6 +17,7 @@ Run commands from the workspace directory:
 python3 krypper.py show README.md
 python3 krypper.py list
 python3 krypper.py list docs
+python3 krypper.py write notes/today.txt "Remember to review the change."
 ```
 
 `show` writes the selected file to stdout. The path must be relative and resolve
@@ -31,6 +32,12 @@ are included; entries are not followed and subdirectories are not traversed.
 Control characters are escaped, and the command never reads entry contents.
 Absolute paths, missing paths, non-directories, and paths that escape the
 current directory are rejected.
+
+`write <path> <text>` creates one new UTF-8 text file and never replaces an
+existing file. The target path must be relative, remain inside the current
+directory, and have existing directory parents. Symlink path components and
+targets are refused. Text is limited to 1 MiB after UTF-8 encoding; the command
+does not create parent directories or contact a network service.
 
 Test:
 

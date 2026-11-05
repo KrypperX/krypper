@@ -129,6 +129,118 @@ def list_directory(path):
         os.close(fd)
 
 
+def create_text_file(path, text):
+    if "\0" in path:
+        raise ValueError("invalid file path")
+    if os.path.isabs(path):
+        raise ValueError("absolute paths are not allowed")
+    if not path or path.endswith(os.sep):
+        raise ValueError("invalid file path")
+
+    try:
+        contents = text.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValueError("text is not valid UTF-8") from None
+    if len(contents) > MAX_FILE_SIZE:
+        raise ValueError("text exceeds 1 MiB")
+
+    components = path.split(os.sep)
+    name = components[-1]
+    if name in ("", ".", ".."):
+        raise ValueError("invalid file path")
+
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        root_fd = os.open(".", directory_flags)
+    except OSError:
+        raise ValueError("unable to open current directory") from None
+    directories = [root_fd]
+    try:
+        for component in components[:-1]:
+            if component in ("", "."):
+                continue
+            if component == "..":
+                if len(directories) == 1:
+                    raise ValueError("path must stay inside the current directory")
+                os.close(directories.pop())
+                continue
+
+            parent_fd = directories[-1]
+            try:
+                info = os.stat(component, dir_fd=parent_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                raise ValueError("parent directory not found") from None
+            except OSError:
+                raise ValueError("invalid parent directory") from None
+            if stat.S_ISLNK(info.st_mode):
+                raise ValueError("symlink paths are not allowed")
+            if not stat.S_ISDIR(info.st_mode):
+                raise ValueError("parent is not a directory")
+
+            try:
+                descriptor = os.open(component, directory_flags, dir_fd=parent_fd)
+            except OSError:
+                raise ValueError("invalid parent directory") from None
+            opened = os.fstat(descriptor)
+            if (info.st_dev, info.st_ino) != (opened.st_dev, opened.st_ino):
+                os.close(descriptor)
+                raise ValueError("path changed while creating file")
+            directories.append(descriptor)
+
+        parent_fd = directories[-1]
+        try:
+            file_fd = os.open(
+                name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o666,
+                dir_fd=parent_fd,
+            )
+        except FileExistsError:
+            raise ValueError("file already exists") from None
+        except FileNotFoundError:
+            raise ValueError("parent directory not found") from None
+        except OSError:
+            raise ValueError("unable to create file") from None
+
+        created = None
+        write_failed = False
+        try:
+            created = os.fstat(file_fd)
+            offset = 0
+            while offset < len(contents):
+                try:
+                    written = os.write(file_fd, contents[offset:])
+                except InterruptedError:
+                    continue
+                if written <= 0:
+                    raise OSError("file write made no progress")
+                offset += written
+        except OSError:
+            write_failed = True
+            if created is None:
+                try:
+                    created = os.fstat(file_fd)
+                except OSError:
+                    pass
+        try:
+            os.close(file_fd)
+        except OSError:
+            write_failed = True
+
+        if write_failed:
+            try:
+                if created is not None:
+                    current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                    if (current.st_dev, current.st_ino) == (created.st_dev, created.st_ino):
+                        os.unlink(name, dir_fd=parent_fd)
+            except OSError:
+                pass
+            raise ValueError("unable to write file") from None
+    finally:
+        for descriptor in reversed(directories):
+            os.close(descriptor)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         prog="krypper",
@@ -139,6 +251,9 @@ def main(argv=None):
     show.add_argument("path", help="relative path inside the current directory")
     listing = commands.add_parser("list", help="list immediate directory entries")
     listing.add_argument("path", nargs="?", default=".", help="relative directory inside the current directory")
+    writer = commands.add_parser("write", help="create a new UTF-8 text file")
+    writer.add_argument("path", help="relative file path inside the current directory")
+    writer.add_argument("text", nargs=argparse.REMAINDER, help="text to write")
     args = parser.parse_args(argv)
 
     if args.command is None:
@@ -154,6 +269,13 @@ def main(argv=None):
                 print(json.dumps(name, ensure_ascii=True))
         except ValueError as error:
             listing.error(str(error))
+    elif args.command == "write":
+        if not args.text:
+            writer.error("text is required")
+        try:
+            create_text_file(args.path, " ".join(args.text))
+        except ValueError as error:
+            writer.error(str(error))
     return 0
 
 
