@@ -14,12 +14,13 @@ CLI = Path(__file__).resolve().parents[1] / "krypper.py"
 
 
 class CliTests(unittest.TestCase):
-    def run_cli(self, *args, cwd=None):
+    def run_cli(self, *args, cwd=None, input=None, text=True):
         return subprocess.run(
             [sys.executable, str(CLI), *args],
             cwd=cwd,
+            input=input,
             capture_output=True,
-            text=True,
+            text=text,
             check=False,
         )
 
@@ -292,6 +293,57 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stderr, "")
+
+    def test_write_stdin_creates_multiline_utf8_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            contents = "First line\nCafé 東京\n"
+
+            result = self.run_cli("write", "--stdin", "note.txt", cwd=directory, input=contents)
+
+            self.assertEqual(Path(directory, "note.txt").read_text(encoding="utf-8"), contents)
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+
+    def test_write_stdin_accepts_exactly_one_mibibyte(self):
+        with tempfile.TemporaryDirectory() as directory:
+            contents = "é" * (1024 * 1024 // 2)
+
+            result = self.run_cli("write", "--stdin", "limit.txt", cwd=directory, input=contents)
+
+            self.assertEqual(Path(directory, "limit.txt").stat().st_size, 1024 * 1024)
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+
+    def test_write_stdin_rejects_over_limit_without_creating_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            contents = "x" * (1024 * 1024 + 1)
+
+            result = self.run_cli("write", "--stdin", "too-large.txt", cwd=directory, input=contents)
+
+            self.assertFalse(Path(directory, "too-large.txt").exists())
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("stdin exceeds 1 MiB", result.stderr)
+
+    def test_write_stdin_rejects_invalid_utf8_without_creating_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = self.run_cli("write", "--stdin", "invalid.txt", cwd=directory, input=b"bad \xff", text=False)
+
+            self.assertFalse(Path(directory, "invalid.txt").exists())
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"stdin is not valid UTF-8", result.stderr)
+
+    def test_write_stdin_rejects_extra_text_without_creating_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = self.run_cli("write", "--stdin", "note.txt", "unexpected", cwd=directory, input="stdin text")
+
+            self.assertFalse(Path(directory, "note.txt").exists())
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("extra text is not allowed with --stdin", result.stderr)
 
     def test_write_creates_file_in_existing_nested_parent(self):
         with tempfile.TemporaryDirectory() as directory:
