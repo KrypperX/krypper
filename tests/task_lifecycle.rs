@@ -1,4 +1,4 @@
-use krypper::task_lifecycle::{Task, TaskSession, TaskState};
+use krypper::task_lifecycle::{Task, TaskSession, TaskState, TurnState, TurnTransitionError};
 
 #[test]
 fn new_task_keeps_description_and_starts_pending_with_empty_read_only_history() {
@@ -132,4 +132,187 @@ fn task_lookup_and_events_are_isolated_between_sessions() {
         .unwrap()
         .events()
         .is_empty());
+}
+
+#[test]
+fn tasks_create_stable_pending_turns_in_creation_order() {
+    let mut first_task = Task::new("First task");
+    let mut second_task = Task::new("Second task");
+    let first_task_id = first_task.id();
+    let second_task_id = second_task.id();
+
+    let first_turn_id = first_task.create_turn();
+    let second_turn_id = first_task.create_turn();
+    let other_turn_id = second_task.create_turn();
+
+    assert_ne!(first_task_id, second_task_id);
+    assert_ne!(first_turn_id, second_turn_id);
+    assert_ne!(first_turn_id, other_turn_id);
+
+    let turns = first_task.turns();
+    assert_eq!(turns.len(), 2);
+    assert_eq!(turns[0].id(), first_turn_id);
+    assert_eq!(turns[1].id(), second_turn_id);
+    assert_eq!(turns[0].task_id(), first_task_id);
+    assert_eq!(turns[1].task_id(), first_task_id);
+    assert_eq!(turns[0].state(), TurnState::Pending);
+    assert_eq!(turns[1].state(), TurnState::Pending);
+    assert!(turns[0].events().is_empty());
+    assert!(turns[1].events().is_empty());
+    assert_eq!(
+        first_task.get_turn(first_turn_id).unwrap().id(),
+        first_turn_id
+    );
+    assert!(first_task.get_turn(other_turn_id).is_none());
+    assert_eq!(
+        first_task.transition_turn(other_turn_id, TurnState::Running),
+        Err(TurnTransitionError::UnknownTurn {
+            turn_id: other_turn_id
+        })
+    );
+
+    first_task
+        .transition_turn(first_turn_id, TurnState::Running)
+        .unwrap();
+    assert_eq!(first_task.turns()[0].id(), first_turn_id);
+    assert_eq!(first_task.turns()[0].state(), TurnState::Running);
+}
+
+#[test]
+fn valid_turn_transitions_record_ordered_immutable_events() {
+    let cases = [
+        (vec![], TurnState::Running),
+        (vec![], TurnState::Cancelled),
+        (vec![TurnState::Running], TurnState::Succeeded),
+        (vec![TurnState::Running], TurnState::Failed),
+        (vec![TurnState::Running], TurnState::Cancelled),
+    ];
+
+    for (prefix, next) in cases {
+        let mut task = Task::new("A task");
+        let task_id = task.id();
+        let turn_id = task.create_turn();
+        let mut expected_states = prefix;
+        expected_states.push(next);
+
+        for state in &expected_states {
+            task.transition_turn(turn_id, *state).unwrap();
+        }
+
+        let turn = task.get_turn(turn_id).unwrap();
+        let events = turn.events();
+        assert_eq!(events.len(), expected_states.len());
+        let mut previous_state = TurnState::Pending;
+        for (index, (event, new_state)) in events
+            .iter()
+            .zip(expected_states.iter().copied())
+            .enumerate()
+        {
+            assert_eq!(event.task_id(), task_id);
+            assert_eq!(event.turn_id(), turn_id);
+            assert_eq!(event.sequence(), index as u64 + 1);
+            assert_eq!(event.previous_state(), previous_state);
+            assert_eq!(event.new_state(), new_state);
+            previous_state = new_state;
+        }
+        assert_eq!(turn.state(), next);
+
+        let mut copied_history = turn.events().to_vec();
+        copied_history.clear();
+        assert_eq!(turn.events().len(), expected_states.len());
+    }
+}
+
+#[test]
+fn invalid_turn_transitions_leave_state_and_history_unchanged() {
+    let cases: &[(&[TurnState], TurnState)] = &[
+        (&[], TurnState::Pending),
+        (&[], TurnState::Succeeded),
+        (&[], TurnState::Failed),
+        (&[TurnState::Running], TurnState::Pending),
+        (&[TurnState::Running], TurnState::Running),
+        (
+            &[TurnState::Running, TurnState::Succeeded],
+            TurnState::Pending,
+        ),
+        (
+            &[TurnState::Running, TurnState::Succeeded],
+            TurnState::Running,
+        ),
+        (
+            &[TurnState::Running, TurnState::Succeeded],
+            TurnState::Succeeded,
+        ),
+        (
+            &[TurnState::Running, TurnState::Succeeded],
+            TurnState::Failed,
+        ),
+        (
+            &[TurnState::Running, TurnState::Succeeded],
+            TurnState::Cancelled,
+        ),
+        (&[TurnState::Running, TurnState::Failed], TurnState::Pending),
+        (&[TurnState::Running, TurnState::Failed], TurnState::Running),
+        (
+            &[TurnState::Running, TurnState::Failed],
+            TurnState::Succeeded,
+        ),
+        (&[TurnState::Running, TurnState::Failed], TurnState::Failed),
+        (
+            &[TurnState::Running, TurnState::Failed],
+            TurnState::Cancelled,
+        ),
+        (&[TurnState::Cancelled], TurnState::Pending),
+        (&[TurnState::Cancelled], TurnState::Running),
+        (&[TurnState::Cancelled], TurnState::Succeeded),
+        (&[TurnState::Cancelled], TurnState::Failed),
+        (&[TurnState::Cancelled], TurnState::Cancelled),
+    ];
+
+    for (prefix, invalid) in cases {
+        let mut task = Task::new("A task");
+        let turn_id = task.create_turn();
+        for state in *prefix {
+            task.transition_turn(turn_id, *state).unwrap();
+        }
+        let turn = task.get_turn(turn_id).unwrap();
+        let previous_state = turn.state();
+        let previous_events = turn.events().to_vec();
+
+        let error = task.transition_turn(turn_id, *invalid).unwrap_err();
+        assert_eq!(
+            error,
+            TurnTransitionError::InvalidTransition {
+                from: previous_state,
+                to: *invalid,
+            }
+        );
+        let turn = task.get_turn(turn_id).unwrap();
+        assert_eq!(turn.state(), previous_state);
+        assert_eq!(turn.events(), previous_events);
+    }
+}
+
+#[test]
+fn turns_keep_state_and_history_isolated_between_tasks() {
+    let mut first_task = Task::new("First task");
+    let mut second_task = Task::new("Second task");
+    let first_task_id = first_task.id();
+    let second_task_id = second_task.id();
+    let first_turn_id = first_task.create_turn();
+    first_task.create_turn();
+    let other_turn_id = second_task.create_turn();
+
+    first_task
+        .transition_turn(first_turn_id, TurnState::Running)
+        .unwrap();
+
+    assert_eq!(first_task.turns()[0].events()[0].task_id(), first_task_id);
+    assert_eq!(first_task.turns()[0].events()[0].turn_id(), first_turn_id);
+    assert!(first_task.turns()[1].events().is_empty());
+    assert!(second_task.turns()[0].events().is_empty());
+    assert!(first_task.get_turn(other_turn_id).is_none());
+    assert!(second_task.get_turn(first_turn_id).is_none());
+    assert_eq!(second_task.turns()[0].task_id(), second_task_id);
+    assert_eq!(second_task.turns()[0].id(), other_turn_id);
 }
