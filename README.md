@@ -1,56 +1,67 @@
 # Krypper
 
-Krypper is a local command-line tool. It uses only Python's standard library
-and runs offline.
+Krypper is a local Rust command-line tool and in-process task runtime. Runtime
+behavior stays on the machine and works offline.
 
-## Local CLI
+## Build and run
 
-Build/check syntax:
-
-```sh
-python3 -m py_compile krypper.py
-```
-
-Run commands from the workspace directory:
+Build the binary from the repository root:
 
 ```sh
-python3 krypper.py show README.md
-python3 krypper.py list
-python3 krypper.py list docs
-python3 krypper.py write notes/today.txt "Remember to review the change."
-python3 krypper.py write --stdin notes/from-pipe.txt < notes/draft.txt
+cargo build --release
+cargo run -- show README.md
+cargo run -- list
+cargo run -- list docs
+cargo run -- write notes/today.txt "Remember to review the change."
+cargo run -- write --stdin notes/from-pipe.txt < notes/draft.txt
 ```
 
-`show` writes the selected file to stdout. The path must be relative and resolve
-inside the current working directory. Only regular UTF-8 files up to 1 MiB are
-accepted; absolute paths, missing files, directories, invalid UTF-8, and paths
-that escape the current directory are rejected.
+The release binary is `target/release/krypper`. Run it with the directory you
+want to work in as the process current directory. For example, to list another
+workspace, run `/path/to/krypper/target/release/krypper list` after changing to
+that workspace.
 
-`list` prints JSON-quoted names for the immediate entries in the selected
-directory, in sorted order. The path defaults to the current directory and
-must be relative and stay inside it, including through symlinks. Hidden names
-are included; entries are not followed and subdirectories are not traversed.
-Control characters are escaped, and the command never reads entry contents.
-Absolute paths, missing paths, non-directories, and paths that escape the
-current directory are rejected.
+`show` writes a regular UTF-8 file to stdout without adding output. Its relative
+path must resolve inside the current directory. Symlinks may be followed when
+their resolved path stays inside it. Absolute paths, missing files, directories,
+invalid UTF-8, and files over 1 MiB are rejected.
 
-`write <path> <text>` creates one new UTF-8 text file and never replaces an
-existing file. The target path must be relative, remain inside the current
-directory, and have existing directory parents. Symlink path components and
-targets are refused. Text is limited to 1 MiB after UTF-8 encoding; the command
-does not create parent directories or contact a network service. Use
-`write --stdin <path>` to read UTF-8 text from standard input; input is limited
-to 1 MiB and invalid UTF-8 is rejected before a file is created.
+`list` prints JSON-quoted immediate entry names, sorted by name. It includes
+hidden names, escapes control and non-ASCII characters, does not read entry
+contents, and does not follow symlink entries. The optional directory path
+defaults to the current directory; a symlink used for that path may be followed
+only when it resolves inside the current directory.
 
-Test:
+`write <path> <text>` joins the text arguments with spaces and creates one new
+UTF-8 file. `write --stdin <path>` reads UTF-8 text from standard input. Both
+forms accept at most 1 MiB after UTF-8 encoding. Paths must stay within the
+current directory and have existing directory parents. Write refuses symlink
+components and existing targets, creates files exclusively, and removes its
+partial file if a write fails. It never creates parent directories, overwrites
+files, or contacts a network service.
+
+Command and input errors print usage and a diagnostic and exit with status 2.
+
+## Task lifecycle
+
+`krypper::task_lifecycle` provides `Task`, `TaskSession`, and `TaskState` for
+in-process use. Tasks start as `pending`; valid transitions append ordered,
+task-bound events. `Task::events()` exposes a read-only history. Sessions find
+tasks by ID and list them in creation order.
+
+## Checks
+
+Run formatting, build, check, lint, and the complete Rust test suite with:
 
 ```sh
-python3 -m unittest discover -s tests -v
+cargo fmt --all -- --check
+cargo build --locked
+cargo check --locked
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked --all-targets
 ```
 
-The build command checks Python syntax and does not produce a packaged
-executable.
+The existing [verify workflow](.github/workflows/verify.yml) runs these Rust
+checks for pull requests and pushes to `main`.
 
 Contributions should go through reviewed pull requests and the existing required checks.
-
-See the [verify workflow](.github/workflows/verify.yml).

@@ -1,0 +1,8 @@
+[package]
+name = "krypper"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libc = "0.2"
+uuid = { version = "1", features = ["v4"] }
