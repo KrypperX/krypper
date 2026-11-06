@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from typing import Optional
 from uuid import uuid4
 
 
@@ -38,3 +39,20 @@ class Task:
         )
         self.events.append(event)
         self.state = new_state
+
+
+@dataclass
+class TaskSession:
+    id: str = field(default_factory=lambda: str(uuid4()), init=False)
+    _tasks: dict[str, Task] = field(default_factory=dict, init=False, repr=False)
+
+    def create_task(self, description: str) -> Task:
+        task = Task(description)
+        self._tasks[task.id] = task
+        return task
+
+    def get_task(self, task_id: str) -> Optional[Task]:
+        return self._tasks.get(task_id)
+
+    def list_tasks(self) -> list[Task]:
+        return list(self._tasks.values())
