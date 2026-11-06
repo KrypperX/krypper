@@ -1,6 +1,6 @@
 import unittest
 
-from task_lifecycle import Task
+from task_lifecycle import Task, TaskSession
 
 
 class TaskLifecycleTests(unittest.TestCase):
@@ -98,6 +98,65 @@ class TaskLifecycleTests(unittest.TestCase):
         self.assertEqual(second.events, [])
         self.assertEqual(first.events[0].task_id, first.id)
         self.assertNotEqual(first.events[0].task_id, second.id)
+
+
+class TaskSessionTests(unittest.TestCase):
+    def test_new_sessions_have_unique_stable_identifiers_and_no_tasks(self):
+        first = TaskSession()
+        second = TaskSession()
+        first_id = first.id
+
+        self.assertTrue(first_id)
+        self.assertNotEqual(first.id, second.id)
+        self.assertEqual(first.id, first_id)
+        self.assertEqual(first.list_tasks(), [])
+
+    def test_create_task_keeps_description_and_returns_pending_task(self):
+        session = TaskSession()
+
+        task = session.create_task("Review the release notes")
+        task_id = task.id
+
+        self.assertIsInstance(task, Task)
+        self.assertEqual(task.description, "Review the release notes")
+        self.assertEqual(task.state, "pending")
+        self.assertTrue(task_id)
+        task.transition("running")
+        self.assertEqual(task.id, task_id)
+
+    def test_session_retrieves_task_by_identifier(self):
+        session = TaskSession()
+        task = session.create_task("Review the release notes")
+
+        self.assertIs(session.get_task(task.id), task)
+
+    def test_session_lists_tasks_in_creation_order(self):
+        session = TaskSession()
+        first = session.create_task("First task")
+        second = session.create_task("Second task")
+
+        self.assertEqual(session.list_tasks(), [first, second])
+
+    def test_unknown_task_identifier_returns_none(self):
+        session = TaskSession()
+
+        self.assertIsNone(session.get_task("unknown"))
+
+    def test_tasks_and_lifecycle_events_are_isolated_between_sessions(self):
+        first_session = TaskSession()
+        second_session = TaskSession()
+        first = first_session.create_task("A task")
+        second = second_session.create_task("A task")
+
+        first.transition("running")
+
+        self.assertNotEqual(first.id, second.id)
+        self.assertIsNone(first_session.get_task(second.id))
+        self.assertIsNone(second_session.get_task(first.id))
+        self.assertEqual(first.state, "running")
+        self.assertEqual(len(first.events), 1)
+        self.assertEqual(second.state, "pending")
+        self.assertEqual(second.events, [])
 
 
 if __name__ == "__main__":
