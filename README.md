@@ -44,10 +44,13 @@ Command and input errors print usage and a diagnostic and exit with status 2.
 
 ## Task lifecycle
 
-`krypper::task_lifecycle` provides `Task`, `TaskSession`, and `TaskState` for
-in-process use. Tasks start as `pending`; valid transitions append ordered,
-task-bound events. `Task::events()` exposes a read-only history. Sessions find
-tasks by ID and list them in creation order.
+`krypper::task_lifecycle` provides `Task`, `TaskSession`, `TaskState`, `Turn`,
+and `TurnState` for in-process use. Tasks and turns start as `pending`; valid
+transitions append ordered events, and `Task::events()` and `Turn::events()`
+expose read-only histories. A task creates turns in creation order, transitions
+them by ID, and lists them without exposing mutable turn or event collections;
+each turn's events include its task and turn IDs. Sessions find tasks by ID and
+list them in creation order.
 
 ## Checks
 
