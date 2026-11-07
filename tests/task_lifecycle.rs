@@ -1,6 +1,6 @@
 use krypper::task_lifecycle::{
     Task, TaskEvent, TaskHistoryEvent, TaskHistoryTransition, TaskSession, TaskState, TurnEvent,
-    TurnState, TurnTransitionError, WorkspaceReadError,
+    TurnState, TurnTransitionError, WorkspaceReadError, WorkspaceWriteError,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -231,6 +231,188 @@ fn failed_workspace_reads_report_file_errors_without_changing_lifecycle_history(
             assert_eq!(lifecycle_snapshot(&session), before);
         }
     });
+}
+
+#[test]
+fn running_owned_turn_creates_a_workspace_file_without_changing_lifecycle_history() {
+    let temp = TempDir::new();
+    fs::create_dir(temp.path().join("notes")).unwrap();
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) = running_turn(&mut session);
+    let before = lifecycle_snapshot(&session);
+
+    let result = with_current_dir(temp.path(), || {
+        session.create_workspace_file(task_id, turn_id, Path::new("notes/context.txt"), "résumé")
+    });
+
+    assert_eq!(result, Ok(()));
+    assert_eq!(
+        fs::read_to_string(temp.path().join("notes/context.txt")).unwrap(),
+        "résumé"
+    );
+    assert_eq!(lifecycle_snapshot(&session), before);
+}
+
+#[test]
+fn workspace_file_creation_requires_an_existing_task_owned_running_turn() {
+    let temp = TempDir::new();
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) = running_turn(&mut session);
+    let (foreign_task_id, foreign_turn_id) = {
+        let foreign_task = session.create_task("Foreign task");
+        foreign_task.transition(TaskState::Running).unwrap();
+        let task_id = foreign_task.id();
+        let turn_id = foreign_task.create_turn().unwrap();
+        foreign_task
+            .transition_turn(turn_id, TurnState::Running)
+            .unwrap();
+        (task_id, turn_id)
+    };
+    let pending_turn_id = session
+        .get_task_mut(task_id)
+        .unwrap()
+        .create_turn()
+        .unwrap();
+    let missing_task_id = Uuid::new_v4();
+    let missing_turn_id = Uuid::new_v4();
+
+    with_current_dir(temp.path(), || {
+        let before = lifecycle_snapshot(&session);
+        assert!(matches!(
+            session.create_workspace_file(
+                missing_task_id,
+                turn_id,
+                Path::new("missing.txt"),
+                "text"
+            ),
+            Err(WorkspaceWriteError::TaskNotFound { task_id }) if task_id == missing_task_id
+        ));
+        assert!(matches!(
+            session.create_workspace_file(
+                task_id,
+                foreign_turn_id,
+                Path::new("foreign.txt"),
+                "text"
+            ),
+            Err(WorkspaceWriteError::ForeignTurn {
+                task_id: requested_task_id,
+                turn_id,
+                owner_task_id,
+            }) if requested_task_id == task_id
+                && turn_id == foreign_turn_id
+                && owner_task_id == foreign_task_id
+        ));
+        assert!(matches!(
+            session.create_workspace_file(
+                task_id,
+                missing_turn_id,
+                Path::new("missing-turn.txt"),
+                "text"
+            ),
+            Err(WorkspaceWriteError::TurnNotFound {
+                task_id: actual_task_id,
+                turn_id,
+            }) if actual_task_id == task_id && turn_id == missing_turn_id
+        ));
+        assert!(matches!(
+            session.create_workspace_file(
+                task_id,
+                pending_turn_id,
+                Path::new("pending.txt"),
+                "text"
+            ),
+            Err(WorkspaceWriteError::TurnNotRunning {
+                turn_id,
+                state: TurnState::Pending
+            }) if turn_id == pending_turn_id
+        ));
+        assert_eq!(lifecycle_snapshot(&session), before);
+        assert!(!temp.path().join("missing.txt").exists());
+        assert!(!temp.path().join("foreign.txt").exists());
+        assert!(!temp.path().join("missing-turn.txt").exists());
+        assert!(!temp.path().join("pending.txt").exists());
+    });
+}
+
+#[test]
+fn failed_workspace_file_creations_preserve_files_and_lifecycle_history() {
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new();
+    let workspace = temp.path().join("workspace");
+    let outside = temp.path().join("outside");
+    fs::create_dir(&workspace).unwrap();
+    fs::create_dir(&outside).unwrap();
+    fs::write(workspace.join("existing.txt"), "keep this").unwrap();
+    fs::write(workspace.join("not-a-directory"), "file").unwrap();
+    fs::write(outside.join("sentinel.txt"), "outside stays unchanged").unwrap();
+    symlink(&outside, workspace.join("outside-link")).unwrap();
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) = running_turn(&mut session);
+    let oversized = "x".repeat(1024 * 1024 + 1);
+    let absolute_path = workspace.join("absolute.txt");
+
+    with_current_dir(&workspace, || {
+        let before = lifecycle_snapshot(&session);
+        let failures = [
+            (
+                Path::new("../outside/sentinel.txt"),
+                "text",
+                "path must stay inside the current directory",
+            ),
+            (
+                absolute_path.as_path(),
+                "text",
+                "absolute paths are not allowed",
+            ),
+            (
+                Path::new("outside-link/created.txt"),
+                "text",
+                "symlink paths are not allowed",
+            ),
+            (
+                Path::new("missing-parent/created.txt"),
+                "text",
+                "parent directory not found",
+            ),
+            (
+                Path::new("not-a-directory/created.txt"),
+                "text",
+                "parent is not a directory",
+            ),
+            (
+                Path::new("existing.txt"),
+                "replacement",
+                "file already exists",
+            ),
+            (
+                Path::new("oversized.txt"),
+                oversized.as_str(),
+                "text exceeds 1 MiB",
+            ),
+        ];
+
+        for (path, text, message) in failures {
+            let error = session
+                .create_workspace_file(task_id, turn_id, path, text)
+                .unwrap_err();
+            assert!(error.to_string().contains(message), "{error}");
+            assert_eq!(lifecycle_snapshot(&session), before);
+        }
+    });
+
+    assert_eq!(
+        fs::read_to_string(workspace.join("existing.txt")).unwrap(),
+        "keep this"
+    );
+    assert_eq!(
+        fs::read_to_string(outside.join("sentinel.txt")).unwrap(),
+        "outside stays unchanged"
+    );
+    assert!(!outside.join("created.txt").exists());
+    assert!(!workspace.join("missing-parent/created.txt").exists());
+    assert!(!workspace.join("not-a-directory/created.txt").exists());
+    assert!(!workspace.join("oversized.txt").exists());
 }
 
 #[test]
