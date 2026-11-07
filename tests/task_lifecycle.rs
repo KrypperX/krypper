@@ -410,3 +410,180 @@ fn turns_keep_state_and_history_isolated_between_tasks() {
     assert_eq!(second_task.turns()[0].task_id(), second_task_id);
     assert_eq!(second_task.turns()[0].id(), other_turn_id);
 }
+
+#[test]
+fn task_cancel_cancels_active_turns_before_task_and_preserves_terminal_turns() {
+    let mut task = Task::new("A task");
+    task.transition(TaskState::Running).unwrap();
+
+    let pending_turn_id = task.create_turn();
+    let running_turn_id = task.create_turn();
+    let succeeded_turn_id = task.create_turn();
+    let failed_turn_id = task.create_turn();
+    let cancelled_turn_id = task.create_turn();
+
+    task.transition_turn(running_turn_id, TurnState::Running)
+        .unwrap();
+    task.transition_turn(succeeded_turn_id, TurnState::Running)
+        .unwrap();
+    task.transition_turn(succeeded_turn_id, TurnState::Succeeded)
+        .unwrap();
+    task.transition_turn(failed_turn_id, TurnState::Running)
+        .unwrap();
+    task.transition_turn(failed_turn_id, TurnState::Failed)
+        .unwrap();
+    task.transition_turn(cancelled_turn_id, TurnState::Cancelled)
+        .unwrap();
+
+    let task_events_before = task.events().to_vec();
+    let succeeded_events_before = task.get_turn(succeeded_turn_id).unwrap().events().to_vec();
+    let failed_events_before = task.get_turn(failed_turn_id).unwrap().events().to_vec();
+    let cancelled_events_before = task.get_turn(cancelled_turn_id).unwrap().events().to_vec();
+
+    task.cancel().unwrap();
+
+    assert_eq!(task.state(), TaskState::Cancelled);
+    assert_eq!(task.events().len(), task_events_before.len() + 1);
+    let task_event = task.events().last().unwrap();
+    assert_eq!(task_event.task_id(), task.id());
+    assert_eq!(task_event.sequence(), task_events_before.len() as u64 + 1);
+    assert_eq!(task_event.previous_state(), TaskState::Running);
+    assert_eq!(task_event.new_state(), TaskState::Cancelled);
+
+    assert_eq!(
+        task.turns()
+            .iter()
+            .map(|turn| turn.id())
+            .collect::<Vec<_>>(),
+        vec![
+            pending_turn_id,
+            running_turn_id,
+            succeeded_turn_id,
+            failed_turn_id,
+            cancelled_turn_id,
+        ]
+    );
+    for (turn_id, previous_state, previous_event_count) in [
+        (pending_turn_id, TurnState::Pending, 0),
+        (running_turn_id, TurnState::Running, 1),
+    ] {
+        let turn = task.get_turn(turn_id).unwrap();
+        assert_eq!(turn.state(), TurnState::Cancelled);
+        let event = turn.events().last().unwrap();
+        assert_eq!(event.task_id(), task.id());
+        assert_eq!(event.turn_id(), turn_id);
+        assert_eq!(event.sequence(), previous_event_count + 1);
+        assert_eq!(event.previous_state(), previous_state);
+        assert_eq!(event.new_state(), TurnState::Cancelled);
+    }
+
+    assert_eq!(
+        task.get_turn(succeeded_turn_id).unwrap().state(),
+        TurnState::Succeeded
+    );
+    assert_eq!(
+        task.get_turn(succeeded_turn_id).unwrap().events(),
+        succeeded_events_before
+    );
+    assert_eq!(
+        task.get_turn(failed_turn_id).unwrap().state(),
+        TurnState::Failed
+    );
+    assert_eq!(
+        task.get_turn(failed_turn_id).unwrap().events(),
+        failed_events_before
+    );
+    assert_eq!(
+        task.get_turn(cancelled_turn_id).unwrap().state(),
+        TurnState::Cancelled
+    );
+    assert_eq!(
+        task.get_turn(cancelled_turn_id).unwrap().events(),
+        cancelled_events_before
+    );
+}
+
+#[test]
+fn task_cancel_cancels_pending_turns_of_a_pending_task() {
+    let mut task = Task::new("A pending task");
+    let first_turn_id = task.create_turn();
+    let second_turn_id = task.create_turn();
+    let task_id = task.id();
+
+    task.cancel().unwrap();
+
+    assert_eq!(task.state(), TaskState::Cancelled);
+    assert_eq!(task.events().len(), 1);
+    assert_eq!(task.events()[0].task_id(), task_id);
+    assert_eq!(task.events()[0].sequence(), 1);
+    assert_eq!(task.events()[0].previous_state(), TaskState::Pending);
+    assert_eq!(task.events()[0].new_state(), TaskState::Cancelled);
+    assert_eq!(task.turns()[0].id(), first_turn_id);
+    assert_eq!(task.turns()[1].id(), second_turn_id);
+    for (sequence, turn_id) in [(1, first_turn_id), (1, second_turn_id)] {
+        let turn = task.get_turn(turn_id).unwrap();
+        assert_eq!(turn.state(), TurnState::Cancelled);
+        assert_eq!(turn.events().len(), 1);
+        assert_eq!(turn.events()[0].task_id(), task_id);
+        assert_eq!(turn.events()[0].turn_id(), turn_id);
+        assert_eq!(turn.events()[0].sequence(), sequence);
+        assert_eq!(turn.events()[0].previous_state(), TurnState::Pending);
+        assert_eq!(turn.events()[0].new_state(), TurnState::Cancelled);
+    }
+}
+
+#[test]
+fn task_cancel_succeeds_for_tasks_without_turns() {
+    for initial_state in [TaskState::Pending, TaskState::Running] {
+        let mut task = Task::new("A task without turns");
+        if initial_state == TaskState::Running {
+            task.transition(TaskState::Running).unwrap();
+        }
+
+        task.cancel().unwrap();
+
+        assert_eq!(task.state(), TaskState::Cancelled);
+        assert_eq!(
+            task.events().last().unwrap().previous_state(),
+            initial_state
+        );
+        assert_eq!(
+            task.events().last().unwrap().new_state(),
+            TaskState::Cancelled
+        );
+        assert!(task.turns().is_empty());
+    }
+}
+
+#[test]
+fn task_cancel_rejects_terminal_tasks_without_mutating_task_or_turn_history() {
+    for terminal_state in [
+        TaskState::Succeeded,
+        TaskState::Failed,
+        TaskState::Cancelled,
+    ] {
+        let mut task = Task::new("A terminal task");
+        if terminal_state != TaskState::Cancelled {
+            task.transition(TaskState::Running).unwrap();
+        }
+        task.transition(terminal_state).unwrap();
+
+        let active_turn_id = task.create_turn();
+        let task_state_before = task.state();
+        let task_events_before = task.events().to_vec();
+        let turn_state_before = task.get_turn(active_turn_id).unwrap().state();
+        let turn_events_before = task.get_turn(active_turn_id).unwrap().events().to_vec();
+
+        let error = task.cancel().unwrap_err();
+
+        assert_eq!(error.from(), terminal_state);
+        assert_eq!(error.to(), TaskState::Cancelled);
+        assert_eq!(error.blocking_turn(), None);
+        assert!(error.to_string().contains("cannot transition task"));
+        assert_eq!(task.state(), task_state_before);
+        assert_eq!(task.events(), task_events_before);
+        let turn = task.get_turn(active_turn_id).unwrap();
+        assert_eq!(turn.state(), turn_state_before);
+        assert_eq!(turn.events(), turn_events_before);
+    }
+}
