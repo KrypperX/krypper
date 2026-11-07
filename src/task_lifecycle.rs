@@ -343,6 +343,24 @@ impl fmt::Display for TurnState {
     }
 }
 
+/// The caller-provided result or failure detail recorded when a turn completes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TurnOutcome {
+    /// The turn completed successfully with its result.
+    Success { result: String },
+    /// The turn failed with its failure detail.
+    Failure { detail: String },
+}
+
+impl TurnOutcome {
+    fn terminal_state(&self) -> TurnState {
+        match self {
+            Self::Success { .. } => TurnState::Succeeded,
+            Self::Failure { .. } => TurnState::Failed,
+        }
+    }
+}
+
 /// An attempted transition that is not valid for a turn's current state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TurnTransitionError {
@@ -388,6 +406,51 @@ impl fmt::Display for TurnTransitionError {
 }
 
 impl std::error::Error for TurnTransitionError {}
+
+/// An attempt to complete a turn that is missing, foreign, or not running.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TurnCompletionError {
+    /// The task identifier is not present in the session.
+    TaskNotFound { task_id: Uuid },
+    /// The turn identifier is not present in the requested task.
+    TurnNotFound { task_id: Uuid, turn_id: Uuid },
+    /// The turn identifier belongs to a different task in this session.
+    ForeignTurn {
+        task_id: Uuid,
+        turn_id: Uuid,
+        owner_task_id: Uuid,
+    },
+    /// The turn exists but is not currently running.
+    TurnNotRunning { turn_id: Uuid, state: TurnState },
+}
+
+impl fmt::Display for TurnCompletionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TaskNotFound { task_id } => {
+                write!(formatter, "task '{task_id}' is not in this session")
+            }
+            Self::TurnNotFound { task_id, turn_id } => {
+                write!(formatter, "turn '{turn_id}' is not in task '{task_id}'")
+            }
+            Self::ForeignTurn {
+                task_id,
+                turn_id,
+                owner_task_id,
+            } => write!(
+                formatter,
+                "turn '{turn_id}' belongs to task '{owner_task_id}', not requested task '{task_id}'"
+            ),
+            Self::TurnNotRunning { turn_id, state } => write!(
+                formatter,
+                "turn '{turn_id}' is '{}', not running",
+                state.as_str()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for TurnCompletionError {}
 
 /// An immutable record of one successful turn state transition.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -478,6 +541,7 @@ pub struct Turn {
     id: Uuid,
     task_id: Uuid,
     state: TurnState,
+    outcome: Option<TurnOutcome>,
     events: Vec<TurnEvent>,
 }
 
@@ -487,6 +551,7 @@ impl Turn {
             id: Uuid::new_v4(),
             task_id,
             state: TurnState::Pending,
+            outcome: None,
             events: Vec::new(),
         }
     }
@@ -504,6 +569,23 @@ impl Turn {
     /// Returns the current lifecycle state.
     pub fn state(&self) -> TurnState {
         self.state
+    }
+
+    /// Returns the recorded terminal outcome by a read-only reference.
+    ///
+    /// State-only transitions and cancellation do not create an outcome.
+    ///
+    /// ```compile_fail
+    /// use krypper::task_lifecycle::TurnOutcome;
+    ///
+    /// fn replace(outcome: &TurnOutcome) {
+    ///     *outcome = TurnOutcome::Success {
+    ///         result: "changed".to_owned(),
+    ///     };
+    /// }
+    /// ```
+    pub fn outcome(&self) -> Option<&TurnOutcome> {
+        self.outcome.as_ref()
     }
 
     /// Returns lifecycle history as a read-only slice.
@@ -709,6 +791,46 @@ impl Task {
         Ok(())
     }
 
+    /// Completes a running turn and records its caller-provided outcome.
+    ///
+    /// The matching succeeded or failed state and lifecycle history entry are recorded with the
+    /// outcome. A missing or non-running turn is left unchanged.
+    pub fn complete_turn(
+        &mut self,
+        turn_id: Uuid,
+        outcome: TurnOutcome,
+    ) -> Result<(), TurnCompletionError> {
+        let turn_index = self
+            .turns
+            .iter()
+            .position(|turn| turn.id == turn_id)
+            .ok_or(TurnCompletionError::TurnNotFound {
+                task_id: self.id,
+                turn_id,
+            })?;
+        let turn_state = self.turns[turn_index].state;
+        if turn_state != TurnState::Running {
+            return Err(TurnCompletionError::TurnNotRunning {
+                turn_id,
+                state: turn_state,
+            });
+        }
+
+        let terminal_state = outcome.terminal_state();
+        self.history.reserve(1);
+        self.turns[turn_index].events.reserve(1);
+        self.turns[turn_index].outcome = Some(outcome);
+        self.turns[turn_index].record_transition(terminal_state);
+        Self::record_turn_history(
+            &mut self.history,
+            self.id,
+            turn_id,
+            TurnState::Running,
+            terminal_state,
+        );
+        Ok(())
+    }
+
     /// Returns turns in creation order as a read-only slice.
     pub fn turns(&self) -> &[Turn] {
         &self.turns
@@ -810,6 +932,40 @@ impl TaskSession {
     /// Returns a mutable task in this session by identifier.
     pub fn get_task_mut(&mut self, task_id: Uuid) -> Option<&mut Task> {
         self.tasks.iter_mut().find(|task| task.id == task_id)
+    }
+
+    /// Completes a running turn owned by the requested task in this session.
+    ///
+    /// Returns a typed error without changing any task, turn, lifecycle history, or existing
+    /// outcome when the task or turn cannot be completed.
+    pub fn complete_turn(
+        &mut self,
+        task_id: Uuid,
+        turn_id: Uuid,
+        outcome: TurnOutcome,
+    ) -> Result<(), TurnCompletionError> {
+        let task = self
+            .get_task(task_id)
+            .ok_or(TurnCompletionError::TaskNotFound { task_id })?;
+        if task.get_turn(turn_id).is_none() {
+            let owner_task_id = self
+                .tasks
+                .iter()
+                .find(|candidate| candidate.get_turn(turn_id).is_some())
+                .map(Task::id);
+            return match owner_task_id {
+                Some(owner_task_id) => Err(TurnCompletionError::ForeignTurn {
+                    task_id,
+                    turn_id,
+                    owner_task_id,
+                }),
+                None => Err(TurnCompletionError::TurnNotFound { task_id, turn_id }),
+            };
+        }
+
+        self.get_task_mut(task_id)
+            .ok_or(TurnCompletionError::TaskNotFound { task_id })?
+            .complete_turn(turn_id, outcome)
     }
 
     /// Reads one UTF-8 file for a currently running turn owned by this session.

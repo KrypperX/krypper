@@ -1,6 +1,7 @@
 use krypper::task_lifecycle::{
-    Task, TaskEvent, TaskHistoryEvent, TaskHistoryTransition, TaskSession, TaskState, TurnEvent,
-    TurnState, TurnTransitionError, WorkspaceListError, WorkspaceReadError, WorkspaceWriteError,
+    Task, TaskEvent, TaskHistoryEvent, TaskHistoryTransition, TaskSession, TaskState,
+    TurnCompletionError, TurnEvent, TurnOutcome, TurnState, TurnTransitionError,
+    WorkspaceListError, WorkspaceReadError, WorkspaceWriteError,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -68,7 +69,7 @@ fn running_turn_in(session: &mut TaskSession, workspace: &Path) -> (Uuid, Uuid) 
     with_current_dir(workspace, || running_turn(session))
 }
 
-type TurnSnapshot = (Uuid, TurnState, Vec<TurnEvent>);
+type TurnSnapshot = (Uuid, TurnState, Option<TurnOutcome>, Vec<TurnEvent>);
 type TaskSnapshot = (
     Uuid,
     TaskState,
@@ -89,7 +90,14 @@ fn lifecycle_snapshot(session: &TaskSession) -> Vec<TaskSnapshot> {
                 task.history().to_vec(),
                 task.turns()
                     .iter()
-                    .map(|turn| (turn.id(), turn.state(), turn.events().to_vec()))
+                    .map(|turn| {
+                        (
+                            turn.id(),
+                            turn.state(),
+                            turn.outcome().cloned(),
+                            turn.events().to_vec(),
+                        )
+                    })
                     .collect(),
             )
         })
@@ -719,6 +727,207 @@ fn new_task_keeps_description_and_starts_pending_with_empty_read_only_history() 
     assert_eq!(task.description(), "Review the release notes");
     assert_eq!(task.state(), TaskState::Pending);
     assert!(task.events().is_empty());
+}
+
+#[test]
+fn task_completes_a_running_turn_with_a_success_outcome() {
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) = running_turn(&mut session);
+    let outcome = TurnOutcome::Success {
+        result: "completed result".to_owned(),
+    };
+
+    assert_eq!(
+        session
+            .get_task_mut(task_id)
+            .unwrap()
+            .complete_turn(turn_id, outcome.clone()),
+        Ok(())
+    );
+
+    let task = session.get_task(task_id).unwrap();
+    assert_eq!(task.state(), TaskState::Running);
+    let turn = task.get_turn(turn_id).unwrap();
+    assert_eq!(turn.state(), TurnState::Succeeded);
+    assert_eq!(turn.outcome(), Some(&outcome));
+    assert_eq!(
+        turn.events().last().unwrap().previous_state(),
+        TurnState::Running
+    );
+    assert_eq!(
+        turn.events().last().unwrap().new_state(),
+        TurnState::Succeeded
+    );
+    assert_eq!(
+        task.history().last().unwrap().transition(),
+        TaskHistoryTransition::Turn {
+            turn_id,
+            previous_state: TurnState::Running,
+            new_state: TurnState::Succeeded,
+        }
+    );
+}
+
+#[test]
+fn task_session_completes_a_running_turn_with_a_failure_outcome() {
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) = running_turn(&mut session);
+    let outcome = TurnOutcome::Failure {
+        detail: "operation failed".to_owned(),
+    };
+
+    assert_eq!(
+        session.complete_turn(task_id, turn_id, outcome.clone()),
+        Ok(())
+    );
+
+    let turn = session
+        .get_task(task_id)
+        .unwrap()
+        .get_turn(turn_id)
+        .unwrap();
+    assert_eq!(turn.state(), TurnState::Failed);
+    assert_eq!(turn.outcome(), Some(&outcome));
+    assert_eq!(
+        turn.events().last().unwrap().previous_state(),
+        TurnState::Running
+    );
+    assert_eq!(turn.events().last().unwrap().new_state(), TurnState::Failed);
+}
+
+#[test]
+fn invalid_turn_completion_returns_typed_errors_without_mutating_lifecycle_or_outcomes() {
+    let mut session = TaskSession::new();
+    let (task_id, running_turn_id) = running_turn(&mut session);
+    let pending_turn_id = session
+        .get_task_mut(task_id)
+        .unwrap()
+        .create_turn()
+        .unwrap();
+    let completed_turn_id = session
+        .get_task_mut(task_id)
+        .unwrap()
+        .create_turn()
+        .unwrap();
+    session
+        .get_task_mut(task_id)
+        .unwrap()
+        .transition_turn(completed_turn_id, TurnState::Running)
+        .unwrap();
+    session
+        .complete_turn(
+            task_id,
+            completed_turn_id,
+            TurnOutcome::Success {
+                result: "preserved".to_owned(),
+            },
+        )
+        .unwrap();
+    let (foreign_task_id, foreign_turn_id) = running_turn(&mut session);
+    let missing_task_id = Uuid::new_v4();
+    let missing_turn_id = Uuid::new_v4();
+    let before = lifecycle_snapshot(&session);
+
+    assert!(matches!(
+        session.complete_turn(
+            missing_task_id,
+            running_turn_id,
+            TurnOutcome::Success {
+                result: "unused".to_owned(),
+            }
+        ),
+        Err(TurnCompletionError::TaskNotFound { task_id }) if task_id == missing_task_id
+    ));
+    assert_eq!(lifecycle_snapshot(&session), before);
+
+    assert!(matches!(
+        session.complete_turn(
+            task_id,
+            missing_turn_id,
+            TurnOutcome::Failure {
+                detail: "unused".to_owned(),
+            }
+        ),
+        Err(TurnCompletionError::TurnNotFound {
+            task_id: actual_task_id,
+            turn_id,
+        }) if actual_task_id == task_id && turn_id == missing_turn_id
+    ));
+    assert_eq!(lifecycle_snapshot(&session), before);
+
+    assert!(matches!(
+        session.complete_turn(
+            task_id,
+            foreign_turn_id,
+            TurnOutcome::Failure {
+                detail: "unused".to_owned(),
+            }
+        ),
+        Err(TurnCompletionError::ForeignTurn {
+            task_id: requested_task_id,
+            turn_id,
+            owner_task_id,
+        }) if requested_task_id == task_id
+            && turn_id == foreign_turn_id
+            && owner_task_id == foreign_task_id
+    ));
+    assert_eq!(lifecycle_snapshot(&session), before);
+
+    for (turn_id, state) in [
+        (pending_turn_id, TurnState::Pending),
+        (completed_turn_id, TurnState::Succeeded),
+    ] {
+        let error = session
+            .complete_turn(
+                task_id,
+                turn_id,
+                TurnOutcome::Failure {
+                    detail: "unused".to_owned(),
+                },
+            )
+            .unwrap_err();
+        assert_eq!(
+            error,
+            TurnCompletionError::TurnNotRunning { turn_id, state }
+        );
+        assert!(error.to_string().contains("not running"));
+        assert_eq!(lifecycle_snapshot(&session), before);
+    }
+}
+
+#[test]
+fn state_only_terminal_transitions_and_cancellation_do_not_create_outcomes() {
+    for terminal_state in [TurnState::Succeeded, TurnState::Failed] {
+        let mut task = Task::new("State-only completion");
+        task.transition(TaskState::Running).unwrap();
+        let turn_id = task.create_turn().unwrap();
+        task.transition_turn(turn_id, TurnState::Running).unwrap();
+
+        task.transition_turn(turn_id, terminal_state).unwrap();
+
+        assert_eq!(task.get_turn(turn_id).unwrap().outcome(), None);
+    }
+
+    let mut task = Task::new("Cancelled task");
+    task.transition(TaskState::Running).unwrap();
+    let turn_id = task.create_turn().unwrap();
+    task.transition_turn(turn_id, TurnState::Running).unwrap();
+    let explicitly_cancelled_turn_id = task.create_turn().unwrap();
+    task.transition_turn(explicitly_cancelled_turn_id, TurnState::Cancelled)
+        .unwrap();
+    task.cancel().unwrap();
+
+    assert_eq!(
+        task.get_turn(turn_id).unwrap().state(),
+        TurnState::Cancelled
+    );
+    assert_eq!(task.get_turn(turn_id).unwrap().outcome(), None);
+    assert_eq!(
+        task.get_turn(explicitly_cancelled_turn_id)
+            .unwrap()
+            .outcome(),
+        None
+    );
 }
 
 #[test]
