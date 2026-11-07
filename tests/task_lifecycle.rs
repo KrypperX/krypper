@@ -64,6 +64,10 @@ fn running_turn(session: &mut TaskSession) -> (Uuid, Uuid) {
     (task_id, turn_id)
 }
 
+fn running_turn_in(session: &mut TaskSession, workspace: &Path) -> (Uuid, Uuid) {
+    with_current_dir(workspace, || running_turn(session))
+}
+
 type TurnSnapshot = (Uuid, TurnState, Vec<TurnEvent>);
 type TaskSnapshot = (
     Uuid,
@@ -97,13 +101,127 @@ fn running_owned_turn_reads_a_workspace_file() {
     let temp = TempDir::new();
     fs::write(temp.path().join("note.txt"), "private task context").unwrap();
     let mut session = TaskSession::new();
-    let (task_id, turn_id) = running_turn(&mut session);
+    let (task_id, turn_id) = running_turn_in(&mut session, temp.path());
 
     let contents = with_current_dir(temp.path(), || {
         session.read_workspace_file(task_id, turn_id, Path::new("note.txt"))
     });
 
     assert_eq!(contents, Ok("private task context".to_owned()));
+}
+
+#[test]
+fn running_owned_turn_workspace_operations_stay_bound_after_chdir() {
+    let temp = TempDir::new();
+    let workspace = temp.path().join("workspace");
+    let other_directory = temp.path().join("other");
+    fs::create_dir(&workspace).unwrap();
+    fs::create_dir(&other_directory).unwrap();
+    fs::write(workspace.join("note.txt"), "task workspace").unwrap();
+    fs::write(other_directory.join("note.txt"), "process workspace").unwrap();
+    fs::write(other_directory.join("other.txt"), "other").unwrap();
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) = running_turn_in(&mut session, &workspace);
+
+    let (read, entries, create) = with_current_dir(&other_directory, || {
+        (
+            session.read_workspace_file(task_id, turn_id, Path::new("note.txt")),
+            session.list_workspace_directory(task_id, turn_id, Path::new(".")),
+            session.create_workspace_file(task_id, turn_id, Path::new("created.txt"), "bound"),
+        )
+    });
+
+    assert_eq!(read, Ok("task workspace".to_owned()));
+    assert_eq!(entries, Ok(vec!["note.txt".into()]));
+    assert_eq!(create, Ok(()));
+    assert_eq!(
+        fs::read_to_string(workspace.join("created.txt")).unwrap(),
+        "bound"
+    );
+    assert!(!other_directory.join("created.txt").exists());
+}
+
+#[test]
+fn tasks_created_in_different_directories_use_isolated_workspaces() {
+    let temp = TempDir::new();
+    let first_workspace = temp.path().join("first");
+    let second_workspace = temp.path().join("second");
+    let other_directory = temp.path().join("other");
+    fs::create_dir(&first_workspace).unwrap();
+    fs::create_dir(&second_workspace).unwrap();
+    fs::create_dir(&other_directory).unwrap();
+    fs::write(first_workspace.join("identity.txt"), "first").unwrap();
+    fs::write(second_workspace.join("identity.txt"), "second").unwrap();
+    fs::write(other_directory.join("identity.txt"), "other").unwrap();
+    let mut session = TaskSession::new();
+    let (first_task, first_turn) = running_turn_in(&mut session, &first_workspace);
+    let (second_task, second_turn) = running_turn_in(&mut session, &second_workspace);
+
+    let results = with_current_dir(&other_directory, || {
+        (
+            session.read_workspace_file(first_task, first_turn, Path::new("identity.txt")),
+            session.read_workspace_file(second_task, second_turn, Path::new("identity.txt")),
+            session.list_workspace_directory(first_task, first_turn, Path::new(".")),
+            session.list_workspace_directory(second_task, second_turn, Path::new(".")),
+            session.create_workspace_file(
+                first_task,
+                first_turn,
+                Path::new("created.txt"),
+                "first",
+            ),
+            session.create_workspace_file(
+                second_task,
+                second_turn,
+                Path::new("created.txt"),
+                "second",
+            ),
+        )
+    });
+
+    assert_eq!(results.0, Ok("first".to_owned()));
+    assert_eq!(results.1, Ok("second".to_owned()));
+    assert_eq!(results.2, Ok(vec!["identity.txt".into()]));
+    assert_eq!(results.3, Ok(vec!["identity.txt".into()]));
+    assert_eq!(results.4, Ok(()));
+    assert_eq!(results.5, Ok(()));
+    assert_eq!(
+        fs::read_to_string(first_workspace.join("created.txt")).unwrap(),
+        "first"
+    );
+    assert_eq!(
+        fs::read_to_string(second_workspace.join("created.txt")).unwrap(),
+        "second"
+    );
+    assert!(!other_directory.join("created.txt").exists());
+}
+
+#[test]
+fn workspace_resolution_failures_leave_lifecycle_and_files_unchanged() {
+    let temp = TempDir::new();
+    let removed_workspace = temp.path().join("removed");
+    fs::create_dir(&removed_workspace).unwrap();
+    fs::write(temp.path().join("sentinel.txt"), "unchanged").unwrap();
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) = with_current_dir(&removed_workspace, || {
+        fs::remove_dir(&removed_workspace).unwrap();
+        running_turn(&mut session)
+    });
+    let before = lifecycle_snapshot(&session);
+
+    let read = session.read_workspace_file(task_id, turn_id, Path::new("missing.txt"));
+    assert!(read.unwrap_err().to_string().contains("task workspace"));
+    assert_eq!(lifecycle_snapshot(&session), before);
+    let list = session.list_workspace_directory(task_id, turn_id, Path::new("."));
+    assert!(list.unwrap_err().to_string().contains("task workspace"));
+    assert_eq!(lifecycle_snapshot(&session), before);
+    let create = session.create_workspace_file(task_id, turn_id, Path::new("created.txt"), "text");
+    assert!(create.unwrap_err().to_string().contains("task workspace"));
+    assert_eq!(lifecycle_snapshot(&session), before);
+    assert_eq!(
+        fs::read_to_string(temp.path().join("sentinel.txt")).unwrap(),
+        "unchanged"
+    );
+    assert!(!temp.path().join("created.txt").exists());
 }
 
 #[test]
@@ -171,18 +289,29 @@ fn workspace_read_follows_only_symlinks_that_stay_inside_the_workspace() {
     let temp = TempDir::new();
     let workspace = temp.path().join("workspace");
     let outside = temp.path().join("outside");
+    let other_directory = temp.path().join("other");
     fs::create_dir(&workspace).unwrap();
     fs::create_dir(&outside).unwrap();
+    fs::create_dir(&other_directory).unwrap();
     fs::write(workspace.join("note.txt"), "inside").unwrap();
     fs::write(outside.join("note.txt"), "outside").unwrap();
     symlink("note.txt", workspace.join("inside-link")).unwrap();
+    symlink(
+        workspace.join("note.txt"),
+        workspace.join("inside-absolute-link"),
+    )
+    .unwrap();
     symlink(outside.join("note.txt"), workspace.join("outside-link")).unwrap();
     let mut session = TaskSession::new();
-    let (task_id, turn_id) = running_turn(&mut session);
+    let (task_id, turn_id) = running_turn_in(&mut session, &workspace);
 
-    with_current_dir(&workspace, || {
+    with_current_dir(&other_directory, || {
         assert_eq!(
             session.read_workspace_file(task_id, turn_id, Path::new("inside-link")),
+            Ok("inside".to_owned())
+        );
+        assert_eq!(
+            session.read_workspace_file(task_id, turn_id, Path::new("inside-absolute-link")),
             Ok("inside".to_owned())
         );
         let outside_link = session
@@ -213,7 +342,7 @@ fn failed_workspace_reads_report_file_errors_without_changing_lifecycle_history(
     fs::write(temp.path().join("invalid.txt"), [0xff]).unwrap();
     fs::write(temp.path().join("large.txt"), vec![b'x'; 1024 * 1024 + 1]).unwrap();
     let mut session = TaskSession::new();
-    let (task_id, turn_id) = running_turn(&mut session);
+    let (task_id, turn_id) = running_turn_in(&mut session, temp.path());
     let paths_and_messages = [
         ("missing.txt", "file not found"),
         ("directory", "not a regular file"),
@@ -256,7 +385,7 @@ fn running_owned_turn_lists_immediate_entries_as_native_names_in_cli_order() {
     symlink(&outside, workspace.join("outside-link")).unwrap();
 
     let mut session = TaskSession::new();
-    let (task_id, turn_id) = running_turn(&mut session);
+    let (task_id, turn_id) = running_turn_in(&mut session, &workspace);
     let before = lifecycle_snapshot(&session);
 
     let entries = with_current_dir(&workspace, || {
@@ -285,7 +414,7 @@ fn running_owned_turn_lists_immediate_entries_as_native_names_in_cli_order() {
 fn workspace_listing_requires_an_existing_owned_running_turn() {
     let temp = TempDir::new();
     let mut session = TaskSession::new();
-    let (task_id, turn_id) = running_turn(&mut session);
+    let (task_id, turn_id) = running_turn_in(&mut session, temp.path());
     let pending_turn_id = session
         .get_task_mut(task_id)
         .unwrap()
@@ -351,14 +480,16 @@ fn workspace_listing_requires_an_existing_owned_running_turn() {
 }
 
 #[test]
-fn workspace_listing_uses_cli_directory_resolution_and_preserves_history_on_failure() {
+fn workspace_listing_uses_task_workspace_resolution_and_preserves_history_on_failure() {
     use std::os::unix::fs::symlink;
 
     let temp = TempDir::new();
     let workspace = temp.path().join("workspace");
     let outside = temp.path().join("outside");
+    let other_directory = temp.path().join("other");
     fs::create_dir(&workspace).unwrap();
     fs::create_dir(&outside).unwrap();
+    fs::create_dir(&other_directory).unwrap();
     fs::create_dir(workspace.join("nested")).unwrap();
     fs::write(workspace.join("nested/entry"), "inside").unwrap();
     fs::write(workspace.join("file"), "not a directory").unwrap();
@@ -367,8 +498,8 @@ fn workspace_listing_uses_cli_directory_resolution_and_preserves_history_on_fail
     symlink(&outside, workspace.join("outside-link")).unwrap();
 
     let mut session = TaskSession::new();
-    let (task_id, turn_id) = running_turn(&mut session);
-    let inside_entries = with_current_dir(&workspace, || {
+    let (task_id, turn_id) = running_turn_in(&mut session, &workspace);
+    let inside_entries = with_current_dir(&other_directory, || {
         session.list_workspace_directory(task_id, turn_id, Path::new("inside-link"))
     });
     assert_eq!(inside_entries, Ok(vec!["entry".into()]));
@@ -386,7 +517,7 @@ fn workspace_listing_uses_cli_directory_resolution_and_preserves_history_on_fail
         ),
         (workspace.clone(), "absolute paths are not allowed"),
     ];
-    with_current_dir(&workspace, || {
+    with_current_dir(&other_directory, || {
         for (path, message) in invalid_paths {
             let before = lifecycle_snapshot(&session);
             let error = session
@@ -403,7 +534,7 @@ fn running_owned_turn_creates_a_workspace_file_without_changing_lifecycle_histor
     let temp = TempDir::new();
     fs::create_dir(temp.path().join("notes")).unwrap();
     let mut session = TaskSession::new();
-    let (task_id, turn_id) = running_turn(&mut session);
+    let (task_id, turn_id) = running_turn_in(&mut session, temp.path());
     let before = lifecycle_snapshot(&session);
 
     let result = with_current_dir(temp.path(), || {
@@ -506,18 +637,20 @@ fn failed_workspace_file_creations_preserve_files_and_lifecycle_history() {
     let temp = TempDir::new();
     let workspace = temp.path().join("workspace");
     let outside = temp.path().join("outside");
+    let other_directory = temp.path().join("other");
     fs::create_dir(&workspace).unwrap();
     fs::create_dir(&outside).unwrap();
+    fs::create_dir(&other_directory).unwrap();
     fs::write(workspace.join("existing.txt"), "keep this").unwrap();
     fs::write(workspace.join("not-a-directory"), "file").unwrap();
     fs::write(outside.join("sentinel.txt"), "outside stays unchanged").unwrap();
     symlink(&outside, workspace.join("outside-link")).unwrap();
     let mut session = TaskSession::new();
-    let (task_id, turn_id) = running_turn(&mut session);
+    let (task_id, turn_id) = running_turn_in(&mut session, &workspace);
     let oversized = "x".repeat(1024 * 1024 + 1);
     let absolute_path = workspace.join("absolute.txt");
 
-    with_current_dir(&workspace, || {
+    with_current_dir(&other_directory, || {
         let before = lifecycle_snapshot(&session);
         let failures = [
             (
