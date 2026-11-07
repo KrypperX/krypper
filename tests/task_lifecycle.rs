@@ -1,6 +1,6 @@
 use krypper::task_lifecycle::{
     Task, TaskEvent, TaskHistoryEvent, TaskHistoryTransition, TaskSession, TaskState, TurnEvent,
-    TurnState, TurnTransitionError, WorkspaceReadError, WorkspaceWriteError,
+    TurnState, TurnTransitionError, WorkspaceListError, WorkspaceReadError, WorkspaceWriteError,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -226,6 +226,171 @@ fn failed_workspace_reads_report_file_errors_without_changing_lifecycle_history(
             let before = lifecycle_snapshot(&session);
             let error = session
                 .read_workspace_file(task_id, turn_id, Path::new(path))
+                .unwrap_err();
+            assert!(error.to_string().contains(message), "{error}");
+            assert_eq!(lifecycle_snapshot(&session), before);
+        }
+    });
+}
+
+#[test]
+fn running_owned_turn_lists_immediate_entries_as_native_names_in_cli_order() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new();
+    let workspace = temp.path().join("workspace");
+    let outside = temp.path().join("outside");
+    fs::create_dir(&workspace).unwrap();
+    fs::create_dir(&outside).unwrap();
+    fs::create_dir(workspace.join("nested")).unwrap();
+    fs::write(workspace.join(".hidden"), "hidden").unwrap();
+    fs::write(workspace.join("a"), "a").unwrap();
+    fs::write(workspace.join("z"), "z").unwrap();
+    fs::write(workspace.join("nested/child-only"), "child").unwrap();
+    fs::write(outside.join("outside-only"), "outside").unwrap();
+    let non_utf8 = OsString::from_vec(b"bad-\xff".to_vec());
+    fs::write(workspace.join(&non_utf8), "native name").unwrap();
+    symlink("nested", workspace.join("entry-link")).unwrap();
+    symlink(&outside, workspace.join("outside-link")).unwrap();
+
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) = running_turn(&mut session);
+    let before = lifecycle_snapshot(&session);
+
+    let entries = with_current_dir(&workspace, || {
+        session.list_workspace_directory(task_id, turn_id, Path::new("."))
+    });
+
+    let expected = vec![
+        OsString::from(".hidden"),
+        OsString::from("a"),
+        non_utf8,
+        OsString::from("entry-link"),
+        OsString::from("nested"),
+        OsString::from("outside-link"),
+        OsString::from("z"),
+    ];
+    assert_eq!(entries, Ok(expected.clone()));
+    assert!(expected.iter().all(|name| workspace.join(name).exists()));
+    assert!(!expected.contains(&OsString::from(".")));
+    assert!(!expected.contains(&OsString::from("..")));
+    assert!(!expected.contains(&OsString::from("child-only")));
+    assert!(!expected.contains(&OsString::from("outside-only")));
+    assert_eq!(lifecycle_snapshot(&session), before);
+}
+
+#[test]
+fn workspace_listing_requires_an_existing_owned_running_turn() {
+    let temp = TempDir::new();
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) = running_turn(&mut session);
+    let pending_turn_id = session
+        .get_task_mut(task_id)
+        .unwrap()
+        .create_turn()
+        .unwrap();
+    let failed_turn_id = {
+        let task = session.get_task_mut(task_id).unwrap();
+        let turn_id = task.create_turn().unwrap();
+        task.transition_turn(turn_id, TurnState::Running).unwrap();
+        task.transition_turn(turn_id, TurnState::Failed).unwrap();
+        turn_id
+    };
+    let (foreign_task_id, foreign_turn_id) = {
+        let foreign_task = session.create_task("Foreign task");
+        foreign_task.transition(TaskState::Running).unwrap();
+        let task_id = foreign_task.id();
+        let turn_id = foreign_task.create_turn().unwrap();
+        foreign_task
+            .transition_turn(turn_id, TurnState::Running)
+            .unwrap();
+        (task_id, turn_id)
+    };
+    let missing_task_id = Uuid::new_v4();
+    let missing_turn_id = Uuid::new_v4();
+    let before = lifecycle_snapshot(&session);
+
+    with_current_dir(temp.path(), || {
+        assert!(matches!(
+            session.list_workspace_directory(missing_task_id, turn_id, Path::new(".")),
+            Err(WorkspaceListError::TaskNotFound { task_id }) if task_id == missing_task_id
+        ));
+        assert!(matches!(
+            session.list_workspace_directory(task_id, foreign_turn_id, Path::new(".")),
+            Err(WorkspaceListError::ForeignTurn {
+                task_id: requested_task_id,
+                turn_id,
+                owner_task_id,
+            }) if requested_task_id == task_id
+                && turn_id == foreign_turn_id
+                && owner_task_id == foreign_task_id
+        ));
+        assert!(matches!(
+            session.list_workspace_directory(task_id, missing_turn_id, Path::new(".")),
+            Err(WorkspaceListError::TurnNotFound {
+                task_id: actual_task_id,
+                turn_id,
+            }) if actual_task_id == task_id && turn_id == missing_turn_id
+        ));
+        for (turn_id, state) in [
+            (pending_turn_id, TurnState::Pending),
+            (failed_turn_id, TurnState::Failed),
+        ] {
+            assert!(matches!(
+                session.list_workspace_directory(task_id, turn_id, Path::new(".")),
+                Err(WorkspaceListError::TurnNotRunning {
+                    turn_id: actual_turn_id,
+                    state: actual_state,
+                }) if actual_turn_id == turn_id && actual_state == state
+            ));
+        }
+        assert_eq!(lifecycle_snapshot(&session), before);
+    });
+}
+
+#[test]
+fn workspace_listing_uses_cli_directory_resolution_and_preserves_history_on_failure() {
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new();
+    let workspace = temp.path().join("workspace");
+    let outside = temp.path().join("outside");
+    fs::create_dir(&workspace).unwrap();
+    fs::create_dir(&outside).unwrap();
+    fs::create_dir(workspace.join("nested")).unwrap();
+    fs::write(workspace.join("nested/entry"), "inside").unwrap();
+    fs::write(workspace.join("file"), "not a directory").unwrap();
+    fs::write(outside.join("entry"), "outside").unwrap();
+    symlink("nested", workspace.join("inside-link")).unwrap();
+    symlink(&outside, workspace.join("outside-link")).unwrap();
+
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) = running_turn(&mut session);
+    let inside_entries = with_current_dir(&workspace, || {
+        session.list_workspace_directory(task_id, turn_id, Path::new("inside-link"))
+    });
+    assert_eq!(inside_entries, Ok(vec!["entry".into()]));
+
+    let invalid_paths = [
+        (PathBuf::from("missing"), "file not found"),
+        (PathBuf::from("file"), "not a directory"),
+        (
+            PathBuf::from("../outside"),
+            "path must stay inside the current directory",
+        ),
+        (
+            PathBuf::from("outside-link"),
+            "path must stay inside the current directory",
+        ),
+        (workspace.clone(), "absolute paths are not allowed"),
+    ];
+    with_current_dir(&workspace, || {
+        for (path, message) in invalid_paths {
+            let before = lifecycle_snapshot(&session);
+            let error = session
+                .list_workspace_directory(task_id, turn_id, &path)
                 .unwrap_err();
             assert!(error.to_string().contains(message), "{error}");
             assert_eq!(lifecycle_snapshot(&session), before);

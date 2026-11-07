@@ -47,6 +47,19 @@ pub(crate) fn read_text_file(path: &OsStr) -> Result<String, CliError> {
 }
 
 pub(crate) fn list_directory(path: &OsStr) -> Result<Vec<String>, CliError> {
+    list_directory_entries(path).map(|names| {
+        names
+            .into_iter()
+            .map(|name| quote_json(&name.sort_key))
+            .collect()
+    })
+}
+
+pub(crate) fn list_directory_names(path: &OsStr) -> Result<Vec<OsString>, CliError> {
+    list_directory_entries(path).map(|names| names.into_iter().map(|name| name.name).collect())
+}
+
+fn list_directory_entries(path: &OsStr) -> Result<Vec<ListedName>, CliError> {
     let directory = open_cwd_relative(path, true)?;
     let duplicate = duplicate_fd(directory.as_raw_fd())
         .map_err(|_| CliError::new("unable to list directory"))?;
@@ -83,7 +96,7 @@ pub(crate) fn list_directory(path: &OsStr) -> Result<Vec<String>, CliError> {
     }
 
     names.sort_by(|left, right| left.sort_key.cmp(&right.sort_key));
-    Ok(names.into_iter().map(|name| name.json).collect())
+    Ok(names)
 }
 
 pub(crate) fn create_text_file(path: &OsStr, text: &str) -> Result<(), CliError> {
@@ -521,14 +534,14 @@ impl Drop for DirectoryStream {
 
 struct ListedName {
     sort_key: Vec<u32>,
-    json: String,
+    name: OsString,
 }
 
 impl ListedName {
     fn new(bytes: Vec<u8>) -> Self {
         let sort_key = python_codepoints(&bytes);
-        let json = quote_json(&sort_key);
-        Self { sort_key, json }
+        let name = OsString::from_vec(bytes);
+        Self { sort_key, name }
     }
 }
 
@@ -664,7 +677,7 @@ mod tests {
     #[test]
     fn directory_names_match_python_json_escaping_and_sort_order() {
         let name = super::ListedName::new(vec![b'\xff']);
-        assert_eq!(name.json, "\"\\udcff\"");
+        assert_eq!(super::quote_json(&name.sort_key), "\"\\udcff\"");
         assert_eq!(name.sort_key, vec![0xdcff]);
     }
 }

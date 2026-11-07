@@ -1,4 +1,5 @@
-use crate::file_safety::{create_text_file, read_text_file};
+use crate::file_safety::{create_text_file, list_directory_names, read_text_file};
+use std::ffi::OsString;
 use std::fmt;
 use std::path::Path;
 use uuid::Uuid;
@@ -167,6 +168,56 @@ impl fmt::Display for WorkspaceReadError {
 }
 
 impl std::error::Error for WorkspaceReadError {}
+
+/// An error while listing a workspace directory for a task turn.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WorkspaceListError {
+    /// The task identifier is not present in the session.
+    TaskNotFound { task_id: Uuid },
+    /// The turn identifier is not present in the requested task.
+    TurnNotFound { task_id: Uuid, turn_id: Uuid },
+    /// The turn identifier belongs to a different task in this session.
+    ForeignTurn {
+        task_id: Uuid,
+        turn_id: Uuid,
+        owner_task_id: Uuid,
+    },
+    /// The requested turn exists but is not currently running.
+    TurnNotRunning { turn_id: Uuid, state: TurnState },
+    /// The directory could not be listed under the existing file-safety policy.
+    Directory { message: String },
+}
+
+impl fmt::Display for WorkspaceListError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TaskNotFound { task_id } => {
+                write!(formatter, "task '{task_id}' is not in this session")
+            }
+            Self::TurnNotFound { task_id, turn_id } => {
+                write!(formatter, "turn '{turn_id}' is not in task '{task_id}'")
+            }
+            Self::ForeignTurn {
+                task_id,
+                turn_id,
+                owner_task_id,
+            } => write!(
+                formatter,
+                "turn '{turn_id}' belongs to task '{owner_task_id}', not requested task '{task_id}'"
+            ),
+            Self::TurnNotRunning { turn_id, state } => write!(
+                formatter,
+                "turn '{turn_id}' is '{}', not running",
+                state.as_str()
+            ),
+            Self::Directory { message } => {
+                write!(formatter, "workspace directory listing failed: {message}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for WorkspaceListError {}
 
 /// An error while creating a workspace file for a task turn.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -759,6 +810,52 @@ impl TaskSession {
         }
 
         read_text_file(path.as_os_str()).map_err(|error| WorkspaceReadError::File {
+            message: error.message().to_owned(),
+        })
+    }
+
+    /// Lists immediate filesystem-native entry names for a currently running owned turn.
+    ///
+    /// The relative path is resolved from the process current directory and follows the same
+    /// workspace boundary, symlink, missing-path, and directory policies as the `list` command.
+    /// Names use the same deterministic order as `list` and can be used directly as path
+    /// components. This operation borrows the session immutably and does not change lifecycle
+    /// state or history.
+    pub fn list_workspace_directory(
+        &self,
+        task_id: Uuid,
+        turn_id: Uuid,
+        path: &Path,
+    ) -> Result<Vec<OsString>, WorkspaceListError> {
+        let task = self
+            .get_task(task_id)
+            .ok_or(WorkspaceListError::TaskNotFound { task_id })?;
+        let turn = match task.get_turn(turn_id) {
+            Some(turn) => turn,
+            None => {
+                let owner_task_id = self
+                    .tasks
+                    .iter()
+                    .find(|candidate| candidate.get_turn(turn_id).is_some())
+                    .map(Task::id);
+                return match owner_task_id {
+                    Some(owner_task_id) => Err(WorkspaceListError::ForeignTurn {
+                        task_id,
+                        turn_id,
+                        owner_task_id,
+                    }),
+                    None => Err(WorkspaceListError::TurnNotFound { task_id, turn_id }),
+                };
+            }
+        };
+        if turn.state() != TurnState::Running {
+            return Err(WorkspaceListError::TurnNotRunning {
+                turn_id,
+                state: turn.state(),
+            });
+        }
+
+        list_directory_names(path.as_os_str()).map_err(|error| WorkspaceListError::Directory {
             message: error.message().to_owned(),
         })
     }
