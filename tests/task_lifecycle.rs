@@ -1091,10 +1091,12 @@ fn terminal_task_transitions_reject_active_turns_without_changing_histories() {
             task.transition_turn(active_turn_id, TurnState::Running)
                 .unwrap();
         }
-        task.transition_turn(completed_turn_id, TurnState::Running)
-            .unwrap();
-        task.transition_turn(completed_turn_id, TurnState::Succeeded)
-            .unwrap();
+        if task_state == TaskState::Running {
+            task.transition_turn(completed_turn_id, TurnState::Running)
+                .unwrap();
+            task.transition_turn(completed_turn_id, TurnState::Succeeded)
+                .unwrap();
+        }
 
         let previous_task_state = task.state();
         let previous_task_events = task.events().to_vec();
@@ -1281,11 +1283,78 @@ fn tasks_create_stable_pending_turns_in_creation_order() {
         })
     );
 
+    first_task.transition(TaskState::Running).unwrap();
     first_task
         .transition_turn(first_turn_id, TurnState::Running)
         .unwrap();
     assert_eq!(first_task.turns()[0].id(), first_turn_id);
     assert_eq!(first_task.turns()[0].state(), TurnState::Running);
+}
+
+#[test]
+fn pending_turn_cannot_start_until_its_task_is_running() {
+    let mut session = TaskSession::new();
+    let task = session.create_task("A pending task");
+    let task_id = task.id();
+    let turn_id = task.create_turn().unwrap();
+    let before = lifecycle_snapshot(&session);
+
+    let error = session
+        .get_task_mut(task_id)
+        .unwrap()
+        .transition_turn(turn_id, TurnState::Running)
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        TurnTransitionError::TaskNotRunning {
+            task_id,
+            task_state: TaskState::Pending,
+            turn_id,
+            turn_state: TurnState::Pending,
+        }
+    );
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "cannot start turn '{turn_id}' in state 'pending' while owning task '{task_id}' is 'pending'"
+        )
+    );
+    assert_eq!(lifecycle_snapshot(&session), before);
+}
+
+#[test]
+fn pending_turn_can_start_after_its_task_starts() {
+    let mut task = Task::new("A task");
+    let turn_id = task.create_turn().unwrap();
+
+    task.transition(TaskState::Running).unwrap();
+    task.transition_turn(turn_id, TurnState::Running).unwrap();
+
+    assert_eq!(task.state(), TaskState::Running);
+    assert_eq!(task.get_turn(turn_id).unwrap().state(), TurnState::Running);
+    assert_eq!(
+        task.get_turn(turn_id).unwrap().events()[0].previous_state(),
+        TurnState::Pending
+    );
+}
+
+#[test]
+fn pending_turn_can_be_cancelled_while_its_task_is_pending() {
+    let mut task = Task::new("A pending task");
+    let turn_id = task.create_turn().unwrap();
+
+    task.transition_turn(turn_id, TurnState::Cancelled).unwrap();
+
+    assert_eq!(task.state(), TaskState::Pending);
+    assert_eq!(
+        task.get_turn(turn_id).unwrap().state(),
+        TurnState::Cancelled
+    );
+    assert_eq!(
+        task.get_turn(turn_id).unwrap().events()[0].previous_state(),
+        TurnState::Pending
+    );
 }
 
 #[test]
@@ -1300,6 +1369,7 @@ fn valid_turn_transitions_record_ordered_immutable_events() {
 
     for (prefix, next) in cases {
         let mut task = Task::new("A task");
+        task.transition(TaskState::Running).unwrap();
         let task_id = task.id();
         let turn_id = task.create_turn().unwrap();
         let mut expected_states = prefix;
@@ -1381,6 +1451,7 @@ fn invalid_turn_transitions_leave_state_and_history_unchanged() {
 
     for (prefix, invalid) in cases {
         let mut task = Task::new("A task");
+        task.transition(TaskState::Running).unwrap();
         let turn_id = task.create_turn().unwrap();
         for state in *prefix {
             task.transition_turn(turn_id, *state).unwrap();
@@ -1413,6 +1484,7 @@ fn turns_keep_state_and_history_isolated_between_tasks() {
     first_task.create_turn().unwrap();
     let other_turn_id = second_task.create_turn().unwrap();
 
+    first_task.transition(TaskState::Running).unwrap();
     first_task
         .transition_turn(first_turn_id, TurnState::Running)
         .unwrap();
