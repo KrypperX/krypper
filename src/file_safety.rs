@@ -23,8 +23,31 @@ impl CliError {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct WorkspaceRoot {
+    descriptor: OwnedFd,
+    path: PathBuf,
+}
+
+pub(crate) fn capture_workspace_root() -> Result<WorkspaceRoot, String> {
+    let descriptor = open_current_directory()
+        .map_err(|error| format!("unable to open current directory: {error}"))?;
+    let path = fs::canonicalize(".")
+        .map_err(|error| format!("unable to resolve current directory: {error}"))?;
+    verify_root_descriptor(descriptor.as_raw_fd(), &path)
+        .map_err(|error| format!("unable to verify current directory: {}", error.message()))?;
+    Ok(WorkspaceRoot { descriptor, path })
+}
+
 pub(crate) fn read_text_file(path: &OsStr) -> Result<String, CliError> {
-    let mut file = open_cwd_relative(path, false)?;
+    read_open_text_file(open_cwd_relative(path, false)?)
+}
+
+pub(crate) fn read_text_file_at(root: &WorkspaceRoot, path: &OsStr) -> Result<String, CliError> {
+    read_open_text_file(open_workspace_relative(root, path, false)?)
+}
+
+fn read_open_text_file(mut file: File) -> Result<String, CliError> {
     let metadata = file
         .metadata()
         .map_err(|_| CliError::new("unable to read file"))?;
@@ -55,12 +78,26 @@ pub(crate) fn list_directory(path: &OsStr) -> Result<Vec<String>, CliError> {
     })
 }
 
-pub(crate) fn list_directory_names(path: &OsStr) -> Result<Vec<OsString>, CliError> {
-    list_directory_entries(path).map(|names| names.into_iter().map(|name| name.name).collect())
+pub(crate) fn list_directory_names_at(
+    root: &WorkspaceRoot,
+    path: &OsStr,
+) -> Result<Vec<OsString>, CliError> {
+    list_directory_entries_at(root, path)
+        .map(|names| names.into_iter().map(|name| name.name).collect())
 }
 
 fn list_directory_entries(path: &OsStr) -> Result<Vec<ListedName>, CliError> {
-    let directory = open_cwd_relative(path, true)?;
+    list_open_directory(open_cwd_relative(path, true)?)
+}
+
+fn list_directory_entries_at(
+    root: &WorkspaceRoot,
+    path: &OsStr,
+) -> Result<Vec<ListedName>, CliError> {
+    list_open_directory(open_workspace_relative(root, path, true)?)
+}
+
+fn list_open_directory(directory: File) -> Result<Vec<ListedName>, CliError> {
     let duplicate = duplicate_fd(directory.as_raw_fd())
         .map_err(|_| CliError::new("unable to list directory"))?;
     let raw = duplicate.into_raw_fd();
@@ -100,6 +137,22 @@ fn list_directory_entries(path: &OsStr) -> Result<Vec<ListedName>, CliError> {
 }
 
 pub(crate) fn create_text_file(path: &OsStr, text: &str) -> Result<(), CliError> {
+    let contents = validate_create_text_file(path, text)?;
+    let root =
+        open_current_directory().map_err(|_| CliError::new("unable to open current directory"))?;
+    create_text_file_at_with_writer(root.as_raw_fd(), path, contents, write_to_fd)
+}
+
+pub(crate) fn create_text_file_at(
+    root: &WorkspaceRoot,
+    path: &OsStr,
+    text: &str,
+) -> Result<(), CliError> {
+    let contents = validate_create_text_file(path, text)?;
+    create_text_file_at_with_writer(root.descriptor.as_raw_fd(), path, contents, write_to_fd)
+}
+
+fn validate_create_text_file<'a>(path: &OsStr, text: &'a str) -> Result<&'a [u8], CliError> {
     let path_bytes = path.as_bytes();
     if path_bytes.contains(&0) {
         return Err(CliError::new("invalid file path"));
@@ -115,10 +168,7 @@ pub(crate) fn create_text_file(path: &OsStr, text: &str) -> Result<(), CliError>
     if contents.len() > MAX_FILE_SIZE {
         return Err(CliError::new("text exceeds 1 MiB"));
     }
-
-    let root =
-        open_current_directory().map_err(|_| CliError::new("unable to open current directory"))?;
-    create_text_file_at_with_writer(root.as_raw_fd(), path, contents, write_to_fd)
+    Ok(contents)
 }
 
 fn open_cwd_relative(path: &OsStr, directory: bool) -> Result<File, CliError> {
@@ -128,6 +178,28 @@ fn open_cwd_relative(path: &OsStr, directory: bool) -> Result<File, CliError> {
 
     let root = open_current_directory().map_err(|_| CliError::new("unable to read file"))?;
     let root_path = fs::canonicalize(".").map_err(|_| CliError::new("invalid path"))?;
+    open_root_relative(root, &root_path, path, directory)
+}
+
+fn open_workspace_relative(
+    root: &WorkspaceRoot,
+    path: &OsStr,
+    directory: bool,
+) -> Result<File, CliError> {
+    if Path::new(path).is_absolute() {
+        return Err(CliError::new("absolute paths are not allowed"));
+    }
+    let descriptor = duplicate_fd(root.descriptor.as_raw_fd())
+        .map_err(|_| CliError::new("unable to read file"))?;
+    open_root_relative(descriptor, &root.path, path, directory)
+}
+
+fn open_root_relative(
+    root: OwnedFd,
+    root_path: &Path,
+    path: &OsStr,
+    directory: bool,
+) -> Result<File, CliError> {
     let mut directories = vec![root];
     let mut pending = split_components(path.as_bytes());
     let mut symlinks = 0;
@@ -167,12 +239,12 @@ fn open_cwd_relative(path: &OsStr, directory: bool) -> Result<File, CliError> {
             if target.first() == Some(&b'/') {
                 let target_path = PathBuf::from(OsString::from_vec(target));
                 let target_path = normalize_absolute(&target_path);
-                if !target_path.starts_with(&root_path) {
+                if !target_path.starts_with(root_path) {
                     return Err(CliError::new("path must stay inside the current directory"));
                 }
-                verify_root_descriptor(directories[0].as_raw_fd(), &root_path)?;
+                verify_root_descriptor(directories[0].as_raw_fd(), root_path)?;
                 let relative = target_path
-                    .strip_prefix(&root_path)
+                    .strip_prefix(root_path)
                     .map_err(|_| CliError::new("invalid path"))?;
                 directories.truncate(1);
                 prepend_components(&mut pending, relative.as_os_str().as_bytes());
