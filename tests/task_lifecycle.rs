@@ -1,6 +1,237 @@
 use krypper::task_lifecycle::{
-    Task, TaskHistoryTransition, TaskSession, TaskState, TurnState, TurnTransitionError,
+    Task, TaskEvent, TaskHistoryEvent, TaskHistoryTransition, TaskSession, TaskState, TurnEvent,
+    TurnState, TurnTransitionError, WorkspaceReadError,
 };
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use uuid::Uuid;
+
+static CURRENT_DIR_LOCK: Mutex<()> = Mutex::new(());
+
+struct TempDir(PathBuf);
+
+impl TempDir {
+    fn new() -> Self {
+        let path = std::env::temp_dir().join(format!("krypper-workspace-read-{}", Uuid::new_v4()));
+        fs::create_dir(&path).unwrap();
+        Self(path)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        fs::remove_dir_all(&self.0).unwrap();
+    }
+}
+
+struct RestoreCurrentDir(PathBuf);
+
+impl RestoreCurrentDir {
+    fn enter(path: &Path) -> Self {
+        let previous = std::env::current_dir().unwrap();
+        std::env::set_current_dir(path).unwrap();
+        Self(previous)
+    }
+}
+
+impl Drop for RestoreCurrentDir {
+    fn drop(&mut self) {
+        if let Err(error) = std::env::set_current_dir(&self.0) {
+            eprintln!("failed to restore test working directory: {error}");
+        }
+    }
+}
+
+fn with_current_dir<T>(path: &Path, operation: impl FnOnce() -> T) -> T {
+    let _lock = CURRENT_DIR_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _restore = RestoreCurrentDir::enter(path);
+    operation()
+}
+
+fn running_turn(session: &mut TaskSession) -> (Uuid, Uuid) {
+    let task = session.create_task("Read a workspace file");
+    task.transition(TaskState::Running).unwrap();
+    let task_id = task.id();
+    let turn_id = task.create_turn().unwrap();
+    task.transition_turn(turn_id, TurnState::Running).unwrap();
+    (task_id, turn_id)
+}
+
+type TurnSnapshot = (Uuid, TurnState, Vec<TurnEvent>);
+type TaskSnapshot = (
+    Uuid,
+    TaskState,
+    Vec<TaskEvent>,
+    Vec<TaskHistoryEvent>,
+    Vec<TurnSnapshot>,
+);
+
+fn lifecycle_snapshot(session: &TaskSession) -> Vec<TaskSnapshot> {
+    session
+        .list_tasks()
+        .iter()
+        .map(|task| {
+            (
+                task.id(),
+                task.state(),
+                task.events().to_vec(),
+                task.history().to_vec(),
+                task.turns()
+                    .iter()
+                    .map(|turn| (turn.id(), turn.state(), turn.events().to_vec()))
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn running_owned_turn_reads_a_workspace_file() {
+    let temp = TempDir::new();
+    fs::write(temp.path().join("note.txt"), "private task context").unwrap();
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) = running_turn(&mut session);
+
+    let contents = with_current_dir(temp.path(), || {
+        session.read_workspace_file(task_id, turn_id, Path::new("note.txt"))
+    });
+
+    assert_eq!(contents, Ok("private task context".to_owned()));
+}
+
+#[test]
+fn workspace_read_requires_an_existing_task_owned_running_turn() {
+    let temp = TempDir::new();
+    fs::write(temp.path().join("note.txt"), "context").unwrap();
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) = running_turn(&mut session);
+    let (foreign_task_id, foreign_turn_id) = {
+        let foreign_task = session.create_task("Foreign task");
+        foreign_task.transition(TaskState::Running).unwrap();
+        let task_id = foreign_task.id();
+        let turn_id = foreign_task.create_turn().unwrap();
+        foreign_task
+            .transition_turn(turn_id, TurnState::Running)
+            .unwrap();
+        (task_id, turn_id)
+    };
+    let pending_turn_id = session
+        .get_task_mut(task_id)
+        .unwrap()
+        .create_turn()
+        .unwrap();
+    let missing_task_id = Uuid::new_v4();
+    let missing_turn_id = Uuid::new_v4();
+
+    with_current_dir(temp.path(), || {
+        let before = lifecycle_snapshot(&session);
+        assert!(matches!(
+            session.read_workspace_file(missing_task_id, turn_id, Path::new("note.txt")),
+            Err(WorkspaceReadError::TaskNotFound { task_id }) if task_id == missing_task_id
+        ));
+        assert!(matches!(
+            session.read_workspace_file(task_id, foreign_turn_id, Path::new("note.txt")),
+            Err(WorkspaceReadError::ForeignTurn {
+                task_id: requested_task_id,
+                turn_id,
+                owner_task_id,
+            }) if requested_task_id == task_id
+                && turn_id == foreign_turn_id
+                && owner_task_id == foreign_task_id
+        ));
+        assert!(matches!(
+            session.read_workspace_file(task_id, missing_turn_id, Path::new("note.txt")),
+            Err(WorkspaceReadError::TurnNotFound {
+                task_id: actual_task_id,
+                turn_id,
+            }) if actual_task_id == task_id && turn_id == missing_turn_id
+        ));
+        assert!(matches!(
+            session.read_workspace_file(task_id, pending_turn_id, Path::new("note.txt")),
+            Err(WorkspaceReadError::TurnNotRunning {
+                turn_id,
+                state: TurnState::Pending
+            }) if turn_id == pending_turn_id
+        ));
+        assert_eq!(lifecycle_snapshot(&session), before);
+    });
+}
+
+#[test]
+fn workspace_read_follows_only_symlinks_that_stay_inside_the_workspace() {
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new();
+    let workspace = temp.path().join("workspace");
+    let outside = temp.path().join("outside");
+    fs::create_dir(&workspace).unwrap();
+    fs::create_dir(&outside).unwrap();
+    fs::write(workspace.join("note.txt"), "inside").unwrap();
+    fs::write(outside.join("note.txt"), "outside").unwrap();
+    symlink("note.txt", workspace.join("inside-link")).unwrap();
+    symlink(outside.join("note.txt"), workspace.join("outside-link")).unwrap();
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) = running_turn(&mut session);
+
+    with_current_dir(&workspace, || {
+        assert_eq!(
+            session.read_workspace_file(task_id, turn_id, Path::new("inside-link")),
+            Ok("inside".to_owned())
+        );
+        let outside_link = session
+            .read_workspace_file(task_id, turn_id, Path::new("outside-link"))
+            .unwrap_err();
+        assert!(outside_link
+            .to_string()
+            .contains("path must stay inside the current directory"));
+        let traversal = session
+            .read_workspace_file(task_id, turn_id, Path::new("../outside/note.txt"))
+            .unwrap_err();
+        assert!(traversal
+            .to_string()
+            .contains("path must stay inside the current directory"));
+        let absolute = session
+            .read_workspace_file(task_id, turn_id, &workspace.join("note.txt"))
+            .unwrap_err();
+        assert!(absolute
+            .to_string()
+            .contains("absolute paths are not allowed"));
+    });
+}
+
+#[test]
+fn failed_workspace_reads_report_file_errors_without_changing_lifecycle_history() {
+    let temp = TempDir::new();
+    fs::create_dir(temp.path().join("directory")).unwrap();
+    fs::write(temp.path().join("invalid.txt"), [0xff]).unwrap();
+    fs::write(temp.path().join("large.txt"), vec![b'x'; 1024 * 1024 + 1]).unwrap();
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) = running_turn(&mut session);
+    let paths_and_messages = [
+        ("missing.txt", "file not found"),
+        ("directory", "not a regular file"),
+        ("invalid.txt", "file is not valid UTF-8"),
+        ("large.txt", "file exceeds 1 MiB"),
+    ];
+
+    with_current_dir(temp.path(), || {
+        for (path, message) in paths_and_messages {
+            let before = lifecycle_snapshot(&session);
+            let error = session
+                .read_workspace_file(task_id, turn_id, Path::new(path))
+                .unwrap_err();
+            assert!(error.to_string().contains(message), "{error}");
+            assert_eq!(lifecycle_snapshot(&session), before);
+        }
+    });
+}
 
 #[test]
 fn new_task_keeps_description_and_starts_pending_with_empty_read_only_history() {
