@@ -222,6 +222,30 @@ impl fmt::Display for WorkspaceListError {
 
 impl std::error::Error for WorkspaceListError {}
 
+impl From<WorkspaceReadError> for WorkspaceListError {
+    fn from(error: WorkspaceReadError) -> Self {
+        match error {
+            WorkspaceReadError::TaskNotFound { task_id } => Self::TaskNotFound { task_id },
+            WorkspaceReadError::TurnNotFound { task_id, turn_id } => {
+                Self::TurnNotFound { task_id, turn_id }
+            }
+            WorkspaceReadError::ForeignTurn {
+                task_id,
+                turn_id,
+                owner_task_id,
+            } => Self::ForeignTurn {
+                task_id,
+                turn_id,
+                owner_task_id,
+            },
+            WorkspaceReadError::TurnNotRunning { turn_id, state } => {
+                Self::TurnNotRunning { turn_id, state }
+            }
+            WorkspaceReadError::File { message } => Self::Directory { message },
+        }
+    }
+}
+
 /// An error while creating a workspace file for a task turn.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WorkspaceWriteError {
@@ -968,17 +992,11 @@ impl TaskSession {
             .complete_turn(turn_id, outcome)
     }
 
-    /// Reads one UTF-8 file for a currently running turn owned by this session.
-    ///
-    /// The relative path is resolved from this task's creation directory and follows the same
-    /// workspace boundary, symlink, regular-file, and 1 MiB policies as the `show` command.
-    /// This operation borrows the session immutably and does not change lifecycle state or history.
-    pub fn read_workspace_file(
+    fn running_workspace_task(
         &self,
         task_id: Uuid,
         turn_id: Uuid,
-        path: &Path,
-    ) -> Result<String, WorkspaceReadError> {
+    ) -> Result<&Task, WorkspaceReadError> {
         let task = self
             .get_task(task_id)
             .ok_or(WorkspaceReadError::TaskNotFound { task_id })?;
@@ -1006,7 +1024,30 @@ impl TaskSession {
                 state: turn.state(),
             });
         }
+        Ok(task)
+    }
 
+    /// Checks task ownership and running-turn state without performing a workspace operation.
+    pub(crate) fn validate_running_turn(
+        &self,
+        task_id: Uuid,
+        turn_id: Uuid,
+    ) -> Result<(), WorkspaceReadError> {
+        self.running_workspace_task(task_id, turn_id).map(|_| ())
+    }
+
+    /// Reads one UTF-8 file for a currently running turn owned by this session.
+    ///
+    /// The relative path is resolved from this task's creation directory and follows the same
+    /// workspace boundary, symlink, regular-file, and 1 MiB policies as the `show` command.
+    /// This operation borrows the session immutably and does not change lifecycle state or history.
+    pub fn read_workspace_file(
+        &self,
+        task_id: Uuid,
+        turn_id: Uuid,
+        path: &Path,
+    ) -> Result<String, WorkspaceReadError> {
+        let task = self.running_workspace_task(task_id, turn_id)?;
         let root = task
             .workspace_root
             .as_ref()
@@ -1032,33 +1073,8 @@ impl TaskSession {
         path: &Path,
     ) -> Result<Vec<OsString>, WorkspaceListError> {
         let task = self
-            .get_task(task_id)
-            .ok_or(WorkspaceListError::TaskNotFound { task_id })?;
-        let turn = match task.get_turn(turn_id) {
-            Some(turn) => turn,
-            None => {
-                let owner_task_id = self
-                    .tasks
-                    .iter()
-                    .find(|candidate| candidate.get_turn(turn_id).is_some())
-                    .map(Task::id);
-                return match owner_task_id {
-                    Some(owner_task_id) => Err(WorkspaceListError::ForeignTurn {
-                        task_id,
-                        turn_id,
-                        owner_task_id,
-                    }),
-                    None => Err(WorkspaceListError::TurnNotFound { task_id, turn_id }),
-                };
-            }
-        };
-        if turn.state() != TurnState::Running {
-            return Err(WorkspaceListError::TurnNotRunning {
-                turn_id,
-                state: turn.state(),
-            });
-        }
-
+            .running_workspace_task(task_id, turn_id)
+            .map_err(WorkspaceListError::from)?;
         let root =
             task.workspace_root
                 .as_ref()
