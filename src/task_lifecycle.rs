@@ -415,7 +415,7 @@ impl Task {
         &self.events
     }
 
-    /// Returns all successful task and owned-turn transitions in chronological order.
+    /// Returns task transitions, turn creations, and owned-turn transitions in chronological order.
     ///
     /// The returned slice is read-only; callers can mutate a copy without changing
     /// the task's recorded history.
