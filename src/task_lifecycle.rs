@@ -1,4 +1,6 @@
+use crate::file_safety::read_text_file;
 use std::fmt;
+use std::path::Path;
 use uuid::Uuid;
 
 /// The lifecycle states supported by a task.
@@ -117,6 +119,54 @@ impl fmt::Display for TurnCreationError {
 }
 
 impl std::error::Error for TurnCreationError {}
+
+/// An error while requesting a workspace file for a task turn.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WorkspaceReadError {
+    /// The task identifier is not present in the session.
+    TaskNotFound { task_id: Uuid },
+    /// The turn identifier is not present in the requested task.
+    TurnNotFound { task_id: Uuid, turn_id: Uuid },
+    /// The turn identifier belongs to a different task in this session.
+    ForeignTurn {
+        task_id: Uuid,
+        turn_id: Uuid,
+        owner_task_id: Uuid,
+    },
+    /// The requested turn exists but is not currently running.
+    TurnNotRunning { turn_id: Uuid, state: TurnState },
+    /// The workspace file could not be read under the existing file-safety policy.
+    File { message: String },
+}
+
+impl fmt::Display for WorkspaceReadError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TaskNotFound { task_id } => {
+                write!(formatter, "task '{task_id}' is not in this session")
+            }
+            Self::TurnNotFound { task_id, turn_id } => {
+                write!(formatter, "turn '{turn_id}' is not in task '{task_id}'")
+            }
+            Self::ForeignTurn {
+                task_id,
+                turn_id,
+                owner_task_id,
+            } => write!(
+                formatter,
+                "turn '{turn_id}' belongs to task '{owner_task_id}', not requested task '{task_id}'"
+            ),
+            Self::TurnNotRunning { turn_id, state } => write!(
+                formatter,
+                "turn '{turn_id}' is '{}', not running",
+                state.as_str()
+            ),
+            Self::File { message } => write!(formatter, "workspace file read failed: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for WorkspaceReadError {}
 
 /// An immutable record of one successful state transition.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -617,6 +667,50 @@ impl TaskSession {
     /// Returns a mutable task in this session by identifier.
     pub fn get_task_mut(&mut self, task_id: Uuid) -> Option<&mut Task> {
         self.tasks.iter_mut().find(|task| task.id == task_id)
+    }
+
+    /// Reads one UTF-8 file for a currently running turn owned by this session.
+    ///
+    /// The relative path is resolved from the process current directory and follows the same
+    /// workspace boundary, symlink, regular-file, and 1 MiB policies as the `show` command.
+    /// This operation borrows the session immutably and does not change lifecycle state or history.
+    pub fn read_workspace_file(
+        &self,
+        task_id: Uuid,
+        turn_id: Uuid,
+        path: &Path,
+    ) -> Result<String, WorkspaceReadError> {
+        let task = self
+            .get_task(task_id)
+            .ok_or(WorkspaceReadError::TaskNotFound { task_id })?;
+        let turn = match task.get_turn(turn_id) {
+            Some(turn) => turn,
+            None => {
+                let owner_task_id = self
+                    .tasks
+                    .iter()
+                    .find(|candidate| candidate.get_turn(turn_id).is_some())
+                    .map(Task::id);
+                return match owner_task_id {
+                    Some(owner_task_id) => Err(WorkspaceReadError::ForeignTurn {
+                        task_id,
+                        turn_id,
+                        owner_task_id,
+                    }),
+                    None => Err(WorkspaceReadError::TurnNotFound { task_id, turn_id }),
+                };
+            }
+        };
+        if turn.state() != TurnState::Running {
+            return Err(WorkspaceReadError::TurnNotRunning {
+                turn_id,
+                state: turn.state(),
+            });
+        }
+
+        read_text_file(path.as_os_str()).map_err(|error| WorkspaceReadError::File {
+            message: error.message().to_owned(),
+        })
     }
 
     /// Returns the tasks in creation order as a read-only slice.
