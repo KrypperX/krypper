@@ -11,6 +11,96 @@ fn new_task_keeps_description_and_starts_pending_with_empty_read_only_history() 
 }
 
 #[test]
+fn turn_creation_is_allowed_for_pending_and_running_tasks_in_creation_order() {
+    for task_state in [TaskState::Pending, TaskState::Running] {
+        let mut task = Task::new("A task");
+        if task_state == TaskState::Running {
+            task.transition(TaskState::Running).unwrap();
+        }
+        let task_id = task.id();
+
+        let first_turn_id = task.create_turn().unwrap();
+        let second_turn_id = task.create_turn().unwrap();
+
+        assert_eq!(
+            task.turns()
+                .iter()
+                .map(|turn| turn.id())
+                .collect::<Vec<_>>(),
+            vec![first_turn_id, second_turn_id]
+        );
+        for turn in task.turns() {
+            assert_eq!(turn.task_id(), task_id);
+            assert_eq!(turn.state(), TurnState::Pending);
+            assert!(turn.events().is_empty());
+        }
+    }
+}
+
+#[test]
+fn turn_creation_rejects_terminal_tasks_without_mutating_state_or_history() {
+    for terminal_state in [
+        TaskState::Succeeded,
+        TaskState::Failed,
+        TaskState::Cancelled,
+    ] {
+        let mut task = Task::new("A task");
+        task.transition(TaskState::Running).unwrap();
+        let completed_turn_id = task.create_turn().unwrap();
+        let cancelled_turn_id = task.create_turn().unwrap();
+        task.transition_turn(completed_turn_id, TurnState::Running)
+            .unwrap();
+        task.transition_turn(completed_turn_id, TurnState::Succeeded)
+            .unwrap();
+        task.transition_turn(cancelled_turn_id, TurnState::Cancelled)
+            .unwrap();
+        task.transition(terminal_state).unwrap();
+
+        let task_state_before = task.state();
+        let task_events_before = task.events().to_vec();
+        let history_before = task.history().to_vec();
+        let turns_before = task
+            .turns()
+            .iter()
+            .map(|turn| {
+                (
+                    turn.id(),
+                    turn.task_id(),
+                    turn.state(),
+                    turn.events().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let error = task.create_turn().unwrap_err();
+
+        assert_eq!(error.task_state(), terminal_state);
+        assert_eq!(
+            error.to_string(),
+            format!("cannot create a turn for task in terminal state '{terminal_state}'")
+        );
+        assert_eq!(task.state(), task_state_before);
+        assert_eq!(task.events(), task_events_before);
+        assert_eq!(task.history(), history_before);
+        assert_eq!(task.turns().len(), turns_before.len());
+        assert_eq!(
+            task.turns()
+                .iter()
+                .map(|turn| {
+                    (
+                        turn.id(),
+                        turn.task_id(),
+                        turn.state(),
+                        turn.events().to_vec(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            turns_before
+        );
+    }
+}
+
+#[test]
 fn task_ids_are_unique_and_stable() {
     let mut first = Task::new("First task");
     let second = Task::new("Second task");
@@ -54,8 +144,8 @@ fn valid_transitions_record_ordered_task_bound_events() {
 fn combined_history_records_interleaved_task_and_turn_transitions() {
     let mut task = Task::new("A task");
     let task_id = task.id();
-    let first_turn_id = task.create_turn();
-    let second_turn_id = task.create_turn();
+    let first_turn_id = task.create_turn().unwrap();
+    let second_turn_id = task.create_turn().unwrap();
 
     task.transition_turn(first_turn_id, TurnState::Running)
         .unwrap();
@@ -137,7 +227,7 @@ fn combined_history_records_interleaved_task_and_turn_transitions() {
 fn invalid_task_and_turn_transitions_leave_every_history_and_state_unchanged() {
     let mut task = Task::new("A task");
     task.transition(TaskState::Running).unwrap();
-    let active_turn_id = task.create_turn();
+    let active_turn_id = task.create_turn().unwrap();
     task.transition_turn(active_turn_id, TurnState::Running)
         .unwrap();
 
@@ -222,8 +312,8 @@ fn terminal_task_transitions_reject_active_turns_without_changing_histories() {
 
     for (task_state, active_turn_state, next) in cases {
         let mut task = Task::new("A task");
-        let active_turn_id = task.create_turn();
-        let completed_turn_id = task.create_turn();
+        let active_turn_id = task.create_turn().unwrap();
+        let completed_turn_id = task.create_turn().unwrap();
 
         if task_state == TaskState::Running {
             task.transition(TaskState::Running).unwrap();
@@ -280,19 +370,19 @@ fn terminal_task_transitions_succeed_after_all_turns_finish() {
         let mut task = Task::new("A task");
         task.transition(TaskState::Running).unwrap();
 
-        let succeeded_turn = task.create_turn();
+        let succeeded_turn = task.create_turn().unwrap();
         task.transition_turn(succeeded_turn, TurnState::Running)
             .unwrap();
         task.transition_turn(succeeded_turn, TurnState::Succeeded)
             .unwrap();
 
-        let failed_turn = task.create_turn();
+        let failed_turn = task.create_turn().unwrap();
         task.transition_turn(failed_turn, TurnState::Running)
             .unwrap();
         task.transition_turn(failed_turn, TurnState::Failed)
             .unwrap();
 
-        let cancelled_turn = task.create_turn();
+        let cancelled_turn = task.create_turn().unwrap();
         task.transition_turn(cancelled_turn, TurnState::Cancelled)
             .unwrap();
 
@@ -373,9 +463,9 @@ fn tasks_create_stable_pending_turns_in_creation_order() {
     let first_task_id = first_task.id();
     let second_task_id = second_task.id();
 
-    let first_turn_id = first_task.create_turn();
-    let second_turn_id = first_task.create_turn();
-    let other_turn_id = second_task.create_turn();
+    let first_turn_id = first_task.create_turn().unwrap();
+    let second_turn_id = first_task.create_turn().unwrap();
+    let other_turn_id = second_task.create_turn().unwrap();
 
     assert_ne!(first_task_id, second_task_id);
     assert_ne!(first_turn_id, second_turn_id);
@@ -423,7 +513,7 @@ fn valid_turn_transitions_record_ordered_immutable_events() {
     for (prefix, next) in cases {
         let mut task = Task::new("A task");
         let task_id = task.id();
-        let turn_id = task.create_turn();
+        let turn_id = task.create_turn().unwrap();
         let mut expected_states = prefix;
         expected_states.push(next);
 
@@ -503,7 +593,7 @@ fn invalid_turn_transitions_leave_state_and_history_unchanged() {
 
     for (prefix, invalid) in cases {
         let mut task = Task::new("A task");
-        let turn_id = task.create_turn();
+        let turn_id = task.create_turn().unwrap();
         for state in *prefix {
             task.transition_turn(turn_id, *state).unwrap();
         }
@@ -531,9 +621,9 @@ fn turns_keep_state_and_history_isolated_between_tasks() {
     let mut second_task = Task::new("Second task");
     let first_task_id = first_task.id();
     let second_task_id = second_task.id();
-    let first_turn_id = first_task.create_turn();
-    first_task.create_turn();
-    let other_turn_id = second_task.create_turn();
+    let first_turn_id = first_task.create_turn().unwrap();
+    first_task.create_turn().unwrap();
+    let other_turn_id = second_task.create_turn().unwrap();
 
     first_task
         .transition_turn(first_turn_id, TurnState::Running)
@@ -554,11 +644,11 @@ fn task_cancel_cancels_active_turns_before_task_and_preserves_terminal_turns() {
     let mut task = Task::new("A task");
     task.transition(TaskState::Running).unwrap();
 
-    let pending_turn_id = task.create_turn();
-    let running_turn_id = task.create_turn();
-    let succeeded_turn_id = task.create_turn();
-    let failed_turn_id = task.create_turn();
-    let cancelled_turn_id = task.create_turn();
+    let pending_turn_id = task.create_turn().unwrap();
+    let running_turn_id = task.create_turn().unwrap();
+    let succeeded_turn_id = task.create_turn().unwrap();
+    let failed_turn_id = task.create_turn().unwrap();
+    let cancelled_turn_id = task.create_turn().unwrap();
 
     task.transition_turn(running_turn_id, TurnState::Running)
         .unwrap();
@@ -671,8 +761,8 @@ fn task_cancel_cancels_active_turns_before_task_and_preserves_terminal_turns() {
 #[test]
 fn task_cancel_cancels_pending_turns_of_a_pending_task() {
     let mut task = Task::new("A pending task");
-    let first_turn_id = task.create_turn();
-    let second_turn_id = task.create_turn();
+    let first_turn_id = task.create_turn().unwrap();
+    let second_turn_id = task.create_turn().unwrap();
     let task_id = task.id();
 
     task.cancel().unwrap();
@@ -722,18 +812,24 @@ fn task_cancel_succeeds_for_tasks_without_turns() {
 
 #[test]
 fn task_cancel_rejects_terminal_tasks_without_mutating_task_or_turn_history() {
-    for terminal_state in [
-        TaskState::Succeeded,
-        TaskState::Failed,
-        TaskState::Cancelled,
+    for (terminal_state, turn_terminal_state) in [
+        (TaskState::Succeeded, TurnState::Succeeded),
+        (TaskState::Failed, TurnState::Failed),
+        (TaskState::Cancelled, TurnState::Cancelled),
     ] {
         let mut task = Task::new("A terminal task");
-        if terminal_state != TaskState::Cancelled {
+        let active_turn_id = task.create_turn().unwrap();
+        if terminal_state == TaskState::Cancelled {
+            task.cancel().unwrap();
+        } else {
             task.transition(TaskState::Running).unwrap();
+            task.transition_turn(active_turn_id, TurnState::Running)
+                .unwrap();
+            task.transition_turn(active_turn_id, turn_terminal_state)
+                .unwrap();
+            task.transition(terminal_state).unwrap();
         }
-        task.transition(terminal_state).unwrap();
 
-        let active_turn_id = task.create_turn();
         let task_state_before = task.state();
         let task_events_before = task.events().to_vec();
         let turn_state_before = task.get_turn(active_turn_id).unwrap().state();

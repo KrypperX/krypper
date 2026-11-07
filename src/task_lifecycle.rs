@@ -93,6 +93,31 @@ impl fmt::Display for TransitionError {
 
 impl std::error::Error for TransitionError {}
 
+/// An attempt to create a turn for a terminal task.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TurnCreationError {
+    task_state: TaskState,
+}
+
+impl TurnCreationError {
+    /// Returns the terminal state that prevented turn creation.
+    pub fn task_state(&self) -> TaskState {
+        self.task_state
+    }
+}
+
+impl fmt::Display for TurnCreationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "cannot create a turn for task in terminal state '{}'",
+            self.task_state
+        )
+    }
+}
+
+impl std::error::Error for TurnCreationError {}
+
 /// An immutable record of one successful state transition.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TaskEvent {
@@ -436,12 +461,20 @@ impl Task {
         });
     }
 
-    /// Creates a pending turn, appends it to this task's history, and returns its ID.
-    pub fn create_turn(&mut self) -> Uuid {
+    /// Creates a pending turn and appends it to this task's turns in creation order.
+    ///
+    /// Returns an error without changing the task when it is terminal.
+    pub fn create_turn(&mut self) -> Result<Uuid, TurnCreationError> {
+        if self.state.is_terminal() {
+            return Err(TurnCreationError {
+                task_state: self.state,
+            });
+        }
+
         let turn = Turn::new(self.id);
         let turn_id = turn.id();
         self.turns.push(turn);
-        turn_id
+        Ok(turn_id)
     }
 
     /// Returns a turn owned by this task by identifier.
