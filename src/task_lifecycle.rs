@@ -265,6 +265,23 @@ impl Turn {
         &self.events
     }
 
+    fn record_transition(&mut self, next: TurnState) {
+        self.events.push(TurnEvent {
+            task_id: self.task_id,
+            turn_id: self.id,
+            sequence: self.events.len() as u64 + 1,
+            previous_state: self.state,
+            new_state: next,
+        });
+        self.state = next;
+    }
+
+    fn cancel_if_active(&mut self) {
+        if matches!(self.state, TurnState::Pending | TurnState::Running) {
+            self.record_transition(TurnState::Cancelled);
+        }
+    }
+
     /// Records a valid transition and leaves the turn unchanged on rejection.
     fn transition(&mut self, next: TurnState) -> Result<(), TurnTransitionError> {
         if !self.state.can_transition_to(next) {
@@ -274,14 +291,7 @@ impl Turn {
             });
         }
 
-        self.events.push(TurnEvent {
-            task_id: self.task_id,
-            turn_id: self.id,
-            sequence: self.events.len() as u64 + 1,
-            previous_state: self.state,
-            new_state: next,
-        });
-        self.state = next;
+        self.record_transition(next);
         Ok(())
     }
 }
@@ -328,6 +338,16 @@ impl Task {
         &self.events
     }
 
+    fn record_transition(&mut self, next: TaskState) {
+        self.events.push(TaskEvent {
+            task_id: self.id,
+            sequence: self.events.len() as u64 + 1,
+            previous_state: self.state,
+            new_state: next,
+        });
+        self.state = next;
+    }
+
     /// Creates a pending turn, appends it to this task's history, and returns its ID.
     pub fn create_turn(&mut self) -> Uuid {
         let turn = Turn::new(self.id);
@@ -360,6 +380,28 @@ impl Task {
         &self.turns
     }
 
+    /// Cancels this pending or running task and each of its active turns.
+    ///
+    /// Active turns are cancelled in creation order before the task transition
+    /// is recorded. Terminal turns are left unchanged. A task that is already
+    /// terminal returns a transition error without changing any history.
+    pub fn cancel(&mut self) -> Result<(), TransitionError> {
+        if !self.state.can_transition_to(TaskState::Cancelled) {
+            return Err(TransitionError {
+                from: self.state,
+                to: TaskState::Cancelled,
+                blocking_turn: None,
+            });
+        }
+
+        for turn in &mut self.turns {
+            turn.cancel_if_active();
+        }
+
+        self.record_transition(TaskState::Cancelled);
+        Ok(())
+    }
+
     /// Records a valid transition and leaves the task unchanged on rejection.
     pub fn transition(&mut self, next: TaskState) -> Result<(), TransitionError> {
         if !self.state.can_transition_to(next) {
@@ -384,13 +426,7 @@ impl Task {
             }
         }
 
-        self.events.push(TaskEvent {
-            task_id: self.id,
-            sequence: self.events.len() as u64 + 1,
-            previous_state: self.state,
-            new_state: next,
-        });
-        self.state = next;
+        self.record_transition(next);
         Ok(())
     }
 }
