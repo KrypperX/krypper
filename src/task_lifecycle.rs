@@ -385,6 +385,34 @@ impl TurnOutcome {
     }
 }
 
+/// The action category recorded when a workspace action fails.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum TurnActivityAction {
+    /// A workspace file read failed.
+    ReadFile,
+    /// A workspace directory listing failed.
+    ListDirectory,
+    /// The decision source selected an unsupported action.
+    Unsupported,
+}
+
+/// A metadata-only summary of one action or stop event in a task-owned turn.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum TurnActivitySummary {
+    /// A file was read; only its byte count is retained.
+    FileRead { bytes_read: usize },
+    /// A directory was listed; entry names are not retained.
+    DirectoryListed { entry_count: usize },
+    /// The decision source explicitly completed the turn; its result is not retained here.
+    Completed,
+    /// The loop exhausted its action budget.
+    BudgetExhausted { actions: usize },
+    /// A workspace or unsupported action failed.
+    ActionFailed { action: TurnActivityAction },
+}
+
 /// An attempted transition that is not valid for a turn's current state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TurnTransitionError {
@@ -559,6 +587,37 @@ impl TaskHistoryEvent {
     }
 }
 
+/// An immutable metadata-only action summary in a task's activity history.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TaskActivityEvent {
+    task_id: Uuid,
+    turn_id: Uuid,
+    sequence: u64,
+    summary: TurnActivitySummary,
+}
+
+impl TaskActivityEvent {
+    /// Returns the task that owns the summarized turn.
+    pub fn task_id(&self) -> Uuid {
+        self.task_id
+    }
+
+    /// Returns the turn that produced this activity.
+    pub fn turn_id(&self) -> Uuid {
+        self.turn_id
+    }
+
+    /// Returns this entry's one-based position in the task activity history.
+    pub fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    /// Returns the action or stop summary without workspace data or result text.
+    pub fn summary(&self) -> TurnActivitySummary {
+        self.summary
+    }
+}
+
 /// A task-owned turn with a stable identifier and append-only transition history.
 #[derive(Debug)]
 pub struct Turn {
@@ -567,6 +626,7 @@ pub struct Turn {
     state: TurnState,
     outcome: Option<TurnOutcome>,
     events: Vec<TurnEvent>,
+    activity_history: Vec<TurnActivitySummary>,
 }
 
 impl Turn {
@@ -577,6 +637,7 @@ impl Turn {
             state: TurnState::Pending,
             outcome: None,
             events: Vec::new(),
+            activity_history: Vec::new(),
         }
     }
 
@@ -615,6 +676,11 @@ impl Turn {
     /// Returns lifecycle history as a read-only slice.
     pub fn events(&self) -> &[TurnEvent] {
         &self.events
+    }
+
+    /// Returns metadata-only action summaries in execution order.
+    pub fn activity_history(&self) -> &[TurnActivitySummary] {
+        &self.activity_history
     }
 
     fn record_transition(&mut self, next: TurnState) {
@@ -661,6 +727,7 @@ pub struct Task {
     state: TaskState,
     events: Vec<TaskEvent>,
     history: Vec<TaskHistoryEvent>,
+    activity_history: Vec<TaskActivityEvent>,
     turns: Vec<Turn>,
 }
 
@@ -677,6 +744,7 @@ impl Task {
             state: TaskState::Pending,
             events: Vec::new(),
             history: Vec::new(),
+            activity_history: Vec::new(),
             turns: Vec::new(),
         }
     }
@@ -713,6 +781,11 @@ impl Task {
     /// ```
     pub fn history(&self) -> &[TaskHistoryEvent] {
         &self.history
+    }
+
+    /// Returns action summaries across owned turns in chronological order.
+    pub fn activity_history(&self) -> &[TaskActivityEvent] {
+        &self.activity_history
     }
 
     fn record_transition(&mut self, next: TaskState) {
@@ -824,6 +897,15 @@ impl Task {
         turn_id: Uuid,
         outcome: TurnOutcome,
     ) -> Result<(), TurnCompletionError> {
+        self.complete_turn_with_activity(turn_id, outcome, &[])
+    }
+
+    fn complete_turn_with_activity(
+        &mut self,
+        turn_id: Uuid,
+        outcome: TurnOutcome,
+        activity: &[TurnActivitySummary],
+    ) -> Result<(), TurnCompletionError> {
         let turn_index = self
             .turns
             .iter()
@@ -842,7 +924,20 @@ impl Task {
 
         let terminal_state = outcome.terminal_state();
         self.history.reserve(1);
+        self.activity_history.reserve(activity.len());
         self.turns[turn_index].events.reserve(1);
+        self.turns[turn_index]
+            .activity_history
+            .reserve(activity.len());
+        for summary in activity.iter().copied() {
+            self.turns[turn_index].activity_history.push(summary);
+            self.activity_history.push(TaskActivityEvent {
+                task_id: self.id,
+                turn_id,
+                sequence: self.activity_history.len() as u64 + 1,
+                summary,
+            });
+        }
         self.turns[turn_index].outcome = Some(outcome);
         self.turns[turn_index].record_transition(terminal_state);
         Self::record_turn_history(
@@ -968,6 +1063,16 @@ impl TaskSession {
         turn_id: Uuid,
         outcome: TurnOutcome,
     ) -> Result<(), TurnCompletionError> {
+        self.complete_turn_with_activity(task_id, turn_id, outcome, &[])
+    }
+
+    pub(crate) fn complete_turn_with_activity(
+        &mut self,
+        task_id: Uuid,
+        turn_id: Uuid,
+        outcome: TurnOutcome,
+        activity: &[TurnActivitySummary],
+    ) -> Result<(), TurnCompletionError> {
         let task = self
             .get_task(task_id)
             .ok_or(TurnCompletionError::TaskNotFound { task_id })?;
@@ -989,7 +1094,7 @@ impl TaskSession {
 
         self.get_task_mut(task_id)
             .ok_or(TurnCompletionError::TaskNotFound { task_id })?
-            .complete_turn(turn_id, outcome)
+            .complete_turn_with_activity(turn_id, outcome, activity)
     }
 
     fn running_workspace_task(
