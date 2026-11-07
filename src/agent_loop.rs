@@ -1,6 +1,6 @@
 use crate::task_lifecycle::{
     TaskSession, TurnActivityAction, TurnActivitySummary, TurnCompletionError, TurnOutcome,
-    WorkspaceListError, WorkspaceReadError,
+    WorkspaceListError, WorkspaceReadError, WorkspaceWriteError,
 };
 use std::ffi::OsString;
 use std::fmt;
@@ -14,6 +14,8 @@ pub enum WorkspaceAction {
     ReadFile { path: PathBuf },
     /// List the immediate entries of a directory under the task's workspace safety policy.
     ListDirectory { path: PathBuf },
+    /// Create one UTF-8 file without replacing an existing path under the task's workspace policy.
+    CreateFile { path: PathBuf, contents: String },
     /// Finish the turn with an explicit result.
     Complete { result: String },
     /// An unsupported action, returned as a clear failed observation.
@@ -30,6 +32,10 @@ pub enum WorkspaceObservation {
         path: PathBuf,
         entries: Vec<OsString>,
     },
+    /// A file was created; its contents are not retained in the observation.
+    FileCreated { path: PathBuf, bytes_written: usize },
+    /// A file creation rejected under the workspace policy; contents are not retained.
+    FileCreationFailed { path: PathBuf, error: GoalTurnError },
     /// A requested action that failed under the existing workspace policy.
     ActionFailed {
         action: WorkspaceAction,
@@ -148,6 +154,8 @@ pub enum GoalTurnError {
     WorkspaceRead(WorkspaceReadError),
     /// The existing workspace safety policy rejected or could not list a directory.
     WorkspaceList(WorkspaceListError),
+    /// The existing workspace safety policy rejected or could not create a file.
+    WorkspaceWrite(WorkspaceWriteError),
     /// The task or turn could not be completed in its current session state.
     Lifecycle(TurnCompletionError),
 }
@@ -160,6 +168,7 @@ impl fmt::Display for GoalTurnError {
             }
             Self::WorkspaceRead(error) => error.fmt(formatter),
             Self::WorkspaceList(error) => error.fmt(formatter),
+            Self::WorkspaceWrite(error) => error.fmt(formatter),
             Self::Lifecycle(error) => error.fmt(formatter),
         }
     }
@@ -171,6 +180,7 @@ impl std::error::Error for GoalTurnError {
             Self::UnsupportedAction { .. } => None,
             Self::WorkspaceRead(error) => Some(error),
             Self::WorkspaceList(error) => Some(error),
+            Self::WorkspaceWrite(error) => Some(error),
             Self::Lifecycle(error) => Some(error),
         }
     }
@@ -227,7 +237,11 @@ pub fn run_goal_turn<D: DecisionSource + ?Sized>(
                 WorkspaceObservation::DirectoryListed { entries, .. } => {
                     format!("listed {} entries", entries.len())
                 }
-                WorkspaceObservation::ActionFailed { .. } => String::new(),
+                WorkspaceObservation::FileCreated { bytes_written, .. } => {
+                    format!("created file ({bytes_written} bytes)")
+                }
+                WorkspaceObservation::FileCreationFailed { .. }
+                | WorkspaceObservation::ActionFailed { .. } => String::new(),
             };
             let activity = summarize_observation(&observation);
             finish_turn(
@@ -356,10 +370,19 @@ fn summarize_observation(observation: &WorkspaceObservation) -> TurnActivitySumm
                 entry_count: entries.len(),
             }
         }
+        WorkspaceObservation::FileCreated { bytes_written, .. } => {
+            TurnActivitySummary::FileCreated {
+                bytes_written: *bytes_written,
+            }
+        }
+        WorkspaceObservation::FileCreationFailed { .. } => TurnActivitySummary::ActionFailed {
+            action: TurnActivityAction::CreateFile,
+        },
         WorkspaceObservation::ActionFailed { action, .. } => {
             let action = match action {
                 WorkspaceAction::ReadFile { .. } => TurnActivityAction::ReadFile,
                 WorkspaceAction::ListDirectory { .. } => TurnActivityAction::ListDirectory,
+                WorkspaceAction::CreateFile { .. } => TurnActivityAction::CreateFile,
                 WorkspaceAction::Complete { .. } | WorkspaceAction::Unsupported { .. } => {
                     TurnActivityAction::Unsupported
                 }
@@ -416,6 +439,27 @@ fn execute_action(
                     })
                 }
                 Err(error) => Err(GoalTurnError::WorkspaceList(error)),
+            }
+        }
+        WorkspaceAction::CreateFile { path, contents } => {
+            match session.create_workspace_file(task_id, turn_id, path, contents) {
+                Ok(()) => Ok(ActionExecution::Observation(
+                    WorkspaceObservation::FileCreated {
+                        path: path.clone(),
+                        bytes_written: contents.len(),
+                    },
+                )),
+                Err(error @ WorkspaceWriteError::File { .. }) => {
+                    let error = GoalTurnError::WorkspaceWrite(error);
+                    Ok(ActionExecution::Failed {
+                        observation: WorkspaceObservation::FileCreationFailed {
+                            path: path.clone(),
+                            error: error.clone(),
+                        },
+                        error,
+                    })
+                }
+                Err(error) => Err(GoalTurnError::WorkspaceWrite(error)),
             }
         }
         WorkspaceAction::Complete { result } => Ok(ActionExecution::Complete(result.clone())),
