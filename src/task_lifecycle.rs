@@ -1,4 +1,7 @@
-use crate::file_safety::{create_text_file, list_directory_names, read_text_file};
+use crate::file_safety::{
+    capture_workspace_root, create_text_file_at, list_directory_names_at, read_text_file_at,
+    WorkspaceRoot,
+};
 use std::ffi::OsString;
 use std::fmt;
 use std::path::Path;
@@ -527,6 +530,7 @@ impl Turn {
 pub struct Task {
     id: Uuid,
     description: String,
+    workspace_root: Result<WorkspaceRoot, String>,
     state: TaskState,
     events: Vec<TaskEvent>,
     history: Vec<TaskHistoryEvent>,
@@ -534,11 +538,15 @@ pub struct Task {
 }
 
 impl Task {
-    /// Creates a task in the `pending` state.
+    /// Creates a pending task and captures the current directory as its workspace.
+    ///
+    /// Workspace operations report an error if that directory cannot be resolved.
     pub fn new(description: impl Into<String>) -> Self {
+        let workspace_root = capture_workspace_root();
         Self {
             id: Uuid::new_v4(),
             description: description.into(),
+            workspace_root,
             state: TaskState::Pending,
             events: Vec::new(),
             history: Vec::new(),
@@ -772,7 +780,7 @@ impl TaskSession {
 
     /// Reads one UTF-8 file for a currently running turn owned by this session.
     ///
-    /// The relative path is resolved from the process current directory and follows the same
+    /// The relative path is resolved from this task's creation directory and follows the same
     /// workspace boundary, symlink, regular-file, and 1 MiB policies as the `show` command.
     /// This operation borrows the session immutably and does not change lifecycle state or history.
     pub fn read_workspace_file(
@@ -809,14 +817,20 @@ impl TaskSession {
             });
         }
 
-        read_text_file(path.as_os_str()).map_err(|error| WorkspaceReadError::File {
+        let root = task
+            .workspace_root
+            .as_ref()
+            .map_err(|message| WorkspaceReadError::File {
+                message: format!("task workspace could not be resolved: {message}"),
+            })?;
+        read_text_file_at(root, path.as_os_str()).map_err(|error| WorkspaceReadError::File {
             message: error.message().to_owned(),
         })
     }
 
     /// Lists immediate filesystem-native entry names for a currently running owned turn.
     ///
-    /// The relative path is resolved from the process current directory and follows the same
+    /// The relative path is resolved from this task's creation directory and follows the same
     /// workspace boundary, symlink, missing-path, and directory policies as the `list` command.
     /// Names use the same deterministic order as `list` and can be used directly as path
     /// components. This operation borrows the session immutably and does not change lifecycle
@@ -855,14 +869,22 @@ impl TaskSession {
             });
         }
 
-        list_directory_names(path.as_os_str()).map_err(|error| WorkspaceListError::Directory {
-            message: error.message().to_owned(),
+        let root =
+            task.workspace_root
+                .as_ref()
+                .map_err(|message| WorkspaceListError::Directory {
+                    message: format!("task workspace could not be resolved: {message}"),
+                })?;
+        list_directory_names_at(root, path.as_os_str()).map_err(|error| {
+            WorkspaceListError::Directory {
+                message: error.message().to_owned(),
+            }
         })
     }
 
     /// Creates one UTF-8 file for a currently running turn owned by this session.
     ///
-    /// The relative path is resolved from the process current directory and follows the same
+    /// The relative path is resolved from this task's creation directory and follows the same
     /// workspace boundary, symlink, parent-directory, create-only, and 1 MiB policies as the
     /// `write` command. This operation borrows the session immutably and does not change lifecycle
     /// state or history.
@@ -901,8 +923,16 @@ impl TaskSession {
             });
         }
 
-        create_text_file(path.as_os_str(), text).map_err(|error| WorkspaceWriteError::File {
-            message: error.message().to_owned(),
+        let root = task
+            .workspace_root
+            .as_ref()
+            .map_err(|message| WorkspaceWriteError::File {
+                message: format!("task workspace could not be resolved: {message}"),
+            })?;
+        create_text_file_at(root, path.as_os_str(), text).map_err(|error| {
+            WorkspaceWriteError::File {
+                message: error.message().to_owned(),
+            }
         })
     }
 
