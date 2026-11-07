@@ -251,13 +251,18 @@ impl TurnEvent {
     }
 }
 
-/// The states changed by one entry in a task's combined lifecycle history.
+/// The lifecycle change recorded in a task's combined history.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TaskHistoryTransition {
     /// A task changed lifecycle state.
     Task {
         previous_state: TaskState,
         new_state: TaskState,
+    },
+    /// A task created a turn in its initial state.
+    TurnCreated {
+        turn_id: Uuid,
+        initial_state: TurnState,
     },
     /// A task-owned turn changed lifecycle state.
     Turn {
@@ -281,12 +286,12 @@ impl TaskHistoryEvent {
         self.task_id
     }
 
-    /// Returns the one-based position of this transition in the combined task history.
+    /// Returns the one-based position of this entry in the combined task history.
     pub fn sequence(&self) -> u64 {
         self.sequence
     }
 
-    /// Returns which task or turn transition this entry records.
+    /// Returns which task or turn lifecycle change this entry records.
     pub fn transition(&self) -> TaskHistoryTransition {
         self.transition
     }
@@ -410,7 +415,7 @@ impl Task {
         &self.events
     }
 
-    /// Returns all successful task and owned-turn transitions in chronological order.
+    /// Returns task transitions, turn creations, and owned-turn transitions in chronological order.
     ///
     /// The returned slice is read-only; callers can mutate a copy without changing
     /// the task's recorded history.
@@ -461,7 +466,7 @@ impl Task {
         });
     }
 
-    /// Creates a pending turn and appends it to this task's turns in creation order.
+    /// Creates a pending turn, appending it to the turns and combined history in creation order.
     ///
     /// Returns an error without changing the task when it is terminal.
     pub fn create_turn(&mut self) -> Result<Uuid, TurnCreationError> {
@@ -473,7 +478,16 @@ impl Task {
 
         let turn = Turn::new(self.id);
         let turn_id = turn.id();
+        let initial_state = turn.state();
         self.turns.push(turn);
+        self.history.push(TaskHistoryEvent {
+            task_id: self.id,
+            sequence: self.history.len() as u64 + 1,
+            transition: TaskHistoryTransition::TurnCreated {
+                turn_id,
+                initial_state,
+            },
+        });
         Ok(turn_id)
     }
 
