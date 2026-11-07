@@ -226,6 +226,47 @@ impl TurnEvent {
     }
 }
 
+/// The states changed by one entry in a task's combined lifecycle history.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TaskHistoryTransition {
+    /// A task changed lifecycle state.
+    Task {
+        previous_state: TaskState,
+        new_state: TaskState,
+    },
+    /// A task-owned turn changed lifecycle state.
+    Turn {
+        turn_id: Uuid,
+        previous_state: TurnState,
+        new_state: TurnState,
+    },
+}
+
+/// An immutable record in a task's combined task and turn lifecycle history.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TaskHistoryEvent {
+    task_id: Uuid,
+    sequence: u64,
+    transition: TaskHistoryTransition,
+}
+
+impl TaskHistoryEvent {
+    /// Returns the task whose history contains this event.
+    pub fn task_id(&self) -> Uuid {
+        self.task_id
+    }
+
+    /// Returns the one-based position of this transition in the combined task history.
+    pub fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    /// Returns which task or turn transition this entry records.
+    pub fn transition(&self) -> TaskHistoryTransition {
+        self.transition
+    }
+}
+
 /// A task-owned turn with a stable identifier and append-only transition history.
 #[derive(Debug)]
 pub struct Turn {
@@ -276,9 +317,13 @@ impl Turn {
         self.state = next;
     }
 
-    fn cancel_if_active(&mut self) {
+    fn cancel_if_active(&mut self) -> Option<TurnState> {
         if matches!(self.state, TurnState::Pending | TurnState::Running) {
+            let previous_state = self.state;
             self.record_transition(TurnState::Cancelled);
+            Some(previous_state)
+        } else {
+            None
         }
     }
 
@@ -303,6 +348,7 @@ pub struct Task {
     description: String,
     state: TaskState,
     events: Vec<TaskEvent>,
+    history: Vec<TaskHistoryEvent>,
     turns: Vec<Turn>,
 }
 
@@ -314,6 +360,7 @@ impl Task {
             description: description.into(),
             state: TaskState::Pending,
             events: Vec::new(),
+            history: Vec::new(),
             turns: Vec::new(),
         }
     }
@@ -338,14 +385,55 @@ impl Task {
         &self.events
     }
 
+    /// Returns all successful task and owned-turn transitions in chronological order.
+    ///
+    /// The returned slice is read-only; callers can mutate a copy without changing
+    /// the task's recorded history.
+    ///
+    /// ```compile_fail
+    /// use krypper::task_lifecycle::Task;
+    /// let task = Task::new("A task");
+    /// task.history().clear();
+    /// ```
+    pub fn history(&self) -> &[TaskHistoryEvent] {
+        &self.history
+    }
+
     fn record_transition(&mut self, next: TaskState) {
+        let previous_state = self.state;
         self.events.push(TaskEvent {
             task_id: self.id,
             sequence: self.events.len() as u64 + 1,
-            previous_state: self.state,
+            previous_state,
             new_state: next,
         });
+        self.history.push(TaskHistoryEvent {
+            task_id: self.id,
+            sequence: self.history.len() as u64 + 1,
+            transition: TaskHistoryTransition::Task {
+                previous_state,
+                new_state: next,
+            },
+        });
         self.state = next;
+    }
+
+    fn record_turn_history(
+        history: &mut Vec<TaskHistoryEvent>,
+        task_id: Uuid,
+        turn_id: Uuid,
+        previous_state: TurnState,
+        new_state: TurnState,
+    ) {
+        history.push(TaskHistoryEvent {
+            task_id,
+            sequence: history.len() as u64 + 1,
+            transition: TaskHistoryTransition::Turn {
+                turn_id,
+                previous_state,
+                new_state,
+            },
+        });
     }
 
     /// Creates a pending turn, appends it to this task's history, and returns its ID.
@@ -367,12 +455,18 @@ impl Task {
         turn_id: Uuid,
         next: TurnState,
     ) -> Result<(), TurnTransitionError> {
-        let turn = self
-            .turns
-            .iter_mut()
-            .find(|turn| turn.id == turn_id)
-            .ok_or(TurnTransitionError::UnknownTurn { turn_id })?;
-        turn.transition(next)
+        let previous_state = {
+            let turn = self
+                .turns
+                .iter_mut()
+                .find(|turn| turn.id == turn_id)
+                .ok_or(TurnTransitionError::UnknownTurn { turn_id })?;
+            let previous_state = turn.state;
+            turn.transition(next)?;
+            previous_state
+        };
+        Self::record_turn_history(&mut self.history, self.id, turn_id, previous_state, next);
+        Ok(())
     }
 
     /// Returns turns in creation order as a read-only slice.
@@ -395,7 +489,15 @@ impl Task {
         }
 
         for turn in &mut self.turns {
-            turn.cancel_if_active();
+            if let Some(previous_state) = turn.cancel_if_active() {
+                Self::record_turn_history(
+                    &mut self.history,
+                    self.id,
+                    turn.id,
+                    previous_state,
+                    TurnState::Cancelled,
+                );
+            }
         }
 
         self.record_transition(TaskState::Cancelled);
