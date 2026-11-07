@@ -407,7 +407,7 @@ fn write_stdin_rejects_oversize_invalid_utf8_and_extra_text_before_creation() {
     let extra = run_with_input(
         directory.path(),
         &["write", "--stdin", "extra.txt", "unexpected"],
-        b"text",
+        b"",
     );
     assert!(stderr(&too_large).contains("stdin exceeds 1 MiB"));
     assert!(stderr(&invalid).contains("stdin is not valid UTF-8"));

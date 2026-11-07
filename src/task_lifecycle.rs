@@ -346,8 +346,20 @@ impl fmt::Display for TurnState {
 /// An attempted transition that is not valid for a turn's current state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TurnTransitionError {
-    UnknownTurn { turn_id: Uuid },
-    InvalidTransition { from: TurnState, to: TurnState },
+    UnknownTurn {
+        turn_id: Uuid,
+    },
+    /// Starting a pending turn requires its owning task to be running.
+    TaskNotRunning {
+        task_id: Uuid,
+        task_state: TaskState,
+        turn_id: Uuid,
+        turn_state: TurnState,
+    },
+    InvalidTransition {
+        from: TurnState,
+        to: TurnState,
+    },
 }
 
 impl fmt::Display for TurnTransitionError {
@@ -356,6 +368,15 @@ impl fmt::Display for TurnTransitionError {
             Self::UnknownTurn { turn_id } => {
                 write!(formatter, "turn '{turn_id}' is not owned by this task")
             }
+            Self::TaskNotRunning {
+                task_id,
+                task_state,
+                turn_id,
+                turn_state,
+            } => write!(
+                formatter,
+                "cannot start turn '{turn_id}' in state '{turn_state}' while owning task '{task_id}' is '{task_state}'"
+            ),
             Self::InvalidTransition { from, to } => write!(
                 formatter,
                 "cannot transition turn from '{}' to '{}'",
@@ -661,12 +682,25 @@ impl Task {
         turn_id: Uuid,
         next: TurnState,
     ) -> Result<(), TurnTransitionError> {
+        let task_id = self.id;
+        let task_state = self.state;
         let previous_state = {
             let turn = self
                 .turns
                 .iter_mut()
                 .find(|turn| turn.id == turn_id)
                 .ok_or(TurnTransitionError::UnknownTurn { turn_id })?;
+            if turn.state == TurnState::Pending
+                && next == TurnState::Running
+                && task_state != TaskState::Running
+            {
+                return Err(TurnTransitionError::TaskNotRunning {
+                    task_id,
+                    task_state,
+                    turn_id,
+                    turn_state: turn.state,
+                });
+            }
             let previous_state = turn.state;
             turn.transition(next)?;
             previous_state
