@@ -393,6 +393,8 @@ pub enum TurnActivityAction {
     ReadFile,
     /// A workspace directory listing failed.
     ListDirectory,
+    /// A workspace file creation failed.
+    CreateFile,
     /// The decision source selected an unsupported action.
     Unsupported,
 }
@@ -403,6 +405,8 @@ pub enum TurnActivityAction {
 pub enum TurnActivitySummary {
     /// A file was read; only its byte count is retained.
     FileRead { bytes_read: usize },
+    /// A file was created; only its byte count is retained.
+    FileCreated { bytes_written: usize },
     /// A directory was listed; entry names are not retained.
     DirectoryListed { entry_count: usize },
     /// The decision source explicitly completed the turn; its result is not retained here.
