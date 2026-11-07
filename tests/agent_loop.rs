@@ -3,7 +3,8 @@ use krypper::agent_loop::{
     WorkspaceObservation,
 };
 use krypper::task_lifecycle::{
-    TaskHistoryTransition, TaskSession, TaskState, TurnOutcome, TurnState, WorkspaceReadError,
+    TaskHistoryTransition, TaskSession, TaskState, TurnActivityAction, TurnActivitySummary,
+    TurnOutcome, TurnState, WorkspaceReadError,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -96,6 +97,14 @@ fn goal_turn_reads_one_file_and_records_the_matching_outcome() {
     let turn = task.get_turn(turn_id).unwrap();
     assert_eq!(turn.state(), TurnState::Succeeded);
     assert_eq!(turn.outcome(), Some(&expected_outcome));
+    assert_eq!(
+        turn.activity_history(),
+        [TurnActivitySummary::FileRead { bytes_read: 20 }]
+    );
+    assert_eq!(
+        task.activity_history()[0].summary(),
+        TurnActivitySummary::FileRead { bytes_read: 20 }
+    );
     assert_eq!(
         task.history().last().unwrap().transition(),
         TaskHistoryTransition::Turn {
@@ -372,13 +381,38 @@ fn bounded_goal_turn_passes_goal_and_ordered_observations_to_each_decision() {
         result: "workspace inspected".to_owned(),
     };
     assert_eq!(result.outcome(), &expected_outcome);
-    let turn = session
-        .get_task(task_id)
-        .unwrap()
-        .get_turn(turn_id)
-        .unwrap();
+    let task = session.get_task(task_id).unwrap();
+    let turn = task.get_turn(turn_id).unwrap();
     assert_eq!(turn.state(), TurnState::Succeeded);
     assert_eq!(turn.outcome(), Some(&expected_outcome));
+    let expected_activity = [
+        TurnActivitySummary::FileRead { bytes_read: 17 },
+        TurnActivitySummary::DirectoryListed { entry_count: 1 },
+        TurnActivitySummary::Completed,
+    ];
+    assert_eq!(turn.activity_history(), expected_activity);
+    assert_eq!(
+        task.activity_history()
+            .iter()
+            .map(|event| (event.turn_id(), event.summary()))
+            .collect::<Vec<_>>(),
+        expected_activity.map(|summary| (turn_id, summary))
+    );
+    assert_eq!(
+        task.activity_history()
+            .iter()
+            .map(|event| event.sequence())
+            .collect::<Vec<_>>(),
+        [1, 2, 3]
+    );
+    assert!(matches!(
+        task.history().last().unwrap().transition(),
+        TaskHistoryTransition::Turn {
+            turn_id: recorded_turn_id,
+            previous_state: TurnState::Running,
+            new_state: TurnState::Succeeded,
+        } if recorded_turn_id == turn_id
+    ));
 }
 
 #[test]
@@ -419,11 +453,24 @@ fn bounded_goal_turn_stops_when_the_action_budget_is_exhausted() {
     let expected_outcome = TurnOutcome::Failure {
         detail: "action budget exhausted after 2 actions".to_owned(),
     };
+    let expected_activity = [
+        TurnActivitySummary::FileRead { bytes_read: 11 },
+        TurnActivitySummary::FileRead { bytes_read: 11 },
+        TurnActivitySummary::BudgetExhausted { actions: 2 },
+    ];
     assert_eq!(result.outcome(), &expected_outcome);
     let task = session.get_task(task_id).unwrap();
     let turn = task.get_turn(turn_id).unwrap();
     assert_eq!(turn.state(), TurnState::Failed);
     assert_eq!(turn.outcome(), Some(&expected_outcome));
+    assert_eq!(turn.activity_history(), expected_activity);
+    assert_eq!(
+        task.activity_history()
+            .iter()
+            .map(|event| event.summary())
+            .collect::<Vec<_>>(),
+        expected_activity
+    );
     assert_eq!(
         task.history().last().unwrap().transition(),
         TaskHistoryTransition::Turn {
@@ -475,14 +522,59 @@ fn bounded_goal_turn_returns_safe_action_failures_as_observations() {
         TurnOutcome::Failure { detail }
             if detail.contains("path must stay inside the current directory")
     ));
-    let turn = session
-        .get_task(task_id)
-        .unwrap()
-        .get_turn(turn_id)
-        .unwrap();
+    let task = session.get_task(task_id).unwrap();
+    let turn = task.get_turn(turn_id).unwrap();
     assert_eq!(turn.state(), TurnState::Failed);
     assert_eq!(turn.outcome(), Some(result.outcome()));
+    let expected_activity = TurnActivitySummary::ActionFailed {
+        action: TurnActivityAction::ReadFile,
+    };
+    assert_eq!(turn.activity_history(), [expected_activity]);
+    assert_eq!(task.activity_history()[0].summary(), expected_activity);
     assert_eq!(fs::read_to_string(outside_file).unwrap(), "stay outside");
+}
+
+#[test]
+fn bounded_goal_turn_records_unsupported_action_failure_without_action_details() {
+    let workspace = TempDir::new();
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) = with_current_dir(workspace.path(), || {
+        running_turn(&mut session, "Perform a supported action")
+    });
+    let mut decisions =
+        |_goal: &str, _observations: &[WorkspaceObservation]| WorkspaceAction::Unsupported {
+            action: "write_file secret.txt".to_owned(),
+        };
+
+    let result = run_goal_turn_with_budget(
+        &mut session,
+        task_id,
+        turn_id,
+        "Perform a supported action",
+        2,
+        &mut decisions,
+    )
+    .unwrap();
+
+    assert_eq!(result.stop_reason(), GoalTurnStopReason::ActionFailed);
+    let task = session.get_task(task_id).unwrap();
+    let turn = task.get_turn(turn_id).unwrap();
+    assert_eq!(
+        turn.activity_history(),
+        [TurnActivitySummary::ActionFailed {
+            action: TurnActivityAction::Unsupported,
+        }]
+    );
+    assert_eq!(turn.state(), TurnState::Failed);
+    assert_eq!(turn.outcome(), Some(result.outcome()));
+    assert!(matches!(
+        task.history().last().unwrap().transition(),
+        TaskHistoryTransition::Turn {
+            turn_id: recorded_turn_id,
+            previous_state: TurnState::Running,
+            new_state: TurnState::Failed,
+        } if recorded_turn_id == turn_id
+    ));
 }
 
 #[test]
@@ -495,7 +587,21 @@ fn bounded_goal_turn_validates_ownership_and_state_before_deciding() {
         let turn_id = task.create_turn().unwrap();
         (task_id, turn_id)
     });
+    let (second_task_id, foreign_turn_id) = with_current_dir(workspace.path(), || {
+        running_turn(&mut session, "Second task")
+    });
     let history = session.get_task(task_id).unwrap().history().to_vec();
+    let activity_history = session
+        .get_task(task_id)
+        .unwrap()
+        .activity_history()
+        .to_vec();
+    let second_history = session.get_task(second_task_id).unwrap().history().to_vec();
+    let second_activity_history = session
+        .get_task(second_task_id)
+        .unwrap()
+        .activity_history()
+        .to_vec();
     let mut decision_calls = 0;
     let mut decisions = |_goal: &str, _observations: &[WorkspaceObservation]| {
         decision_calls += 1;
@@ -523,9 +629,60 @@ fn bounded_goal_turn_validates_ownership_and_state_before_deciding() {
             }
         ) if actual_turn_id == turn_id
     ));
-    assert_eq!(decision_calls, 0);
     let task = session.get_task(task_id).unwrap();
     assert_eq!(task.history(), history);
+    assert_eq!(task.activity_history(), activity_history);
     assert_eq!(task.get_turn(turn_id).unwrap().state(), TurnState::Pending);
     assert_eq!(task.get_turn(turn_id).unwrap().outcome(), None);
+    assert!(task
+        .get_turn(turn_id)
+        .unwrap()
+        .activity_history()
+        .is_empty());
+
+    let error = run_goal_turn_with_budget(
+        &mut session,
+        task_id,
+        foreign_turn_id,
+        "Run only for the owner",
+        2,
+        &mut decisions,
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        krypper::agent_loop::GoalTurnError::WorkspaceRead(
+            WorkspaceReadError::ForeignTurn {
+                task_id: requested_task_id,
+                turn_id: actual_turn_id,
+                owner_task_id,
+            }
+        ) if requested_task_id == task_id
+            && actual_turn_id == foreign_turn_id
+            && owner_task_id == second_task_id
+    ));
+    drop(decisions);
+    assert_eq!(decision_calls, 0);
+    assert_eq!(session.get_task(task_id).unwrap().history(), history);
+    assert_eq!(
+        session.get_task(task_id).unwrap().activity_history(),
+        activity_history
+    );
+    assert_eq!(
+        session.get_task(second_task_id).unwrap().history(),
+        second_history
+    );
+    assert_eq!(
+        session.get_task(second_task_id).unwrap().activity_history(),
+        second_activity_history
+    );
+    let foreign_turn = session
+        .get_task(second_task_id)
+        .unwrap()
+        .get_turn(foreign_turn_id)
+        .unwrap();
+    assert_eq!(foreign_turn.state(), TurnState::Running);
+    assert_eq!(foreign_turn.outcome(), None);
+    assert!(foreign_turn.activity_history().is_empty());
 }
