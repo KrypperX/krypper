@@ -1,5 +1,6 @@
 use crate::task_lifecycle::{
-    TaskSession, TurnCompletionError, TurnOutcome, WorkspaceListError, WorkspaceReadError,
+    TaskSession, TurnActivityAction, TurnActivitySummary, TurnCompletionError, TurnOutcome,
+    WorkspaceListError, WorkspaceReadError,
 };
 use std::ffi::OsString;
 use std::fmt;
@@ -184,6 +185,13 @@ enum ActionExecution {
     },
 }
 
+struct TurnCompletionData {
+    activity: Vec<TurnActivitySummary>,
+    actions_taken: usize,
+    stop_reason: GoalTurnStopReason,
+    outcome: TurnOutcome,
+}
+
 /// Runs one decision-selected action for an already running, task-owned turn.
 ///
 /// This preserves the original one-action API. Use [`run_goal_turn_with_budget`] when the
@@ -206,9 +214,12 @@ pub fn run_goal_turn<D: DecisionSource + ?Sized>(
             task_id,
             turn_id,
             Vec::new(),
-            1,
-            GoalTurnStopReason::Completed,
-            TurnOutcome::Success { result },
+            TurnCompletionData {
+                activity: vec![TurnActivitySummary::Completed],
+                actions_taken: 1,
+                stop_reason: GoalTurnStopReason::Completed,
+                outcome: TurnOutcome::Success { result },
+            },
         ),
         ActionExecution::Observation(observation) => {
             let result = match &observation {
@@ -218,26 +229,34 @@ pub fn run_goal_turn<D: DecisionSource + ?Sized>(
                 }
                 WorkspaceObservation::ActionFailed { .. } => String::new(),
             };
+            let activity = summarize_observation(&observation);
             finish_turn(
                 session,
                 task_id,
                 turn_id,
                 vec![observation],
-                1,
-                GoalTurnStopReason::ActionCompleted,
-                TurnOutcome::Success { result },
+                TurnCompletionData {
+                    activity: vec![activity],
+                    actions_taken: 1,
+                    stop_reason: GoalTurnStopReason::ActionCompleted,
+                    outcome: TurnOutcome::Success { result },
+                },
             )
         }
         ActionExecution::Failed { observation, error } => {
             let detail = error.to_string();
+            let activity = summarize_observation(&observation);
             finish_turn(
                 session,
                 task_id,
                 turn_id,
                 vec![observation],
-                1,
-                GoalTurnStopReason::ActionFailed,
-                TurnOutcome::Failure { detail },
+                TurnCompletionData {
+                    activity: vec![activity],
+                    actions_taken: 1,
+                    stop_reason: GoalTurnStopReason::ActionFailed,
+                    outcome: TurnOutcome::Failure { detail },
+                },
             )?;
             Err(error)
         }
@@ -263,50 +282,91 @@ pub fn run_goal_turn_with_budget<D: BoundedDecisionSource + ?Sized>(
         .map_err(GoalTurnError::WorkspaceRead)?;
 
     let mut observations = Vec::new();
+    let mut activity = Vec::new();
     let mut actions_taken = 0;
     while actions_taken < max_actions {
         let action = decision_source.choose_action(goal, &observations);
         actions_taken += 1;
         match execute_action(session, task_id, turn_id, &action)? {
             ActionExecution::Complete(result) => {
+                activity.push(TurnActivitySummary::Completed);
                 return finish_turn(
                     session,
                     task_id,
                     turn_id,
                     observations,
-                    actions_taken,
-                    GoalTurnStopReason::Completed,
-                    TurnOutcome::Success { result },
+                    TurnCompletionData {
+                        activity,
+                        actions_taken,
+                        stop_reason: GoalTurnStopReason::Completed,
+                        outcome: TurnOutcome::Success { result },
+                    },
                 );
             }
-            ActionExecution::Observation(observation) => observations.push(observation),
+            ActionExecution::Observation(observation) => {
+                activity.push(summarize_observation(&observation));
+                observations.push(observation);
+            }
             ActionExecution::Failed { observation, error } => {
                 let detail = error.to_string();
+                activity.push(summarize_observation(&observation));
                 observations.push(observation);
                 return finish_turn(
                     session,
                     task_id,
                     turn_id,
                     observations,
-                    actions_taken,
-                    GoalTurnStopReason::ActionFailed,
-                    TurnOutcome::Failure { detail },
+                    TurnCompletionData {
+                        activity,
+                        actions_taken,
+                        stop_reason: GoalTurnStopReason::ActionFailed,
+                        outcome: TurnOutcome::Failure { detail },
+                    },
                 );
             }
         }
     }
 
+    activity.push(TurnActivitySummary::BudgetExhausted {
+        actions: actions_taken,
+    });
     finish_turn(
         session,
         task_id,
         turn_id,
         observations,
-        actions_taken,
-        GoalTurnStopReason::ActionBudgetExhausted,
-        TurnOutcome::Failure {
-            detail: format!("action budget exhausted after {actions_taken} actions"),
+        TurnCompletionData {
+            activity,
+            actions_taken,
+            stop_reason: GoalTurnStopReason::ActionBudgetExhausted,
+            outcome: TurnOutcome::Failure {
+                detail: format!("action budget exhausted after {actions_taken} actions"),
+            },
         },
     )
+}
+
+fn summarize_observation(observation: &WorkspaceObservation) -> TurnActivitySummary {
+    match observation {
+        WorkspaceObservation::FileRead { contents, .. } => TurnActivitySummary::FileRead {
+            bytes_read: contents.len(),
+        },
+        WorkspaceObservation::DirectoryListed { entries, .. } => {
+            TurnActivitySummary::DirectoryListed {
+                entry_count: entries.len(),
+            }
+        }
+        WorkspaceObservation::ActionFailed { action, .. } => {
+            let action = match action {
+                WorkspaceAction::ReadFile { .. } => TurnActivityAction::ReadFile,
+                WorkspaceAction::ListDirectory { .. } => TurnActivityAction::ListDirectory,
+                WorkspaceAction::Complete { .. } | WorkspaceAction::Unsupported { .. } => {
+                    TurnActivityAction::Unsupported
+                }
+            };
+            TurnActivitySummary::ActionFailed { action }
+        }
+    }
 }
 
 fn execute_action(
@@ -379,12 +439,15 @@ fn finish_turn(
     task_id: Uuid,
     turn_id: Uuid,
     observations: Vec<WorkspaceObservation>,
-    actions_taken: usize,
-    stop_reason: GoalTurnStopReason,
-    outcome: TurnOutcome,
+    completion: TurnCompletionData,
 ) -> Result<GoalTurnResult, GoalTurnError> {
     session
-        .complete_turn(task_id, turn_id, outcome.clone())
+        .complete_turn_with_activity(
+            task_id,
+            turn_id,
+            completion.outcome.clone(),
+            &completion.activity,
+        )
         .map_err(GoalTurnError::Lifecycle)?;
     let read_result = observations
         .iter()
@@ -398,8 +461,8 @@ fn finish_turn(
         turn_id,
         read_result,
         observations,
-        actions_taken,
-        stop_reason,
-        outcome,
+        actions_taken: completion.actions_taken,
+        stop_reason: completion.stop_reason,
+        outcome: completion.outcome,
     })
 }
