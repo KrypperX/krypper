@@ -33,6 +33,10 @@ impl TaskState {
                 )
         )
     }
+
+    fn is_terminal(self) -> bool {
+        matches!(self, Self::Succeeded | Self::Failed | Self::Cancelled)
+    }
 }
 
 impl fmt::Display for TaskState {
@@ -46,6 +50,7 @@ impl fmt::Display for TaskState {
 pub struct TransitionError {
     from: TaskState,
     to: TaskState,
+    blocking_turn: Option<(Uuid, TurnState)>,
 }
 
 impl TransitionError {
@@ -58,16 +63,31 @@ impl TransitionError {
     pub fn to(self) -> TaskState {
         self.to
     }
+
+    /// Returns the active turn that prevented a terminal task transition.
+    pub fn blocking_turn(self) -> Option<(Uuid, TurnState)> {
+        self.blocking_turn
+    }
 }
 
 impl fmt::Display for TransitionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "cannot transition task from '{}' to '{}'",
-            self.from.as_str(),
-            self.to.as_str()
-        )
+        match self.blocking_turn {
+            Some((turn_id, turn_state)) => write!(
+                formatter,
+                "cannot transition task from '{}' to '{}' while owned turn '{}' is '{}'",
+                self.from.as_str(),
+                self.to.as_str(),
+                turn_id,
+                turn_state.as_str()
+            ),
+            None => write!(
+                formatter,
+                "cannot transition task from '{}' to '{}'",
+                self.from.as_str(),
+                self.to.as_str()
+            ),
+        }
     }
 }
 
@@ -346,7 +366,22 @@ impl Task {
             return Err(TransitionError {
                 from: self.state,
                 to: next,
+                blocking_turn: None,
             });
+        }
+
+        if next.is_terminal() {
+            if let Some(turn) = self
+                .turns
+                .iter()
+                .find(|turn| matches!(turn.state, TurnState::Pending | TurnState::Running))
+            {
+                return Err(TransitionError {
+                    from: self.state,
+                    to: next,
+                    blocking_turn: Some((turn.id, turn.state)),
+                });
+            }
         }
 
         self.events.push(TaskEvent {
