@@ -1,4 +1,6 @@
-use krypper::task_lifecycle::{Task, TaskSession, TaskState, TurnState, TurnTransitionError};
+use krypper::task_lifecycle::{
+    Task, TaskHistoryTransition, TaskSession, TaskState, TurnState, TurnTransitionError,
+};
 
 #[test]
 fn new_task_keeps_description_and_starts_pending_with_empty_read_only_history() {
@@ -46,6 +48,133 @@ fn valid_transitions_record_ordered_task_bound_events() {
         assert_eq!(event.new_state(), next);
         assert_eq!(event.sequence(), task.events().len() as u64);
     }
+}
+
+#[test]
+fn combined_history_records_interleaved_task_and_turn_transitions() {
+    let mut task = Task::new("A task");
+    let task_id = task.id();
+    let first_turn_id = task.create_turn();
+    let second_turn_id = task.create_turn();
+
+    task.transition_turn(first_turn_id, TurnState::Running)
+        .unwrap();
+    task.transition(TaskState::Running).unwrap();
+    task.transition_turn(second_turn_id, TurnState::Cancelled)
+        .unwrap();
+    task.transition_turn(first_turn_id, TurnState::Succeeded)
+        .unwrap();
+    task.transition(TaskState::Succeeded).unwrap();
+
+    assert_eq!(
+        task.history()
+            .iter()
+            .map(|event| (event.task_id(), event.sequence(), event.transition()))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                task_id,
+                1,
+                TaskHistoryTransition::Turn {
+                    turn_id: first_turn_id,
+                    previous_state: TurnState::Pending,
+                    new_state: TurnState::Running,
+                },
+            ),
+            (
+                task_id,
+                2,
+                TaskHistoryTransition::Task {
+                    previous_state: TaskState::Pending,
+                    new_state: TaskState::Running,
+                },
+            ),
+            (
+                task_id,
+                3,
+                TaskHistoryTransition::Turn {
+                    turn_id: second_turn_id,
+                    previous_state: TurnState::Pending,
+                    new_state: TurnState::Cancelled,
+                },
+            ),
+            (
+                task_id,
+                4,
+                TaskHistoryTransition::Turn {
+                    turn_id: first_turn_id,
+                    previous_state: TurnState::Running,
+                    new_state: TurnState::Succeeded,
+                },
+            ),
+            (
+                task_id,
+                5,
+                TaskHistoryTransition::Task {
+                    previous_state: TaskState::Running,
+                    new_state: TaskState::Succeeded,
+                },
+            ),
+        ]
+    );
+
+    assert_eq!(task.events()[1].sequence(), 2);
+    assert_eq!(
+        task.get_turn(first_turn_id).unwrap().events()[1].sequence(),
+        2
+    );
+    assert_eq!(
+        task.get_turn(second_turn_id).unwrap().events()[0].sequence(),
+        1
+    );
+
+    let mut copied_history = task.history().to_vec();
+    copied_history.clear();
+    assert_eq!(task.history().len(), 5);
+}
+
+#[test]
+fn invalid_task_and_turn_transitions_leave_every_history_and_state_unchanged() {
+    let mut task = Task::new("A task");
+    task.transition(TaskState::Running).unwrap();
+    let active_turn_id = task.create_turn();
+    task.transition_turn(active_turn_id, TurnState::Running)
+        .unwrap();
+
+    let task_state = task.state();
+    let task_events = task.events().to_vec();
+    let history = task.history().to_vec();
+    let turns = task
+        .turns()
+        .iter()
+        .map(|turn| (turn.id(), turn.state(), turn.events().to_vec()))
+        .collect::<Vec<_>>();
+
+    assert!(task.transition(TaskState::Succeeded).is_err());
+    assert_eq!(task.state(), task_state);
+    assert_eq!(task.events(), task_events);
+    assert_eq!(task.history(), history);
+    assert_eq!(
+        task.turns()
+            .iter()
+            .map(|turn| (turn.id(), turn.state(), turn.events().to_vec()))
+            .collect::<Vec<_>>(),
+        turns
+    );
+
+    assert!(task
+        .transition_turn(active_turn_id, TurnState::Pending)
+        .is_err());
+    assert_eq!(task.state(), task_state);
+    assert_eq!(task.events(), task_events);
+    assert_eq!(task.history(), history);
+    assert_eq!(
+        task.turns()
+            .iter()
+            .map(|turn| (turn.id(), turn.state(), turn.events().to_vec()))
+            .collect::<Vec<_>>(),
+        turns
+    );
 }
 
 #[test]
@@ -182,6 +311,15 @@ fn separate_tasks_keep_events_isolated() {
     assert!(second.events().is_empty());
     assert_eq!(first.events()[0].task_id(), first.id());
     assert_ne!(first.events()[0].task_id(), second.id());
+    assert_eq!(
+        first.history()[0].transition(),
+        TaskHistoryTransition::Task {
+            previous_state: TaskState::Pending,
+            new_state: TaskState::Running,
+        }
+    );
+    assert_eq!(first.history()[0].task_id(), first.id());
+    assert!(second.history().is_empty());
 }
 
 #[test]
@@ -443,6 +581,33 @@ fn task_cancel_cancels_active_turns_before_task_and_preserves_terminal_turns() {
     task.cancel().unwrap();
 
     assert_eq!(task.state(), TaskState::Cancelled);
+    assert_eq!(task.history().len(), 10);
+    assert_eq!(
+        task.history()[7].transition(),
+        TaskHistoryTransition::Turn {
+            turn_id: pending_turn_id,
+            previous_state: TurnState::Pending,
+            new_state: TurnState::Cancelled,
+        }
+    );
+    assert_eq!(
+        task.history()[8].transition(),
+        TaskHistoryTransition::Turn {
+            turn_id: running_turn_id,
+            previous_state: TurnState::Running,
+            new_state: TurnState::Cancelled,
+        }
+    );
+    assert_eq!(
+        task.history()[9].transition(),
+        TaskHistoryTransition::Task {
+            previous_state: TaskState::Running,
+            new_state: TaskState::Cancelled,
+        }
+    );
+    assert_eq!(task.history()[7].sequence(), 8);
+    assert_eq!(task.history()[8].sequence(), 9);
+    assert_eq!(task.history()[9].sequence(), 10);
     assert_eq!(task.events().len(), task_events_before.len() + 1);
     let task_event = task.events().last().unwrap();
     assert_eq!(task_event.task_id(), task.id());
