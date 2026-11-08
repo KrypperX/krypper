@@ -44,14 +44,16 @@ files, or contacts a network service.
 `task --goal <goal> --max-actions <positive-number>` runs one bounded task turn
 in-process with the current directory as its workspace. It reads one caller
 decision per line from standard input. Enter `read <path>`, `list [path]`,
-`create <path> <text>`, or `complete [result]`; a create path is one token, and
-the remaining line is its text. Read and list actions use the same workspace
-policy as the existing commands, while create is create-only and follows the
-same path and size limits as `write`. The CLI prints each observation before
-asking for the next action, then prints the terminal state, outcome, and
-metadata-only activity history. Invalid input, end-of-input, an action failure,
-or an exhausted action budget fails the turn and exits with status 1. Explicit
-completion counts as an action against the limit.
+`create <path> <text>`, `complete [result]`, or `cancel`; a create path is one
+token, and the remaining line is its text. Read and list actions use the same
+workspace policy as the existing commands, while create is create-only and
+follows the same path and size limits as `write`. The CLI prints each
+observation before asking for the next action, then prints the terminal state,
+outcome, and metadata-only activity history. Invalid input, end-of-input, an
+action failure, or an exhausted action budget fails the turn and exits with
+status 1. Explicit completion counts as an action against the limit. Caller
+cancellation also consumes one action, cancels the task and active turn, and
+exits with status 130.
 
 Each task action line is limited to 1,052,672 bytes (1 MiB + 4 KiB), counting
 its line ending when present. Oversized lines fail the turn before parsing or

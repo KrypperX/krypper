@@ -413,6 +413,8 @@ pub enum TurnActivitySummary {
     Completed,
     /// The loop exhausted its action budget.
     BudgetExhausted { actions: usize },
+    /// The caller cancelled the task-owned turn.
+    Cancelled,
     /// A workspace or unsupported action failed.
     ActionFailed { action: TurnActivityAction },
 }
@@ -463,7 +465,7 @@ impl fmt::Display for TurnTransitionError {
 
 impl std::error::Error for TurnTransitionError {}
 
-/// An attempt to complete a turn that is missing, foreign, or not running.
+/// An attempt to complete or cancel a turn whose task or active turn is invalid.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TurnCompletionError {
     /// The task identifier is not present in the session.
@@ -478,6 +480,8 @@ pub enum TurnCompletionError {
     },
     /// The turn exists but is not currently running.
     TurnNotRunning { turn_id: Uuid, state: TurnState },
+    /// The owning task cannot transition to cancelled in its current state.
+    TaskTransition(TransitionError),
 }
 
 impl fmt::Display for TurnCompletionError {
@@ -502,11 +506,22 @@ impl fmt::Display for TurnCompletionError {
                 "turn '{turn_id}' is '{}', not running",
                 state.as_str()
             ),
+            Self::TaskTransition(error) => error.fmt(formatter),
         }
     }
 }
 
-impl std::error::Error for TurnCompletionError {}
+impl std::error::Error for TurnCompletionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::TaskTransition(error) => Some(error),
+            Self::TaskNotFound { .. }
+            | Self::TurnNotFound { .. }
+            | Self::ForeignTurn { .. }
+            | Self::TurnNotRunning { .. } => None,
+        }
+    }
+}
 
 /// An immutable record of one successful turn state transition.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -928,20 +943,8 @@ impl Task {
 
         let terminal_state = outcome.terminal_state();
         self.history.reserve(1);
-        self.activity_history.reserve(activity.len());
         self.turns[turn_index].events.reserve(1);
-        self.turns[turn_index]
-            .activity_history
-            .reserve(activity.len());
-        for summary in activity.iter().copied() {
-            self.turns[turn_index].activity_history.push(summary);
-            self.activity_history.push(TaskActivityEvent {
-                task_id: self.id,
-                turn_id,
-                sequence: self.activity_history.len() as u64 + 1,
-                summary,
-            });
-        }
+        self.record_activity(turn_index, activity);
         self.turns[turn_index].outcome = Some(outcome);
         self.turns[turn_index].record_transition(terminal_state);
         Self::record_turn_history(
@@ -952,6 +955,23 @@ impl Task {
             terminal_state,
         );
         Ok(())
+    }
+
+    fn record_activity(&mut self, turn_index: usize, activity: &[TurnActivitySummary]) {
+        self.activity_history.reserve(activity.len());
+        self.turns[turn_index]
+            .activity_history
+            .reserve(activity.len());
+        let turn_id = self.turns[turn_index].id;
+        for summary in activity.iter().copied() {
+            self.turns[turn_index].activity_history.push(summary);
+            self.activity_history.push(TaskActivityEvent {
+                task_id: self.id,
+                turn_id,
+                sequence: self.activity_history.len() as u64 + 1,
+                summary,
+            });
+        }
     }
 
     /// Returns turns in creation order as a read-only slice.
@@ -1099,6 +1119,61 @@ impl TaskSession {
         self.get_task_mut(task_id)
             .ok_or(TurnCompletionError::TaskNotFound { task_id })?
             .complete_turn_with_activity(turn_id, outcome, activity)
+    }
+
+    /// Records metadata-only activity and cancels a running task-owned turn and its task.
+    ///
+    /// Activity summaries are appended in order before the existing lifecycle cancellation
+    /// transitions. Cancellation does not create a success or failure outcome.
+    pub fn cancel_turn_with_activity(
+        &mut self,
+        task_id: Uuid,
+        turn_id: Uuid,
+        activity: &[TurnActivitySummary],
+    ) -> Result<(), TurnCompletionError> {
+        let Some(task_index) = self.tasks.iter().position(|task| task.id == task_id) else {
+            return Err(TurnCompletionError::TaskNotFound { task_id });
+        };
+
+        let Some(turn_index) = self.tasks[task_index]
+            .turns
+            .iter()
+            .position(|turn| turn.id == turn_id)
+        else {
+            let owner_task_id = self
+                .tasks
+                .iter()
+                .find(|task| task.get_turn(turn_id).is_some())
+                .map(Task::id);
+            return match owner_task_id {
+                Some(owner_task_id) => Err(TurnCompletionError::ForeignTurn {
+                    task_id,
+                    turn_id,
+                    owner_task_id,
+                }),
+                None => Err(TurnCompletionError::TurnNotFound { task_id, turn_id }),
+            };
+        };
+
+        let task = &self.tasks[task_index];
+        let turn_state = task.turns[turn_index].state;
+        if turn_state != TurnState::Running {
+            return Err(TurnCompletionError::TurnNotRunning {
+                turn_id,
+                state: turn_state,
+            });
+        }
+        if !task.state.can_transition_to(TaskState::Cancelled) {
+            return Err(TurnCompletionError::TaskTransition(TransitionError {
+                from: task.state,
+                to: TaskState::Cancelled,
+                blocking_turn: None,
+            }));
+        }
+
+        let task = &mut self.tasks[task_index];
+        task.record_activity(turn_index, activity);
+        task.cancel().map_err(TurnCompletionError::TaskTransition)
     }
 
     fn running_workspace_task(

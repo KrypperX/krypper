@@ -555,6 +555,69 @@ fn task_shows_ordered_observations_completion_and_metadata_history() {
 }
 
 #[test]
+fn task_cancel_stops_before_reading_or_running_a_later_action() {
+    let directory = TempDir::new();
+
+    let output = run_with_input(
+        directory.path(),
+        &["task", "--goal", "Inspect files", "--max-actions", "3"],
+        b"cancel\ncreate must-not-exist.txt ignored\n",
+    );
+
+    assert_eq!(output.status.code(), Some(130));
+    let output_text = stdout(&output);
+    assert!(output_text.contains("Task state: cancelled"));
+    assert!(output_text.contains("Turn state: cancelled"));
+    assert!(output_text.contains("Turn outcome: cancelled by caller"));
+    assert!(output_text.contains("Actions: 1/3"));
+    assert!(output_text.contains("- Cancelled"));
+    assert!(!output_text.contains("Turn outcome: success"));
+    assert!(!output_text.contains("Turn outcome: failure"));
+    assert_eq!(stderr(&output).matches("action ").count(), 1);
+    assert!(!directory.path().join("must-not-exist.txt").exists());
+}
+
+#[test]
+fn task_cancel_preserves_prior_observations_and_effects_in_metadata_order() {
+    let directory = TempDir::new();
+    fs::write(directory.path().join("brief.txt"), "private contents").unwrap();
+
+    let output = run_with_input(
+        directory.path(),
+        &["task", "--goal", "Inspect files", "--max-actions", "4"],
+        b"read brief.txt\ncreate kept.txt retained effect\ncancel\ncreate must-not-exist.txt ignored\n",
+    );
+
+    assert_eq!(output.status.code(), Some(130));
+    let output_text = stdout(&output);
+    let first = output_text.find("Observation 1: read brief.txt").unwrap();
+    let second = output_text.find("Observation 2: created kept.txt").unwrap();
+    let state = output_text.find("Task state: cancelled").unwrap();
+    assert!(first < second && second < state);
+    assert!(output_text.contains("private contents"));
+    assert!(output_text.contains("Turn state: cancelled"));
+    assert!(output_text.contains("Turn outcome: cancelled by caller"));
+    assert!(output_text.contains("Actions: 3/4"));
+
+    let history = output_text
+        .split("Activity history (metadata only):")
+        .nth(1)
+        .unwrap();
+    let read = history.find("FileRead { bytes_read: 16 }").unwrap();
+    let created = history.find("FileCreated { bytes_written: 15 }").unwrap();
+    let cancelled = history.find("Cancelled").unwrap();
+    assert!(read < created && created < cancelled);
+    assert!(!history.contains("private contents"));
+    assert!(!history.contains("retained effect"));
+    assert_eq!(
+        fs::read_to_string(directory.path().join("kept.txt")).unwrap(),
+        "retained effect"
+    );
+    assert!(!directory.path().join("must-not-exist.txt").exists());
+    assert_eq!(stderr(&output).matches("action ").count(), 3);
+}
+
+#[test]
 fn task_exhausts_the_action_budget_with_one_failed_terminal_outcome() {
     let directory = TempDir::new();
     fs::write(directory.path().join("brief.txt"), "brief").unwrap();

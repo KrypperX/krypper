@@ -1,7 +1,7 @@
 use krypper::task_lifecycle::{
     Task, TaskEvent, TaskHistoryEvent, TaskHistoryTransition, TaskSession, TaskState,
-    TurnCompletionError, TurnEvent, TurnOutcome, TurnState, TurnTransitionError,
-    WorkspaceListError, WorkspaceReadError, WorkspaceWriteError,
+    TurnActivitySummary, TurnCompletionError, TurnEvent, TurnOutcome, TurnState,
+    TurnTransitionError, WorkspaceListError, WorkspaceReadError, WorkspaceWriteError,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -1824,6 +1824,50 @@ fn task_cancel_cancels_active_turns_before_task_and_preserves_terminal_turns() {
     assert_eq!(
         task.get_turn(cancelled_turn_id).unwrap().events(),
         cancelled_events_before
+    );
+}
+
+#[test]
+fn session_cancellation_records_metadata_before_consistent_terminal_history() {
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) = running_turn(&mut session);
+    let activity = [
+        TurnActivitySummary::FileRead { bytes_read: 16 },
+        TurnActivitySummary::FileCreated { bytes_written: 15 },
+        TurnActivitySummary::Cancelled,
+    ];
+
+    session
+        .cancel_turn_with_activity(task_id, turn_id, &activity)
+        .unwrap();
+
+    let task = session.get_task(task_id).unwrap();
+    let turn = task.get_turn(turn_id).unwrap();
+    assert_eq!(task.state(), TaskState::Cancelled);
+    assert_eq!(turn.state(), TurnState::Cancelled);
+    assert_eq!(turn.outcome(), None);
+    assert_eq!(turn.activity_history(), activity);
+    assert_eq!(
+        task.activity_history()
+            .iter()
+            .map(|event| event.summary())
+            .collect::<Vec<_>>(),
+        activity
+    );
+    assert_eq!(
+        task.history()[task.history().len() - 2].transition(),
+        TaskHistoryTransition::Turn {
+            turn_id,
+            previous_state: TurnState::Running,
+            new_state: TurnState::Cancelled,
+        }
+    );
+    assert_eq!(
+        task.history().last().unwrap().transition(),
+        TaskHistoryTransition::Task {
+            previous_state: TaskState::Running,
+            new_state: TaskState::Cancelled,
+        }
     );
 }
 

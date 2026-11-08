@@ -1,4 +1,6 @@
-use crate::agent_loop::{run_goal_turn_with_budget, WorkspaceAction, WorkspaceObservation};
+use crate::agent_loop::{
+    run_goal_turn_with_budget, GoalTurnStopReason, WorkspaceAction, WorkspaceObservation,
+};
 use crate::file_safety::{create_text_file, list_directory, read_text_file};
 use crate::task_lifecycle::{TaskSession, TaskState, TurnOutcome, TurnState};
 use std::ffi::{OsStr, OsString};
@@ -250,17 +252,20 @@ fn run_task(
         .map_err(io::Error::other)?
     };
 
-    let succeeded = matches!(result.outcome(), TurnOutcome::Success { .. });
-    let next_task_state = if succeeded {
-        TaskState::Succeeded
-    } else {
-        TaskState::Failed
-    };
-    session
-        .get_task_mut(task_id)
-        .ok_or_else(|| io::Error::other("task was not found in its session"))?
-        .transition(next_task_state)
-        .map_err(io::Error::other)?;
+    let succeeded = matches!(result.outcome(), Some(TurnOutcome::Success { .. }));
+    let cancelled = result.stop_reason() == GoalTurnStopReason::Cancelled;
+    if !cancelled {
+        let next_task_state = if succeeded {
+            TaskState::Succeeded
+        } else {
+            TaskState::Failed
+        };
+        session
+            .get_task_mut(task_id)
+            .ok_or_else(|| io::Error::other("task was not found in its session"))?
+            .transition(next_task_state)
+            .map_err(io::Error::other)?;
+    }
 
     if let Some(cause) = stream_error {
         return Err(cause);
@@ -287,8 +292,13 @@ fn run_task(
     writeln!(output, "Task state: {}", task.state())?;
     writeln!(output, "Turn state: {turn_state}")?;
     match result.outcome() {
-        TurnOutcome::Success { result } => writeln!(output, "Turn outcome: success: {result}")?,
-        TurnOutcome::Failure { detail } => writeln!(output, "Turn outcome: failure: {detail}")?,
+        Some(TurnOutcome::Success { result }) => {
+            writeln!(output, "Turn outcome: success: {result}")?
+        }
+        Some(TurnOutcome::Failure { detail }) => {
+            writeln!(output, "Turn outcome: failure: {detail}")?
+        }
+        None => writeln!(output, "Turn outcome: cancelled by caller")?,
     }
     writeln!(
         output,
@@ -301,7 +311,13 @@ fn run_task(
         writeln!(output, "- {summary:?}")?;
     }
 
-    Ok(if succeeded { 0 } else { 1 })
+    Ok(if succeeded {
+        0
+    } else if cancelled {
+        130
+    } else {
+        1
+    })
 }
 
 fn parse_task_action(line: &str) -> WorkspaceAction {
@@ -350,6 +366,9 @@ fn parse_task_action(line: &str) -> WorkspaceAction {
         "complete" => WorkspaceAction::Complete {
             result: arguments.unwrap_or_default().trim_start().to_owned(),
         },
+        "cancel" if arguments.is_none_or(|arguments| arguments.trim().is_empty()) => {
+            WorkspaceAction::Cancel
+        }
         _ => invalid(),
     }
 }
@@ -604,7 +623,7 @@ fn write_root_help(output: &mut dyn Write) -> io::Result<()> {
 
 fn write_task_help(output: &mut dyn Write) -> io::Result<()> {
     output.write_all(
-        b"usage: krypper task [-h] --goal GOAL --max-actions N\n\nrun one caller-directed task turn in the current directory\n\noptions:\n  --goal GOAL          required task goal\n  --max-actions N      required positive action limit\n  -h, --help           show this help message and exit\n\nEnter one action per line on standard input:\n  read PATH\n  list [PATH]\n  create PATH TEXT\n  complete [RESULT]\n\nInvalid input, end-of-input, action failures, and budget exhaustion fail the turn.\n",
+        b"usage: krypper task [-h] --goal GOAL --max-actions N\n\nrun one caller-directed task turn in the current directory\n\noptions:\n  --goal GOAL          required task goal\n  --max-actions N      required positive action limit\n  -h, --help           show this help message and exit\n\nEnter one action per line on standard input:\n  read PATH\n  list [PATH]\n  create PATH TEXT\n  complete [RESULT]\n  cancel\n\nInvalid input, end-of-input, action failures, and budget exhaustion fail the turn.\nExplicit cancellation reports a cancelled turn and exits with status 130.\n",
     )
 }
 
