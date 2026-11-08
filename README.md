@@ -40,6 +40,22 @@ components and existing targets, creates files exclusively, and removes its
 partial file if a write fails. It never creates parent directories, overwrites
 files, or contacts a network service.
 
+## Bounded task-turn example
+
+The task-turn library API runs in-process and offline. Callers supply the
+decision source; the library does not connect to a model or make decisions for
+them. The example creates a unique temporary workspace, reads a brief through a
+task-owned turn, creates a new summary file, explicitly completes the turn, and
+prints the result and metadata-only activity history. It removes only the
+temporary directory it created.
+
+Build and run the example from the repository root:
+
+```sh
+cargo build --example bounded_task_turn --locked
+cargo run --example bounded_task_turn --locked
+```
+
 Command and input errors print usage and a diagnostic and exit with status 2.
 
 ## Task lifecycle
