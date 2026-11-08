@@ -6,6 +6,8 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 
 const MAX_FILE_SIZE: usize = 1024 * 1024;
+// Leave room for the action command and path beside a maximum-size file body.
+const MAX_TASK_ACTION_LINE_BYTES: usize = MAX_FILE_SIZE + 4096;
 
 /// Runs Krypper using the process arguments and standard streams.
 pub fn run() -> i32 {
@@ -175,7 +177,7 @@ fn run_task(
     };
 
     let mut reader = BufReader::new(input);
-    let mut line = String::new();
+    let mut line = Vec::new();
     let mut displayed_observations = 0;
     let mut decisions = 0;
     let mut stream_error = None;
@@ -212,11 +214,26 @@ fn run_task(
             }
 
             line.clear();
-            match reader.read_line(&mut line) {
+            match (&mut reader)
+                .take(MAX_TASK_ACTION_LINE_BYTES as u64 + 1)
+                .read_until(b'\n', &mut line)
+            {
                 Ok(0) => WorkspaceAction::Unsupported {
                     action: "end of input before the next action".to_owned(),
                 },
-                Ok(_) => parse_task_action(&line),
+                Ok(bytes_read) if bytes_read > MAX_TASK_ACTION_LINE_BYTES => {
+                    WorkspaceAction::Unsupported {
+                        action: format!(
+                            "action line exceeds limit of {MAX_TASK_ACTION_LINE_BYTES} bytes"
+                        ),
+                    }
+                }
+                Ok(_) => match std::str::from_utf8(&line) {
+                    Ok(line) => parse_task_action(line),
+                    Err(cause) => WorkspaceAction::Unsupported {
+                        action: format!("input error: {cause}"),
+                    },
+                },
                 Err(cause) => WorkspaceAction::Unsupported {
                     action: format!("input error: {cause}"),
                 },
@@ -613,7 +630,20 @@ fn write_write_help(output: &mut dyn Write) -> io::Result<()> {
 mod tests {
     use super::run_with;
     use std::ffi::OsString;
-    use std::io::Cursor;
+    use std::io::{Cursor, Read};
+
+    struct CountingReader {
+        input: Cursor<Vec<u8>>,
+        bytes_read: usize,
+    }
+
+    impl Read for CountingReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let bytes_read = self.input.read(buffer)?;
+            self.bytes_read += bytes_read;
+            Ok(bytes_read)
+        }
+    }
 
     #[test]
     fn write_help_is_printed_to_stdout() {
@@ -629,5 +659,36 @@ mod tests {
             .unwrap()
             .contains("usage: krypper write"));
         assert!(error.is_empty());
+    }
+
+    #[test]
+    fn oversized_task_line_stops_reading_without_buffering_the_rest() {
+        const MAX_TASK_ACTION_LINE_BYTES: usize = 1024 * 1024 + 4096;
+
+        let mut bytes = b"list . ".to_vec();
+        bytes.extend(std::iter::repeat_n(b' ', MAX_TASK_ACTION_LINE_BYTES * 4));
+        bytes.push(b'\n');
+        let input_len = bytes.len();
+        let mut input = CountingReader {
+            input: Cursor::new(bytes),
+            bytes_read: 0,
+        };
+        let args = [
+            OsString::from("task"),
+            OsString::from("--goal"),
+            OsString::from("Inspect files"),
+            OsString::from("--max-actions"),
+            OsString::from("2"),
+        ];
+        let mut output = Vec::new();
+        let mut error = Vec::new();
+
+        let code = run_with(&args, &mut input, &mut output, &mut error).unwrap();
+
+        assert_eq!(code, 1);
+        assert!(input.bytes_read < input_len);
+        assert!(String::from_utf8(output)
+            .unwrap()
+            .contains("action line exceeds limit of 1052672 bytes"));
     }
 }

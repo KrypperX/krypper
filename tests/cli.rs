@@ -6,6 +6,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 
+const MAX_FILE_SIZE: usize = 1024 * 1024;
+const MAX_TASK_ACTION_LINE_BYTES: usize = MAX_FILE_SIZE + 4096;
+
 struct TempDir(PathBuf);
 
 impl TempDir {
@@ -594,6 +597,81 @@ fn task_eof_and_invalid_input_share_a_failed_terminal_state() {
         assert!(output.contains("Actions: 1/3"));
         assert!(output.contains(expected_error));
     }
+}
+
+#[test]
+fn task_accepts_an_action_line_at_the_documented_byte_limit() {
+    let directory = TempDir::new();
+    let mut input = b"list . ".to_vec();
+    input.resize(MAX_TASK_ACTION_LINE_BYTES - 1, b' ');
+    input.push(b'\n');
+    input.extend_from_slice(b"complete done\n");
+    assert_eq!(
+        input.iter().position(|byte| *byte == b'\n').unwrap() + 1,
+        MAX_TASK_ACTION_LINE_BYTES
+    );
+
+    let output = run_with_input(
+        directory.path(),
+        &["task", "--goal", "Inspect files", "--max-actions", "2"],
+        &input,
+    );
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stdout(&output).contains("Observation 1: listed . (0 entries)"));
+    assert!(stdout(&output).contains("Turn outcome: success: done"));
+    assert!(stdout(&output).contains("Actions: 2/2"));
+}
+
+#[test]
+fn task_rejects_an_oversized_action_line_once_without_writing_or_parsing_a_prefix() {
+    let directory = TempDir::new();
+    let mut input = b"create should-not-exist.txt ".to_vec();
+    input.extend(std::iter::repeat_n(b'x', MAX_TASK_ACTION_LINE_BYTES));
+    input.extend_from_slice(b"\ncomplete should-not-run\n");
+
+    let output = run_with_input(
+        directory.path(),
+        &["task", "--goal", "Create a file", "--max-actions", "3"],
+        &input,
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(!directory.path().join("should-not-exist.txt").exists());
+    assert!(!directory.path().join("should-not-run").exists());
+    let output = stdout(&output);
+    let limit_error = format!("action line exceeds limit of {MAX_TASK_ACTION_LINE_BYTES} bytes");
+    assert_eq!(output.matches(&limit_error).count(), 2);
+    assert!(output.contains("Observation 1: action failed:"));
+    assert!(output.contains("Turn state: failed"));
+    assert!(output.contains(&format!(
+        "Turn outcome: failure: unsupported workspace action '{limit_error}'"
+    )));
+    assert!(output.contains("Actions: 1/3"));
+    assert!(!output.contains("Observation 2:"));
+}
+
+#[test]
+fn task_can_create_a_file_with_the_maximum_utf8_content() {
+    let directory = TempDir::new();
+    let contents = "é".repeat(MAX_FILE_SIZE / "é".len());
+    let mut input = b"create a ".to_vec();
+    input.extend_from_slice(contents.as_bytes());
+    input.extend_from_slice(b"\ncomplete done\n");
+
+    let output = run_with_input(
+        directory.path(),
+        &["task", "--goal", "Create a file", "--max-actions", "2"],
+        &input,
+    );
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stdout(&output).contains("Observation 1: created a (1048576 bytes)"));
+    assert!(stdout(&output).contains("Turn outcome: success: done"));
+    assert_eq!(
+        fs::read_to_string(directory.path().join("a")).unwrap(),
+        contents
+    );
 }
 
 #[test]
