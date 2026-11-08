@@ -53,6 +53,11 @@ metadata-only activity history. Invalid input, end-of-input, an action failure,
 or an exhausted action budget fails the turn and exits with status 1. Explicit
 completion counts as an action against the limit.
 
+Each task action line is limited to 1,052,672 bytes (1 MiB + 4 KiB), counting
+its line ending when present. Oversized lines fail the turn before parsing or
+workspace access. This limit leaves room for the command and a relative path
+alongside a maximum-size create body.
+
 ## Bounded task-turn example
 
 The task-turn library API runs in-process and offline. Callers supply the
