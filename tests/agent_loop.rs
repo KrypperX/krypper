@@ -92,7 +92,7 @@ fn goal_turn_reads_one_file_and_records_the_matching_outcome() {
     let expected_outcome = TurnOutcome::Success {
         result: "bounded task context".to_owned(),
     };
-    assert_eq!(result.outcome(), &expected_outcome);
+    assert_eq!(result.outcome(), Some(&expected_outcome));
     let task = session.get_task(task_id).unwrap();
     let turn = task.get_turn(turn_id).unwrap();
     assert_eq!(turn.state(), TurnState::Succeeded);
@@ -380,7 +380,7 @@ fn bounded_goal_turn_passes_goal_and_ordered_observations_to_each_decision() {
     let expected_outcome = TurnOutcome::Success {
         result: "workspace inspected".to_owned(),
     };
-    assert_eq!(result.outcome(), &expected_outcome);
+    assert_eq!(result.outcome(), Some(&expected_outcome));
     let task = session.get_task(task_id).unwrap();
     let turn = task.get_turn(turn_id).unwrap();
     assert_eq!(turn.state(), TurnState::Succeeded);
@@ -476,7 +476,7 @@ fn bounded_goal_turn_creates_a_file_with_metadata_and_ordered_observations() {
     let task = session.get_task(task_id).unwrap();
     let turn = task.get_turn(turn_id).unwrap();
     assert_eq!(turn.state(), TurnState::Succeeded);
-    assert_eq!(turn.outcome(), Some(result.outcome()));
+    assert_eq!(turn.outcome(), result.outcome());
     assert_eq!(
         turn.activity_history(),
         [
@@ -545,9 +545,9 @@ fn bounded_goal_turn_creation_counts_toward_action_budget() {
     );
     assert_eq!(
         result.outcome(),
-        &TurnOutcome::Failure {
+        Some(&TurnOutcome::Failure {
             detail: "action budget exhausted after 1 actions".to_owned(),
-        }
+        })
     );
     assert_eq!(
         fs::read_to_string(workspace.path().join("created.txt")).unwrap(),
@@ -556,7 +556,7 @@ fn bounded_goal_turn_creation_counts_toward_action_budget() {
     let task = session.get_task(task_id).unwrap();
     let turn = task.get_turn(turn_id).unwrap();
     assert_eq!(turn.state(), TurnState::Failed);
-    assert_eq!(turn.outcome(), Some(result.outcome()));
+    assert_eq!(turn.outcome(), result.outcome());
     assert_eq!(
         turn.activity_history(),
         [
@@ -628,10 +628,10 @@ fn bounded_goal_turn_rejects_unsafe_file_creation_and_records_failure() {
     let task = session.get_task(task_id).unwrap();
     let turn = task.get_turn(turn_id).unwrap();
     assert_eq!(turn.state(), TurnState::Failed);
-    assert_eq!(turn.outcome(), Some(result.outcome()));
+    assert_eq!(turn.outcome(), result.outcome());
     assert!(matches!(
         result.outcome(),
-        TurnOutcome::Failure { detail }
+        Some(TurnOutcome::Failure { detail })
             if detail.contains("path must stay inside the current directory")
     ));
     assert_eq!(
@@ -697,7 +697,86 @@ fn bounded_goal_turn_does_not_overwrite_an_existing_file() {
         .get_turn(turn_id)
         .unwrap();
     assert_eq!(turn.state(), TurnState::Failed);
-    assert_eq!(turn.outcome(), Some(result.outcome()));
+    assert_eq!(turn.outcome(), result.outcome());
+}
+
+#[test]
+fn bounded_goal_turn_cancellation_counts_once_and_keeps_prior_work() {
+    let workspace = TempDir::new();
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) = with_current_dir(workspace.path(), || {
+        running_turn(&mut session, "Create then cancel")
+    });
+    let mut decision_calls = 0;
+    let mut decisions = |_goal: &str, observations: &[WorkspaceObservation]| {
+        decision_calls += 1;
+        match observations.len() {
+            0 => WorkspaceAction::CreateFile {
+                path: PathBuf::from("kept.txt"),
+                contents: "kept contents".to_owned(),
+            },
+            1 => WorkspaceAction::Cancel,
+            _ => WorkspaceAction::CreateFile {
+                path: PathBuf::from("must-not-be-created.txt"),
+                contents: "ignored".to_owned(),
+            },
+        }
+    };
+
+    let result = run_goal_turn_with_budget(
+        &mut session,
+        task_id,
+        turn_id,
+        "Create then cancel",
+        3,
+        &mut decisions,
+    )
+    .unwrap();
+
+    assert_eq!(decision_calls, 2);
+    assert_eq!(result.actions_taken(), 2);
+    assert_eq!(result.stop_reason(), GoalTurnStopReason::Cancelled);
+    assert_eq!(result.outcome(), None);
+    assert_eq!(
+        result.observations(),
+        &[WorkspaceObservation::FileCreated {
+            path: PathBuf::from("kept.txt"),
+            bytes_written: 13,
+        }]
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("kept.txt")).unwrap(),
+        "kept contents"
+    );
+    assert!(!workspace.path().join("must-not-be-created.txt").exists());
+
+    let task = session.get_task(task_id).unwrap();
+    let turn = task.get_turn(turn_id).unwrap();
+    assert_eq!(task.state(), TaskState::Cancelled);
+    assert_eq!(turn.state(), TurnState::Cancelled);
+    assert_eq!(turn.outcome(), None);
+    assert_eq!(
+        turn.activity_history(),
+        [
+            TurnActivitySummary::FileCreated { bytes_written: 13 },
+            TurnActivitySummary::Cancelled,
+        ]
+    );
+    assert_eq!(
+        task.history()[task.history().len() - 2].transition(),
+        TaskHistoryTransition::Turn {
+            turn_id,
+            previous_state: TurnState::Running,
+            new_state: TurnState::Cancelled,
+        }
+    );
+    assert_eq!(
+        task.history().last().unwrap().transition(),
+        TaskHistoryTransition::Task {
+            previous_state: TaskState::Running,
+            new_state: TaskState::Cancelled,
+        }
+    );
 }
 
 #[test]
@@ -743,7 +822,7 @@ fn bounded_goal_turn_stops_when_the_action_budget_is_exhausted() {
         TurnActivitySummary::FileRead { bytes_read: 11 },
         TurnActivitySummary::BudgetExhausted { actions: 2 },
     ];
-    assert_eq!(result.outcome(), &expected_outcome);
+    assert_eq!(result.outcome(), Some(&expected_outcome));
     let task = session.get_task(task_id).unwrap();
     let turn = task.get_turn(turn_id).unwrap();
     assert_eq!(turn.state(), TurnState::Failed);
@@ -804,13 +883,13 @@ fn bounded_goal_turn_returns_safe_action_failures_as_observations() {
     ));
     assert!(matches!(
         result.outcome(),
-        TurnOutcome::Failure { detail }
+        Some(TurnOutcome::Failure { detail })
             if detail.contains("path must stay inside the current directory")
     ));
     let task = session.get_task(task_id).unwrap();
     let turn = task.get_turn(turn_id).unwrap();
     assert_eq!(turn.state(), TurnState::Failed);
-    assert_eq!(turn.outcome(), Some(result.outcome()));
+    assert_eq!(turn.outcome(), result.outcome());
     let expected_activity = TurnActivitySummary::ActionFailed {
         action: TurnActivityAction::ReadFile,
     };
@@ -851,7 +930,7 @@ fn bounded_goal_turn_records_unsupported_action_failure_without_action_details()
         }]
     );
     assert_eq!(turn.state(), TurnState::Failed);
-    assert_eq!(turn.outcome(), Some(result.outcome()));
+    assert_eq!(turn.outcome(), result.outcome());
     assert!(matches!(
         task.history().last().unwrap().transition(),
         TaskHistoryTransition::Turn {

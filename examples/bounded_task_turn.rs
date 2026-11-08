@@ -138,16 +138,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     )?;
 
     let task_state = match result.outcome() {
-        TurnOutcome::Success { .. } => TaskState::Succeeded,
-        TurnOutcome::Failure { .. } => TaskState::Failed,
+        Some(TurnOutcome::Success { .. }) => TaskState::Succeeded,
+        Some(TurnOutcome::Failure { .. }) => TaskState::Failed,
+        None => TaskState::Cancelled,
     };
-    session
-        .get_task_mut(task_id)
-        .ok_or_else(missing_task)?
-        .transition(task_state)?;
+    if result.outcome().is_some() {
+        session
+            .get_task_mut(task_id)
+            .ok_or_else(missing_task)?
+            .transition(task_state)?;
+    }
 
     if result.stop_reason() != GoalTurnStopReason::Completed
-        || !matches!(result.outcome(), TurnOutcome::Success { .. })
+        || !matches!(result.outcome(), Some(TurnOutcome::Success { .. }))
     {
         return Err(io::Error::other("the example task turn did not complete successfully").into());
     }

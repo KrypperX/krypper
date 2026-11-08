@@ -18,6 +18,8 @@ pub enum WorkspaceAction {
     CreateFile { path: PathBuf, contents: String },
     /// Finish the turn with an explicit result.
     Complete { result: String },
+    /// Cancel the active task and turn.
+    Cancel,
     /// An unsupported action, returned as a clear failed observation.
     Unsupported { action: String },
 }
@@ -54,6 +56,8 @@ pub enum GoalTurnStopReason {
     ActionFailed,
     /// The legacy one-action entry point completed its single action.
     ActionCompleted,
+    /// The caller cancelled the active task and turn.
+    Cancelled,
 }
 
 /// A replaceable source that chooses an action from the goal and prior observations.
@@ -94,7 +98,7 @@ where
     }
 }
 
-/// The observations, stop reason, and matching terminal outcome for a task-owned turn.
+/// The observations, stop reason, and optional completion outcome for a task-owned turn.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GoalTurnResult {
     task_id: Uuid,
@@ -103,7 +107,7 @@ pub struct GoalTurnResult {
     observations: Vec<WorkspaceObservation>,
     actions_taken: usize,
     stop_reason: GoalTurnStopReason,
-    outcome: TurnOutcome,
+    outcome: Option<TurnOutcome>,
 }
 
 impl GoalTurnResult {
@@ -139,9 +143,9 @@ impl GoalTurnResult {
         self.stop_reason
     }
 
-    /// Returns the outcome recorded on the completed turn.
-    pub fn outcome(&self) -> &TurnOutcome {
-        &self.outcome
+    /// Returns the success or failure outcome, or `None` when the turn was cancelled.
+    pub fn outcome(&self) -> Option<&TurnOutcome> {
+        self.outcome.as_ref()
     }
 }
 
@@ -156,7 +160,7 @@ pub enum GoalTurnError {
     WorkspaceList(WorkspaceListError),
     /// The existing workspace safety policy rejected or could not create a file.
     WorkspaceWrite(WorkspaceWriteError),
-    /// The task or turn could not be completed in its current session state.
+    /// The task or turn could not be completed or cancelled in its current session state.
     Lifecycle(TurnCompletionError),
 }
 
@@ -189,6 +193,7 @@ impl std::error::Error for GoalTurnError {
 enum ActionExecution {
     Observation(WorkspaceObservation),
     Complete(String),
+    Cancel,
     Failed {
         observation: WorkspaceObservation,
         error: GoalTurnError,
@@ -231,6 +236,9 @@ pub fn run_goal_turn<D: DecisionSource + ?Sized>(
                 outcome: TurnOutcome::Success { result },
             },
         ),
+        ActionExecution::Cancel => {
+            cancel_turn(session, task_id, turn_id, Vec::new(), Vec::new(), 1)
+        }
         ActionExecution::Observation(observation) => {
             let result = match &observation {
                 WorkspaceObservation::FileRead { contents, .. } => contents.clone(),
@@ -317,6 +325,16 @@ pub fn run_goal_turn_with_budget<D: BoundedDecisionSource + ?Sized>(
                     },
                 );
             }
+            ActionExecution::Cancel => {
+                return cancel_turn(
+                    session,
+                    task_id,
+                    turn_id,
+                    observations,
+                    activity,
+                    actions_taken,
+                );
+            }
             ActionExecution::Observation(observation) => {
                 activity.push(summarize_observation(&observation));
                 observations.push(observation);
@@ -383,9 +401,9 @@ fn summarize_observation(observation: &WorkspaceObservation) -> TurnActivitySumm
                 WorkspaceAction::ReadFile { .. } => TurnActivityAction::ReadFile,
                 WorkspaceAction::ListDirectory { .. } => TurnActivityAction::ListDirectory,
                 WorkspaceAction::CreateFile { .. } => TurnActivityAction::CreateFile,
-                WorkspaceAction::Complete { .. } | WorkspaceAction::Unsupported { .. } => {
-                    TurnActivityAction::Unsupported
-                }
+                WorkspaceAction::Complete { .. }
+                | WorkspaceAction::Cancel
+                | WorkspaceAction::Unsupported { .. } => TurnActivityAction::Unsupported,
             };
             TurnActivitySummary::ActionFailed { action }
         }
@@ -463,6 +481,7 @@ fn execute_action(
             }
         }
         WorkspaceAction::Complete { result } => Ok(ActionExecution::Complete(result.clone())),
+        WorkspaceAction::Cancel => Ok(ActionExecution::Cancel),
         WorkspaceAction::Unsupported { action: name } => {
             let error = GoalTurnError::UnsupportedAction {
                 action: name.clone(),
@@ -476,6 +495,36 @@ fn execute_action(
             })
         }
     }
+}
+
+fn cancel_turn(
+    session: &mut TaskSession,
+    task_id: Uuid,
+    turn_id: Uuid,
+    observations: Vec<WorkspaceObservation>,
+    mut activity: Vec<TurnActivitySummary>,
+    actions_taken: usize,
+) -> Result<GoalTurnResult, GoalTurnError> {
+    activity.push(TurnActivitySummary::Cancelled);
+    session
+        .cancel_turn_with_activity(task_id, turn_id, &activity)
+        .map_err(GoalTurnError::Lifecycle)?;
+    let read_result = observations
+        .iter()
+        .find_map(|observation| match observation {
+            WorkspaceObservation::FileRead { contents, .. } => Some(contents.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    Ok(GoalTurnResult {
+        task_id,
+        turn_id,
+        read_result,
+        observations,
+        actions_taken,
+        stop_reason: GoalTurnStopReason::Cancelled,
+        outcome: None,
+    })
 }
 
 fn finish_turn(
@@ -507,6 +556,6 @@ fn finish_turn(
         observations,
         actions_taken: completion.actions_taken,
         stop_reason: completion.stop_reason,
-        outcome: completion.outcome,
+        outcome: Some(completion.outcome),
     })
 }
