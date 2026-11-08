@@ -69,7 +69,7 @@ fn help_prints_usage_and_succeeds() {
     let output = run(None, &["--help"]);
     assert!(output.status.success());
     assert!(stdout(&output).contains("usage: krypper"));
-    assert!(stdout(&output).contains("{show,list,write}"));
+    assert!(stdout(&output).contains("{show,list,write,task}"));
 }
 
 #[test]
@@ -77,7 +77,7 @@ fn missing_command_prints_usage_and_fails() {
     let output = run(None, &[]);
     assert_eq!(output.status.code(), Some(2));
     assert!(stderr(&output).contains("usage: krypper"));
-    assert!(stderr(&output).contains("{show,list,write}"));
+    assert!(stderr(&output).contains("{show,list,write,task}"));
 }
 
 #[test]
@@ -507,4 +507,144 @@ fn write_refuses_symlink_parents_targets_and_missing_or_nondirectory_parents() {
         "keep"
     );
     assert!(!nested.join("new.txt").exists());
+}
+
+#[test]
+fn task_shows_ordered_observations_completion_and_metadata_history() {
+    let directory = TempDir::new();
+    fs::write(directory.path().join("brief.txt"), "brief contents").unwrap();
+
+    let output = run_with_input(
+        directory.path(),
+        &[
+            "task",
+            "--goal",
+            "Summarize the brief",
+            "--max-actions",
+            "4",
+        ],
+        b"read brief.txt\nlist .\ncreate summary.txt saved summary\ncomplete saved\n",
+    );
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let output = stdout(&output);
+    let read = output.find("Observation 1: read brief.txt").unwrap();
+    let listed = output.find("Observation 2: listed .").unwrap();
+    let created = output.find("Observation 3: created summary.txt").unwrap();
+    let state = output.find("Turn state: succeeded").unwrap();
+    assert!(read < listed && listed < created && created < state);
+    assert!(output.contains("brief contents"));
+    assert!(output.contains("Turn outcome: success: saved"));
+    assert!(output.contains("Actions: 4/4"));
+    let history = output
+        .split("Activity history (metadata only):")
+        .nth(1)
+        .unwrap();
+    assert!(history.contains("FileRead { bytes_read: 14 }"));
+    assert!(history.contains("DirectoryListed { entry_count: 1 }"));
+    assert!(history.contains("FileCreated { bytes_written: 13 }"));
+    assert!(history.contains("Completed"));
+    assert!(!history.contains("brief contents"));
+    assert_eq!(
+        fs::read_to_string(directory.path().join("summary.txt")).unwrap(),
+        "saved summary"
+    );
+}
+
+#[test]
+fn task_exhausts_the_action_budget_with_one_failed_terminal_outcome() {
+    let directory = TempDir::new();
+    fs::write(directory.path().join("brief.txt"), "brief").unwrap();
+
+    let output = run_with_input(
+        directory.path(),
+        &["task", "--goal", "Inspect files", "--max-actions", "2"],
+        b"read brief.txt\nlist .\ncomplete too late\n",
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    let output = stdout(&output);
+    assert!(output.contains("Observation 1: read brief.txt"));
+    assert!(output.contains("Observation 2: listed ."));
+    assert!(output.contains("Turn state: failed"));
+    assert!(output.contains("Turn outcome: failure: action budget exhausted after 2 actions"));
+    assert!(output.contains("Actions: 2/2"));
+    assert!(!output.contains("too late"));
+}
+
+#[test]
+fn task_eof_and_invalid_input_share_a_failed_terminal_state() {
+    let directory = TempDir::new();
+    let cases: [(&[u8], &str); 2] = [
+        (b"", "end of input"),
+        (b"delete note.txt\n", "unsupported workspace action"),
+    ];
+
+    for (input, expected_error) in cases {
+        let output = run_with_input(
+            directory.path(),
+            &["task", "--goal", "Inspect files", "--max-actions", "3"],
+            input,
+        );
+
+        assert_eq!(output.status.code(), Some(1));
+        let output = stdout(&output);
+        assert!(output.contains("Turn state: failed"));
+        assert!(output.contains("Turn outcome: failure:"));
+        assert!(output.contains("Actions: 1/3"));
+        assert!(output.contains(expected_error));
+    }
+}
+
+#[test]
+fn task_rejects_outside_and_existing_file_creations_without_writing() {
+    let directory = TempDir::new();
+    let workspace = directory.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let outside = directory.path().join("outside.txt");
+    fs::write(&outside, "keep outside").unwrap();
+    fs::write(workspace.join("existing.txt"), "keep existing").unwrap();
+
+    let outside_output = run_with_input(
+        &workspace,
+        &["task", "--goal", "Create a file", "--max-actions", "1"],
+        b"create ../outside.txt replace\n",
+    );
+    let existing_output = run_with_input(
+        &workspace,
+        &["task", "--goal", "Create a file", "--max-actions", "1"],
+        b"create existing.txt replace\n",
+    );
+
+    assert_eq!(outside_output.status.code(), Some(1));
+    assert_eq!(existing_output.status.code(), Some(1));
+    assert!(stdout(&outside_output).contains("Turn outcome: failure:"));
+    assert!(stdout(&outside_output).contains("path must stay inside the current directory"));
+    assert!(stdout(&existing_output).contains("file already exists"));
+    assert_eq!(fs::read_to_string(outside).unwrap(), "keep outside");
+    assert_eq!(
+        fs::read_to_string(workspace.join("existing.txt")).unwrap(),
+        "keep existing"
+    );
+}
+
+#[test]
+fn task_requires_a_nonempty_goal_and_positive_action_limit() {
+    let directory = TempDir::new();
+    let missing_goal = run(Some(directory.path()), &["task", "--max-actions", "1"]);
+    let empty_goal = run(
+        Some(directory.path()),
+        &["task", "--goal", " ", "--max-actions", "1"],
+    );
+    let zero_limit = run(
+        Some(directory.path()),
+        &["task", "--goal", "Inspect files", "--max-actions", "0"],
+    );
+
+    assert_eq!(missing_goal.status.code(), Some(2));
+    assert!(stderr(&missing_goal).contains("the following argument is required: --goal"));
+    assert_eq!(empty_goal.status.code(), Some(2));
+    assert!(stderr(&empty_goal).contains("goal must not be empty"));
+    assert_eq!(zero_limit.status.code(), Some(2));
+    assert!(stderr(&zero_limit).contains("action limit must be a positive integer"));
 }

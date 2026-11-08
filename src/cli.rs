@@ -1,6 +1,9 @@
+use crate::agent_loop::{run_goal_turn_with_budget, WorkspaceAction, WorkspaceObservation};
 use crate::file_safety::{create_text_file, list_directory, read_text_file};
+use crate::task_lifecycle::{TaskSession, TaskState, TurnOutcome, TurnState};
 use std::ffi::{OsStr, OsString};
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::path::PathBuf;
 
 const MAX_FILE_SIZE: usize = 1024 * 1024;
 
@@ -47,6 +50,7 @@ fn run_with(
         "show" => run_show(arguments, output, error),
         "list" => run_list(arguments, output, error),
         "write" => run_write(arguments, input, output, error),
+        "task" => run_task(arguments, input, output, error),
         _ if command_name.starts_with('-') => usage_error(
             error,
             None,
@@ -55,9 +59,331 @@ fn run_with(
         _ => usage_error(
             error,
             None,
-            &format!("invalid choice: '{command_name}' (choose from 'show', 'list', 'write')"),
+            &format!(
+                "invalid choice: '{command_name}' (choose from 'show', 'list', 'write', 'task')"
+            ),
         ),
     }
+}
+
+fn run_task(
+    arguments: &[OsString],
+    input: &mut dyn Read,
+    output: &mut dyn Write,
+    error: &mut dyn Write,
+) -> io::Result<i32> {
+    if contains_help_before_terminator(arguments) {
+        write_task_help(output)?;
+        return Ok(0);
+    }
+
+    let mut goal = None;
+    let mut max_actions = None;
+    let mut position = 0;
+    while let Some(argument) = arguments.get(position) {
+        let Some(option) = argument.to_str() else {
+            return usage_error(error, Some("task"), "arguments must be valid UTF-8");
+        };
+        position += 1;
+        match option {
+            "--goal" => {
+                if goal.is_some() {
+                    return usage_error(error, Some("task"), "--goal may be provided only once");
+                }
+                let Some(value) = arguments.get(position) else {
+                    return usage_error(
+                        error,
+                        Some("task"),
+                        "the following argument is required: --goal",
+                    );
+                };
+                let Some(value) = value.to_str() else {
+                    return usage_error(error, Some("task"), "goal must be valid UTF-8");
+                };
+                goal = Some(value.to_owned());
+                position += 1;
+            }
+            "--max-actions" => {
+                if max_actions.is_some() {
+                    return usage_error(
+                        error,
+                        Some("task"),
+                        "--max-actions may be provided only once",
+                    );
+                }
+                let Some(value) = arguments.get(position) else {
+                    return usage_error(
+                        error,
+                        Some("task"),
+                        "the following argument is required: --max-actions",
+                    );
+                };
+                let limit = value
+                    .to_str()
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .filter(|limit| *limit > 0);
+                let Some(limit) = limit else {
+                    return usage_error(
+                        error,
+                        Some("task"),
+                        "action limit must be a positive integer",
+                    );
+                };
+                max_actions = Some(limit);
+                position += 1;
+            }
+            _ => {
+                return usage_error(
+                    error,
+                    Some("task"),
+                    &format!("unrecognized arguments: {option}"),
+                );
+            }
+        }
+    }
+
+    let Some(goal) = goal else {
+        return usage_error(
+            error,
+            Some("task"),
+            "the following argument is required: --goal",
+        );
+    };
+    if goal.trim().is_empty() {
+        return usage_error(error, Some("task"), "goal must not be empty");
+    }
+    let Some(max_actions) = max_actions else {
+        return usage_error(
+            error,
+            Some("task"),
+            "the following argument is required: --max-actions",
+        );
+    };
+
+    let mut session = TaskSession::new();
+    let task_id = session.create_task(goal.clone()).id();
+    let turn_id = {
+        let task = session
+            .get_task_mut(task_id)
+            .ok_or_else(|| io::Error::other("task was not found in its session"))?;
+        task.transition(TaskState::Running)
+            .map_err(io::Error::other)?;
+        let turn_id = task.create_turn().map_err(io::Error::other)?;
+        task.transition_turn(turn_id, TurnState::Running)
+            .map_err(io::Error::other)?;
+        turn_id
+    };
+
+    let mut reader = BufReader::new(input);
+    let mut line = String::new();
+    let mut displayed_observations = 0;
+    let mut decisions = 0;
+    let mut stream_error = None;
+    let result = {
+        let mut decision_source = |_goal: &str, observations: &[WorkspaceObservation]| {
+            while displayed_observations < observations.len() {
+                if let Err(cause) = write_observation(
+                    output,
+                    displayed_observations + 1,
+                    &observations[displayed_observations],
+                ) {
+                    stream_error = Some(cause);
+                    return WorkspaceAction::Unsupported {
+                        action: "unable to display action observation".to_owned(),
+                    };
+                }
+                displayed_observations += 1;
+            }
+            if let Err(cause) = output.flush() {
+                stream_error = Some(cause);
+                return WorkspaceAction::Unsupported {
+                    action: "unable to display action observation".to_owned(),
+                };
+            }
+
+            decisions += 1;
+            if let Err(cause) =
+                write!(error, "action {decisions}/{max_actions}> ").and_then(|()| error.flush())
+            {
+                stream_error = Some(cause);
+                return WorkspaceAction::Unsupported {
+                    action: "unable to display action prompt".to_owned(),
+                };
+            }
+
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => WorkspaceAction::Unsupported {
+                    action: "end of input before the next action".to_owned(),
+                },
+                Ok(_) => parse_task_action(&line),
+                Err(cause) => WorkspaceAction::Unsupported {
+                    action: format!("input error: {cause}"),
+                },
+            }
+        };
+        run_goal_turn_with_budget(
+            &mut session,
+            task_id,
+            turn_id,
+            &goal,
+            max_actions,
+            &mut decision_source,
+        )
+        .map_err(io::Error::other)?
+    };
+
+    let succeeded = matches!(result.outcome(), TurnOutcome::Success { .. });
+    let next_task_state = if succeeded {
+        TaskState::Succeeded
+    } else {
+        TaskState::Failed
+    };
+    session
+        .get_task_mut(task_id)
+        .ok_or_else(|| io::Error::other("task was not found in its session"))?
+        .transition(next_task_state)
+        .map_err(io::Error::other)?;
+
+    if let Some(cause) = stream_error {
+        return Err(cause);
+    }
+    for observation in result.observations().iter().skip(displayed_observations) {
+        write_observation(output, displayed_observations + 1, observation)?;
+        displayed_observations += 1;
+    }
+
+    let task = session
+        .get_task(task_id)
+        .ok_or_else(|| io::Error::other("task was not found in its session"))?;
+    let turn = task
+        .get_turn(turn_id)
+        .ok_or_else(|| io::Error::other("turn was not found in its task"))?;
+    let turn_state = match turn.state() {
+        TurnState::Succeeded => "succeeded",
+        TurnState::Failed => "failed",
+        TurnState::Pending => "pending",
+        TurnState::Running => "running",
+        TurnState::Cancelled => "cancelled",
+    };
+
+    writeln!(output, "Task state: {}", task.state())?;
+    writeln!(output, "Turn state: {turn_state}")?;
+    match result.outcome() {
+        TurnOutcome::Success { result } => writeln!(output, "Turn outcome: success: {result}")?,
+        TurnOutcome::Failure { detail } => writeln!(output, "Turn outcome: failure: {detail}")?,
+    }
+    writeln!(
+        output,
+        "Actions: {}/{}",
+        result.actions_taken(),
+        max_actions
+    )?;
+    writeln!(output, "Activity history (metadata only):")?;
+    for summary in turn.activity_history() {
+        writeln!(output, "- {summary:?}")?;
+    }
+
+    Ok(if succeeded { 0 } else { 1 })
+}
+
+fn parse_task_action(line: &str) -> WorkspaceAction {
+    let line = line.trim_end_matches(&['\r', '\n'][..]);
+    let (name, arguments) = match line.find(char::is_whitespace) {
+        Some(separator) => (&line[..separator], Some(&line[separator + 1..])),
+        None => (line, None),
+    };
+    let invalid = || WorkspaceAction::Unsupported {
+        action: format!("invalid input: {line}"),
+    };
+
+    match name {
+        "read" => arguments
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(|path| WorkspaceAction::ReadFile {
+                path: PathBuf::from(path),
+            })
+            .unwrap_or_else(invalid),
+        "list" => WorkspaceAction::ListDirectory {
+            path: PathBuf::from(
+                arguments
+                    .map(str::trim)
+                    .filter(|path| !path.is_empty())
+                    .unwrap_or("."),
+            ),
+        },
+        "create" => {
+            let Some(arguments) = arguments else {
+                return invalid();
+            };
+            let arguments = arguments.trim_start();
+            let Some(separator) = arguments.find(char::is_whitespace) else {
+                return invalid();
+            };
+            let path = &arguments[..separator];
+            if path.is_empty() {
+                return invalid();
+            }
+            WorkspaceAction::CreateFile {
+                path: PathBuf::from(path),
+                contents: arguments[separator + 1..].to_owned(),
+            }
+        }
+        "complete" => WorkspaceAction::Complete {
+            result: arguments.unwrap_or_default().trim_start().to_owned(),
+        },
+        _ => invalid(),
+    }
+}
+
+fn write_observation(
+    output: &mut dyn Write,
+    number: usize,
+    observation: &WorkspaceObservation,
+) -> io::Result<()> {
+    match observation {
+        WorkspaceObservation::FileRead { path, contents } => {
+            writeln!(output, "Observation {number}: read {}", path.display())?;
+            writeln!(output, "  contents:")?;
+            output.write_all(contents.as_bytes())?;
+            if !contents.ends_with('\n') {
+                output.write_all(b"\n")?;
+            }
+        }
+        WorkspaceObservation::DirectoryListed { path, entries } => {
+            writeln!(
+                output,
+                "Observation {number}: listed {} ({} entries)",
+                path.display(),
+                entries.len()
+            )?;
+            for entry in entries {
+                writeln!(output, "  {entry:?}")?;
+            }
+        }
+        WorkspaceObservation::FileCreated {
+            path,
+            bytes_written,
+        } => {
+            writeln!(
+                output,
+                "Observation {number}: created {} ({bytes_written} bytes)",
+                path.display()
+            )?;
+        }
+        WorkspaceObservation::FileCreationFailed { path, error } => {
+            writeln!(
+                output,
+                "Observation {number}: create {} failed: {error}",
+                path.display()
+            )?;
+        }
+        WorkspaceObservation::ActionFailed { error, .. } => {
+            writeln!(output, "Observation {number}: action failed: {error}")?;
+        }
+    }
+    Ok(())
 }
 
 fn run_show(
@@ -244,7 +570,8 @@ fn usage_error(error: &mut dyn Write, command: Option<&str>, message: &str) -> i
         Some("show") => "usage: krypper show [-h] path",
         Some("list") => "usage: krypper list [-h] [path]",
         Some("write") => "usage: krypper write [-h] [--stdin] path ...",
-        _ => "usage: krypper [-h] {show,list,write} ...",
+        Some("task") => "usage: krypper task [-h] --goal GOAL --max-actions N",
+        _ => "usage: krypper [-h] {show,list,write,task} ...",
     };
     let program = command.map_or_else(|| "krypper".to_owned(), |name| format!("krypper {name}"));
     writeln!(error, "{usage}")?;
@@ -254,7 +581,13 @@ fn usage_error(error: &mut dyn Write, command: Option<&str>, message: &str) -> i
 
 fn write_root_help(output: &mut dyn Write) -> io::Result<()> {
     output.write_all(
-        b"usage: krypper [-h] {show,list,write} ...\n\nLocal command-line entry point for Krypper.\n\npositional arguments:\n  {show,list,write}\n    show        display a UTF-8 text file\n    list        list immediate directory entries\n    write       create a new UTF-8 text file\n\noptions:\n  -h, --help    show this help message and exit\n",
+        b"usage: krypper [-h] {show,list,write,task} ...\n\nLocal command-line entry point for Krypper.\n\npositional arguments:\n  {show,list,write,task}\n    show        display a UTF-8 text file\n    list        list immediate directory entries\n    write       create a new UTF-8 text file\n    task        run a caller-directed bounded task turn\n\noptions:\n  -h, --help    show this help message and exit\n",
+    )
+}
+
+fn write_task_help(output: &mut dyn Write) -> io::Result<()> {
+    output.write_all(
+        b"usage: krypper task [-h] --goal GOAL --max-actions N\n\nrun one caller-directed task turn in the current directory\n\noptions:\n  --goal GOAL          required task goal\n  --max-actions N      required positive action limit\n  -h, --help           show this help message and exit\n\nEnter one action per line on standard input:\n  read PATH\n  list [PATH]\n  create PATH TEXT\n  complete [RESULT]\n\nInvalid input, end-of-input, action failures, and budget exhaustion fail the turn.\n",
     )
 }
 
