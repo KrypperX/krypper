@@ -106,28 +106,27 @@ fn main() -> Result<(), Box<dyn Error>> {
         turn_id
     };
 
-    let mut decision_source =
-        |goal: &str, observations: &[WorkspaceObservation]| match observations {
-            [] => WorkspaceAction::ReadFile {
-                path: PathBuf::from("brief.txt"),
-            },
-            [WorkspaceObservation::FileRead { contents, .. }] => WorkspaceAction::CreateFile {
-                path: PathBuf::from("summary.txt"),
-                contents: format!("Goal: {goal}\nBrief: {contents}"),
-            },
-            [
-                WorkspaceObservation::FileRead { contents, .. },
-                WorkspaceObservation::FileCreated { bytes_written, .. },
-            ] => WorkspaceAction::Complete {
+    let mut decision_source = |goal: &str, observations: &[WorkspaceObservation]| match observations
+    {
+        [] => WorkspaceAction::ReadFile {
+            path: PathBuf::from("brief.txt"),
+        },
+        [WorkspaceObservation::FileRead { contents, .. }] => WorkspaceAction::CreateFile {
+            path: PathBuf::from("summary.txt"),
+            contents: format!("Goal: {goal}\nBrief: {contents}"),
+        },
+        [WorkspaceObservation::FileRead { contents, .. }, WorkspaceObservation::FileCreated { bytes_written, .. }] => {
+            WorkspaceAction::Complete {
                 result: format!(
                     "Saved a {bytes_written}-byte summary after reading {} brief bytes for: {goal}",
                     contents.len()
                 ),
-            },
-            _ => WorkspaceAction::Unsupported {
-                action: "unexpected observation sequence".to_owned(),
-            },
-        };
+            }
+        }
+        _ => WorkspaceAction::Unsupported {
+            action: "unexpected observation sequence".to_owned(),
+        },
+    };
 
     let result = run_goal_turn_with_budget(
         &mut session,
