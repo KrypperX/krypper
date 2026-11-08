@@ -4,7 +4,7 @@ use krypper::agent_loop::{
 };
 use krypper::task_lifecycle::{
     TaskHistoryTransition, TaskSession, TaskState, TurnActivityAction, TurnActivitySummary,
-    TurnOutcome, TurnState, WorkspaceReadError,
+    TurnOutcome, TurnState, WorkspaceReadError, WorkspaceWriteError,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -416,6 +416,291 @@ fn bounded_goal_turn_passes_goal_and_ordered_observations_to_each_decision() {
 }
 
 #[test]
+fn bounded_goal_turn_creates_a_file_with_metadata_and_ordered_observations() {
+    let workspace = TempDir::new();
+    fs::write(workspace.path().join("first.txt"), "first").unwrap();
+    let contents = "created café 🔒";
+    let bytes_written = contents.len();
+    let goal = "Read a note, create a file, and finish";
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) =
+        with_current_dir(workspace.path(), || running_turn(&mut session, goal));
+    let mut decision_inputs = Vec::new();
+    let mut decisions = |received_goal: &str, observations: &[WorkspaceObservation]| {
+        decision_inputs.push((received_goal.to_owned(), observations.to_vec()));
+        match observations.len() {
+            0 => WorkspaceAction::ReadFile {
+                path: PathBuf::from("first.txt"),
+            },
+            1 => WorkspaceAction::CreateFile {
+                path: PathBuf::from("created.txt"),
+                contents: contents.to_owned(),
+            },
+            _ => WorkspaceAction::Complete {
+                result: "file created".to_owned(),
+            },
+        }
+    };
+
+    let result =
+        run_goal_turn_with_budget(&mut session, task_id, turn_id, goal, 3, &mut decisions).unwrap();
+
+    assert_eq!(decision_inputs.len(), 3);
+    assert!(decision_inputs
+        .iter()
+        .all(|(received_goal, _)| received_goal == goal));
+    assert!(decision_inputs[0].1.is_empty());
+    assert_eq!(decision_inputs[1].1, result.observations()[..1]);
+    assert_eq!(decision_inputs[2].1, result.observations());
+    assert_eq!(result.actions_taken(), 3);
+    assert_eq!(result.stop_reason(), GoalTurnStopReason::Completed);
+    assert_eq!(
+        result.observations(),
+        &[
+            WorkspaceObservation::FileRead {
+                path: PathBuf::from("first.txt"),
+                contents: "first".to_owned(),
+            },
+            WorkspaceObservation::FileCreated {
+                path: PathBuf::from("created.txt"),
+                bytes_written,
+            },
+        ]
+    );
+    assert_eq!(result.read_result(), "first");
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("created.txt")).unwrap(),
+        contents
+    );
+
+    let task = session.get_task(task_id).unwrap();
+    let turn = task.get_turn(turn_id).unwrap();
+    assert_eq!(turn.state(), TurnState::Succeeded);
+    assert_eq!(turn.outcome(), Some(result.outcome()));
+    assert_eq!(
+        turn.activity_history(),
+        [
+            TurnActivitySummary::FileRead { bytes_read: 5 },
+            TurnActivitySummary::FileCreated { bytes_written },
+            TurnActivitySummary::Completed,
+        ]
+    );
+    assert!(!format!("{:?}", turn.activity_history()).contains(contents));
+    assert_eq!(
+        task.activity_history()
+            .iter()
+            .map(|event| event.summary())
+            .collect::<Vec<_>>(),
+        turn.activity_history()
+    );
+    assert_eq!(
+        task.history().last().unwrap().transition(),
+        TaskHistoryTransition::Turn {
+            turn_id,
+            previous_state: TurnState::Running,
+            new_state: TurnState::Succeeded,
+        }
+    );
+}
+
+#[test]
+fn bounded_goal_turn_creation_counts_toward_action_budget() {
+    let workspace = TempDir::new();
+    let contents = "private file text";
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) = with_current_dir(workspace.path(), || {
+        running_turn(&mut session, "Create one file within the budget")
+    });
+    let mut decisions = 0;
+    let mut decision_source = |_goal: &str, _observations: &[WorkspaceObservation]| {
+        decisions += 1;
+        WorkspaceAction::CreateFile {
+            path: PathBuf::from("created.txt"),
+            contents: contents.to_owned(),
+        }
+    };
+
+    let result = run_goal_turn_with_budget(
+        &mut session,
+        task_id,
+        turn_id,
+        "Create one file within the budget",
+        1,
+        &mut decision_source,
+    )
+    .unwrap();
+
+    assert_eq!(decisions, 1);
+    assert_eq!(result.actions_taken(), 1);
+    assert_eq!(
+        result.stop_reason(),
+        GoalTurnStopReason::ActionBudgetExhausted
+    );
+    assert_eq!(
+        result.observations(),
+        &[WorkspaceObservation::FileCreated {
+            path: PathBuf::from("created.txt"),
+            bytes_written: contents.len(),
+        }]
+    );
+    assert_eq!(
+        result.outcome(),
+        &TurnOutcome::Failure {
+            detail: "action budget exhausted after 1 actions".to_owned(),
+        }
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("created.txt")).unwrap(),
+        contents
+    );
+    let task = session.get_task(task_id).unwrap();
+    let turn = task.get_turn(turn_id).unwrap();
+    assert_eq!(turn.state(), TurnState::Failed);
+    assert_eq!(turn.outcome(), Some(result.outcome()));
+    assert_eq!(
+        turn.activity_history(),
+        [
+            TurnActivitySummary::FileCreated {
+                bytes_written: contents.len(),
+            },
+            TurnActivitySummary::BudgetExhausted { actions: 1 },
+        ]
+    );
+    assert!(!format!("{:?}", turn.activity_history()).contains(contents));
+    assert_eq!(
+        task.activity_history()
+            .iter()
+            .map(|event| event.summary())
+            .collect::<Vec<_>>(),
+        turn.activity_history()
+    );
+    assert_eq!(
+        task.history().last().unwrap().transition(),
+        TaskHistoryTransition::Turn {
+            turn_id,
+            previous_state: TurnState::Running,
+            new_state: TurnState::Failed,
+        }
+    );
+}
+
+#[test]
+fn bounded_goal_turn_rejects_unsafe_file_creation_and_records_failure() {
+    let root = TempDir::new();
+    let workspace = root.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let outside_file = root.path().join("outside.txt");
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) = with_current_dir(&workspace, || {
+        running_turn(&mut session, "Create a safe file")
+    });
+    let mut decisions =
+        |_goal: &str, _observations: &[WorkspaceObservation]| WorkspaceAction::CreateFile {
+            path: PathBuf::from("../outside.txt"),
+            contents: "must not be written".to_owned(),
+        };
+
+    let result = run_goal_turn_with_budget(
+        &mut session,
+        task_id,
+        turn_id,
+        "Create a safe file",
+        2,
+        &mut decisions,
+    )
+    .unwrap();
+
+    assert_eq!(result.actions_taken(), 1);
+    assert_eq!(result.stop_reason(), GoalTurnStopReason::ActionFailed);
+    assert!(matches!(
+        result.observations(),
+        [WorkspaceObservation::FileCreationFailed {
+            path,
+            error: krypper::agent_loop::GoalTurnError::WorkspaceWrite(
+                WorkspaceWriteError::File { message }
+            ),
+        }] if path == &PathBuf::from("../outside.txt")
+            && message.contains("path must stay inside the current directory")
+    ));
+    assert!(!format!("{:?}", result.observations()).contains("must not be written"));
+    assert!(!outside_file.exists());
+
+    let task = session.get_task(task_id).unwrap();
+    let turn = task.get_turn(turn_id).unwrap();
+    assert_eq!(turn.state(), TurnState::Failed);
+    assert_eq!(turn.outcome(), Some(result.outcome()));
+    assert!(matches!(
+        result.outcome(),
+        TurnOutcome::Failure { detail }
+            if detail.contains("path must stay inside the current directory")
+    ));
+    assert_eq!(
+        turn.activity_history(),
+        [TurnActivitySummary::ActionFailed {
+            action: TurnActivityAction::CreateFile,
+        }]
+    );
+    assert_eq!(
+        task.activity_history()[0].summary(),
+        turn.activity_history()[0]
+    );
+    assert_eq!(
+        task.history().last().unwrap().transition(),
+        TaskHistoryTransition::Turn {
+            turn_id,
+            previous_state: TurnState::Running,
+            new_state: TurnState::Failed,
+        }
+    );
+}
+
+#[test]
+fn bounded_goal_turn_does_not_overwrite_an_existing_file() {
+    let workspace = TempDir::new();
+    let path = workspace.path().join("existing.txt");
+    fs::write(&path, "original").unwrap();
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) = with_current_dir(workspace.path(), || {
+        running_turn(&mut session, "Do not overwrite the existing file")
+    });
+    let mut decisions =
+        |_goal: &str, _observations: &[WorkspaceObservation]| WorkspaceAction::CreateFile {
+            path: PathBuf::from("existing.txt"),
+            contents: "replacement".to_owned(),
+        };
+
+    let result = run_goal_turn_with_budget(
+        &mut session,
+        task_id,
+        turn_id,
+        "Do not overwrite the existing file",
+        2,
+        &mut decisions,
+    )
+    .unwrap();
+
+    assert_eq!(result.actions_taken(), 1);
+    assert_eq!(result.stop_reason(), GoalTurnStopReason::ActionFailed);
+    assert!(matches!(
+        result.observations(),
+        [WorkspaceObservation::FileCreationFailed {
+            path,
+            error: krypper::agent_loop::GoalTurnError::WorkspaceWrite(
+                WorkspaceWriteError::File { message }
+            ),
+        }] if path == &PathBuf::from("existing.txt") && message.contains("already exists")
+    ));
+    assert_eq!(fs::read_to_string(path).unwrap(), "original");
+    let turn = session
+        .get_task(task_id)
+        .unwrap()
+        .get_turn(turn_id)
+        .unwrap();
+    assert_eq!(turn.state(), TurnState::Failed);
+    assert_eq!(turn.outcome(), Some(result.outcome()));
+}
+
+#[test]
 fn bounded_goal_turn_stops_when_the_action_budget_is_exhausted() {
     let workspace = TempDir::new();
     fs::write(workspace.path().join("note.txt"), "observation").unwrap();
@@ -605,8 +890,9 @@ fn bounded_goal_turn_validates_ownership_and_state_before_deciding() {
     let mut decision_calls = 0;
     let mut decisions = |_goal: &str, _observations: &[WorkspaceObservation]| {
         decision_calls += 1;
-        WorkspaceAction::Complete {
-            result: "must not run".to_owned(),
+        WorkspaceAction::CreateFile {
+            path: PathBuf::from("must-not-be-created.txt"),
+            contents: "must not be written".to_owned(),
         }
     };
 
@@ -639,6 +925,7 @@ fn bounded_goal_turn_validates_ownership_and_state_before_deciding() {
         .unwrap()
         .activity_history()
         .is_empty());
+    assert!(!workspace.path().join("must-not-be-created.txt").exists());
 
     let error = run_goal_turn_with_budget(
         &mut session,
@@ -664,6 +951,7 @@ fn bounded_goal_turn_validates_ownership_and_state_before_deciding() {
     ));
     drop(decisions);
     assert_eq!(decision_calls, 0);
+    assert!(!workspace.path().join("must-not-be-created.txt").exists());
     assert_eq!(session.get_task(task_id).unwrap().history(), history);
     assert_eq!(
         session.get_task(task_id).unwrap().activity_history(),
