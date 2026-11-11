@@ -9,6 +9,7 @@ use std::path::{Component, Path, PathBuf};
 
 const MAX_FILE_SIZE: usize = 1024 * 1024;
 const MAX_SYMLINKS: usize = 40;
+const MAX_TASK_DIRECTORY_ENTRIES: usize = 1024;
 
 #[derive(Debug)]
 pub(crate) struct CliError(String);
@@ -78,26 +79,29 @@ pub(crate) fn list_directory(path: &OsStr) -> Result<Vec<String>, CliError> {
     })
 }
 
-pub(crate) fn list_directory_names_at(
+pub(crate) fn list_task_directory_names_at(
     root: &WorkspaceRoot,
     path: &OsStr,
 ) -> Result<Vec<OsString>, CliError> {
-    list_directory_entries_at(root, path)
-        .map(|names| names.into_iter().map(|name| name.name).collect())
+    list_open_directory_with_limit(
+        open_workspace_relative(root, path, true)?,
+        Some(MAX_TASK_DIRECTORY_ENTRIES),
+    )
+    .map(|names| names.into_iter().map(|name| name.name).collect())
 }
 
 fn list_directory_entries(path: &OsStr) -> Result<Vec<ListedName>, CliError> {
     list_open_directory(open_cwd_relative(path, true)?)
 }
 
-fn list_directory_entries_at(
-    root: &WorkspaceRoot,
-    path: &OsStr,
-) -> Result<Vec<ListedName>, CliError> {
-    list_open_directory(open_workspace_relative(root, path, true)?)
+fn list_open_directory(directory: File) -> Result<Vec<ListedName>, CliError> {
+    list_open_directory_with_limit(directory, None)
 }
 
-fn list_open_directory(directory: File) -> Result<Vec<ListedName>, CliError> {
+fn list_open_directory_with_limit(
+    directory: File,
+    maximum_entries: Option<usize>,
+) -> Result<Vec<ListedName>, CliError> {
     let duplicate = duplicate_fd(directory.as_raw_fd())
         .map_err(|_| CliError::new("unable to list directory"))?;
     let raw = duplicate.into_raw_fd();
@@ -124,11 +128,12 @@ fn list_open_directory(directory: File) -> Result<Vec<ListedName>, CliError> {
             break;
         }
         // SAFETY: `d_name` is NUL-terminated by `readdir`, and is copied before the next call.
-        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }
-            .to_bytes()
-            .to_vec();
+        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
         if name != b"." && name != b".." {
-            names.push(ListedName::new(name));
+            if maximum_entries.is_some_and(|maximum| names.len() == maximum) {
+                return Err(CliError::new("directory exceeds 1,024 entries"));
+            }
+            names.push(ListedName::new(name.to_vec()));
         }
     }
 
