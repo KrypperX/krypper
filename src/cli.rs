@@ -417,6 +417,9 @@ fn parse_task_action(line: &str) -> WorkspaceAction {
     let invalid = || WorkspaceAction::Unsupported {
         action: format!("invalid input: {line}"),
     };
+    let invalid_replace = || WorkspaceAction::Unsupported {
+        action: "invalid replace action".to_owned(),
+    };
 
     match name {
         "read" => arguments
@@ -449,6 +452,26 @@ fn parse_task_action(line: &str) -> WorkspaceAction {
             WorkspaceAction::CreateFile {
                 path: PathBuf::from(path),
                 contents: arguments[separator + 1..].to_owned(),
+            }
+        }
+        "replace" => {
+            let Some(arguments) = arguments else {
+                return invalid_replace();
+            };
+            let arguments = arguments.trim_start();
+            let Some(separator) = arguments.find(char::is_whitespace) else {
+                return invalid_replace();
+            };
+            let path = &arguments[..separator];
+            let Some((match_text, replacement_text)) =
+                arguments[separator + 1..].split_once(" => ")
+            else {
+                return invalid_replace();
+            };
+            WorkspaceAction::ReplaceText {
+                path: PathBuf::from(path),
+                match_text: match_text.to_owned(),
+                replacement_text: replacement_text.to_owned(),
             }
         }
         "complete" => WorkspaceAction::Complete {
@@ -499,10 +522,27 @@ fn write_observation(
                 path.display()
             )?;
         }
+        WorkspaceObservation::TextReplaced {
+            path,
+            bytes_written,
+        } => {
+            writeln!(
+                output,
+                "Observation {number}: replaced text in {} ({bytes_written} bytes)",
+                path.display()
+            )?;
+        }
         WorkspaceObservation::FileCreationFailed { path, error } => {
             writeln!(
                 output,
                 "Observation {number}: create {} failed: {error}",
+                path.display()
+            )?;
+        }
+        WorkspaceObservation::TextReplacementFailed { path, error } => {
+            writeln!(
+                output,
+                "Observation {number}: replacement in {} failed: {error}",
                 path.display()
             )?;
         }
@@ -714,7 +754,7 @@ fn write_root_help(output: &mut dyn Write) -> io::Result<()> {
 
 fn write_task_help(output: &mut dyn Write) -> io::Result<()> {
     output.write_all(
-        b"usage: krypper task [-h] --goal GOAL --max-actions N\n\nrun a caller-directed task across bounded turns in the current directory\n\noptions:\n  --goal GOAL          required task goal\n  --max-actions N      required positive action limit for the whole task\n  -h, --help           show this help message and exit\n\nEnter one action per line on standard input:\n  read PATH\n  list [PATH]\n  create PATH TEXT\n  continue\n  complete [RESULT]\n  cancel\n\ncontinue ends this turn and starts another while action budget remains.\ncomplete ends the task successfully. Invalid input, end-of-input, action failures,\nand budget exhaustion fail the task. Explicit cancellation reports a cancelled\ntask and exits with status 130.\n",
+        b"usage: krypper task [-h] --goal GOAL --max-actions N\n\nrun a caller-directed task across bounded turns in the current directory\n\noptions:\n  --goal GOAL          required task goal\n  --max-actions N      required positive action limit for the whole task\n  -h, --help           show this help message and exit\n\nEnter one action per line on standard input:\n  read PATH\n  list [PATH]\n  create PATH TEXT\n  replace PATH MATCH_TEXT => REPLACEMENT_TEXT\n  continue\n  complete [RESULT]\n  cancel\n\nreplace requires one non-empty exact match; it prints only path and byte-count metadata.\ncontinue ends this turn and starts another while action budget remains.\ncomplete ends the task successfully. Invalid input, end-of-input, action failures,\nand budget exhaustion fail the task. Explicit cancellation reports a cancelled\ntask and exits with status 130.\n",
     )
 }
 
