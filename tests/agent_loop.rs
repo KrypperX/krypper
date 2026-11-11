@@ -169,6 +169,79 @@ fn rejected_workspace_read_fails_the_turn_with_a_matching_outcome() {
 }
 
 #[test]
+fn over_limit_directory_listing_fails_once_without_retaining_names_or_deciding_again() {
+    let workspace = TempDir::new();
+    for index in 0..1025 {
+        fs::write(workspace.path().join(format!("entry-{index:04}")), "").unwrap();
+    }
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) = with_current_dir(workspace.path(), || {
+        running_turn(&mut session, "List the workspace")
+    });
+    let mut decisions_called = 0;
+    let mut decisions = |_: &str, _: &[WorkspaceObservation]| {
+        decisions_called += 1;
+        if decisions_called == 1 {
+            WorkspaceAction::ListDirectory {
+                path: PathBuf::from("."),
+            }
+        } else {
+            WorkspaceAction::Complete {
+                result: "should not run".to_owned(),
+            }
+        }
+    };
+
+    let result = run_goal_turn_with_budget(
+        &mut session,
+        task_id,
+        turn_id,
+        "List the workspace",
+        3,
+        &mut decisions,
+    )
+    .unwrap();
+
+    assert_eq!(decisions_called, 1);
+    assert_eq!(result.actions_taken(), 1);
+    assert_eq!(result.stop_reason(), GoalTurnStopReason::ActionFailed);
+    let [WorkspaceObservation::ActionFailed { action, error }] = result.observations() else {
+        panic!("over-limit listing must produce one failed observation");
+    };
+    assert!(matches!(action, WorkspaceAction::ListDirectory { .. }));
+    let failure = error.to_string();
+    assert!(
+        failure.contains("directory exceeds 1,024 entries"),
+        "{failure}"
+    );
+    let expected_outcome = TurnOutcome::Failure {
+        detail: failure.clone(),
+    };
+    assert_eq!(result.outcome(), Some(&expected_outcome));
+    assert!(!format!("{:?}", result.observations()).contains("entry-"));
+
+    let task = session.get_task(task_id).unwrap();
+    let turn = task.get_turn(turn_id).unwrap();
+    assert_eq!(turn.state(), TurnState::Failed);
+    assert_eq!(turn.outcome(), Some(&expected_outcome));
+    let failed_activity = [TurnActivitySummary::ActionFailed {
+        action: TurnActivityAction::ListDirectory,
+    }];
+    assert_eq!(turn.activity_history(), failed_activity);
+    assert_eq!(task.activity_history()[0].summary(), failed_activity[0]);
+    assert!(!format!("{:?}", task.history()).contains("entry-"));
+    assert!(!format!("{:?}", task.activity_history()).contains("entry-"));
+    assert_eq!(
+        task.history().last().unwrap().transition(),
+        TaskHistoryTransition::Turn {
+            turn_id,
+            previous_state: TurnState::Running,
+            new_state: TurnState::Failed,
+        }
+    );
+}
+
+#[test]
 fn foreign_turn_errors_leave_both_tasks_and_histories_unchanged() {
     let workspace = TempDir::new();
     let mut session = TaskSession::new();

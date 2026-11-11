@@ -1,5 +1,5 @@
 use crate::file_safety::{
-    capture_workspace_root, create_text_file_at, list_directory_names_at, read_text_file_at,
+    capture_workspace_root, create_text_file_at, list_task_directory_names_at, read_text_file_at,
     WorkspaceRoot,
 };
 use std::ffi::OsString;
@@ -1248,7 +1248,8 @@ impl TaskSession {
     /// The relative path is resolved from this task's creation directory and follows the same
     /// workspace boundary, symlink, missing-path, and directory policies as the `list` command.
     /// Names use the same deterministic order as `list` and can be used directly as path
-    /// components. This operation borrows the session immutably and does not change lifecycle
+    /// components. At most 1,024 immediate names are returned; larger directories fail without a
+    /// partial result. This operation borrows the session immutably and does not change lifecycle
     /// state or history.
     pub fn list_workspace_directory(
         &self,
@@ -1265,7 +1266,7 @@ impl TaskSession {
                 .map_err(|message| WorkspaceListError::Directory {
                     message: format!("task workspace could not be resolved: {message}"),
                 })?;
-        list_directory_names_at(root, path.as_os_str()).map_err(|error| {
+        list_task_directory_names_at(root, path.as_os_str()).map_err(|error| {
             WorkspaceListError::Directory {
                 message: error.message().to_owned(),
             }

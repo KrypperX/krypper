@@ -281,6 +281,22 @@ fn list_defaults_to_current_directory_and_includes_hidden_names_in_sorted_order(
 }
 
 #[test]
+fn standalone_list_keeps_output_for_more_than_1024_entries() {
+    let directory = TempDir::new();
+    for index in 0..1025 {
+        fs::write(directory.path().join(format!("entry-{index:04}")), "").unwrap();
+    }
+
+    let output = run(Some(directory.path()), &["list"]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let names = stdout(&output).lines().collect::<Vec<_>>();
+    assert_eq!(names.len(), 1025);
+    assert_eq!(names.first(), Some(&"\"entry-0000\""));
+    assert_eq!(names.last(), Some(&"\"entry-1024\""));
+}
+
+#[test]
 fn list_shows_only_immediate_names_and_escapes_control_characters() {
     let directory = TempDir::new();
     let nested = directory.path().join("nested");
