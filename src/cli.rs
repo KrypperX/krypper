@@ -306,6 +306,28 @@ fn run_task(
         result.actions_taken(),
         max_actions
     )?;
+
+    writeln!(output, "Task lifecycle history (metadata only):")?;
+    for event in task.events() {
+        writeln!(
+            output,
+            "- sequence {}: task_transition {} -> {}",
+            event.sequence(),
+            event.previous_state(),
+            event.new_state()
+        )?;
+    }
+    writeln!(output, "Turn lifecycle history (metadata only):")?;
+    for event in turn.events() {
+        writeln!(
+            output,
+            "- sequence {}: turn_transition {} -> {}",
+            event.sequence(),
+            event.previous_state(),
+            event.new_state()
+        )?;
+    }
+
     writeln!(output, "Activity history (metadata only):")?;
     for summary in turn.activity_history() {
         writeln!(output, "- {summary:?}")?;
