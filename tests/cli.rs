@@ -67,6 +67,35 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+fn assert_lifecycle_transitions(output: &str, terminal_state: &str) {
+    let task_history_start = output
+        .find("Task lifecycle history (metadata only):")
+        .unwrap();
+    let turn_history_start = output
+        .find("Turn lifecycle history (metadata only):")
+        .unwrap();
+    let activity_history_start = output.find("Activity history (metadata only):").unwrap();
+
+    assert!(task_history_start < turn_history_start);
+    assert!(turn_history_start < activity_history_start);
+    assert_eq!(
+        &output[task_history_start..turn_history_start],
+        format!(
+            "Task lifecycle history (metadata only):\n\
+- sequence 1: task_transition pending -> running\n\
+- sequence 2: task_transition running -> {terminal_state}\n"
+        )
+    );
+    assert_eq!(
+        &output[turn_history_start..activity_history_start],
+        format!(
+            "Turn lifecycle history (metadata only):\n\
+- sequence 1: turn_transition pending -> running\n\
+- sequence 2: turn_transition running -> {terminal_state}\n"
+        )
+    );
+}
+
 #[test]
 fn help_prints_usage_and_succeeds() {
     let output = run(None, &["--help"]);
@@ -555,6 +584,8 @@ fn task_shows_ordered_observations_completion_and_metadata_history() {
     assert!(output.contains("brief contents"));
     assert!(output.contains("Turn outcome: success: saved"));
     assert!(output.contains("Actions: 4/4"));
+    assert!(output.contains("Task state: succeeded"));
+    assert_lifecycle_transitions(output, "succeeded");
     let history = output
         .split("Activity history (metadata only):")
         .nth(1)
@@ -586,6 +617,7 @@ fn task_cancel_stops_before_reading_or_running_a_later_action() {
     assert!(output_text.contains("Turn state: cancelled"));
     assert!(output_text.contains("Turn outcome: cancelled by caller"));
     assert!(output_text.contains("Actions: 1/3"));
+    assert_lifecycle_transitions(output_text, "cancelled");
     assert!(output_text.contains("- Cancelled"));
     assert!(!output_text.contains("Turn outcome: success"));
     assert!(!output_text.contains("Turn outcome: failure"));
@@ -651,6 +683,8 @@ fn task_exhausts_the_action_budget_with_one_failed_terminal_outcome() {
     assert!(output.contains("Turn state: failed"));
     assert!(output.contains("Turn outcome: failure: action budget exhausted after 2 actions"));
     assert!(output.contains("Actions: 2/2"));
+    assert!(output.contains("Task state: failed"));
+    assert_lifecycle_transitions(output, "failed");
     assert!(!output.contains("too late"));
 }
 
