@@ -794,6 +794,91 @@ fn task_completes_a_running_turn_with_a_success_outcome() {
 }
 
 #[test]
+fn completed_turn_can_be_followed_by_a_new_turn_on_the_same_running_task() {
+    let mut session = TaskSession::new();
+    let (task_id, first_turn_id) = running_turn(&mut session);
+    session
+        .complete_turn(
+            task_id,
+            first_turn_id,
+            TurnOutcome::Success {
+                result: "continued".to_owned(),
+            },
+        )
+        .unwrap();
+
+    let task = session.get_task_mut(task_id).unwrap();
+    assert_eq!(task.state(), TaskState::Running);
+    let second_turn_id = task.create_turn().unwrap();
+    task.transition_turn(second_turn_id, TurnState::Running)
+        .unwrap();
+    task.complete_turn(
+        second_turn_id,
+        TurnOutcome::Success {
+            result: "finished".to_owned(),
+        },
+    )
+    .unwrap();
+    task.transition(TaskState::Succeeded).unwrap();
+
+    let task = session.get_task(task_id).unwrap();
+    assert_eq!(task.state(), TaskState::Succeeded);
+    assert_eq!(task.turns().len(), 2);
+    assert_eq!(
+        task.get_turn(first_turn_id).unwrap().state(),
+        TurnState::Succeeded
+    );
+    assert_eq!(
+        task.get_turn(second_turn_id).unwrap().state(),
+        TurnState::Succeeded
+    );
+    assert_eq!(
+        task.history()
+            .iter()
+            .map(TaskHistoryEvent::transition)
+            .collect::<Vec<_>>(),
+        [
+            TaskHistoryTransition::Task {
+                previous_state: TaskState::Pending,
+                new_state: TaskState::Running,
+            },
+            TaskHistoryTransition::TurnCreated {
+                turn_id: first_turn_id,
+                initial_state: TurnState::Pending,
+            },
+            TaskHistoryTransition::Turn {
+                turn_id: first_turn_id,
+                previous_state: TurnState::Pending,
+                new_state: TurnState::Running,
+            },
+            TaskHistoryTransition::Turn {
+                turn_id: first_turn_id,
+                previous_state: TurnState::Running,
+                new_state: TurnState::Succeeded,
+            },
+            TaskHistoryTransition::TurnCreated {
+                turn_id: second_turn_id,
+                initial_state: TurnState::Pending,
+            },
+            TaskHistoryTransition::Turn {
+                turn_id: second_turn_id,
+                previous_state: TurnState::Pending,
+                new_state: TurnState::Running,
+            },
+            TaskHistoryTransition::Turn {
+                turn_id: second_turn_id,
+                previous_state: TurnState::Running,
+                new_state: TurnState::Succeeded,
+            },
+            TaskHistoryTransition::Task {
+                previous_state: TaskState::Running,
+                new_state: TaskState::Succeeded,
+            },
+        ]
+    );
+}
+
+#[test]
 fn task_session_completes_a_running_turn_with_a_failure_outcome() {
     let mut session = TaskSession::new();
     let (task_id, turn_id) = running_turn(&mut session);
