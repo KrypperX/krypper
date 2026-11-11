@@ -1,5 +1,5 @@
 use krypper::agent_loop::{
-    run_goal_turn, run_goal_turn_with_budget, GoalTurnStopReason, WorkspaceAction,
+    run_goal_turn, run_goal_turn_with_budget, GoalTurnError, GoalTurnStopReason, WorkspaceAction,
     WorkspaceObservation,
 };
 use krypper::task_lifecycle::{
@@ -573,6 +573,160 @@ fn bounded_goal_turn_creates_a_file_with_metadata_and_ordered_observations() {
             previous_state: TurnState::Running,
             new_state: TurnState::Succeeded,
         }
+    );
+}
+
+#[test]
+fn bounded_goal_turn_replaces_unique_text_and_retains_only_metadata() {
+    let workspace = TempDir::new();
+    let match_text = "PRIVATE_MATCH_71";
+    let replacement_text = "PRIVATE_REPLACEMENT_83";
+    fs::write(
+        workspace.path().join("note.txt"),
+        format!("before {match_text} after"),
+    )
+    .unwrap();
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) = with_current_dir(workspace.path(), || {
+        running_turn(&mut session, "Replace one exact phrase")
+    });
+    let mut decisions_called = 0;
+    let mut decisions = |_goal: &str, observations: &[WorkspaceObservation]| {
+        decisions_called += 1;
+        if observations.is_empty() {
+            WorkspaceAction::ReplaceText {
+                path: PathBuf::from("note.txt"),
+                match_text: match_text.to_owned(),
+                replacement_text: replacement_text.to_owned(),
+            }
+        } else {
+            WorkspaceAction::Complete {
+                result: "replacement finished".to_owned(),
+            }
+        }
+    };
+
+    let result = run_goal_turn_with_budget(
+        &mut session,
+        task_id,
+        turn_id,
+        "Replace one exact phrase",
+        3,
+        &mut decisions,
+    )
+    .unwrap();
+
+    assert_eq!(decisions_called, 2);
+    assert_eq!(result.actions_taken(), 2);
+    assert_eq!(result.stop_reason(), GoalTurnStopReason::Completed);
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("note.txt")).unwrap(),
+        format!("before {replacement_text} after")
+    );
+    assert_eq!(
+        result.observations(),
+        &[WorkspaceObservation::TextReplaced {
+            path: PathBuf::from("note.txt"),
+            bytes_written: format!("before {replacement_text} after").len(),
+        }]
+    );
+    let task = session.get_task(task_id).unwrap();
+    let turn = task.get_turn(turn_id).unwrap();
+    let activity = [
+        TurnActivitySummary::TextReplaced {
+            bytes_written: format!("before {replacement_text} after").len(),
+        },
+        TurnActivitySummary::Completed,
+    ];
+    assert_eq!(turn.activity_history(), activity);
+    assert_eq!(
+        task.activity_history()
+            .iter()
+            .map(|event| event.summary())
+            .collect::<Vec<_>>(),
+        activity
+    );
+    let retained = format!(
+        "{:?} {:?} {:?}",
+        result.observations(),
+        result.outcome(),
+        turn.activity_history()
+    );
+    assert!(!retained.contains(match_text));
+    assert!(!retained.contains(replacement_text));
+}
+
+#[test]
+fn failed_replacement_consumes_one_action_records_metadata_and_stops_decisions() {
+    let workspace = TempDir::new();
+    let match_text = "PRIVATE_MATCH_92";
+    let replacement_text = "PRIVATE_REPLACEMENT_47";
+    fs::write(
+        workspace.path().join("note.txt"),
+        format!("{match_text} {match_text}"),
+    )
+    .unwrap();
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) = with_current_dir(workspace.path(), || {
+        running_turn(&mut session, "Reject an ambiguous replacement")
+    });
+    let mut decisions_called = 0;
+    let mut decisions = |_goal: &str, _observations: &[WorkspaceObservation]| {
+        decisions_called += 1;
+        WorkspaceAction::ReplaceText {
+            path: PathBuf::from("note.txt"),
+            match_text: match_text.to_owned(),
+            replacement_text: replacement_text.to_owned(),
+        }
+    };
+
+    let result = run_goal_turn_with_budget(
+        &mut session,
+        task_id,
+        turn_id,
+        "Reject an ambiguous replacement",
+        3,
+        &mut decisions,
+    )
+    .unwrap();
+
+    assert_eq!(decisions_called, 1);
+    assert_eq!(result.actions_taken(), 1);
+    assert_eq!(result.stop_reason(), GoalTurnStopReason::ActionFailed);
+    assert!(matches!(
+        result.observations(),
+        [WorkspaceObservation::TextReplacementFailed {
+            path,
+            error: GoalTurnError::WorkspaceReplace(
+                krypper::task_lifecycle::WorkspaceReplaceError::File { message }
+            ),
+        }] if path == &PathBuf::from("note.txt")
+            && message.contains("match text is ambiguous")
+    ));
+    let retained = format!(
+        "{:?} {:?} {:?}",
+        result.observations(),
+        result.outcome(),
+        session.get_task(task_id).unwrap().activity_history()
+    );
+    assert!(!retained.contains(match_text));
+    assert!(!retained.contains(replacement_text));
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("note.txt")).unwrap(),
+        format!("{match_text} {match_text}")
+    );
+    let task = session.get_task(task_id).unwrap();
+    let turn = task.get_turn(turn_id).unwrap();
+    assert_eq!(turn.state(), TurnState::Failed);
+    assert_eq!(
+        turn.activity_history(),
+        [TurnActivitySummary::ActionFailed {
+            action: TurnActivityAction::ReplaceText,
+        }]
+    );
+    assert_eq!(
+        task.activity_history()[0].summary(),
+        turn.activity_history()[0]
     );
 }
 
