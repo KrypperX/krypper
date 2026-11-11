@@ -18,6 +18,8 @@ pub enum WorkspaceAction {
     CreateFile { path: PathBuf, contents: String },
     /// Finish the turn with an explicit result.
     Complete { result: String },
+    /// Finish this turn and let the same task continue in a new turn.
+    Continue,
     /// Cancel the active task and turn.
     Cancel,
     /// An unsupported action, returned as a clear failed observation.
@@ -50,6 +52,8 @@ pub enum WorkspaceObservation {
 pub enum GoalTurnStopReason {
     /// The decision source explicitly completed the turn.
     Completed,
+    /// The decision source ended this turn and requested another bounded turn.
+    Continued,
     /// The caller's maximum number of decisions was reached.
     ActionBudgetExhausted,
     /// A workspace action failed and the turn was recorded as failed.
@@ -193,6 +197,7 @@ impl std::error::Error for GoalTurnError {
 enum ActionExecution {
     Observation(WorkspaceObservation),
     Complete(String),
+    Continue,
     Cancel,
     Failed {
         observation: WorkspaceObservation,
@@ -234,6 +239,20 @@ pub fn run_goal_turn<D: DecisionSource + ?Sized>(
                 actions_taken: 1,
                 stop_reason: GoalTurnStopReason::Completed,
                 outcome: TurnOutcome::Success { result },
+            },
+        ),
+        ActionExecution::Continue => finish_turn(
+            session,
+            task_id,
+            turn_id,
+            Vec::new(),
+            TurnCompletionData {
+                activity: vec![TurnActivitySummary::Continued],
+                actions_taken: 1,
+                stop_reason: GoalTurnStopReason::Continued,
+                outcome: TurnOutcome::Success {
+                    result: "continued".to_owned(),
+                },
             },
         ),
         ActionExecution::Cancel => {
@@ -325,6 +344,44 @@ pub fn run_goal_turn_with_budget<D: BoundedDecisionSource + ?Sized>(
                     },
                 );
             }
+            ActionExecution::Continue => {
+                activity.push(TurnActivitySummary::Continued);
+                if actions_taken == max_actions {
+                    activity.push(TurnActivitySummary::BudgetExhausted {
+                        actions: actions_taken,
+                    });
+                    return finish_turn(
+                        session,
+                        task_id,
+                        turn_id,
+                        observations,
+                        TurnCompletionData {
+                            activity,
+                            actions_taken,
+                            stop_reason: GoalTurnStopReason::ActionBudgetExhausted,
+                            outcome: TurnOutcome::Failure {
+                                detail: format!(
+                                    "action budget exhausted after {actions_taken} actions"
+                                ),
+                            },
+                        },
+                    );
+                }
+                return finish_turn(
+                    session,
+                    task_id,
+                    turn_id,
+                    observations,
+                    TurnCompletionData {
+                        activity,
+                        actions_taken,
+                        stop_reason: GoalTurnStopReason::Continued,
+                        outcome: TurnOutcome::Success {
+                            result: "continued".to_owned(),
+                        },
+                    },
+                );
+            }
             ActionExecution::Cancel => {
                 return cancel_turn(
                     session,
@@ -402,6 +459,7 @@ fn summarize_observation(observation: &WorkspaceObservation) -> TurnActivitySumm
                 WorkspaceAction::ListDirectory { .. } => TurnActivityAction::ListDirectory,
                 WorkspaceAction::CreateFile { .. } => TurnActivityAction::CreateFile,
                 WorkspaceAction::Complete { .. }
+                | WorkspaceAction::Continue
                 | WorkspaceAction::Cancel
                 | WorkspaceAction::Unsupported { .. } => TurnActivityAction::Unsupported,
             };
@@ -481,6 +539,7 @@ fn execute_action(
             }
         }
         WorkspaceAction::Complete { result } => Ok(ActionExecution::Complete(result.clone())),
+        WorkspaceAction::Continue => Ok(ActionExecution::Continue),
         WorkspaceAction::Cancel => Ok(ActionExecution::Cancel),
         WorkspaceAction::Unsupported { action: name } => {
             let error = GoalTurnError::UnsupportedAction {
