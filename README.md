@@ -48,8 +48,9 @@ decision per line from standard input. Enter `read <path>`, `list [path]`,
 token, and the remaining line is its text. Read and list actions use the same
 workspace policy as the existing commands, while create is create-only and
 follows the same path and size limits as `write`. The CLI prints each
-observation before asking for the next action, then prints the terminal state,
-outcome, and metadata-only activity history. Invalid input, end-of-input, an
+observation before asking for the next action, then prints task and turn
+lifecycle transitions as metadata, the terminal states and outcome, the action
+count, and the metadata-only activity history. Invalid input, end-of-input, an
 action failure, or an exhausted action budget fails the turn and exits with
 status 1. Explicit completion counts as an action against the limit. Caller
 cancellation also consumes one action, cancels the task and active turn, and
