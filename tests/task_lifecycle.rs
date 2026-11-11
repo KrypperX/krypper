@@ -419,6 +419,31 @@ fn running_owned_turn_lists_immediate_entries_as_native_names_in_cli_order() {
 }
 
 #[test]
+fn running_owned_turn_lists_all_1024_immediate_entries() {
+    let temp = TempDir::new();
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    fs::write(workspace.join(".hidden"), "hidden").unwrap();
+    for index in 0..1023 {
+        fs::write(workspace.join(format!("entry-{index:04}")), "").unwrap();
+    }
+
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) = running_turn_in(&mut session, &workspace);
+    let entries = with_current_dir(&workspace, || {
+        session.list_workspace_directory(task_id, turn_id, Path::new("."))
+    })
+    .unwrap();
+
+    assert_eq!(entries.len(), 1024);
+    assert!(entries.contains(&".hidden".into()));
+    assert!(entries.contains(&"entry-0000".into()));
+    assert!(entries.contains(&"entry-1022".into()));
+    assert!(!entries.contains(&".".into()));
+    assert!(!entries.contains(&"..".into()));
+}
+
+#[test]
 fn workspace_listing_requires_an_existing_owned_running_turn() {
     let temp = TempDir::new();
     let mut session = TaskSession::new();
