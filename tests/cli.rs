@@ -602,6 +602,117 @@ fn task_shows_ordered_observations_completion_and_metadata_history() {
 }
 
 #[test]
+fn task_replaces_one_exact_match_and_prints_metadata_only() {
+    let directory = TempDir::new();
+    let match_text = "PRIVATE_MATCH_33";
+    let replacement_text = "PRIVATE_REPLACEMENT_44";
+    fs::write(
+        directory.path().join("note.txt"),
+        format!("before {match_text} after"),
+    )
+    .unwrap();
+    let input = format!("replace note.txt {match_text} => {replacement_text}\ncomplete done\n");
+
+    let output = run_with_input(
+        directory.path(),
+        &[
+            "task",
+            "--goal",
+            "Replace one exact match",
+            "--max-actions",
+            "2",
+        ],
+        input.as_bytes(),
+    );
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let stdout = stdout(&output);
+    assert!(stdout.contains("Observation 1: replaced text in note.txt"));
+    assert!(stdout.contains("Turn outcome: success: done"));
+    assert!(stdout.contains("Actions: 2/2"));
+    let activity = stdout
+        .split("Activity history (metadata only):")
+        .nth(1)
+        .unwrap();
+    assert!(activity.contains("TextReplaced { bytes_written:"));
+    assert!(activity.contains("Completed"));
+    assert!(!stdout.contains(match_text));
+    assert!(!stdout.contains(replacement_text));
+    assert!(!activity.contains(match_text));
+    assert!(!activity.contains(replacement_text));
+    assert_eq!(
+        fs::read_to_string(directory.path().join("note.txt")).unwrap(),
+        format!("before {replacement_text} after")
+    );
+}
+
+#[test]
+fn task_can_replace_a_match_with_empty_text() {
+    let directory = TempDir::new();
+    fs::write(directory.path().join("note.txt"), "remove this text").unwrap();
+
+    let output = run_with_input(
+        directory.path(),
+        &[
+            "task",
+            "--goal",
+            "Remove one exact match",
+            "--max-actions",
+            "2",
+        ],
+        b"replace note.txt remove this text => \ncomplete done\n",
+    );
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stdout(&output).contains("Observation 1: replaced text in note.txt (0 bytes)"));
+    assert_eq!(
+        fs::read_to_string(directory.path().join("note.txt")).unwrap(),
+        ""
+    );
+}
+
+#[test]
+fn task_rejects_ambiguous_replacement_once_without_printing_text_or_reading_again() {
+    let directory = TempDir::new();
+    let match_text = "PRIVATE_MATCH_57";
+    let replacement_text = "PRIVATE_REPLACEMENT_68";
+    fs::write(
+        directory.path().join("note.txt"),
+        format!("{match_text} {match_text}"),
+    )
+    .unwrap();
+    let input =
+        format!("replace note.txt {match_text} => {replacement_text}\ncomplete must_not_run\n");
+
+    let output = run_with_input(
+        directory.path(),
+        &[
+            "task",
+            "--goal",
+            "Reject an ambiguous match",
+            "--max-actions",
+            "3",
+        ],
+        input.as_bytes(),
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = stdout(&output);
+    assert!(stdout.contains("replacement in note.txt failed"));
+    assert!(stdout.contains("match text is ambiguous"));
+    assert!(stdout.contains("Actions: 1/3"));
+    assert!(stdout.contains("ActionFailed { action: ReplaceText }"));
+    assert!(!stdout.contains(match_text));
+    assert!(!stdout.contains(replacement_text));
+    assert!(!stdout.contains("must_not_run"));
+    assert_eq!(stderr(&output).matches("action ").count(), 1);
+    assert_eq!(
+        fs::read_to_string(directory.path().join("note.txt")).unwrap(),
+        format!("{match_text} {match_text}")
+    );
+}
+
+#[test]
 fn task_continue_starts_a_second_turn_with_the_same_workspace_and_shared_history() {
     let directory = TempDir::new();
 
@@ -1024,5 +1135,6 @@ fn task_help_lists_continue_and_describes_the_whole_task_budget() {
 
     assert!(output.status.success());
     assert!(stdout(&output).contains("  continue\n"));
+    assert!(stdout(&output).contains("replace PATH MATCH_TEXT => REPLACEMENT_TEXT"));
     assert!(stdout(&output).contains("action limit for the whole task"));
 }
