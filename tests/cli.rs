@@ -602,6 +602,183 @@ fn task_shows_ordered_observations_completion_and_metadata_history() {
 }
 
 #[test]
+fn task_continue_starts_a_second_turn_with_the_same_workspace_and_shared_history() {
+    let directory = TempDir::new();
+
+    let output = run_with_input(
+        directory.path(),
+        &[
+            "task",
+            "--goal",
+            "Carry work across turns",
+            "--max-actions",
+            "4",
+        ],
+        b"create carried.txt retained effect\ncontinue\nread carried.txt\ncomplete finished\n",
+    );
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let output_text = stdout(&output);
+    assert!(output_text.contains("Turn 1 result: success: continued"));
+    assert!(output_text.contains("Turn 2 result: success: finished"));
+    assert!(output_text.contains("Task outcome: succeeded"));
+    assert!(output_text.contains("Actions: 4/4"));
+    assert!(output_text.contains("Task/turn lifecycle history (metadata only):"));
+    let turn_one = output_text.find("Turn 1 result:").unwrap();
+    let turn_two = output_text.find("Turn 2 result:").unwrap();
+    let task_outcome = output_text.find("Task outcome:").unwrap();
+    assert!(turn_one < turn_two && turn_two < task_outcome);
+    let lifecycle = output_text
+        .split("Task/turn lifecycle history (metadata only):")
+        .nth(1)
+        .unwrap();
+    let first_turn_ended = lifecycle.find("sequence 4: Turn {").unwrap();
+    let second_turn_created = lifecycle.find("sequence 5: TurnCreated {").unwrap();
+    let task_completed = lifecycle.find("sequence 8: Task {").unwrap();
+    assert!(first_turn_ended < second_turn_created && second_turn_created < task_completed);
+    assert!(output_text.contains("Observation 1: created carried.txt (15 bytes)"));
+    assert!(output_text.contains("Observation 2: read carried.txt"));
+    assert!(output_text.contains("retained effect"));
+    let activity = output_text
+        .split("Activity history (metadata only):")
+        .nth(1)
+        .unwrap();
+    assert!(activity.contains("Continued"));
+    assert!(activity.contains("FileCreated { bytes_written: 15 }"));
+    assert!(activity.contains("FileRead { bytes_read: 15 }"));
+    assert!(!activity.contains("retained effect"));
+    assert_eq!(
+        fs::read_to_string(directory.path().join("carried.txt")).unwrap(),
+        "retained effect"
+    );
+    assert_eq!(stderr(&output).matches("action ").count(), 4);
+}
+
+#[test]
+fn task_continue_at_the_last_action_fails_without_starting_another_turn() {
+    let directory = TempDir::new();
+
+    let output = run_with_input(
+        directory.path(),
+        &[
+            "task",
+            "--goal",
+            "Stay within the budget",
+            "--max-actions",
+            "1",
+        ],
+        b"continue\ncomplete too late\n",
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    let output_text = stdout(&output);
+    assert!(output_text.contains("Turn outcome: failure: action budget exhausted after 1 actions"));
+    assert!(output_text.contains("Task outcome: failed"));
+    assert!(output_text.contains("Actions: 1/1"));
+    assert!(!output_text.contains("Turn 2 result:"));
+    assert!(!output_text.contains("Task/turn lifecycle history"));
+    assert!(!output_text.contains("too late"));
+    let activity = output_text
+        .split("Activity history (metadata only):")
+        .nth(1)
+        .unwrap();
+    assert!(activity.contains("Continue"));
+    assert!(activity.contains("BudgetExhausted { actions: 1 }"));
+    assert_eq!(stderr(&output).matches("action ").count(), 1);
+}
+
+#[test]
+fn task_shares_the_action_budget_across_continued_turns() {
+    let directory = TempDir::new();
+
+    let output = run_with_input(
+        directory.path(),
+        &[
+            "task",
+            "--goal",
+            "Share one action budget",
+            "--max-actions",
+            "3",
+        ],
+        b"create carried.txt retained\ncontinue\nread carried.txt\ncomplete too late\n",
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    let output_text = stdout(&output);
+    assert!(output_text.contains("Turn 1 result: success: continued"));
+    assert!(output_text.contains("Turn 2 result: failure: action budget exhausted after 1 actions"));
+    assert!(output_text.contains("Task outcome: failed"));
+    assert!(output_text.contains("Actions: 3/3"));
+    assert!(!output_text.contains("too late"));
+    assert_eq!(stderr(&output).matches("action ").count(), 3);
+    assert_eq!(
+        fs::read_to_string(directory.path().join("carried.txt")).unwrap(),
+        "retained"
+    );
+}
+
+#[test]
+fn task_cancellation_during_a_later_turn_keeps_earlier_results_and_effects() {
+    let directory = TempDir::new();
+
+    let output = run_with_input(
+        directory.path(),
+        &[
+            "task",
+            "--goal",
+            "Cancel after continuing",
+            "--max-actions",
+            "6",
+        ],
+        b"create earlier.txt earlier effect\nread earlier.txt\ncontinue\ncreate kept.txt retained\ncancel\ncreate ignored.txt ignored\n",
+    );
+
+    assert_eq!(output.status.code(), Some(130));
+    let output_text = stdout(&output);
+    assert!(output_text.contains("Turn 1 result: success: continued"));
+    assert!(output_text.contains("Turn 2 result: cancelled by caller"));
+    assert!(output_text.contains("Task outcome: cancelled by caller"));
+    assert!(output_text.contains("Actions: 5/6"));
+    assert!(output_text.contains("earlier effect"));
+    assert!(!output_text.contains("ignored.txt"));
+    assert_eq!(
+        fs::read_to_string(directory.path().join("kept.txt")).unwrap(),
+        "retained"
+    );
+    assert_eq!(
+        fs::read_to_string(directory.path().join("earlier.txt")).unwrap(),
+        "earlier effect"
+    );
+    assert!(!directory.path().join("ignored.txt").exists());
+    assert_eq!(stderr(&output).matches("action ").count(), 5);
+}
+
+#[test]
+fn task_failure_after_continue_stops_before_another_decision() {
+    let directory = TempDir::new();
+
+    let output = run_with_input(
+        directory.path(),
+        &[
+            "task",
+            "--goal",
+            "Stop after an invalid action",
+            "--max-actions",
+            "4",
+        ],
+        b"continue\ndelete note.txt\ncomplete too late\n",
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    let output_text = stdout(&output);
+    assert!(output_text.contains("Turn 1 result: success: continued"));
+    assert!(output_text.contains("Turn 2 result: failure:"));
+    assert!(output_text.contains("Task outcome: failed"));
+    assert!(!output_text.contains("too late"));
+    assert_eq!(stderr(&output).matches("action ").count(), 2);
+}
+
+#[test]
 fn task_cancel_stops_before_reading_or_running_a_later_action() {
     let directory = TempDir::new();
 
@@ -838,4 +1015,14 @@ fn task_requires_a_nonempty_goal_and_positive_action_limit() {
     assert!(stderr(&empty_goal).contains("goal must not be empty"));
     assert_eq!(zero_limit.status.code(), Some(2));
     assert!(stderr(&zero_limit).contains("action limit must be a positive integer"));
+}
+
+#[test]
+fn task_help_lists_continue_and_describes_the_whole_task_budget() {
+    let directory = TempDir::new();
+    let output = run(Some(directory.path()), &["task", "--help"]);
+
+    assert!(output.status.success());
+    assert!(stdout(&output).contains("  continue\n"));
+    assert!(stdout(&output).contains("action limit for the whole task"));
 }

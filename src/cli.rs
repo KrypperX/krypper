@@ -166,7 +166,7 @@ fn run_task(
 
     let mut session = TaskSession::new();
     let task_id = session.create_task(goal.clone()).id();
-    let turn_id = {
+    let mut turn_id = {
         let task = session
             .get_task_mut(task_id)
             .ok_or_else(|| io::Error::other("task was not found in its session"))?;
@@ -180,132 +180,175 @@ fn run_task(
 
     let mut reader = BufReader::new(input);
     let mut line = Vec::new();
-    let mut displayed_observations = 0;
+    let mut observation_number = 0;
     let mut decisions = 0;
     let mut stream_error = None;
-    let result = {
-        let mut decision_source = |_goal: &str, observations: &[WorkspaceObservation]| {
-            while displayed_observations < observations.len() {
-                if let Err(cause) = write_observation(
-                    output,
-                    displayed_observations + 1,
-                    &observations[displayed_observations],
-                ) {
+    let mut actions_taken = 0;
+    let mut turn_results = Vec::new();
+    loop {
+        let mut displayed_observations = 0;
+        let result = {
+            let mut decision_source = |_goal: &str, observations: &[WorkspaceObservation]| {
+                while displayed_observations < observations.len() {
+                    if let Err(cause) = write_observation(
+                        output,
+                        observation_number + 1,
+                        &observations[displayed_observations],
+                    ) {
+                        stream_error = Some(cause);
+                        return WorkspaceAction::Unsupported {
+                            action: "unable to display action observation".to_owned(),
+                        };
+                    }
+                    displayed_observations += 1;
+                    observation_number += 1;
+                }
+                if let Err(cause) = output.flush() {
                     stream_error = Some(cause);
                     return WorkspaceAction::Unsupported {
                         action: "unable to display action observation".to_owned(),
                     };
                 }
-                displayed_observations += 1;
-            }
-            if let Err(cause) = output.flush() {
-                stream_error = Some(cause);
-                return WorkspaceAction::Unsupported {
-                    action: "unable to display action observation".to_owned(),
-                };
-            }
 
-            decisions += 1;
-            if let Err(cause) =
-                write!(error, "action {decisions}/{max_actions}> ").and_then(|()| error.flush())
-            {
-                stream_error = Some(cause);
-                return WorkspaceAction::Unsupported {
-                    action: "unable to display action prompt".to_owned(),
-                };
-            }
-
-            line.clear();
-            match (&mut reader)
-                .take(MAX_TASK_ACTION_LINE_BYTES as u64 + 1)
-                .read_until(b'\n', &mut line)
-            {
-                Ok(0) => WorkspaceAction::Unsupported {
-                    action: "end of input before the next action".to_owned(),
-                },
-                Ok(bytes_read) if bytes_read > MAX_TASK_ACTION_LINE_BYTES => {
-                    WorkspaceAction::Unsupported {
-                        action: format!(
-                            "action line exceeds limit of {MAX_TASK_ACTION_LINE_BYTES} bytes"
-                        ),
-                    }
+                decisions += 1;
+                if let Err(cause) =
+                    write!(error, "action {decisions}/{max_actions}> ").and_then(|()| error.flush())
+                {
+                    stream_error = Some(cause);
+                    return WorkspaceAction::Unsupported {
+                        action: "unable to display action prompt".to_owned(),
+                    };
                 }
-                Ok(_) => match std::str::from_utf8(&line) {
-                    Ok(line) => parse_task_action(line),
+
+                line.clear();
+                match (&mut reader)
+                    .take(MAX_TASK_ACTION_LINE_BYTES as u64 + 1)
+                    .read_until(b'\n', &mut line)
+                {
+                    Ok(0) => WorkspaceAction::Unsupported {
+                        action: "end of input before the next action".to_owned(),
+                    },
+                    Ok(bytes_read) if bytes_read > MAX_TASK_ACTION_LINE_BYTES => {
+                        WorkspaceAction::Unsupported {
+                            action: format!(
+                                "action line exceeds limit of {MAX_TASK_ACTION_LINE_BYTES} bytes"
+                            ),
+                        }
+                    }
+                    Ok(_) => match std::str::from_utf8(&line) {
+                        Ok(line) => parse_task_action(line),
+                        Err(cause) => WorkspaceAction::Unsupported {
+                            action: format!("input error: {cause}"),
+                        },
+                    },
                     Err(cause) => WorkspaceAction::Unsupported {
                         action: format!("input error: {cause}"),
                     },
-                },
-                Err(cause) => WorkspaceAction::Unsupported {
-                    action: format!("input error: {cause}"),
-                },
+                }
+            };
+            run_goal_turn_with_budget(
+                &mut session,
+                task_id,
+                turn_id,
+                &goal,
+                max_actions - actions_taken,
+                &mut decision_source,
+            )
+            .map_err(io::Error::other)?
+        };
+        actions_taken += result.actions_taken();
+        let stop_reason = result.stop_reason();
+
+        match stop_reason {
+            GoalTurnStopReason::Completed | GoalTurnStopReason::ActionCompleted => session
+                .get_task_mut(task_id)
+                .ok_or_else(|| io::Error::other("task was not found in its session"))?
+                .transition(TaskState::Succeeded)
+                .map_err(io::Error::other)?,
+            GoalTurnStopReason::Continued | GoalTurnStopReason::Cancelled => {}
+            GoalTurnStopReason::ActionBudgetExhausted | GoalTurnStopReason::ActionFailed => {
+                session
+                    .get_task_mut(task_id)
+                    .ok_or_else(|| io::Error::other("task was not found in its session"))?
+                    .transition(TaskState::Failed)
+                    .map_err(io::Error::other)?;
             }
-        };
-        run_goal_turn_with_budget(
-            &mut session,
-            task_id,
-            turn_id,
-            &goal,
-            max_actions,
-            &mut decision_source,
-        )
-        .map_err(io::Error::other)?
-    };
+        }
 
-    let succeeded = matches!(result.outcome(), Some(TurnOutcome::Success { .. }));
-    let cancelled = result.stop_reason() == GoalTurnStopReason::Cancelled;
-    if !cancelled {
-        let next_task_state = if succeeded {
-            TaskState::Succeeded
-        } else {
-            TaskState::Failed
-        };
-        session
-            .get_task_mut(task_id)
-            .ok_or_else(|| io::Error::other("task was not found in its session"))?
-            .transition(next_task_state)
-            .map_err(io::Error::other)?;
-    }
+        if let Some(cause) = stream_error.take() {
+            return Err(cause);
+        }
+        for observation in result.observations().iter().skip(displayed_observations) {
+            write_observation(output, observation_number + 1, observation)?;
+            observation_number += 1;
+        }
+        turn_results.push(result);
 
-    if let Some(cause) = stream_error {
-        return Err(cause);
-    }
-    for observation in result.observations().iter().skip(displayed_observations) {
-        write_observation(output, displayed_observations + 1, observation)?;
-        displayed_observations += 1;
+        match stop_reason {
+            GoalTurnStopReason::Continued => {
+                let task = session
+                    .get_task_mut(task_id)
+                    .ok_or_else(|| io::Error::other("task was not found in its session"))?;
+                turn_id = task.create_turn().map_err(io::Error::other)?;
+                task.transition_turn(turn_id, TurnState::Running)
+                    .map_err(io::Error::other)?;
+            }
+            _ => break,
+        }
     }
 
     let task = session
         .get_task(task_id)
         .ok_or_else(|| io::Error::other("task was not found in its session"))?;
+    let result = turn_results
+        .last()
+        .ok_or_else(|| io::Error::other("task did not produce a turn result"))?;
     let turn = task
         .get_turn(turn_id)
         .ok_or_else(|| io::Error::other("turn was not found in its task"))?;
-    let turn_state = match turn.state() {
-        TurnState::Succeeded => "succeeded",
-        TurnState::Failed => "failed",
-        TurnState::Pending => "pending",
-        TurnState::Running => "running",
-        TurnState::Cancelled => "cancelled",
-    };
+    let succeeded = task.state() == TaskState::Succeeded;
+    let cancelled = task.state() == TaskState::Cancelled;
+
+    if turn_results.len() > 1 {
+        writeln!(output, "Turn results (in order):")?;
+        for (index, turn_result) in turn_results.iter().enumerate() {
+            write_turn_outcome(
+                output,
+                &format!("Turn {} result: ", index + 1),
+                turn_result.outcome(),
+            )?;
+            writeln!(
+                output,
+                "Turn {} actions: {}",
+                index + 1,
+                turn_result.actions_taken()
+            )?;
+        }
+    }
 
     writeln!(output, "Task state: {}", task.state())?;
-    writeln!(output, "Turn state: {turn_state}")?;
-    match result.outcome() {
-        Some(TurnOutcome::Success { result }) => {
-            writeln!(output, "Turn outcome: success: {result}")?
+    let task_outcome = match task.state() {
+        TaskState::Succeeded => "succeeded",
+        TaskState::Failed => "failed",
+        TaskState::Cancelled => "cancelled by caller",
+        TaskState::Pending | TaskState::Running => "still running",
+    };
+    writeln!(output, "Task outcome: {task_outcome}")?;
+    writeln!(output, "Turn state: {}", turn.state())?;
+    write_turn_outcome(output, "Turn outcome: ", result.outcome())?;
+    writeln!(output, "Actions: {actions_taken}/{max_actions}")?;
+
+    if task.turns().len() > 1 {
+        writeln!(output, "Task/turn lifecycle history (metadata only):")?;
+        for event in task.history() {
+            writeln!(
+                output,
+                "- sequence {}: {:?}",
+                event.sequence(),
+                event.transition()
+            )?;
         }
-        Some(TurnOutcome::Failure { detail }) => {
-            writeln!(output, "Turn outcome: failure: {detail}")?
-        }
-        None => writeln!(output, "Turn outcome: cancelled by caller")?,
     }
-    writeln!(
-        output,
-        "Actions: {}/{}",
-        result.actions_taken(),
-        max_actions
-    )?;
 
     writeln!(output, "Task lifecycle history (metadata only):")?;
     for event in task.events() {
@@ -329,8 +372,19 @@ fn run_task(
     }
 
     writeln!(output, "Activity history (metadata only):")?;
-    for summary in turn.activity_history() {
-        writeln!(output, "- {summary:?}")?;
+    if task.turns().len() == 1 {
+        for summary in turn.activity_history() {
+            writeln!(output, "- {summary:?}")?;
+        }
+    } else {
+        for event in task.activity_history() {
+            writeln!(
+                output,
+                "- sequence {}: {:?}",
+                event.sequence(),
+                event.summary()
+            )?;
+        }
     }
 
     Ok(if succeeded {
@@ -340,6 +394,18 @@ fn run_task(
     } else {
         1
     })
+}
+
+fn write_turn_outcome(
+    output: &mut dyn Write,
+    prefix: &str,
+    outcome: Option<&TurnOutcome>,
+) -> io::Result<()> {
+    match outcome {
+        Some(TurnOutcome::Success { result }) => writeln!(output, "{prefix}success: {result}"),
+        Some(TurnOutcome::Failure { detail }) => writeln!(output, "{prefix}failure: {detail}"),
+        None => writeln!(output, "{prefix}cancelled by caller"),
+    }
 }
 
 fn parse_task_action(line: &str) -> WorkspaceAction {
@@ -388,6 +454,9 @@ fn parse_task_action(line: &str) -> WorkspaceAction {
         "complete" => WorkspaceAction::Complete {
             result: arguments.unwrap_or_default().trim_start().to_owned(),
         },
+        "continue" if arguments.is_none_or(|arguments| arguments.trim().is_empty()) => {
+            WorkspaceAction::Continue
+        }
         "cancel" if arguments.is_none_or(|arguments| arguments.trim().is_empty()) => {
             WorkspaceAction::Cancel
         }
@@ -639,13 +708,13 @@ fn usage_error(error: &mut dyn Write, command: Option<&str>, message: &str) -> i
 
 fn write_root_help(output: &mut dyn Write) -> io::Result<()> {
     output.write_all(
-        b"usage: krypper [-h] {show,list,write,task} ...\n\nLocal command-line entry point for Krypper.\n\npositional arguments:\n  {show,list,write,task}\n    show        display a UTF-8 text file\n    list        list immediate directory entries\n    write       create a new UTF-8 text file\n    task        run a caller-directed bounded task turn\n\noptions:\n  -h, --help    show this help message and exit\n",
+        b"usage: krypper [-h] {show,list,write,task} ...\n\nLocal command-line entry point for Krypper.\n\npositional arguments:\n  {show,list,write,task}\n    show        display a UTF-8 text file\n    list        list immediate directory entries\n    write       create a new UTF-8 text file\n    task        run a caller-directed bounded task\n\noptions:\n  -h, --help    show this help message and exit\n",
     )
 }
 
 fn write_task_help(output: &mut dyn Write) -> io::Result<()> {
     output.write_all(
-        b"usage: krypper task [-h] --goal GOAL --max-actions N\n\nrun one caller-directed task turn in the current directory\n\noptions:\n  --goal GOAL          required task goal\n  --max-actions N      required positive action limit\n  -h, --help           show this help message and exit\n\nEnter one action per line on standard input:\n  read PATH\n  list [PATH]\n  create PATH TEXT\n  complete [RESULT]\n  cancel\n\nInvalid input, end-of-input, action failures, and budget exhaustion fail the turn.\nExplicit cancellation reports a cancelled turn and exits with status 130.\n",
+        b"usage: krypper task [-h] --goal GOAL --max-actions N\n\nrun a caller-directed task across bounded turns in the current directory\n\noptions:\n  --goal GOAL          required task goal\n  --max-actions N      required positive action limit for the whole task\n  -h, --help           show this help message and exit\n\nEnter one action per line on standard input:\n  read PATH\n  list [PATH]\n  create PATH TEXT\n  continue\n  complete [RESULT]\n  cancel\n\ncontinue ends this turn and starts another while action budget remains.\ncomplete ends the task successfully. Invalid input, end-of-input, action failures,\nand budget exhaustion fail the task. Explicit cancellation reports a cancelled\ntask and exits with status 130.\n",
     )
 }
 

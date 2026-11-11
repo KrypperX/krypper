@@ -411,6 +411,8 @@ pub enum TurnActivitySummary {
     DirectoryListed { entry_count: usize },
     /// The decision source explicitly completed the turn; its result is not retained here.
     Completed,
+    /// The caller requested another turn for the same task.
+    Continued,
     /// The loop exhausted its action budget.
     BudgetExhausted { actions: usize },
     /// The caller cancelled the task-owned turn.
