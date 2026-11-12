@@ -447,6 +447,13 @@ fn parse_task_action(line: &str) -> WorkspaceAction {
                     .unwrap_or("."),
             ),
         },
+        "mkdir" => arguments
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(|path| WorkspaceAction::CreateDirectory {
+                path: PathBuf::from(path),
+            })
+            .unwrap_or_else(invalid),
         "search" => {
             let Some(arguments) = arguments else {
                 return invalid_search();
@@ -580,6 +587,13 @@ fn write_observation(
                 writeln!(output, "  {entry:?}")?;
             }
         }
+        WorkspaceObservation::DirectoryCreated { path } => {
+            writeln!(
+                output,
+                "Observation {number}: created directory {}",
+                path.display()
+            )?;
+        }
         WorkspaceObservation::TextSearched {
             directory,
             locations,
@@ -618,6 +632,13 @@ fn write_observation(
             writeln!(
                 output,
                 "Observation {number}: create {} failed: {error}",
+                path.display()
+            )?;
+        }
+        WorkspaceObservation::DirectoryCreationFailed { path, error } => {
+            writeln!(
+                output,
+                "Observation {number}: mkdir {} failed: {error}",
                 path.display()
             )?;
         }
@@ -843,7 +864,27 @@ fn write_root_help(output: &mut dyn Write) -> io::Result<()> {
 
 fn write_task_help(output: &mut dyn Write) -> io::Result<()> {
     output.write_all(
-        b"usage: krypper task [-h] --goal GOAL --max-actions N\n\nrun a caller-directed task across bounded turns in the current directory\n\noptions:\n  --goal GOAL          required task goal\n  --max-actions N      required positive action limit for the whole task\n  -h, --help           show this help message and exit\n\nEnter one action per line on standard input:\n  read PATH\n  read-range PATH START_LINE MAX_LINES\n  list [PATH]\n  create PATH TEXT\n  replace PATH MATCH_TEXT => REPLACEMENT_TEXT\n  search DIRECTORY QUERY\n  continue\n  complete [RESULT]\n  cancel\n\nread-range uses one-based lines, returns at most 200 lines and 64 KiB, and reports the actual range.\nreplace requires one non-empty exact match; it prints only path and byte-count metadata.\nsearch returns relative paths and line numbers without matched text.\ncontinue ends this turn and starts another while action budget remains.\ncomplete ends the task successfully. Invalid input, end-of-input, action failures,\nand budget exhaustion fail the task. Explicit cancellation reports a cancelled\ntask and exits with status 130.\n",
+        concat!(
+            "usage: krypper task [-h] --goal GOAL --max-actions N\n\n",
+            "run a caller-directed task across bounded turns in the current directory\n\n",
+            "options:\n  --goal GOAL          required task goal\n",
+            "  --max-actions N      required positive action limit for the whole task\n",
+            "  -h, --help           show this help message and exit\n\n",
+            "Enter one action per line on standard input:\n",
+            "  read PATH\n  read-range PATH START_LINE MAX_LINES\n",
+            "  list [PATH]\n  mkdir PATH\n  create PATH TEXT\n",
+            "  replace PATH MATCH_TEXT => REPLACEMENT_TEXT\n",
+            "  search DIRECTORY QUERY\n  continue\n  complete [RESULT]\n  cancel\n\n",
+            "mkdir creates one directory and requires its parent to exist.\n",
+            "read-range uses one-based lines, returns at most 200 lines and 64 KiB, and reports the actual range.\n",
+            "replace requires one non-empty exact match; it prints only path and byte-count metadata.\n",
+            "search returns relative paths and line numbers without matched text.\n",
+            "continue ends this turn and starts another while action budget remains.\n",
+            "complete ends the task successfully. Invalid input, end-of-input, action failures,\n",
+            "and budget exhaustion fail the task. Explicit cancellation reports a cancelled\n",
+            "task and exits with status 130.\n",
+        )
+        .as_bytes(),
     )
 }
 

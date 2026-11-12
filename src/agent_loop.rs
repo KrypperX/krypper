@@ -1,7 +1,7 @@
 use crate::task_lifecycle::{
     TaskSession, TurnActivityAction, TurnActivitySummary, TurnCompletionError, TurnOutcome,
-    WorkspaceListError, WorkspaceReadError, WorkspaceReplaceError, WorkspaceSearchError,
-    WorkspaceSearchLocation, WorkspaceWriteError,
+    WorkspaceCreateDirectoryError, WorkspaceListError, WorkspaceReadError, WorkspaceReplaceError,
+    WorkspaceSearchError, WorkspaceSearchLocation, WorkspaceWriteError,
 };
 use std::ffi::OsString;
 use std::fmt;
@@ -24,6 +24,8 @@ pub enum WorkspaceAction {
     },
     /// List the immediate entries of a directory under the task's workspace safety policy.
     ListDirectory { path: PathBuf },
+    /// Create one directory under the task's workspace safety policy.
+    CreateDirectory { path: PathBuf },
     /// Find a literal query in the immediate regular UTF-8 files of a workspace directory.
     SearchText { directory: PathBuf, query: String },
     /// Create one UTF-8 file without replacing an existing path under the task's workspace policy.
@@ -61,6 +63,8 @@ pub enum WorkspaceObservation {
         path: PathBuf,
         entries: Vec<OsString>,
     },
+    /// A directory was created; no directory contents are retained.
+    DirectoryCreated { path: PathBuf },
     /// Matching relative file paths and one-based line numbers, without matched line contents.
     TextSearched {
         directory: PathBuf,
@@ -70,6 +74,8 @@ pub enum WorkspaceObservation {
     FileCreated { path: PathBuf, bytes_written: usize },
     /// A file creation rejected under the workspace policy; contents are not retained.
     FileCreationFailed { path: PathBuf, error: GoalTurnError },
+    /// A directory creation rejected under the workspace policy.
+    DirectoryCreationFailed { path: PathBuf, error: GoalTurnError },
     /// Text was replaced; the matched and replacement text are not retained.
     TextReplaced { path: PathBuf, bytes_written: usize },
     /// A replacement failed; the matched and replacement text are not retained.
@@ -201,6 +207,8 @@ pub enum GoalTurnError {
     WorkspaceRead(WorkspaceReadError),
     /// The existing workspace safety policy rejected or could not list a directory.
     WorkspaceList(WorkspaceListError),
+    /// The existing workspace safety policy rejected or could not create a directory.
+    WorkspaceDirectory(WorkspaceCreateDirectoryError),
     /// The existing workspace safety policy rejected or could not create a file.
     WorkspaceWrite(WorkspaceWriteError),
     /// The existing workspace safety policy rejected or could not replace file text.
@@ -219,6 +227,7 @@ impl fmt::Display for GoalTurnError {
             }
             Self::WorkspaceRead(error) => error.fmt(formatter),
             Self::WorkspaceList(error) => error.fmt(formatter),
+            Self::WorkspaceDirectory(error) => error.fmt(formatter),
             Self::WorkspaceWrite(error) => error.fmt(formatter),
             Self::WorkspaceReplace(error) => error.fmt(formatter),
             Self::WorkspaceSearch(error) => error.fmt(formatter),
@@ -233,6 +242,7 @@ impl std::error::Error for GoalTurnError {
             Self::UnsupportedAction { .. } => None,
             Self::WorkspaceRead(error) => Some(error),
             Self::WorkspaceList(error) => Some(error),
+            Self::WorkspaceDirectory(error) => Some(error),
             Self::WorkspaceWrite(error) => Some(error),
             Self::WorkspaceReplace(error) => Some(error),
             Self::WorkspaceSearch(error) => Some(error),
@@ -312,6 +322,7 @@ pub fn run_goal_turn<D: DecisionSource + ?Sized>(
                 WorkspaceObservation::DirectoryListed { entries, .. } => {
                     format!("listed {} entries", entries.len())
                 }
+                WorkspaceObservation::DirectoryCreated { .. } => "created directory".to_owned(),
                 WorkspaceObservation::TextSearched { locations, .. } => {
                     format!("found {} matching locations", locations.len())
                 }
@@ -322,6 +333,7 @@ pub fn run_goal_turn<D: DecisionSource + ?Sized>(
                     format!("replaced text ({bytes_written} bytes)")
                 }
                 WorkspaceObservation::FileCreationFailed { .. }
+                | WorkspaceObservation::DirectoryCreationFailed { .. }
                 | WorkspaceObservation::TextReplacementFailed { .. }
                 | WorkspaceObservation::TextSearchFailed { .. }
                 | WorkspaceObservation::ActionFailed { .. } => String::new(),
@@ -520,6 +532,7 @@ fn summarize_observation(observation: &WorkspaceObservation) -> TurnActivitySumm
                 bytes_written: *bytes_written,
             }
         }
+        WorkspaceObservation::DirectoryCreated { .. } => TurnActivitySummary::DirectoryCreated,
         WorkspaceObservation::TextReplaced { bytes_written, .. } => {
             TurnActivitySummary::TextReplaced {
                 bytes_written: *bytes_written,
@@ -527,6 +540,9 @@ fn summarize_observation(observation: &WorkspaceObservation) -> TurnActivitySumm
         }
         WorkspaceObservation::FileCreationFailed { .. } => TurnActivitySummary::ActionFailed {
             action: TurnActivityAction::CreateFile,
+        },
+        WorkspaceObservation::DirectoryCreationFailed { .. } => TurnActivitySummary::ActionFailed {
+            action: TurnActivityAction::CreateDirectory,
         },
         WorkspaceObservation::TextReplacementFailed { .. } => TurnActivitySummary::ActionFailed {
             action: TurnActivityAction::ReplaceText,
@@ -539,6 +555,7 @@ fn summarize_observation(observation: &WorkspaceObservation) -> TurnActivitySumm
                 WorkspaceAction::ReadFile { .. } => TurnActivityAction::ReadFile,
                 WorkspaceAction::ReadRange { .. } => TurnActivityAction::ReadRange,
                 WorkspaceAction::ListDirectory { .. } => TurnActivityAction::ListDirectory,
+                WorkspaceAction::CreateDirectory { .. } => TurnActivityAction::CreateDirectory,
                 WorkspaceAction::CreateFile { .. } => TurnActivityAction::CreateFile,
                 WorkspaceAction::ReplaceText { .. } => TurnActivityAction::ReplaceText,
                 WorkspaceAction::SearchText { .. } => TurnActivityAction::SearchText,
@@ -654,6 +671,24 @@ fn execute_action(
                     })
                 }
                 Err(error) => Err(GoalTurnError::WorkspaceWrite(error)),
+            }
+        }
+        WorkspaceAction::CreateDirectory { path } => {
+            match session.create_workspace_directory(task_id, turn_id, path) {
+                Ok(()) => Ok(ActionExecution::Observation(
+                    WorkspaceObservation::DirectoryCreated { path: path.clone() },
+                )),
+                Err(error @ WorkspaceCreateDirectoryError::Directory { .. }) => {
+                    let error = GoalTurnError::WorkspaceDirectory(error);
+                    Ok(ActionExecution::Failed {
+                        observation: WorkspaceObservation::DirectoryCreationFailed {
+                            path: path.clone(),
+                            error: error.clone(),
+                        },
+                        error,
+                    })
+                }
+                Err(error) => Err(GoalTurnError::WorkspaceDirectory(error)),
             }
         }
         WorkspaceAction::ReplaceText {

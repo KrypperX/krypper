@@ -160,6 +160,42 @@ pub(crate) fn create_text_file_at(
     create_text_file_at_with_writer(root.descriptor.as_raw_fd(), path, contents, write_to_fd)
 }
 
+pub(crate) fn create_directory_at(root: &WorkspaceRoot, path: &OsStr) -> Result<(), CliError> {
+    let path_bytes = path.as_bytes();
+    if path_bytes.contains(&0) {
+        return Err(CliError::new("invalid directory path"));
+    }
+    if Path::new(path).is_absolute() {
+        return Err(CliError::new("absolute paths are not allowed"));
+    }
+    if path_bytes.is_empty() || path_bytes.ends_with(b"/") {
+        return Err(CliError::new("invalid directory path"));
+    }
+
+    let (parent, name) = open_workspace_parent(root, path)?;
+    match stat_at(parent.as_raw_fd(), &name) {
+        Ok(status) if is_symlink(&status) => {
+            return Err(CliError::new("symlink paths are not allowed"));
+        }
+        Ok(_) => return Err(CliError::new("path already exists")),
+        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {}
+        Err(_) => return Err(CliError::new("invalid directory path")),
+    }
+
+    let name = c_string(&name).map_err(|_| CliError::new("invalid directory path"))?;
+    // SAFETY: `parent` is an open directory descriptor and `name` is a NUL-terminated single component.
+    if unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o777) } == 0 {
+        return Ok(());
+    }
+
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::EEXIST) {
+        Err(CliError::new("path already exists"))
+    } else {
+        Err(CliError::new("unable to create directory"))
+    }
+}
+
 pub(crate) fn replace_text_file_at(
     root: &WorkspaceRoot,
     path: &OsStr,
