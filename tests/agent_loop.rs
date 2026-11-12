@@ -906,6 +906,186 @@ fn bounded_goal_turn_creates_a_file_with_metadata_and_ordered_observations() {
 }
 
 #[test]
+fn bounded_goal_turn_creates_directory_then_uses_existing_file_action() {
+    let workspace = TempDir::new();
+    let directory = PathBuf::from("private directory");
+    let contents = "private caller payload";
+    let goal = "Create a workspace directory and file";
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) =
+        with_current_dir(workspace.path(), || running_turn(&mut session, goal));
+    let mut decisions = [
+        WorkspaceAction::CreateDirectory {
+            path: directory.clone(),
+        },
+        WorkspaceAction::CreateFile {
+            path: directory.join("note.txt"),
+            contents: contents.to_owned(),
+        },
+        WorkspaceAction::Complete {
+            result: "finished".to_owned(),
+        },
+    ]
+    .into_iter();
+    let mut decision_count = 0;
+    let mut source = |_: &str, _: &[WorkspaceObservation]| {
+        decision_count += 1;
+        decisions.next().unwrap()
+    };
+
+    let result =
+        run_goal_turn_with_budget(&mut session, task_id, turn_id, goal, 3, &mut source).unwrap();
+
+    assert_eq!(decision_count, 3);
+    assert_eq!(result.actions_taken(), 3);
+    assert_eq!(result.stop_reason(), GoalTurnStopReason::Completed);
+    assert_eq!(
+        result.observations(),
+        [
+            WorkspaceObservation::DirectoryCreated {
+                path: directory.clone(),
+            },
+            WorkspaceObservation::FileCreated {
+                path: directory.join("note.txt"),
+                bytes_written: contents.len(),
+            },
+        ]
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.path().join(&directory).join("note.txt")).unwrap(),
+        contents
+    );
+
+    let task = session.get_task(task_id).unwrap();
+    let turn = task.get_turn(turn_id).unwrap();
+    assert_eq!(turn.state(), TurnState::Succeeded);
+    assert_eq!(turn.outcome(), result.outcome());
+    assert_eq!(
+        turn.activity_history(),
+        [
+            TurnActivitySummary::DirectoryCreated,
+            TurnActivitySummary::FileCreated {
+                bytes_written: contents.len(),
+            },
+            TurnActivitySummary::Completed,
+        ]
+    );
+    let retained = format!("{:?} {:?}", task.activity_history(), task.history());
+    assert!(!retained.contains("private directory"));
+    assert!(!retained.contains(contents));
+}
+
+#[test]
+fn failed_directory_action_records_one_failure_and_stops_deciding() {
+    let workspace = TempDir::new();
+    let goal = "Reject a directory escape";
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) =
+        with_current_dir(workspace.path(), || running_turn(&mut session, goal));
+    let mut decision_count = 0;
+    let mut source = |_: &str, _: &[WorkspaceObservation]| {
+        decision_count += 1;
+        WorkspaceAction::CreateDirectory {
+            path: PathBuf::from("../must-not-exist"),
+        }
+    };
+
+    let result =
+        run_goal_turn_with_budget(&mut session, task_id, turn_id, goal, 2, &mut source).unwrap();
+
+    assert_eq!(decision_count, 1);
+    assert_eq!(result.actions_taken(), 1);
+    assert_eq!(result.stop_reason(), GoalTurnStopReason::ActionFailed);
+    assert!(matches!(
+        result.outcome(),
+        Some(TurnOutcome::Failure { detail })
+            if detail.contains("path must stay inside the current directory")
+    ));
+    assert!(matches!(
+        result.observations(),
+        [WorkspaceObservation::DirectoryCreationFailed { path, .. }]
+            if path == Path::new("../must-not-exist")
+    ));
+    assert!(!workspace
+        .path()
+        .parent()
+        .unwrap()
+        .join("must-not-exist")
+        .exists());
+
+    let task = session.get_task(task_id).unwrap();
+    let turn = task.get_turn(turn_id).unwrap();
+    assert_eq!(turn.state(), TurnState::Failed);
+    assert_eq!(turn.outcome(), result.outcome());
+    assert_eq!(
+        turn.activity_history(),
+        [TurnActivitySummary::ActionFailed {
+            action: TurnActivityAction::CreateDirectory,
+        }]
+    );
+    assert_eq!(
+        task.activity_history()[0].summary(),
+        turn.activity_history()[0]
+    );
+    assert!(!format!("{:?}", task.activity_history()).contains("must-not-exist"));
+}
+
+#[test]
+fn single_action_directory_failure_returns_failed_observation_and_outcome() {
+    let workspace = TempDir::new();
+    let goal = "Reject a directory with a missing parent";
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) =
+        with_current_dir(workspace.path(), || running_turn(&mut session, goal));
+    let mut decision_count = 0;
+    let mut decisions = |_: &str| {
+        decision_count += 1;
+        WorkspaceAction::CreateDirectory {
+            path: PathBuf::from("missing-parent/private-directory"),
+        }
+    };
+
+    let result = with_current_dir(workspace.path(), || {
+        run_goal_turn(&mut session, task_id, turn_id, goal, &mut decisions)
+    });
+
+    assert!(
+        result.is_ok(),
+        "expected a failed turn result, got {result:?}"
+    );
+    let result = result.unwrap();
+    assert_eq!(decision_count, 1);
+    assert_eq!(result.actions_taken(), 1);
+    assert_eq!(result.stop_reason(), GoalTurnStopReason::ActionFailed);
+    let [WorkspaceObservation::DirectoryCreationFailed { path, error }] = result.observations()
+    else {
+        panic!("expected one failed directory observation");
+    };
+    assert_eq!(path, Path::new("missing-parent/private-directory"));
+    let Some(TurnOutcome::Failure { detail }) = result.outcome() else {
+        panic!("expected a failed turn outcome");
+    };
+    assert_eq!(detail, &error.to_string());
+    assert!(!workspace
+        .path()
+        .join("missing-parent/private-directory")
+        .exists());
+
+    let task = session.get_task(task_id).unwrap();
+    let turn = task.get_turn(turn_id).unwrap();
+    assert_eq!(turn.state(), TurnState::Failed);
+    assert_eq!(turn.outcome(), result.outcome());
+    assert_eq!(
+        turn.activity_history(),
+        [TurnActivitySummary::ActionFailed {
+            action: TurnActivityAction::CreateDirectory,
+        }]
+    );
+    assert!(!format!("{:?}", task.activity_history()).contains("private-directory"));
+    assert!(!format!("{:?}", task.history()).contains("missing-parent"));
+}
+
+#[test]
 fn bounded_goal_turn_replaces_unique_text_and_retains_only_metadata() {
     let workspace = TempDir::new();
     let match_text = "PRIVATE_MATCH_71";

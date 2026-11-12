@@ -5,6 +5,7 @@ use krypper::task_lifecycle::{
     WorkspaceSearchLocation, WorkspaceWriteError,
 };
 use std::fs;
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use uuid::Uuid;
@@ -117,6 +118,82 @@ fn running_owned_turn_reads_a_workspace_file() {
     });
 
     assert_eq!(contents, Ok("private task context".to_owned()));
+}
+
+#[test]
+fn running_owned_turn_creates_directories_for_existing_file_actions() {
+    let temp = TempDir::new();
+    fs::create_dir(temp.path().join("existing-parent")).unwrap();
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) = running_turn_in(&mut session, temp.path());
+
+    session
+        .create_workspace_directory(task_id, turn_id, Path::new("root-child"))
+        .unwrap();
+    session
+        .create_workspace_directory(task_id, turn_id, Path::new("existing-parent/nested-child"))
+        .unwrap();
+    session
+        .create_workspace_file(
+            task_id,
+            turn_id,
+            Path::new("existing-parent/nested-child/note.txt"),
+            "file action still works",
+        )
+        .unwrap();
+
+    assert!(temp.path().join("root-child").is_dir());
+    assert!(temp.path().join("existing-parent/nested-child").is_dir());
+    assert_eq!(
+        fs::read_to_string(temp.path().join("existing-parent/nested-child/note.txt")).unwrap(),
+        "file action still works"
+    );
+    let task = session.get_task(task_id).unwrap();
+    let turn = task.get_turn(turn_id).unwrap();
+    assert!(task.activity_history().is_empty());
+    assert!(turn.activity_history().is_empty());
+}
+
+#[test]
+fn running_owned_turn_directory_creation_rejects_unsafe_or_existing_targets() {
+    let temp = TempDir::new();
+    let workspace = temp.path().join("workspace");
+    let outside = temp.path().join("outside");
+    fs::create_dir(&workspace).unwrap();
+    fs::create_dir(&outside).unwrap();
+    fs::write(workspace.join("file-parent"), "not a directory").unwrap();
+    fs::write(workspace.join("existing-file"), "preserve this file").unwrap();
+    fs::create_dir(workspace.join("existing-directory")).unwrap();
+    symlink(&outside, workspace.join("linked-parent")).unwrap();
+    symlink(&outside, workspace.join("linked-target")).unwrap();
+
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) = running_turn_in(&mut session, &workspace);
+    let absolute_target = temp.path().join("absolute-target");
+    let paths = [
+        PathBuf::from("../outside/escaped"),
+        absolute_target.clone(),
+        PathBuf::from("missing-parent/child"),
+        PathBuf::from("file-parent/child"),
+        PathBuf::from("linked-parent/child"),
+        PathBuf::from("linked-target"),
+        PathBuf::from("existing-file"),
+        PathBuf::from("existing-directory"),
+    ];
+
+    for path in &paths {
+        let result = session.create_workspace_directory(task_id, turn_id, path);
+        assert!(result.is_err(), "accepted unsafe directory target {path:?}");
+    }
+
+    assert!(!outside.join("escaped").exists());
+    assert!(!outside.join("child").exists());
+    assert!(!absolute_target.exists());
+    assert!(!workspace.join("missing-parent").exists());
+    assert_eq!(
+        fs::read_to_string(workspace.join("existing-file")).unwrap(),
+        "preserve this file"
+    );
 }
 
 #[test]

@@ -1,6 +1,6 @@
 use crate::file_safety::{
-    capture_workspace_root, create_text_file_at, list_task_directory_names_at, read_text_file_at,
-    replace_text_file_at, search_text_files_at, WorkspaceRoot,
+    capture_workspace_root, create_directory_at, create_text_file_at, list_task_directory_names_at,
+    read_text_file_at, replace_text_file_at, search_text_files_at, WorkspaceRoot,
 };
 use std::ffi::OsString;
 use std::fmt;
@@ -290,6 +290,41 @@ impl From<WorkspaceReadError> for WorkspaceSearchError {
     }
 }
 
+/// An error while creating a workspace directory for a task turn.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WorkspaceCreateDirectoryError {
+    /// The task or turn is missing, foreign, or not currently running.
+    TaskTurn(WorkspaceReadError),
+    /// The directory could not be created under the workspace safety policy.
+    Directory { message: String },
+}
+
+impl fmt::Display for WorkspaceCreateDirectoryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TaskTurn(error) => error.fmt(formatter),
+            Self::Directory { message } => {
+                write!(formatter, "workspace directory creation failed: {message}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for WorkspaceCreateDirectoryError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::TaskTurn(error) => Some(error),
+            Self::Directory { .. } => None,
+        }
+    }
+}
+
+impl From<WorkspaceReadError> for WorkspaceCreateDirectoryError {
+    fn from(error: WorkspaceReadError) -> Self {
+        Self::TaskTurn(error)
+    }
+}
+
 /// An error while creating a workspace file for a task turn.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WorkspaceWriteError {
@@ -474,6 +509,8 @@ pub enum TurnActivityAction {
     ReadRange,
     /// A workspace directory listing failed.
     ListDirectory,
+    /// A workspace directory creation failed.
+    CreateDirectory,
     /// A workspace file creation failed.
     CreateFile,
     /// A workspace text replacement failed.
@@ -496,6 +533,8 @@ pub enum TurnActivitySummary {
         end_line: usize,
         bytes_returned: usize,
     },
+    /// A directory was created; the requested path is not retained here.
+    DirectoryCreated,
     /// A file was created; only its byte count is retained.
     FileCreated { bytes_written: usize },
     /// Text was replaced; only the resulting file size is retained.
@@ -1403,6 +1442,32 @@ impl TaskSession {
             .map_err(|error| WorkspaceSearchError::Search {
                 message: error.message().to_owned(),
             })
+    }
+
+    /// Creates exactly one directory for a currently running turn owned by this session.
+    ///
+    /// The relative path is resolved from this task's captured workspace. Its parent must already
+    /// exist; symlink components, escaping paths, and existing targets are rejected. Creation uses
+    /// the process umask and does not change lifecycle state or history.
+    pub fn create_workspace_directory(
+        &self,
+        task_id: Uuid,
+        turn_id: Uuid,
+        path: &Path,
+    ) -> Result<(), WorkspaceCreateDirectoryError> {
+        let task = self
+            .running_workspace_task(task_id, turn_id)
+            .map_err(WorkspaceCreateDirectoryError::from)?;
+        let root = task.workspace_root.as_ref().map_err(|message| {
+            WorkspaceCreateDirectoryError::Directory {
+                message: format!("task workspace could not be resolved: {message}"),
+            }
+        })?;
+        create_directory_at(root, path.as_os_str()).map_err(|error| {
+            WorkspaceCreateDirectoryError::Directory {
+                message: error.message().to_owned(),
+            }
+        })
     }
 
     /// Creates one UTF-8 file for a currently running turn owned by this session.

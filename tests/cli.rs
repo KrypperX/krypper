@@ -602,6 +602,82 @@ fn task_shows_ordered_observations_completion_and_metadata_history() {
 }
 
 #[test]
+fn task_mkdir_creates_one_directory_for_existing_file_actions() {
+    let directory = TempDir::new();
+    let payload = "private directory payload";
+    let output = run_with_input(
+        directory.path(),
+        &[
+            "task",
+            "--goal",
+            "Prepare a workspace",
+            "--max-actions",
+            "3",
+        ],
+        b"mkdir generated\ncreate generated/note.txt private directory payload\ncomplete done\n",
+    );
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let output_text = stdout(&output);
+    let created_directory = output_text
+        .find("Observation 1: created directory generated")
+        .unwrap();
+    let created_file = output_text
+        .find("Observation 2: created generated/note.txt")
+        .unwrap();
+    let completed = output_text.find("Task state: succeeded").unwrap();
+    assert!(created_directory < created_file && created_file < completed);
+    assert!(output_text.contains("Actions: 3/3"));
+    assert_eq!(
+        fs::read_to_string(directory.path().join("generated/note.txt")).unwrap(),
+        payload
+    );
+    let history = output_text
+        .split("Activity history (metadata only):")
+        .nth(1)
+        .unwrap();
+    assert!(history.contains("DirectoryCreated"));
+    assert!(history.contains("FileCreated { bytes_written: 25 }"));
+    assert!(!history.contains("generated"));
+    assert!(!history.contains(payload));
+}
+
+#[test]
+fn task_mkdir_failure_records_one_terminal_result_without_another_decision() {
+    let directory = TempDir::new();
+    let output = run_with_input(
+        directory.path(),
+        &[
+            "task",
+            "--goal",
+            "Reject a workspace escape",
+            "--max-actions",
+            "2",
+        ],
+        b"mkdir ../escaped\ncomplete must-not-run\n",
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    let output_text = stdout(&output);
+    assert!(output_text.contains("Observation 1: mkdir ../escaped failed:"));
+    assert!(output_text.contains(
+        "Turn outcome: failure: workspace directory creation failed: path must stay inside the current directory"
+    ));
+    assert!(output_text.contains("Task state: failed"));
+    assert!(output_text.contains("Actions: 1/2"));
+    assert_eq!(stderr(&output).matches("action ").count(), 1);
+    assert!(!directory.path().parent().unwrap().join("escaped").exists());
+
+    let history = output_text
+        .split("Activity history (metadata only):")
+        .nth(1)
+        .unwrap();
+    assert!(history.contains("ActionFailed { action: CreateDirectory }"));
+    assert!(!history.contains("../escaped"));
+    assert_lifecycle_transitions(output_text, "failed");
+}
+
+#[test]
 fn task_replaces_one_exact_match_and_prints_metadata_only() {
     let directory = TempDir::new();
     let match_text = "PRIVATE_MATCH_33";
