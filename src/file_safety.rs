@@ -8,7 +8,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
 mod search;
-pub(crate) use search::search_text_files_at;
+pub(crate) use search::{search_text_files_at, search_tree_text_files_at};
 
 const MAX_FILE_SIZE: usize = 1024 * 1024;
 const MAX_SYMLINKS: usize = 40;
@@ -105,6 +105,18 @@ fn list_open_directory_with_limit(
     directory: File,
     maximum_entries: Option<usize>,
 ) -> Result<Vec<ListedName>, CliError> {
+    list_open_directory_with_limit_and_error(
+        directory,
+        maximum_entries,
+        "directory exceeds 1,024 entries",
+    )
+}
+
+fn list_open_directory_with_limit_and_error(
+    directory: File,
+    maximum_entries: Option<usize>,
+    limit_error: &'static str,
+) -> Result<Vec<ListedName>, CliError> {
     let duplicate = duplicate_fd(directory.as_raw_fd())
         .map_err(|_| CliError::new("unable to list directory"))?;
     let raw = duplicate.into_raw_fd();
@@ -134,7 +146,7 @@ fn list_open_directory_with_limit(
         let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
         if name != b"." && name != b".." {
             if maximum_entries.is_some_and(|maximum| names.len() == maximum) {
-                return Err(CliError::new("directory exceeds 1,024 entries"));
+                return Err(CliError::new(limit_error));
             }
             names.push(ListedName::new(name.to_vec()));
         }
