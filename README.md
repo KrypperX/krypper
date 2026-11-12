@@ -44,10 +44,16 @@ files, or contacts a network service.
 `task --goal <goal> --max-actions <positive-number>` runs one task across
 bounded turns in-process with the current directory as its workspace. It reads
 one caller decision per line from standard input. Enter `read <path>`,
-`list [path]`, `create <path> <text>`, `continue`, `complete [result]`, or
-`cancel`; a create path is one token, and the remaining line is its text. Read
-and list actions use the same workspace policy as the existing commands, while
-create is create-only and follows the same path and size limits as `write`.
+`list [path]`, `create <path> <text>`,
+`replace <path> <match text> => <replacement text>`, `continue`,
+`complete [result]`, or `cancel`; a create or replace path is one token, and
+the remaining line contains its text. Replace requires one non-empty exact
+match in an existing UTF-8 file. It rejects missing or ambiguous matches,
+symlink paths, non-regular files, and replacements that would exceed 1 MiB.
+Replacement output and retained activity history contain only path and byte
+count metadata. Read and list actions use the same workspace policy as the
+existing commands, while create is create-only and follows the same path and
+size limits as `write`.
 `continue` ends the active turn and starts another for the same running task.
 The action limit is shared by the whole invocation, and each `continue`
 selection consumes one action. The CLI prints observations before asking for

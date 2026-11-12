@@ -1,7 +1,8 @@
 use krypper::task_lifecycle::{
     Task, TaskEvent, TaskHistoryEvent, TaskHistoryTransition, TaskSession, TaskState,
     TurnActivitySummary, TurnCompletionError, TurnEvent, TurnOutcome, TurnState,
-    TurnTransitionError, WorkspaceListError, WorkspaceReadError, WorkspaceWriteError,
+    TurnTransitionError, WorkspaceListError, WorkspaceReadError, WorkspaceReplaceError,
+    WorkspaceWriteError,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -580,6 +581,147 @@ fn running_owned_turn_creates_a_workspace_file_without_changing_lifecycle_histor
         "résumé"
     );
     assert_eq!(lifecycle_snapshot(&session), before);
+}
+
+#[test]
+fn running_owned_turn_replaces_one_exact_workspace_match_without_history_changes() {
+    let temp = TempDir::new();
+    fs::write(temp.path().join("note.txt"), "before exact match after").unwrap();
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) = running_turn_in(&mut session, temp.path());
+    let before = lifecycle_snapshot(&session);
+
+    let result = session.replace_workspace_text(
+        task_id,
+        turn_id,
+        Path::new("note.txt"),
+        "exact match",
+        "new text",
+    );
+
+    assert_eq!(result, Ok("before new text after".len()));
+    assert_eq!(
+        fs::read_to_string(temp.path().join("note.txt")).unwrap(),
+        "before new text after"
+    );
+    assert_eq!(lifecycle_snapshot(&session), before);
+}
+
+#[test]
+fn failed_workspace_text_replacements_preserve_the_file_and_lifecycle_history() {
+    let temp = TempDir::new();
+    let replacement_text = "PRIVATE_REPLACEMENT_83";
+    fs::write(temp.path().join("note.txt"), "aaaa").unwrap();
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) = running_turn_in(&mut session, temp.path());
+    let before = lifecycle_snapshot(&session);
+
+    for (match_text, expected_error) in [
+        ("missing", "match text was not found"),
+        ("aa", "match text is ambiguous"),
+    ] {
+        let error = session
+            .replace_workspace_text(
+                task_id,
+                turn_id,
+                Path::new("note.txt"),
+                match_text,
+                replacement_text,
+            )
+            .unwrap_err();
+        assert!(matches!(error, WorkspaceReplaceError::File { .. }));
+        assert!(error.to_string().contains(expected_error));
+        assert!(!error.to_string().contains(match_text));
+        assert!(!error.to_string().contains(replacement_text));
+        assert_eq!(
+            fs::read_to_string(temp.path().join("note.txt")).unwrap(),
+            "aaaa"
+        );
+        assert_eq!(lifecycle_snapshot(&session), before);
+    }
+}
+
+#[test]
+fn workspace_text_replacement_requires_a_task_owned_running_turn() {
+    let temp = TempDir::new();
+    fs::write(temp.path().join("note.txt"), "original").unwrap();
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) = running_turn_in(&mut session, temp.path());
+    let (foreign_task_id, foreign_turn_id) = with_current_dir(temp.path(), || {
+        let task = session.create_task("Foreign task");
+        task.transition(TaskState::Running).unwrap();
+        let task_id = task.id();
+        let turn_id = task.create_turn().unwrap();
+        task.transition_turn(turn_id, TurnState::Running).unwrap();
+        (task_id, turn_id)
+    });
+    let pending_turn_id = session
+        .get_task_mut(task_id)
+        .unwrap()
+        .create_turn()
+        .unwrap();
+    let missing_task_id = Uuid::new_v4();
+    let missing_turn_id = Uuid::new_v4();
+    let before = lifecycle_snapshot(&session);
+
+    assert!(matches!(
+        session.replace_workspace_text(
+            missing_task_id,
+            turn_id,
+            Path::new("note.txt"),
+            "original",
+            "changed"
+        ),
+        Err(WorkspaceReplaceError::TaskTurn(WorkspaceReadError::TaskNotFound { task_id }))
+            if task_id == missing_task_id
+    ));
+    assert!(matches!(
+        session.replace_workspace_text(
+            task_id,
+            foreign_turn_id,
+            Path::new("note.txt"),
+            "original",
+            "changed"
+        ),
+        Err(WorkspaceReplaceError::TaskTurn(WorkspaceReadError::ForeignTurn {
+            task_id: requested_task_id,
+            turn_id,
+            owner_task_id,
+        })) if requested_task_id == task_id
+            && turn_id == foreign_turn_id
+            && owner_task_id == foreign_task_id
+    ));
+    assert!(matches!(
+        session.replace_workspace_text(
+            task_id,
+            missing_turn_id,
+            Path::new("note.txt"),
+            "original",
+            "changed"
+        ),
+        Err(WorkspaceReplaceError::TaskTurn(WorkspaceReadError::TurnNotFound {
+            task_id: actual_task_id,
+            turn_id,
+        })) if actual_task_id == task_id && turn_id == missing_turn_id
+    ));
+    assert!(matches!(
+        session.replace_workspace_text(
+            task_id,
+            pending_turn_id,
+            Path::new("note.txt"),
+            "original",
+            "changed"
+        ),
+        Err(WorkspaceReplaceError::TaskTurn(WorkspaceReadError::TurnNotRunning {
+            turn_id,
+            state: TurnState::Pending
+        })) if turn_id == pending_turn_id
+    ));
+    assert_eq!(lifecycle_snapshot(&session), before);
+    assert_eq!(
+        fs::read_to_string(temp.path().join("note.txt")).unwrap(),
+        "original"
+    );
 }
 
 #[test]

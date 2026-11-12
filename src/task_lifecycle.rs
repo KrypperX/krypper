@@ -1,6 +1,6 @@
 use crate::file_safety::{
     capture_workspace_root, create_text_file_at, list_task_directory_names_at, read_text_file_at,
-    WorkspaceRoot,
+    replace_text_file_at, WorkspaceRoot,
 };
 use std::ffi::OsString;
 use std::fmt;
@@ -296,6 +296,41 @@ impl fmt::Display for WorkspaceWriteError {
 
 impl std::error::Error for WorkspaceWriteError {}
 
+/// An error while replacing text in a workspace file for a task turn.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WorkspaceReplaceError {
+    /// The requested task turn is missing, foreign, or not running.
+    TaskTurn(WorkspaceReadError),
+    /// The requested replacement could not be completed under the workspace policy.
+    File { message: String },
+}
+
+impl fmt::Display for WorkspaceReplaceError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TaskTurn(error) => error.fmt(formatter),
+            Self::File { message } => {
+                write!(formatter, "workspace text replacement failed: {message}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for WorkspaceReplaceError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::TaskTurn(error) => Some(error),
+            Self::File { .. } => None,
+        }
+    }
+}
+
+impl From<WorkspaceReadError> for WorkspaceReplaceError {
+    fn from(error: WorkspaceReadError) -> Self {
+        Self::TaskTurn(error)
+    }
+}
+
 /// An immutable record of one successful state transition.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TaskEvent {
@@ -395,6 +430,8 @@ pub enum TurnActivityAction {
     ListDirectory,
     /// A workspace file creation failed.
     CreateFile,
+    /// A workspace text replacement failed.
+    ReplaceText,
     /// The decision source selected an unsupported action.
     Unsupported,
 }
@@ -407,6 +444,8 @@ pub enum TurnActivitySummary {
     FileRead { bytes_read: usize },
     /// A file was created; only its byte count is retained.
     FileCreated { bytes_written: usize },
+    /// Text was replaced; only the resulting file size is retained.
+    TextReplaced { bytes_written: usize },
     /// A directory was listed; entry names are not retained.
     DirectoryListed { entry_count: usize },
     /// The decision source explicitly completed the turn; its result is not retained here.
@@ -1327,6 +1366,37 @@ impl TaskSession {
                 message: error.message().to_owned(),
             }
         })
+    }
+
+    /// Replaces one unique exact text match in an existing UTF-8 file for a running task turn.
+    ///
+    /// The path is resolved beneath the task's captured workspace. Symlink path components,
+    /// non-regular files, missing parents, and content over 1 MiB are rejected. The replacement
+    /// is staged beside the original and committed with an atomic rename; this operation does not
+    /// change lifecycle state or retain either text value in task history. Returns the resulting
+    /// file size in bytes.
+    pub fn replace_workspace_text(
+        &self,
+        task_id: Uuid,
+        turn_id: Uuid,
+        path: &Path,
+        match_text: &str,
+        replacement_text: &str,
+    ) -> Result<usize, WorkspaceReplaceError> {
+        let task = self
+            .running_workspace_task(task_id, turn_id)
+            .map_err(WorkspaceReplaceError::from)?;
+        let root = task
+            .workspace_root
+            .as_ref()
+            .map_err(|message| WorkspaceReplaceError::File {
+                message: format!("task workspace could not be resolved: {message}"),
+            })?;
+        replace_text_file_at(root, path.as_os_str(), match_text, replacement_text).map_err(
+            |error| WorkspaceReplaceError::File {
+                message: error.message().to_owned(),
+            },
+        )
     }
 
     /// Returns the tasks in creation order as a read-only slice.

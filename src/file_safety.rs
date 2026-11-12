@@ -157,6 +157,294 @@ pub(crate) fn create_text_file_at(
     create_text_file_at_with_writer(root.descriptor.as_raw_fd(), path, contents, write_to_fd)
 }
 
+pub(crate) fn replace_text_file_at(
+    root: &WorkspaceRoot,
+    path: &OsStr,
+    match_text: &str,
+    replacement_text: &str,
+) -> Result<usize, CliError> {
+    replace_text_file_at_with_writer(root, path, match_text, replacement_text, write_to_fd)
+}
+
+fn replace_text_file_at_with_writer<F>(
+    root: &WorkspaceRoot,
+    path: &OsStr,
+    match_text: &str,
+    replacement_text: &str,
+    mut writer: F,
+) -> Result<usize, CliError>
+where
+    F: FnMut(RawFd, &[u8]) -> io::Result<usize>,
+{
+    let path_bytes = path.as_bytes();
+    if path_bytes.contains(&0) {
+        return Err(CliError::new("invalid file path"));
+    }
+    if Path::new(path).is_absolute() {
+        return Err(CliError::new("absolute paths are not allowed"));
+    }
+    if path_bytes.is_empty() || path_bytes.ends_with(b"/") {
+        return Err(CliError::new("invalid file path"));
+    }
+    if match_text.is_empty() {
+        return Err(CliError::new("match text must not be empty"));
+    }
+    if match_text.len() > MAX_FILE_SIZE {
+        return Err(CliError::new("match text exceeds 1 MiB"));
+    }
+    if replacement_text.len() > MAX_FILE_SIZE {
+        return Err(CliError::new("replacement text exceeds 1 MiB"));
+    }
+
+    let (parent, name) = open_workspace_parent(root, path)?;
+    let parent_fd = parent.as_raw_fd();
+    let original_status = stat_at(parent_fd, &name).map_err(|error| {
+        if error.raw_os_error() == Some(libc::ENOENT) {
+            CliError::new("file not found")
+        } else {
+            CliError::new("invalid path")
+        }
+    })?;
+    if is_symlink(&original_status) {
+        return Err(CliError::new("symlink paths are not allowed"));
+    }
+    if !is_regular_file(&original_status) {
+        return Err(CliError::new("not a regular file"));
+    }
+
+    let original_file = open_at(
+        parent_fd,
+        &name,
+        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        0,
+    )
+    .map_err(|_| CliError::new("unable to open file"))?;
+    let opened_status =
+        fstat(original_file.as_raw_fd()).map_err(|_| CliError::new("unable to open file"))?;
+    if !same_inode(&original_status, &opened_status) || !is_regular_file(&opened_status) {
+        return Err(CliError::new("file changed while replacing it"));
+    }
+
+    let contents = read_open_text_file(File::from(original_file))?;
+    let range = unique_match_range(&contents, match_text)?;
+    let output_length = contents
+        .len()
+        .checked_sub(match_text.len())
+        .and_then(|length| length.checked_add(replacement_text.len()))
+        .filter(|length| *length <= MAX_FILE_SIZE)
+        .ok_or_else(|| CliError::new("replacement would exceed 1 MiB"))?;
+    let mut replacement = String::with_capacity(output_length);
+    replacement.push_str(&contents[..range.start]);
+    replacement.push_str(replacement_text);
+    replacement.push_str(&contents[range.end..]);
+
+    replace_file_contents_atomically(
+        parent_fd,
+        &name,
+        &original_status,
+        replacement.as_bytes(),
+        &mut writer,
+    )?;
+    Ok(output_length)
+}
+
+fn open_workspace_parent(
+    root: &WorkspaceRoot,
+    path: &OsStr,
+) -> Result<(OwnedFd, OsString), CliError> {
+    let mut components = split_components(path.as_bytes());
+    let Some(name) = components.pop_back() else {
+        return Err(CliError::new("invalid file path"));
+    };
+    if matches!(name.as_bytes(), b"" | b"." | b"..") {
+        return Err(CliError::new("invalid file path"));
+    }
+
+    let mut directories = vec![duplicate_fd(root.descriptor.as_raw_fd())
+        .map_err(|_| CliError::new("unable to open current directory"))?];
+    for component in components {
+        match component.as_bytes() {
+            b"" | b"." => continue,
+            b".." => {
+                if directories.len() == 1 {
+                    return Err(CliError::new("path must stay inside the current directory"));
+                }
+                directories.pop();
+                continue;
+            }
+            _ => {}
+        }
+
+        let parent_fd = directories
+            .last()
+            .expect("invariant: the root descriptor remains on the stack")
+            .as_raw_fd();
+        let status = stat_at(parent_fd, &component).map_err(|error| {
+            if error.raw_os_error() == Some(libc::ENOENT) {
+                CliError::new("parent directory not found")
+            } else {
+                CliError::new("invalid parent directory")
+            }
+        })?;
+        if is_symlink(&status) {
+            return Err(CliError::new("symlink paths are not allowed"));
+        }
+        if !is_directory(&status) {
+            return Err(CliError::new("parent is not a directory"));
+        }
+
+        let opened = open_at(
+            parent_fd,
+            &component,
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0,
+        )
+        .map_err(|_| CliError::new("invalid parent directory"))?;
+        let opened_status =
+            fstat(opened.as_raw_fd()).map_err(|_| CliError::new("invalid parent directory"))?;
+        if !same_inode(&status, &opened_status) {
+            return Err(CliError::new("path changed while replacing file"));
+        }
+        directories.push(opened);
+    }
+
+    let parent = directories
+        .pop()
+        .expect("invariant: the root descriptor remains on the stack");
+    Ok((parent, name))
+}
+
+fn unique_match_range(
+    contents: &str,
+    match_text: &str,
+) -> Result<std::ops::Range<usize>, CliError> {
+    let start = contents
+        .find(match_text)
+        .ok_or_else(|| CliError::new("match text was not found"))?;
+    let next_character = contents[start..].chars().next().map_or(0, char::len_utf8);
+    if contents[start + next_character..].contains(match_text) {
+        return Err(CliError::new("match text is ambiguous"));
+    }
+    Ok(start..start + match_text.len())
+}
+
+fn replace_file_contents_atomically<F>(
+    parent_fd: RawFd,
+    name: &OsStr,
+    original_status: &libc::stat,
+    contents: &[u8],
+    writer: &mut F,
+) -> Result<(), CliError>
+where
+    F: FnMut(RawFd, &[u8]) -> io::Result<usize>,
+{
+    let (temporary_name, temporary_file) = (0..3)
+        .find_map(|_| {
+            let name = OsString::from(format!(".krypper-replace-{}", uuid::Uuid::new_v4()));
+            match open_at(
+                parent_fd,
+                &name,
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600,
+            ) {
+                Ok(file) => Some(Ok((name, file))),
+                Err(error) if error.raw_os_error() == Some(libc::EEXIST) => None,
+                Err(_) => Some(Err(CliError::new("unable to stage file replacement"))),
+            }
+        })
+        .transpose()?
+        .ok_or_else(|| CliError::new("unable to stage file replacement"))?;
+
+    let identity = fstat(temporary_file.as_raw_fd())
+        .ok()
+        .or_else(|| stat_at(parent_fd, &temporary_name).ok());
+    let raw_fd = temporary_file.into_raw_fd();
+    let mut failed = identity.is_none();
+    if !failed && write_all_to_fd(raw_fd, contents, writer).is_err() {
+        failed = true;
+    }
+    if !failed
+        // SAFETY: `raw_fd` is the open temporary file descriptor transferred from `OwnedFd`.
+        && unsafe { libc::fchmod(raw_fd, original_status.st_mode & 0o777) } != 0
+    {
+        failed = true;
+    }
+    if !failed
+        // SAFETY: `raw_fd` remains open and refers to the complete staged file.
+        && unsafe { libc::fsync(raw_fd) } != 0
+    {
+        failed = true;
+    }
+    // SAFETY: `raw_fd` was transferred from `OwnedFd` above and is closed exactly once here.
+    if unsafe { libc::close(raw_fd) } != 0 {
+        failed = true;
+    }
+    if failed {
+        unlink_created_file(parent_fd, &temporary_name, identity.as_ref());
+        return Err(CliError::new("unable to stage file replacement"));
+    }
+
+    let current_status = stat_at(parent_fd, name).map_err(|_| {
+        unlink_created_file(parent_fd, &temporary_name, identity.as_ref());
+        CliError::new("file changed while replacing it")
+    })?;
+    if !same_inode(original_status, &current_status) || !is_regular_file(&current_status) {
+        unlink_created_file(parent_fd, &temporary_name, identity.as_ref());
+        return Err(CliError::new("file changed while replacing it"));
+    }
+
+    let temporary_name_c =
+        c_string(&temporary_name).map_err(|_| CliError::new("unable to stage file replacement"))?;
+    let name_c = c_string(name).map_err(|_| CliError::new("invalid file path"))?;
+    // SAFETY: both names are NUL-terminated single path components and `parent_fd` is an open directory.
+    if unsafe {
+        libc::renameat(
+            parent_fd,
+            temporary_name_c.as_ptr(),
+            parent_fd,
+            name_c.as_ptr(),
+        )
+    } != 0
+    {
+        unlink_created_file(parent_fd, &temporary_name, identity.as_ref());
+        return Err(CliError::new("unable to replace file"));
+    }
+    Ok(())
+}
+
+fn unlink_created_file(parent_fd: RawFd, name: &OsStr, identity: Option<&libc::stat>) {
+    let Some(identity) = identity else {
+        return;
+    };
+    let Ok(current) = stat_at(parent_fd, name) else {
+        return;
+    };
+    let Ok(name) = c_string(name) else {
+        return;
+    };
+    if same_inode(identity, &current) {
+        // SAFETY: `parent_fd` is open, `name` is a single component, and the inode still matches the temporary file created above.
+        unsafe { libc::unlinkat(parent_fd, name.as_ptr(), 0) };
+    }
+}
+
+fn write_all_to_fd<F>(fd: RawFd, contents: &[u8], writer: &mut F) -> io::Result<()>
+where
+    F: FnMut(RawFd, &[u8]) -> io::Result<usize>,
+{
+    let mut offset = 0;
+    while offset < contents.len() {
+        match writer(fd, &contents[offset..]) {
+            Ok(0) => return Err(io::Error::new(io::ErrorKind::WriteZero, "zero-byte write")),
+            Ok(written) if written <= contents.len() - offset => offset += written,
+            Ok(_) => return Err(io::Error::other("writer reported an invalid byte count")),
+            Err(error) if error.raw_os_error() == Some(libc::EINTR) => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
 fn validate_create_text_file<'a>(path: &OsStr, text: &'a str) -> Result<&'a [u8], CliError> {
     let path_bytes = path.as_bytes();
     if path_bytes.contains(&0) {
@@ -685,7 +973,10 @@ fn quote_json(codepoints: &[u32]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{create_text_file, create_text_file_at_with_writer, MAX_FILE_SIZE};
+    use super::{
+        create_text_file, create_text_file_at_with_writer, replace_text_file_at,
+        replace_text_file_at_with_writer, WorkspaceRoot, MAX_FILE_SIZE,
+    };
     use std::fs;
     use std::io;
     use std::os::fd::AsRawFd;
@@ -723,6 +1014,239 @@ mod tests {
         );
         assert_eq!(result.unwrap_err().message(), "unable to write file");
         assert!(!path.join("partial.txt").exists());
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn replacement_changes_only_one_exact_match_in_an_existing_file() {
+        let path = std::env::temp_dir().join(format!(
+            "krypper-replace-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("note.txt"), "before exact match after").unwrap();
+        let root = WorkspaceRoot {
+            descriptor: fs::File::open(&path).unwrap().into(),
+            path: fs::canonicalize(&path).unwrap(),
+        };
+
+        let result = replace_text_file_at(
+            &root,
+            std::ffi::OsStr::new("note.txt"),
+            "exact match",
+            "new text",
+        );
+
+        assert_eq!(result.unwrap(), "before new text after".len());
+        assert_eq!(
+            fs::read_to_string(path.join("note.txt")).unwrap(),
+            "before new text after"
+        );
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn replacement_accepts_a_result_at_the_one_mib_limit() {
+        let path = std::env::temp_dir().join(format!(
+            "krypper-replace-limit-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("note.txt"), "old").unwrap();
+        let root = WorkspaceRoot {
+            descriptor: fs::File::open(&path).unwrap().into(),
+            path: fs::canonicalize(&path).unwrap(),
+        };
+        let replacement = "x".repeat(MAX_FILE_SIZE);
+
+        let result =
+            replace_text_file_at(&root, std::ffi::OsStr::new("note.txt"), "old", &replacement);
+
+        assert_eq!(result.unwrap(), MAX_FILE_SIZE);
+        assert_eq!(
+            fs::read_to_string(path.join("note.txt")).unwrap(),
+            replacement
+        );
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn replacement_rejects_empty_missing_and_ambiguous_matches_without_changes() {
+        let path = std::env::temp_dir().join(format!(
+            "krypper-replace-matches-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("note.txt"), "aaaa").unwrap();
+        let root = WorkspaceRoot {
+            descriptor: fs::File::open(&path).unwrap().into(),
+            path: fs::canonicalize(&path).unwrap(),
+        };
+
+        for (match_text, expected_error) in [
+            ("", "match text must not be empty"),
+            ("missing", "match text was not found"),
+            ("aa", "match text is ambiguous"),
+        ] {
+            let error = replace_text_file_at(
+                &root,
+                std::ffi::OsStr::new("note.txt"),
+                match_text,
+                "replacement",
+            )
+            .unwrap_err();
+            assert_eq!(error.message(), expected_error);
+            assert_eq!(fs::read_to_string(path.join("note.txt")).unwrap(), "aaaa");
+        }
+
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn failed_replacement_keeps_the_original_and_removes_its_partial_stage() {
+        let path = std::env::temp_dir().join(format!(
+            "krypper-replace-write-failure-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("note.txt"), "before exact match after").unwrap();
+        let root = WorkspaceRoot {
+            descriptor: fs::File::open(&path).unwrap().into(),
+            path: fs::canonicalize(&path).unwrap(),
+        };
+        let mut writes = 0;
+
+        let result = replace_text_file_at_with_writer(
+            &root,
+            std::ffi::OsStr::new("note.txt"),
+            "exact match",
+            "a much longer replacement",
+            |fd, bytes| {
+                writes += 1;
+                if writes == 1 {
+                    // SAFETY: `fd` is the staged file descriptor and `bytes` contains at least three bytes.
+                    let count = unsafe { libc::write(fd, bytes.as_ptr().cast(), 3) };
+                    if count < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    Ok(count as usize)
+                } else {
+                    Err(io::Error::other("simulated disk failure"))
+                }
+            },
+        );
+
+        assert_eq!(
+            result.unwrap_err().message(),
+            "unable to stage file replacement"
+        );
+        assert_eq!(
+            fs::read_to_string(path.join("note.txt")).unwrap(),
+            "before exact match after"
+        );
+        assert_eq!(fs::read_dir(&path).unwrap().count(), 1);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn replacement_rejects_unsafe_paths_non_regular_files_and_oversize_content() {
+        use std::os::unix::fs::symlink;
+
+        let path = std::env::temp_dir().join(format!(
+            "krypper-replace-safety-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        let outside = path.join("outside");
+        let workspace = path.join("workspace");
+        fs::create_dir(&path).unwrap();
+        fs::create_dir(&workspace).unwrap();
+        fs::write(&outside, "outside text").unwrap();
+        fs::write(workspace.join("note.txt"), "regular text").unwrap();
+        fs::write(workspace.join("large.txt"), vec![b'x'; MAX_FILE_SIZE + 1]).unwrap();
+        fs::write(workspace.join("not-a-directory"), "file").unwrap();
+        fs::create_dir(workspace.join("directory")).unwrap();
+        symlink("note.txt", workspace.join("linked.txt")).unwrap();
+        symlink(".", workspace.join("linked-parent")).unwrap();
+        let root = WorkspaceRoot {
+            descriptor: fs::File::open(&workspace).unwrap().into(),
+            path: fs::canonicalize(&workspace).unwrap(),
+        };
+        let too_long = "x".repeat(MAX_FILE_SIZE + 1);
+        let fits_but_overflows = "x".repeat(MAX_FILE_SIZE);
+        let cases = [
+            (
+                std::ffi::OsStr::new("../outside"),
+                "text",
+                "replacement",
+                "path must stay inside the current directory",
+            ),
+            (
+                std::ffi::OsStr::new("linked.txt"),
+                "text",
+                "replacement",
+                "symlink paths are not allowed",
+            ),
+            (
+                std::ffi::OsStr::new("linked-parent/note.txt"),
+                "text",
+                "replacement",
+                "symlink paths are not allowed",
+            ),
+            (
+                std::ffi::OsStr::new("missing-parent/new.txt"),
+                "text",
+                "replacement",
+                "parent directory not found",
+            ),
+            (
+                std::ffi::OsStr::new("not-a-directory/new.txt"),
+                "text",
+                "replacement",
+                "parent is not a directory",
+            ),
+            (
+                std::ffi::OsStr::new("directory"),
+                "text",
+                "replacement",
+                "not a regular file",
+            ),
+            (
+                std::ffi::OsStr::new("large.txt"),
+                "x",
+                "replacement",
+                "file exceeds 1 MiB",
+            ),
+            (
+                std::ffi::OsStr::new("note.txt"),
+                "text",
+                fits_but_overflows.as_str(),
+                "replacement would exceed 1 MiB",
+            ),
+            (
+                std::ffi::OsStr::new("note.txt"),
+                "text",
+                too_long.as_str(),
+                "replacement text exceeds 1 MiB",
+            ),
+        ];
+
+        for (file, match_text, replacement_text, expected_error) in cases {
+            let error =
+                replace_text_file_at(&root, file, match_text, replacement_text).unwrap_err();
+            assert_eq!(error.message(), expected_error);
+        }
+        assert_eq!(
+            fs::read_to_string(workspace.join("note.txt")).unwrap(),
+            "regular text"
+        );
+        assert_eq!(fs::read_to_string(outside).unwrap(), "outside text");
+        assert_eq!(fs::read_dir(&workspace).unwrap().count(), 6);
+        assert!(!workspace.join("missing-parent").exists());
         fs::remove_dir_all(path).unwrap();
     }
 
