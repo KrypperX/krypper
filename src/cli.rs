@@ -426,6 +426,9 @@ fn parse_task_action(line: &str) -> WorkspaceAction {
     let invalid_replace = || WorkspaceAction::Unsupported {
         action: "invalid replace action".to_owned(),
     };
+    let invalid_search = || WorkspaceAction::Unsupported {
+        action: "invalid search action".to_owned(),
+    };
 
     match name {
         "read" => arguments
@@ -443,6 +446,27 @@ fn parse_task_action(line: &str) -> WorkspaceAction {
                     .unwrap_or("."),
             ),
         },
+        "search" => {
+            let Some(arguments) = arguments else {
+                return invalid_search();
+            };
+            let arguments = arguments.trim_start();
+            let Some((separator, whitespace)) = arguments
+                .char_indices()
+                .find(|(_, character)| character.is_whitespace())
+            else {
+                return invalid_search();
+            };
+            let directory = &arguments[..separator];
+            let query = &arguments[separator + whitespace.len_utf8()..];
+            if directory.is_empty() || query.is_empty() {
+                return invalid_search();
+            }
+            WorkspaceAction::SearchText {
+                directory: PathBuf::from(directory),
+                query: query.to_owned(),
+            }
+        }
         "create" => {
             let Some(arguments) = arguments else {
                 return invalid();
@@ -521,6 +545,20 @@ fn write_observation(
                 writeln!(output, "  {entry:?}")?;
             }
         }
+        WorkspaceObservation::TextSearched {
+            directory,
+            locations,
+        } => {
+            writeln!(
+                output,
+                "Observation {number}: search in {} found {} locations",
+                directory.display(),
+                locations.len()
+            )?;
+            for location in locations {
+                writeln!(output, "  {:?}:{}", location.path, location.line)?;
+            }
+        }
         WorkspaceObservation::FileCreated {
             path,
             bytes_written,
@@ -553,6 +591,13 @@ fn write_observation(
                 output,
                 "Observation {number}: replacement in {} failed: {error}",
                 path.display()
+            )?;
+        }
+        WorkspaceObservation::TextSearchFailed { directory, error } => {
+            writeln!(
+                output,
+                "Observation {number}: search in {} failed: {error}",
+                directory.display()
             )?;
         }
         WorkspaceObservation::ActionFailed { error, .. } => {
@@ -763,7 +808,7 @@ fn write_root_help(output: &mut dyn Write) -> io::Result<()> {
 
 fn write_task_help(output: &mut dyn Write) -> io::Result<()> {
     output.write_all(
-        b"usage: krypper task [-h] --goal GOAL --max-actions N\n\nrun a caller-directed task across bounded turns in the current directory\n\noptions:\n  --goal GOAL          required task goal\n  --max-actions N      required positive action limit for the whole task\n  -h, --help           show this help message and exit\n\nEnter one action per line on standard input:\n  read PATH\n  list [PATH]\n  create PATH TEXT\n  replace PATH MATCH_TEXT => REPLACEMENT_TEXT\n  continue\n  complete [RESULT]\n  cancel\n\nreplace requires one non-empty exact match; it prints only path and byte-count metadata.\ncontinue ends this turn and starts another while action budget remains.\ncomplete ends the task successfully. Invalid input, end-of-input, action failures,\nand budget exhaustion fail the task. Explicit cancellation reports a cancelled\ntask and exits with status 130.\n",
+        b"usage: krypper task [-h] --goal GOAL --max-actions N\n\nrun a caller-directed task across bounded turns in the current directory\n\noptions:\n  --goal GOAL          required task goal\n  --max-actions N      required positive action limit for the whole task\n  -h, --help           show this help message and exit\n\nEnter one action per line on standard input:\n  read PATH\n  list [PATH]\n  create PATH TEXT\n  replace PATH MATCH_TEXT => REPLACEMENT_TEXT\n  search DIRECTORY QUERY\n  continue\n  complete [RESULT]\n  cancel\n\nreplace requires one non-empty exact match; it prints only path and byte-count metadata.\nsearch returns relative paths and line numbers without matched text.\ncontinue ends this turn and starts another while action budget remains.\ncomplete ends the task successfully. Invalid input, end-of-input, action failures,\nand budget exhaustion fail the task. Explicit cancellation reports a cancelled\ntask and exits with status 130.\n",
     )
 }
 

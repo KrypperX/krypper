@@ -4,7 +4,7 @@ use krypper::agent_loop::{
 };
 use krypper::task_lifecycle::{
     TaskHistoryTransition, TaskSession, TaskState, TurnActivityAction, TurnActivitySummary,
-    TurnOutcome, TurnState, WorkspaceReadError, WorkspaceWriteError,
+    TurnOutcome, TurnState, WorkspaceReadError, WorkspaceSearchLocation, WorkspaceWriteError,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -728,6 +728,125 @@ fn failed_replacement_consumes_one_action_records_metadata_and_stops_decisions()
         task.activity_history()[0].summary(),
         turn.activity_history()[0]
     );
+}
+
+#[test]
+fn bounded_goal_turn_searches_once_and_retains_only_location_metadata() {
+    let workspace = TempDir::new();
+    let query = "PRIVATE_SEARCH_QUERY_83";
+    fs::write(
+        workspace.path().join("note.txt"),
+        format!("private line\n{query} matched text\n"),
+    )
+    .unwrap();
+    let goal = "Find the requested literal";
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) =
+        with_current_dir(workspace.path(), || running_turn(&mut session, goal));
+    let mut decisions = [
+        WorkspaceAction::SearchText {
+            directory: PathBuf::from("."),
+            query: query.to_owned(),
+        },
+        WorkspaceAction::Complete {
+            result: "finished".to_owned(),
+        },
+    ]
+    .into_iter();
+    let mut decision_count = 0;
+    let mut source = |_: &str, _: &[WorkspaceObservation]| {
+        decision_count += 1;
+        decisions.next().unwrap()
+    };
+
+    let result =
+        run_goal_turn_with_budget(&mut session, task_id, turn_id, goal, 3, &mut source).unwrap();
+
+    assert_eq!(decision_count, 2);
+    assert_eq!(result.actions_taken(), 2);
+    assert_eq!(
+        result.observations(),
+        [WorkspaceObservation::TextSearched {
+            directory: PathBuf::from("."),
+            locations: vec![WorkspaceSearchLocation {
+                path: PathBuf::from("note.txt"),
+                line: 2,
+            }],
+        }]
+    );
+    assert_eq!(
+        session
+            .get_task(task_id)
+            .unwrap()
+            .get_turn(turn_id)
+            .unwrap()
+            .activity_history(),
+        [
+            TurnActivitySummary::TextSearched { location_count: 1 },
+            TurnActivitySummary::Completed,
+        ]
+    );
+    assert!(!format!("{:?}", result.observations()).contains(query));
+    assert!(!format!("{:?}", result.observations()).contains("private line"));
+    assert!(!format!("{:?}", result.observations()).contains("matched text"));
+    assert!(!format!(
+        "{:?}",
+        session.get_task(task_id).unwrap().activity_history()
+    )
+    .contains(query));
+}
+
+#[test]
+fn failed_search_records_one_failure_and_does_not_request_another_decision() {
+    let workspace = TempDir::new();
+    let query = "PRIVATE_FAILED_SEARCH_QUERY_47";
+    fs::write(
+        workspace.path().join("invalid.txt"),
+        [b"private contents ".as_slice(), &[0xff]].concat(),
+    )
+    .unwrap();
+    let goal = "Reject invalid UTF-8 search input";
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) =
+        with_current_dir(workspace.path(), || running_turn(&mut session, goal));
+    let mut decision_count = 0;
+    let mut source = |_: &str, _: &[WorkspaceObservation]| {
+        decision_count += 1;
+        WorkspaceAction::SearchText {
+            directory: PathBuf::from("."),
+            query: query.to_owned(),
+        }
+    };
+
+    let result =
+        run_goal_turn_with_budget(&mut session, task_id, turn_id, goal, 3, &mut source).unwrap();
+
+    assert_eq!(decision_count, 1);
+    assert_eq!(result.actions_taken(), 1);
+    assert_eq!(result.stop_reason(), GoalTurnStopReason::ActionFailed);
+    assert_eq!(
+        result.outcome(),
+        Some(&TurnOutcome::Failure {
+            detail: "workspace text search failed: file is not valid UTF-8".to_owned(),
+        })
+    );
+    assert!(matches!(
+        result.observations(),
+        [WorkspaceObservation::TextSearchFailed { .. }]
+    ));
+    let turn = session
+        .get_task(task_id)
+        .unwrap()
+        .get_turn(turn_id)
+        .unwrap();
+    assert_eq!(
+        turn.activity_history(),
+        [TurnActivitySummary::ActionFailed {
+            action: TurnActivityAction::SearchText,
+        }]
+    );
+    assert!(!format!("{:?}", result.observations()).contains(query));
+    assert!(!format!("{:?}", turn.activity_history()).contains(query));
 }
 
 #[test]

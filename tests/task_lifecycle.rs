@@ -2,7 +2,7 @@ use krypper::task_lifecycle::{
     Task, TaskEvent, TaskHistoryEvent, TaskHistoryTransition, TaskSession, TaskState,
     TurnActivitySummary, TurnCompletionError, TurnEvent, TurnOutcome, TurnState,
     TurnTransitionError, WorkspaceListError, WorkspaceReadError, WorkspaceReplaceError,
-    WorkspaceWriteError,
+    WorkspaceSearchLocation, WorkspaceWriteError,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -117,6 +117,38 @@ fn running_owned_turn_reads_a_workspace_file() {
     });
 
     assert_eq!(contents, Ok("private task context".to_owned()));
+}
+
+#[test]
+fn running_owned_turn_search_returns_only_matching_locations_without_history_changes() {
+    let temp = TempDir::new();
+    fs::write(temp.path().join(".hidden"), "skip\nneedle secret\n").unwrap();
+    fs::write(temp.path().join("note.txt"), "needle private text\n").unwrap();
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) = running_turn_in(&mut session, temp.path());
+    let before = lifecycle_snapshot(&session);
+
+    let result = with_current_dir(temp.path(), || {
+        session.search_workspace_text(task_id, turn_id, Path::new("."), "needle")
+    });
+
+    assert_eq!(
+        result,
+        Ok(vec![
+            WorkspaceSearchLocation {
+                path: PathBuf::from(".hidden"),
+                line: 2,
+            },
+            WorkspaceSearchLocation {
+                path: PathBuf::from("note.txt"),
+                line: 1,
+            },
+        ])
+    );
+    assert_eq!(lifecycle_snapshot(&session), before);
+    assert!(!format!("{result:?}").contains("needle"));
+    assert!(!format!("{result:?}").contains("private text"));
+    assert!(!format!("{result:?}").contains("secret"));
 }
 
 #[test]

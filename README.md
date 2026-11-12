@@ -45,7 +45,8 @@ files, or contacts a network service.
 bounded turns in-process with the current directory as its workspace. It reads
 one caller decision per line from standard input. Enter `read <path>`,
 `list [path]`, `create <path> <text>`,
-`replace <path> <match text> => <replacement text>`, `continue`,
+`replace <path> <match text> => <replacement text>`,
+`search <directory> <query>`, `continue`,
 `complete [result]`, or `cancel`; a create or replace path is one token, and
 the remaining line contains its text. Replace requires one non-empty exact
 match in an existing UTF-8 file. It rejects missing or ambiguous matches,
@@ -54,6 +55,13 @@ Replacement output and retained activity history contain only path and byte
 count metadata. Read and list actions use the same workspace policy as the
 existing commands, while create is create-only and follows the same path and
 size limits as `write`.
+Search checks immediate regular UTF-8 files in the selected directory, includes
+hidden names, skips entry symlinks and non-regular files, and does not recurse.
+Its case-sensitive literal query is limited to 4 KiB, each file to 1 MiB, total
+bytes scanned to 16 MiB, and returned file-line locations to 10,000. The
+existing 1,024-entry directory limit applies too. Results contain relative paths
+and one-based line numbers, never matching line text; invalid UTF-8 and oversized
+files fail the whole action.
 `continue` ends the active turn and starts another for the same running task.
 The action limit is shared by the whole invocation, and each `continue`
 selection consumes one action. The CLI prints observations before asking for

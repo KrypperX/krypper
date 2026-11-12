@@ -7,6 +7,9 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
+mod search;
+pub(crate) use search::search_text_files_at;
+
 const MAX_FILE_SIZE: usize = 1024 * 1024;
 const MAX_SYMLINKS: usize = 40;
 const MAX_TASK_DIRECTORY_ENTRIES: usize = 1024;
