@@ -48,10 +48,42 @@ one caller decision per line from standard input. Enter `read <path>`,
 `create <path> <text>`,
 `replace <path> <match text> => <replacement text>`,
 `search <directory> <query>`, `search-tree <directory> <query>`, `continue`,
-`complete [result]`, or `cancel`; a create or replace path is one token, and
-the remaining line contains its text. Replace requires one non-empty exact
-match in an existing UTF-8 file. It rejects missing or ambiguous matches,
-symlink paths, non-regular files, and replacements that would exceed 1 MiB.
+`complete [result]`, or `cancel`.
+
+The unquoted path forms remain supported. `read`, `list`, and `mkdir` take the
+remaining line as the path; `list` defaults to `.`. `read-range` treats the
+final two whitespace-separated fields as the start line and maximum line
+count. For `create`, `replace`, `search`, and `search-tree`, an unquoted path
+is the first whitespace-delimited token because the rest of the line is
+content, `MATCH_TEXT => REPLACEMENT_TEXT`, or a query. Each of these eight
+actions also accepts a JSON double-quoted path token, which allows spaces in
+the path.
+
+Quoted path tokens accept literal valid Unicode and JSON escapes: `\\`, `\"`,
+`\/`, `\b`, `\f`, `\n`, `\r`, `\t`, and `\uHHHH` (a supplementary
+character uses a valid surrogate pair). On Unix, `\xNN` with exactly two
+hexadecimal digits represents one raw path byte, including non-UTF-8 bytes.
+`search` and `search-tree` print each result as a reusable quoted path token
+followed by `:<line>`. Query and file-content text after the path keeps its
+existing syntax; only the path is decoded as a token.
+
+For example, after `search . needle` prints:
+
+```text
+Observation 1: search in . found 1 locations
+  "guides with spaces/quote \"example\"/back\\slash.txt":12
+```
+
+reuse the result path in the next action:
+
+```text
+read-range "guides with spaces/quote \"example\"/back\\slash.txt" 12 4
+```
+
+Create and replace also preserve their existing limits and behavior. Replace
+requires one non-empty exact match in an existing UTF-8 file. It rejects
+missing or ambiguous matches, symlink paths, non-regular files, and
+replacements that would exceed 1 MiB.
 Replacement output and retained activity history contain only path and byte
 count metadata. Read and list actions use the same workspace policy as the
 existing commands, while create is create-only and follows the same path and
