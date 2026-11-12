@@ -569,16 +569,12 @@ fn parse_path_argument_prefix(arguments: &str) -> Option<(PathBuf, &str, bool)> 
         let (path, end) = decode_quoted_path(arguments)?;
         let remainder = &arguments[end..];
         let Some(separator) = remainder.chars().next() else {
-            return Some((PathBuf::from(path), "", false));
+            return Some((path, "", false));
         };
         if !separator.is_whitespace() {
             return None;
         }
-        return Some((
-            PathBuf::from(path),
-            &remainder[separator.len_utf8()..],
-            true,
-        ));
+        return Some((path, &remainder[separator.len_utf8()..], true));
     }
 
     let Some((separator_index, separator)) = arguments
@@ -594,28 +590,35 @@ fn parse_path_argument_prefix(arguments: &str) -> Option<(PathBuf, &str, bool)> 
     ))
 }
 
-fn decode_quoted_path(arguments: &str) -> Option<(String, usize)> {
+fn decode_quoted_path(arguments: &str) -> Option<(PathBuf, usize)> {
     let bytes = arguments.as_bytes();
-    let mut path = String::new();
+    let mut path = Vec::new();
     let mut index = 1;
 
     while let Some(byte) = bytes.get(index).copied() {
         match byte {
-            b'"' => return Some((path, index + 1)),
+            b'"' => return Some((path_buf_from_quoted_bytes(path)?, index + 1)),
             b'\\' => {
                 index += 1;
                 match bytes.get(index).copied()? {
-                    b'"' => path.push('"'),
-                    b'\\' => path.push('\\'),
-                    b'/' => path.push('/'),
-                    b'b' => path.push('\u{0008}'),
-                    b'f' => path.push('\u{000c}'),
-                    b'n' => path.push('\n'),
-                    b'r' => path.push('\r'),
-                    b't' => path.push('\t'),
+                    b'"' => path.push(b'"'),
+                    b'\\' => path.push(b'\\'),
+                    b'/' => path.push(b'/'),
+                    b'b' => path.push(b'\x08'),
+                    b'f' => path.push(b'\x0c'),
+                    b'n' => path.push(b'\n'),
+                    b'r' => path.push(b'\r'),
+                    b't' => path.push(b'\t'),
                     b'u' => {
                         let (character, next_index) = decode_json_unicode_escape(bytes, index + 1)?;
-                        path.push(character);
+                        let mut encoded = [0; 4];
+                        path.extend_from_slice(character.encode_utf8(&mut encoded).as_bytes());
+                        index = next_index;
+                        continue;
+                    }
+                    b'x' => {
+                        let (byte, next_index) = read_hex_byte_escape(bytes, index + 1)?;
+                        path.push(byte);
                         index = next_index;
                         continue;
                     }
@@ -626,13 +629,33 @@ fn decode_quoted_path(arguments: &str) -> Option<(String, usize)> {
             0..=0x1f => return None,
             _ => {
                 let character = arguments.get(index..)?.chars().next()?;
-                path.push(character);
+                let mut encoded = [0; 4];
+                path.extend_from_slice(character.encode_utf8(&mut encoded).as_bytes());
                 index += character.len_utf8();
             }
         }
     }
 
     None
+}
+
+#[cfg(unix)]
+fn path_buf_from_quoted_bytes(path: Vec<u8>) -> Option<PathBuf> {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    Some(PathBuf::from(OsString::from_vec(path)))
+}
+
+#[cfg(not(unix))]
+fn path_buf_from_quoted_bytes(path: Vec<u8>) -> Option<PathBuf> {
+    Some(PathBuf::from(String::from_utf8(path).ok()?))
+}
+
+fn read_hex_byte_escape(bytes: &[u8], index: usize) -> Option<(u8, usize)> {
+    let end = index.checked_add(2)?;
+    let digits = std::str::from_utf8(bytes.get(index..end)?).ok()?;
+    Some((u8::from_str_radix(digits, 16).ok()?, end))
 }
 
 fn decode_json_unicode_escape(bytes: &[u8], index: usize) -> Option<(char, usize)> {
@@ -663,11 +686,49 @@ fn read_json_hex_quad(bytes: &[u8], index: usize) -> Option<(u16, usize)> {
 }
 
 fn quoted_path_token(path: &Path) -> String {
-    let Some(path) = path.to_str() else {
-        return format!("{path:?}");
-    };
-    let mut token = String::with_capacity(path.len() + 2);
+    let mut token = String::new();
     token.push('"');
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+
+        let mut remaining = path.as_os_str().as_bytes();
+        while !remaining.is_empty() {
+            match std::str::from_utf8(remaining) {
+                Ok(valid_path) => {
+                    append_quoted_path_text(&mut token, valid_path);
+                    break;
+                }
+                Err(error) => {
+                    let valid_length = error.valid_up_to();
+                    if let Ok(valid_path) = std::str::from_utf8(&remaining[..valid_length]) {
+                        append_quoted_path_text(&mut token, valid_path);
+                    }
+                    let invalid_length =
+                        error.error_len().unwrap_or(remaining.len() - valid_length);
+                    let invalid_end = valid_length + invalid_length;
+                    for byte in &remaining[valid_length..invalid_end] {
+                        const HEX: &[u8; 16] = b"0123456789abcdef";
+                        token.push_str("\\x");
+                        token.push(char::from(HEX[usize::from(byte >> 4)]));
+                        token.push(char::from(HEX[usize::from(byte & 0x0f)]));
+                    }
+                    remaining = &remaining[invalid_end..];
+                }
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    if let Some(path) = path.to_str() {
+        append_quoted_path_text(&mut token, path);
+    } else {
+        token.push_str(&format!("{path:?}"));
+    }
+    token.push('"');
+    token
+}
+
+fn append_quoted_path_text(token: &mut String, path: &str) {
     for character in path.chars() {
         match character {
             '"' => token.push_str("\\\""),
@@ -683,8 +744,6 @@ fn quoted_path_token(path: &Path) -> String {
             character => token.push(character),
         }
     }
-    token.push('"');
-    token
 }
 
 fn parse_task_read_range(arguments: Option<&str>) -> Option<WorkspaceAction> {
@@ -1084,7 +1143,7 @@ fn write_task_help(output: &mut dyn Write) -> io::Result<()> {
             "  replace PATH MATCH_TEXT => REPLACEMENT_TEXT\n",
             "  search DIRECTORY QUERY\n  search-tree DIRECTORY QUERY\n",
             "  continue\n  complete [RESULT]\n  cancel\n\n",
-            "PATH may be unquoted as before or a JSON double-quoted string; backslash escapes follow JSON.\n",
+            "PATH may be unquoted as before or a JSON double-quoted string; JSON escapes apply, with \\xNN for non-UTF-8 Unix bytes.\n",
             "Search results print reusable quoted path tokens. Text after PATH keeps its existing syntax.\n",
             "mkdir creates one directory and requires its parent to exist.\n",
             "read-range uses one-based lines, returns at most 200 lines and 64 KiB, and reports the actual range.\n",
@@ -1121,8 +1180,9 @@ fn write_write_help(output: &mut dyn Write) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_task_action, quoted_path_token, run_with};
-    use crate::agent_loop::WorkspaceAction;
+    use super::{parse_task_action, quoted_path_token, run_with, write_observation};
+    use crate::agent_loop::{WorkspaceAction, WorkspaceObservation};
+    use crate::task_lifecycle::WorkspaceSearchLocation;
     use std::ffi::OsString;
     use std::io::{Cursor, Read};
     use std::path::{Path, PathBuf};
@@ -1197,6 +1257,51 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_quoted_path_tokens_round_trip() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let path = PathBuf::from(OsString::from_vec(b"nested/file-\xff.txt".to_vec()));
+        let token = r#""nested/file-\xff.txt""#;
+
+        assert_eq!(quoted_path_token(&path), token);
+        let mut output = Vec::new();
+        write_observation(
+            &mut output,
+            1,
+            &WorkspaceObservation::TreeTextSearched {
+                directory: PathBuf::from("."),
+                locations: vec![WorkspaceSearchLocation {
+                    path: path.clone(),
+                    line: 2,
+                }],
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            format!("Observation 1: search-tree in . found 1 locations\n  {token}:2\n")
+        );
+        assert!(matches!(
+            parse_task_action(&format!("read-range {token} 2 3")),
+            WorkspaceAction::ReadRange {
+                path: actual,
+                start_line: 2,
+                max_lines: 3,
+            } if actual == path
+        ));
+        assert!(matches!(
+            parse_task_action(&format!("replace {token} match => replacement")),
+            WorkspaceAction::ReplaceText {
+                path: actual,
+                match_text,
+                replacement_text,
+            } if actual == path && match_text == "match" && replacement_text == "replacement"
+        ));
+    }
+
     #[test]
     fn unquoted_task_paths_keep_existing_parsing() {
         assert!(matches!(
@@ -1228,6 +1333,9 @@ mod tests {
         for action in [
             "read \"unterminated",
             r#"read "invalid\q""#,
+            r#"read "invalid\x""#,
+            r#"read "invalid\x0""#,
+            r#"read "invalid\xgg""#,
             r#"read "invalid\uD800""#,
             "search \"path\"suffix query",
         ] {
