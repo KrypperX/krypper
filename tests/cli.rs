@@ -722,6 +722,43 @@ fn task_replaces_with_multibyte_whitespace_after_the_action() {
 }
 
 #[test]
+fn task_records_and_stops_after_a_failed_replacement_with_ideographic_space() {
+    let directory = TempDir::new();
+    let original_contents = "before original after";
+    fs::write(directory.path().join("note.txt"), original_contents).unwrap();
+
+    let input = "replace note.txt\u{3000}needle => fresh\ncomplete must_not_run\n";
+    let output = run_with_input(
+        directory.path(),
+        &[
+            "task",
+            "--goal",
+            "Record a rejected replacement",
+            "--max-actions",
+            "3",
+        ],
+        input.as_bytes(),
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    let output = stdout(&output);
+    assert!(output.contains("replacement in note.txt failed"));
+    assert!(output.contains("match text was not found"));
+    assert!(output.contains("Actions: 1/3"));
+    assert!(output.contains("ActionFailed { action: ReplaceText }"));
+    assert!(output.contains("Turn state: failed"));
+    assert!(output.contains("Task state: failed"));
+    assert_lifecycle_transitions(output, "failed");
+    assert!(!output.contains("needle"));
+    assert!(!output.contains("fresh"));
+    assert!(!output.contains("must_not_run"));
+    assert_eq!(
+        fs::read_to_string(directory.path().join("note.txt")).unwrap(),
+        original_contents
+    );
+}
+
+#[test]
 fn task_rejects_ambiguous_replacement_once_without_printing_text_or_reading_again() {
     let directory = TempDir::new();
     let match_text = "PRIVATE_MATCH_57";
