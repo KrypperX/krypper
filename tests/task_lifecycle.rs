@@ -2156,6 +2156,37 @@ fn session_cancellation_records_metadata_before_consistent_terminal_history() {
 }
 
 #[test]
+fn range_read_activity_history_contains_only_range_and_byte_metadata() {
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) = running_turn(&mut session);
+    let activity = [
+        TurnActivitySummary::FileRangeRead {
+            start_line: 4,
+            end_line: 6,
+            bytes_returned: 27,
+        },
+        TurnActivitySummary::Cancelled,
+    ];
+
+    session
+        .cancel_turn_with_activity(task_id, turn_id, &activity)
+        .unwrap();
+
+    let task = session.get_task(task_id).unwrap();
+    let turn = task.get_turn(turn_id).unwrap();
+    assert_eq!(turn.activity_history(), activity);
+    assert_eq!(
+        task.activity_history()
+            .iter()
+            .map(|event| event.summary())
+            .collect::<Vec<_>>(),
+        activity
+    );
+    assert!(format!("{:?}", turn.activity_history()).contains("bytes_returned: 27"));
+    assert!(!format!("{:?}", task.activity_history()).contains("excerpt"));
+}
+
+#[test]
 fn task_cancel_cancels_pending_turns_of_a_pending_task() {
     let mut task = Task::new("A pending task");
     let first_turn_id = task.create_turn().unwrap();

@@ -438,6 +438,7 @@ fn parse_task_action(line: &str) -> WorkspaceAction {
                 path: PathBuf::from(path),
             })
             .unwrap_or_else(invalid),
+        "read-range" => parse_task_read_range(arguments).unwrap_or_else(invalid),
         "list" => WorkspaceAction::ListDirectory {
             path: PathBuf::from(
                 arguments
@@ -520,6 +521,24 @@ fn parse_task_action(line: &str) -> WorkspaceAction {
     }
 }
 
+fn parse_task_read_range(arguments: Option<&str>) -> Option<WorkspaceAction> {
+    let arguments = arguments?.trim();
+    let max_separator = arguments.rfind(char::is_whitespace)?;
+    let max_lines = arguments[max_separator..].trim().parse().ok()?;
+    let before_max = arguments[..max_separator].trim_end();
+    let start_separator = before_max.rfind(char::is_whitespace)?;
+    let start_line = before_max[start_separator..].trim().parse().ok()?;
+    let path = before_max[..start_separator].trim_end();
+    if path.is_empty() {
+        return None;
+    }
+    Some(WorkspaceAction::ReadRange {
+        path: PathBuf::from(path),
+        start_line,
+        max_lines,
+    })
+}
+
 fn write_observation(
     output: &mut dyn Write,
     number: usize,
@@ -531,6 +550,22 @@ fn write_observation(
             writeln!(output, "  contents:")?;
             output.write_all(contents.as_bytes())?;
             if !contents.ends_with('\n') {
+                output.write_all(b"\n")?;
+            }
+        }
+        WorkspaceObservation::FileRangeRead {
+            path,
+            start_line,
+            end_line,
+            excerpt,
+        } => {
+            writeln!(
+                output,
+                "Observation {number}: read-range {} lines {start_line}-{end_line}",
+                path.display()
+            )?;
+            output.write_all(excerpt.as_bytes())?;
+            if !excerpt.ends_with('\n') {
                 output.write_all(b"\n")?;
             }
         }
@@ -808,7 +843,7 @@ fn write_root_help(output: &mut dyn Write) -> io::Result<()> {
 
 fn write_task_help(output: &mut dyn Write) -> io::Result<()> {
     output.write_all(
-        b"usage: krypper task [-h] --goal GOAL --max-actions N\n\nrun a caller-directed task across bounded turns in the current directory\n\noptions:\n  --goal GOAL          required task goal\n  --max-actions N      required positive action limit for the whole task\n  -h, --help           show this help message and exit\n\nEnter one action per line on standard input:\n  read PATH\n  list [PATH]\n  create PATH TEXT\n  replace PATH MATCH_TEXT => REPLACEMENT_TEXT\n  search DIRECTORY QUERY\n  continue\n  complete [RESULT]\n  cancel\n\nreplace requires one non-empty exact match; it prints only path and byte-count metadata.\nsearch returns relative paths and line numbers without matched text.\ncontinue ends this turn and starts another while action budget remains.\ncomplete ends the task successfully. Invalid input, end-of-input, action failures,\nand budget exhaustion fail the task. Explicit cancellation reports a cancelled\ntask and exits with status 130.\n",
+        b"usage: krypper task [-h] --goal GOAL --max-actions N\n\nrun a caller-directed task across bounded turns in the current directory\n\noptions:\n  --goal GOAL          required task goal\n  --max-actions N      required positive action limit for the whole task\n  -h, --help           show this help message and exit\n\nEnter one action per line on standard input:\n  read PATH\n  read-range PATH START_LINE MAX_LINES\n  list [PATH]\n  create PATH TEXT\n  replace PATH MATCH_TEXT => REPLACEMENT_TEXT\n  search DIRECTORY QUERY\n  continue\n  complete [RESULT]\n  cancel\n\nread-range uses one-based lines, returns at most 200 lines and 64 KiB, and reports the actual range.\nreplace requires one non-empty exact match; it prints only path and byte-count metadata.\nsearch returns relative paths and line numbers without matched text.\ncontinue ends this turn and starts another while action budget remains.\ncomplete ends the task successfully. Invalid input, end-of-input, action failures,\nand budget exhaustion fail the task. Explicit cancellation reports a cancelled\ntask and exits with status 130.\n",
     )
 }
 

@@ -8,11 +8,20 @@ use std::fmt;
 use std::path::PathBuf;
 use uuid::Uuid;
 
+const MAX_READ_RANGE_LINES: usize = 200;
+const MAX_READ_RANGE_BYTES: usize = 64 * 1024;
+
 /// One action a task-owned turn can request from its workspace.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WorkspaceAction {
     /// Read one UTF-8 file under the task's workspace safety policy.
     ReadFile { path: PathBuf },
+    /// Read at most 200 one-based lines from a UTF-8 file under the task's workspace safety policy.
+    ReadRange {
+        path: PathBuf,
+        start_line: usize,
+        max_lines: usize,
+    },
     /// List the immediate entries of a directory under the task's workspace safety policy.
     ListDirectory { path: PathBuf },
     /// Find a literal query in the immediate regular UTF-8 files of a workspace directory.
@@ -40,6 +49,13 @@ pub enum WorkspaceAction {
 pub enum WorkspaceObservation {
     /// The contents read from one workspace file.
     FileRead { path: PathBuf, contents: String },
+    /// A selected file excerpt and the actual one-based line range returned.
+    FileRangeRead {
+        path: PathBuf,
+        start_line: usize,
+        end_line: usize,
+        excerpt: String,
+    },
     /// Immediate filesystem-native entry names in deterministic order.
     DirectoryListed {
         path: PathBuf,
@@ -148,7 +164,7 @@ impl GoalTurnResult {
         self.turn_id
     }
 
-    /// Returns the first file's contents for callers of the original one-read API.
+    /// Returns the contents or excerpt from the first successful file read.
     ///
     /// New callers should use [`Self::observations`] to inspect every read and listing.
     pub fn read_result(&self) -> &str {
@@ -292,6 +308,7 @@ pub fn run_goal_turn<D: DecisionSource + ?Sized>(
         ActionExecution::Observation(observation) => {
             let result = match &observation {
                 WorkspaceObservation::FileRead { contents, .. } => contents.clone(),
+                WorkspaceObservation::FileRangeRead { excerpt, .. } => excerpt.clone(),
                 WorkspaceObservation::DirectoryListed { entries, .. } => {
                     format!("listed {} entries", entries.len())
                 }
@@ -480,6 +497,16 @@ fn summarize_observation(observation: &WorkspaceObservation) -> TurnActivitySumm
         WorkspaceObservation::FileRead { contents, .. } => TurnActivitySummary::FileRead {
             bytes_read: contents.len(),
         },
+        WorkspaceObservation::FileRangeRead {
+            start_line,
+            end_line,
+            excerpt,
+            ..
+        } => TurnActivitySummary::FileRangeRead {
+            start_line: *start_line,
+            end_line: *end_line,
+            bytes_returned: excerpt.len(),
+        },
         WorkspaceObservation::DirectoryListed { entries, .. } => {
             TurnActivitySummary::DirectoryListed {
                 entry_count: entries.len(),
@@ -510,6 +537,7 @@ fn summarize_observation(observation: &WorkspaceObservation) -> TurnActivitySumm
         WorkspaceObservation::ActionFailed { action, .. } => {
             let action = match action {
                 WorkspaceAction::ReadFile { .. } => TurnActivityAction::ReadFile,
+                WorkspaceAction::ReadRange { .. } => TurnActivityAction::ReadRange,
                 WorkspaceAction::ListDirectory { .. } => TurnActivityAction::ListDirectory,
                 WorkspaceAction::CreateFile { .. } => TurnActivityAction::CreateFile,
                 WorkspaceAction::ReplaceText { .. } => TurnActivityAction::ReplaceText,
@@ -537,6 +565,40 @@ fn execute_action(
                     WorkspaceObservation::FileRead {
                         path: path.clone(),
                         contents,
+                    },
+                )),
+                Err(error @ WorkspaceReadError::File { .. }) => {
+                    let error = GoalTurnError::WorkspaceRead(error);
+                    Ok(ActionExecution::Failed {
+                        observation: WorkspaceObservation::ActionFailed {
+                            action: action.clone(),
+                            error: error.clone(),
+                        },
+                        error,
+                    })
+                }
+                Err(error) => Err(GoalTurnError::WorkspaceRead(error)),
+            }
+        }
+        WorkspaceAction::ReadRange {
+            path,
+            start_line,
+            max_lines,
+        } => {
+            let result = validate_read_range(*start_line, *max_lines)
+                .map_err(|message| WorkspaceReadError::File { message })
+                .and_then(|()| session.read_workspace_file(task_id, turn_id, path))
+                .and_then(|contents| {
+                    select_read_range(&contents, *start_line, *max_lines)
+                        .map_err(|message| WorkspaceReadError::File { message })
+                });
+            match result {
+                Ok((start_line, end_line, excerpt)) => Ok(ActionExecution::Observation(
+                    WorkspaceObservation::FileRangeRead {
+                        path: path.clone(),
+                        start_line,
+                        end_line,
+                        excerpt,
                     },
                 )),
                 Err(error @ WorkspaceReadError::File { .. }) => {
@@ -662,6 +724,41 @@ fn execute_action(
     }
 }
 
+fn validate_read_range(start_line: usize, max_lines: usize) -> Result<(), String> {
+    if start_line == 0 {
+        return Err("starting line must be positive".to_owned());
+    }
+    if max_lines == 0 {
+        return Err("line count must be positive".to_owned());
+    }
+    if max_lines > MAX_READ_RANGE_LINES {
+        return Err("requested line count exceeds 200 lines".to_owned());
+    }
+    Ok(())
+}
+
+fn select_read_range(
+    contents: &str,
+    start_line: usize,
+    max_lines: usize,
+) -> Result<(usize, usize, String), String> {
+    let lines = contents
+        .lines()
+        .skip(start_line - 1)
+        .take(max_lines)
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        return Err(format!("starting line {start_line} does not exist"));
+    }
+
+    let excerpt = lines.join("\n");
+    if excerpt.len() > MAX_READ_RANGE_BYTES {
+        return Err("selected excerpt exceeds 64 KiB".to_owned());
+    }
+    let end_line = start_line + lines.len() - 1;
+    Ok((start_line, end_line, excerpt))
+}
+
 fn cancel_turn(
     session: &mut TaskSession,
     task_id: Uuid,
@@ -678,6 +775,7 @@ fn cancel_turn(
         .iter()
         .find_map(|observation| match observation {
             WorkspaceObservation::FileRead { contents, .. } => Some(contents.clone()),
+            WorkspaceObservation::FileRangeRead { excerpt, .. } => Some(excerpt.clone()),
             _ => None,
         })
         .unwrap_or_default();
@@ -711,6 +809,7 @@ fn finish_turn(
         .iter()
         .find_map(|observation| match observation {
             WorkspaceObservation::FileRead { contents, .. } => Some(contents.clone()),
+            WorkspaceObservation::FileRangeRead { excerpt, .. } => Some(excerpt.clone()),
             _ => None,
         })
         .unwrap_or_default();

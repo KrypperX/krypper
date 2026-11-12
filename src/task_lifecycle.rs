@@ -470,6 +470,8 @@ impl TurnOutcome {
 pub enum TurnActivityAction {
     /// A workspace file read failed.
     ReadFile,
+    /// A bounded workspace file range read failed.
+    ReadRange,
     /// A workspace directory listing failed.
     ListDirectory,
     /// A workspace file creation failed.
@@ -488,6 +490,12 @@ pub enum TurnActivityAction {
 pub enum TurnActivitySummary {
     /// A file was read; only its byte count is retained.
     FileRead { bytes_read: usize },
+    /// A file range was read; only its range and excerpt byte count are retained.
+    FileRangeRead {
+        start_line: usize,
+        end_line: usize,
+        bytes_returned: usize,
+    },
     /// A file was created; only its byte count is retained.
     FileCreated { bytes_written: usize },
     /// Text was replaced; only the resulting file size is retained.

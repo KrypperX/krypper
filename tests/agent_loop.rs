@@ -12,6 +12,7 @@ use std::sync::Mutex;
 use uuid::Uuid;
 
 static CURRENT_DIR_LOCK: Mutex<()> = Mutex::new(());
+const MAX_FILE_SIZE: usize = 1024 * 1024;
 
 struct TempDir(PathBuf);
 
@@ -64,6 +65,32 @@ fn running_turn(session: &mut TaskSession, goal: &str) -> (Uuid, Uuid) {
     (task_id, turn_id)
 }
 
+fn run_single_action(
+    workspace: &Path,
+    action: WorkspaceAction,
+) -> (
+    Result<krypper::agent_loop::GoalTurnResult, GoalTurnError>,
+    TaskSession,
+    Uuid,
+    Uuid,
+) {
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) = with_current_dir(workspace, || {
+        running_turn(&mut session, "Test a workspace action")
+    });
+    let mut decisions = move |_: &str| action.clone();
+    let result = with_current_dir(workspace, || {
+        run_goal_turn(
+            &mut session,
+            task_id,
+            turn_id,
+            "Test a workspace action",
+            &mut decisions,
+        )
+    });
+    (result, session, task_id, turn_id)
+}
+
 #[test]
 fn goal_turn_reads_one_file_and_records_the_matching_outcome() {
     let workspace = TempDir::new();
@@ -113,6 +140,308 @@ fn goal_turn_reads_one_file_and_records_the_matching_outcome() {
             new_state: TurnState::Succeeded,
         }
     );
+}
+
+#[test]
+fn goal_turn_reads_a_bounded_range_and_retains_only_range_metadata() {
+    let workspace = TempDir::new();
+    fs::write(workspace.path().join("note.txt"), "first\nβeta\nlast").unwrap();
+    let excerpt = "βeta\nlast";
+    let action = WorkspaceAction::ReadRange {
+        path: PathBuf::from("note.txt"),
+        start_line: 2,
+        max_lines: 2,
+    };
+
+    let (result, session, task_id, turn_id) = run_single_action(workspace.path(), action);
+    let result = result.unwrap();
+
+    assert_eq!(result.actions_taken(), 1);
+    assert_eq!(result.read_result(), excerpt);
+    assert_eq!(
+        result.observations(),
+        [WorkspaceObservation::FileRangeRead {
+            path: PathBuf::from("note.txt"),
+            start_line: 2,
+            end_line: 3,
+            excerpt: excerpt.to_owned(),
+        }]
+    );
+    assert_eq!(
+        result.outcome(),
+        Some(&TurnOutcome::Success {
+            result: excerpt.to_owned(),
+        })
+    );
+
+    let task = session.get_task(task_id).unwrap();
+    let turn = task.get_turn(turn_id).unwrap();
+    let summary = TurnActivitySummary::FileRangeRead {
+        start_line: 2,
+        end_line: 3,
+        bytes_returned: excerpt.len(),
+    };
+    assert_eq!(turn.activity_history(), [summary]);
+    assert_eq!(task.activity_history()[0].summary(), summary);
+    assert!(!format!("{:?}", turn.activity_history()).contains("βeta"));
+    assert!(!format!("{:?}", task.activity_history()).contains("last"));
+    assert!(!format!("{:?}", task.history()).contains("βeta"));
+}
+
+#[test]
+fn goal_turn_range_reads_define_empty_and_newline_boundary_lines() {
+    let workspace = TempDir::new();
+    let cases = [
+        ("empty.txt", "", 1, 1, None),
+        ("newline.txt", "\n", 1, 1, Some((1, 1, ""))),
+        (
+            "trailing-newline.txt",
+            "first\nsecond\n",
+            2,
+            2,
+            Some((2, 2, "second")),
+        ),
+        (
+            "no-trailing-newline.txt",
+            "first\nsecond",
+            2,
+            2,
+            Some((2, 2, "second")),
+        ),
+    ];
+
+    for (path, contents, start_line, max_lines, expected) in cases {
+        fs::write(workspace.path().join(path), contents).unwrap();
+        let action = WorkspaceAction::ReadRange {
+            path: PathBuf::from(path),
+            start_line,
+            max_lines,
+        };
+        let (result, session, task_id, turn_id) = run_single_action(workspace.path(), action);
+        match expected {
+            Some((expected_start, expected_end, expected_excerpt)) => {
+                let result = result.unwrap();
+                let [WorkspaceObservation::FileRangeRead {
+                    start_line,
+                    end_line,
+                    excerpt,
+                    ..
+                }] = result.observations()
+                else {
+                    panic!("successful range read must return one excerpt observation");
+                };
+                assert_eq!(
+                    (*start_line, *end_line, excerpt.as_str()),
+                    (expected_start, expected_end, expected_excerpt)
+                );
+            }
+            None => {
+                let error = result.unwrap_err();
+                assert!(error.to_string().contains("starting line 1 does not exist"));
+                let turn = session
+                    .get_task(task_id)
+                    .unwrap()
+                    .get_turn(turn_id)
+                    .unwrap();
+                assert_eq!(turn.state(), TurnState::Failed);
+                assert_eq!(
+                    turn.activity_history(),
+                    [TurnActivitySummary::ActionFailed {
+                        action: TurnActivityAction::ReadRange,
+                    }]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn failed_range_action_counts_once_and_stops_later_decisions() {
+    let workspace = TempDir::new();
+    fs::write(workspace.path().join("note.txt"), "private excerpt").unwrap();
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) = with_current_dir(workspace.path(), || {
+        running_turn(&mut session, "Stop on a bad range")
+    });
+    let mut decisions_called = 0;
+    let mut decisions = |_: &str, _: &[WorkspaceObservation]| {
+        decisions_called += 1;
+        if decisions_called == 1 {
+            WorkspaceAction::ReadRange {
+                path: PathBuf::from("note.txt"),
+                start_line: 0,
+                max_lines: 2,
+            }
+        } else {
+            WorkspaceAction::Complete {
+                result: "must not run".to_owned(),
+            }
+        }
+    };
+
+    let result = with_current_dir(workspace.path(), || {
+        run_goal_turn_with_budget(
+            &mut session,
+            task_id,
+            turn_id,
+            "Stop on a bad range",
+            4,
+            &mut decisions,
+        )
+        .unwrap()
+    });
+
+    assert_eq!(decisions_called, 1);
+    assert_eq!(result.actions_taken(), 1);
+    assert_eq!(result.stop_reason(), GoalTurnStopReason::ActionFailed);
+    let [WorkspaceObservation::ActionFailed { action, error }] = result.observations() else {
+        panic!("a rejected range must produce one failed observation");
+    };
+    assert!(matches!(action, WorkspaceAction::ReadRange { .. }));
+    assert!(error.to_string().contains("starting line must be positive"));
+    assert_eq!(
+        result.outcome(),
+        Some(&TurnOutcome::Failure {
+            detail: error.to_string(),
+        })
+    );
+    let task = session.get_task(task_id).unwrap();
+    let turn = task.get_turn(turn_id).unwrap();
+    let failed = [TurnActivitySummary::ActionFailed {
+        action: TurnActivityAction::ReadRange,
+    }];
+    assert_eq!(turn.activity_history(), failed);
+    assert_eq!(task.activity_history()[0].summary(), failed[0]);
+    assert!(!format!("{:?}", task.history()).contains("private excerpt"));
+}
+
+#[test]
+fn range_read_enforces_line_and_excerpt_limits_without_partial_content() {
+    let workspace = TempDir::new();
+    let two_hundred_lines = format!("{}line", "line\n".repeat(199));
+    fs::write(workspace.path().join("lines.txt"), &two_hundred_lines).unwrap();
+    fs::write(
+        workspace.path().join("exact-limit.txt"),
+        "x".repeat(64 * 1024),
+    )
+    .unwrap();
+    fs::write(
+        workspace.path().join("over-limit.txt"),
+        "x".repeat(64 * 1024 + 1),
+    )
+    .unwrap();
+
+    let accepted = WorkspaceAction::ReadRange {
+        path: PathBuf::from("lines.txt"),
+        start_line: 1,
+        max_lines: 200,
+    };
+    let (result, _, _, _) = run_single_action(workspace.path(), accepted);
+    let result = result.unwrap();
+    let [WorkspaceObservation::FileRangeRead {
+        start_line,
+        end_line,
+        excerpt,
+        ..
+    }] = result.observations()
+    else {
+        panic!("200 available lines must be readable");
+    };
+    assert_eq!((*start_line, *end_line), (1, 200));
+    assert_eq!(excerpt.lines().count(), 200);
+
+    let exact_limit = WorkspaceAction::ReadRange {
+        path: PathBuf::from("exact-limit.txt"),
+        start_line: 1,
+        max_lines: 1,
+    };
+    let (result, _, _, _) = run_single_action(workspace.path(), exact_limit);
+    assert_eq!(result.unwrap().read_result().len(), 64 * 1024);
+
+    for (path, start_line, max_lines, expected_error) in [
+        (
+            "lines.txt",
+            1,
+            201,
+            "requested line count exceeds 200 lines",
+        ),
+        ("lines.txt", 1, 0, "line count must be positive"),
+        ("over-limit.txt", 1, 1, "selected excerpt exceeds 64 KiB"),
+        ("lines.txt", 201, 1, "starting line 201 does not exist"),
+    ] {
+        let action = WorkspaceAction::ReadRange {
+            path: PathBuf::from(path),
+            start_line,
+            max_lines,
+        };
+        let (result, session, task_id, turn_id) = run_single_action(workspace.path(), action);
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains(expected_error), "{error}");
+        let task = session.get_task(task_id).unwrap();
+        let turn = task.get_turn(turn_id).unwrap();
+        assert_eq!(
+            turn.activity_history(),
+            [TurnActivitySummary::ActionFailed {
+                action: TurnActivityAction::ReadRange,
+            }]
+        );
+        assert!(!format!("{:?}", task.activity_history()).contains('x'));
+    }
+}
+
+#[test]
+fn range_read_uses_existing_path_utf8_file_type_and_size_safety() {
+    let parent = TempDir::new();
+    let workspace = parent.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    fs::write(parent.path().join("outside.txt"), "outside").unwrap();
+    fs::write(workspace.join("invalid.txt"), [0xff]).unwrap();
+    fs::create_dir(workspace.join("folder")).unwrap();
+    fs::write(workspace.join("large.txt"), vec![b'x'; MAX_FILE_SIZE + 1]).unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+
+        symlink(
+            parent.path().join("outside.txt"),
+            workspace.join("escape.txt"),
+        )
+        .unwrap();
+    }
+
+    for (path, expected_error) in [
+        (
+            "../outside.txt",
+            "path must stay inside the current directory",
+        ),
+        ("invalid.txt", "not valid UTF-8"),
+        ("folder", "not a regular file"),
+        ("large.txt", "file exceeds 1 MiB"),
+    ] {
+        let action = WorkspaceAction::ReadRange {
+            path: PathBuf::from(path),
+            start_line: 1,
+            max_lines: 1,
+        };
+        let (result, _, _, _) = run_single_action(&workspace, action);
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains(expected_error), "{error}");
+    }
+
+    #[cfg(unix)]
+    {
+        let action = WorkspaceAction::ReadRange {
+            path: PathBuf::from("escape.txt"),
+            start_line: 1,
+            max_lines: 1,
+        };
+        let (result, _, _, _) = run_single_action(&workspace, action);
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("path must stay inside the current directory"));
+    }
 }
 
 #[test]
