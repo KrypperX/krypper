@@ -1223,5 +1223,158 @@ fn task_help_lists_continue_and_describes_the_whole_task_budget() {
     assert!(output.status.success());
     assert!(stdout(&output).contains("  continue\n"));
     assert!(stdout(&output).contains("replace PATH MATCH_TEXT => REPLACEMENT_TEXT"));
+    assert!(stdout(&output).contains("search DIRECTORY QUERY"));
     assert!(stdout(&output).contains("action limit for the whole task"));
+}
+
+#[test]
+fn task_searches_hidden_files_in_order_and_reports_only_matching_line_locations() {
+    let directory = TempDir::new();
+    fs::write(
+        directory.path().join("z.txt"),
+        "first line\nneedle secret needle\nNeedle different case\n",
+    )
+    .unwrap();
+    fs::write(directory.path().join(".hidden"), "needle hidden\n").unwrap();
+    fs::create_dir(directory.path().join("nested")).unwrap();
+    fs::write(
+        directory.path().join("nested/ignored.txt"),
+        "needle nested\n",
+    )
+    .unwrap();
+
+    let output = run_with_input(
+        directory.path(),
+        &["task", "--goal", "Find a literal", "--max-actions", "2"],
+        b"search . needle\ncomplete done\n",
+    );
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let output = stdout(&output);
+    let hidden = output.find("  \".hidden\":1").unwrap();
+    let regular = output.find("  \"z.txt\":2").unwrap();
+    assert!(hidden < regular, "search locations must be ordered by path");
+    assert!(output.contains("Observation 1: search in . found 2 locations"));
+    assert!(output.contains("Turn outcome: success: done"));
+    assert!(output.contains("Actions: 2/2"));
+    assert!(!output.contains("needle"));
+    assert!(!output.contains("secret"));
+    assert!(!output.contains("nested/ignored.txt"));
+    assert!(!output.contains("\"z.txt\":3"));
+
+    let activity = output
+        .split("Activity history (metadata only):")
+        .nth(1)
+        .unwrap();
+    assert!(activity.contains("TextSearched { location_count: 2 }"));
+    assert!(!activity.contains("needle"));
+}
+
+#[test]
+fn task_search_with_no_matches_reports_an_empty_location_list() {
+    let directory = TempDir::new();
+    fs::write(directory.path().join("note.txt"), "different literal\n").unwrap();
+
+    let output = run_with_input(
+        directory.path(),
+        &[
+            "task",
+            "--goal",
+            "Find a missing literal",
+            "--max-actions",
+            "2",
+        ],
+        b"search . absent\ncomplete done\n",
+    );
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let output = stdout(&output);
+    assert!(output.contains("Observation 1: search in . found 0 locations"));
+    assert!(output.contains("Turn outcome: success: done"));
+    assert!(output.contains("TextSearched { location_count: 0 }"));
+    assert!(!output.contains("\"note.txt\":"));
+}
+
+#[test]
+fn task_search_failure_is_terminal_and_does_not_print_partial_locations_or_contents() {
+    let directory = TempDir::new();
+    let query = "PRIVATE_SEARCH_FAILURE_QUERY_31";
+    fs::write(directory.path().join("a.txt"), format!("{query} first\n")).unwrap();
+    fs::write(
+        directory.path().join("z-invalid.txt"),
+        [b"private bytes ".as_slice(), &[0xff]].concat(),
+    )
+    .unwrap();
+    let input = format!("search . {query}\ncomplete must_not_run\n");
+
+    let output = run_with_input(
+        directory.path(),
+        &[
+            "task",
+            "--goal",
+            "Reject invalid UTF-8",
+            "--max-actions",
+            "3",
+        ],
+        input.as_bytes(),
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr_output = stderr(&output);
+    let output = stdout(&output);
+    assert!(output
+        .contains("search in . failed: workspace text search failed: file is not valid UTF-8"));
+    assert!(output.contains("ActionFailed { action: SearchText }"));
+    assert!(output
+        .contains("Turn outcome: failure: workspace text search failed: file is not valid UTF-8"));
+    assert!(output.contains("Task state: failed"));
+    assert!(output.contains("Actions: 1/3"));
+    assert!(!output.contains(query));
+    assert!(!output.contains("private bytes"));
+    assert!(!output.contains("\"a.txt\":1"));
+    assert!(!output.contains("must_not_run"));
+    assert_eq!(stderr_output.matches("action ").count(), 1);
+}
+
+#[test]
+fn task_search_rejects_workspace_escapes() {
+    let directory = TempDir::new();
+    let workspace = directory.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    fs::write(directory.path().join("outside.txt"), "outside secret").unwrap();
+
+    let output = run_with_input(
+        &workspace,
+        &["task", "--goal", "Stay in workspace", "--max-actions", "1"],
+        b"search ../ outside\n",
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    let output = stdout(&output);
+    assert!(output
+        .contains("workspace text search failed: path must stay inside the current directory"));
+    assert!(output.contains("Actions: 1/1"));
+    assert!(!output.contains("outside secret"));
+}
+
+#[test]
+fn task_search_escapes_control_characters_in_returned_paths() {
+    let directory = TempDir::new();
+    fs::write(directory.path().join("line\nbreak.txt"), "needle\n").unwrap();
+
+    let output = run_with_input(
+        directory.path(),
+        &["task", "--goal", "Find a literal", "--max-actions", "2"],
+        b"search . needle\ncomplete done\n",
+    );
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        stdout(&output),
+        stderr(&output)
+    );
+    let output = stdout(&output);
+    assert!(output.contains("\"line\\nbreak.txt\":1"));
+    assert!(!output.contains("line\nbreak.txt"));
 }

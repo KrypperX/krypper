@@ -1,10 +1,10 @@
 use crate::file_safety::{
     capture_workspace_root, create_text_file_at, list_task_directory_names_at, read_text_file_at,
-    replace_text_file_at, WorkspaceRoot,
+    replace_text_file_at, search_text_files_at, WorkspaceRoot,
 };
 use std::ffi::OsString;
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 /// The lifecycle states supported by a task.
@@ -246,6 +246,50 @@ impl From<WorkspaceReadError> for WorkspaceListError {
     }
 }
 
+/// A matching file location returned by a bounded workspace text search.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceSearchLocation {
+    /// Relative path to the matching regular file.
+    pub path: PathBuf,
+    /// One-based line number where the literal query begins.
+    pub line: usize,
+}
+
+/// An error while searching a workspace directory for a task turn.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WorkspaceSearchError {
+    /// The task turn is missing, foreign, or not running.
+    TaskTurn(WorkspaceReadError),
+    /// Search could not be completed under the workspace safety policy.
+    Search { message: String },
+}
+
+impl fmt::Display for WorkspaceSearchError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TaskTurn(error) => error.fmt(formatter),
+            Self::Search { message } => {
+                write!(formatter, "workspace text search failed: {message}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for WorkspaceSearchError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::TaskTurn(error) => Some(error),
+            Self::Search { .. } => None,
+        }
+    }
+}
+
+impl From<WorkspaceReadError> for WorkspaceSearchError {
+    fn from(error: WorkspaceReadError) -> Self {
+        Self::TaskTurn(error)
+    }
+}
+
 /// An error while creating a workspace file for a task turn.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WorkspaceWriteError {
@@ -432,6 +476,8 @@ pub enum TurnActivityAction {
     CreateFile,
     /// A workspace text replacement failed.
     ReplaceText,
+    /// A workspace text search failed.
+    SearchText,
     /// The decision source selected an unsupported action.
     Unsupported,
 }
@@ -448,6 +494,8 @@ pub enum TurnActivitySummary {
     TextReplaced { bytes_written: usize },
     /// A directory was listed; entry names are not retained.
     DirectoryListed { entry_count: usize },
+    /// Text was searched; only matching location counts are retained.
+    TextSearched { location_count: usize },
     /// The decision source explicitly completed the turn; its result is not retained here.
     Completed,
     /// The caller requested another turn for the same task.
@@ -1312,6 +1360,41 @@ impl TaskSession {
                 message: error.message().to_owned(),
             }
         })
+    }
+
+    /// Searches immediate regular UTF-8 files in one workspace directory for a literal query.
+    ///
+    /// Paths are relative to the task's captured workspace. Entry symlinks and non-regular files
+    /// are skipped; directory traversal is not recursive. Queries, total bytes scanned, and
+    /// returned file-line locations are bounded to 4 KiB, 16 MiB, and 10,000 locations. Each
+    /// file remains limited to 1 MiB, and directories use the existing 1,024-entry limit. Query
+    /// and file contents are not retained in task activity history.
+    pub fn search_workspace_text(
+        &self,
+        task_id: Uuid,
+        turn_id: Uuid,
+        directory: &Path,
+        query: &str,
+    ) -> Result<Vec<WorkspaceSearchLocation>, WorkspaceSearchError> {
+        let task = self
+            .running_workspace_task(task_id, turn_id)
+            .map_err(WorkspaceSearchError::from)?;
+        let root =
+            task.workspace_root
+                .as_ref()
+                .map_err(|message| WorkspaceSearchError::Search {
+                    message: format!("task workspace could not be resolved: {message}"),
+                })?;
+        search_text_files_at(root, directory.as_os_str(), query)
+            .map(|matches| {
+                matches
+                    .into_iter()
+                    .map(|(path, line)| WorkspaceSearchLocation { path, line })
+                    .collect()
+            })
+            .map_err(|error| WorkspaceSearchError::Search {
+                message: error.message().to_owned(),
+            })
     }
 
     /// Creates one UTF-8 file for a currently running turn owned by this session.

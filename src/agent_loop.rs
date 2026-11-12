@@ -1,6 +1,7 @@
 use crate::task_lifecycle::{
     TaskSession, TurnActivityAction, TurnActivitySummary, TurnCompletionError, TurnOutcome,
-    WorkspaceListError, WorkspaceReadError, WorkspaceReplaceError, WorkspaceWriteError,
+    WorkspaceListError, WorkspaceReadError, WorkspaceReplaceError, WorkspaceSearchError,
+    WorkspaceSearchLocation, WorkspaceWriteError,
 };
 use std::ffi::OsString;
 use std::fmt;
@@ -14,6 +15,8 @@ pub enum WorkspaceAction {
     ReadFile { path: PathBuf },
     /// List the immediate entries of a directory under the task's workspace safety policy.
     ListDirectory { path: PathBuf },
+    /// Find a literal query in the immediate regular UTF-8 files of a workspace directory.
+    SearchText { directory: PathBuf, query: String },
     /// Create one UTF-8 file without replacing an existing path under the task's workspace policy.
     CreateFile { path: PathBuf, contents: String },
     /// Replace one unique exact text match in an existing UTF-8 workspace file.
@@ -42,6 +45,11 @@ pub enum WorkspaceObservation {
         path: PathBuf,
         entries: Vec<OsString>,
     },
+    /// Matching relative file paths and one-based line numbers, without matched line contents.
+    TextSearched {
+        directory: PathBuf,
+        locations: Vec<WorkspaceSearchLocation>,
+    },
     /// A file was created; its contents are not retained in the observation.
     FileCreated { path: PathBuf, bytes_written: usize },
     /// A file creation rejected under the workspace policy; contents are not retained.
@@ -50,6 +58,11 @@ pub enum WorkspaceObservation {
     TextReplaced { path: PathBuf, bytes_written: usize },
     /// A replacement failed; the matched and replacement text are not retained.
     TextReplacementFailed { path: PathBuf, error: GoalTurnError },
+    /// A text search failed; the query and file contents are not retained.
+    TextSearchFailed {
+        directory: PathBuf,
+        error: GoalTurnError,
+    },
     /// A requested action that failed under the existing workspace policy.
     ActionFailed {
         action: WorkspaceAction,
@@ -176,6 +189,8 @@ pub enum GoalTurnError {
     WorkspaceWrite(WorkspaceWriteError),
     /// The existing workspace safety policy rejected or could not replace file text.
     WorkspaceReplace(WorkspaceReplaceError),
+    /// The existing workspace safety policy rejected or could not search workspace text.
+    WorkspaceSearch(WorkspaceSearchError),
     /// The task or turn could not be completed or cancelled in its current session state.
     Lifecycle(TurnCompletionError),
 }
@@ -190,6 +205,7 @@ impl fmt::Display for GoalTurnError {
             Self::WorkspaceList(error) => error.fmt(formatter),
             Self::WorkspaceWrite(error) => error.fmt(formatter),
             Self::WorkspaceReplace(error) => error.fmt(formatter),
+            Self::WorkspaceSearch(error) => error.fmt(formatter),
             Self::Lifecycle(error) => error.fmt(formatter),
         }
     }
@@ -203,6 +219,7 @@ impl std::error::Error for GoalTurnError {
             Self::WorkspaceList(error) => Some(error),
             Self::WorkspaceWrite(error) => Some(error),
             Self::WorkspaceReplace(error) => Some(error),
+            Self::WorkspaceSearch(error) => Some(error),
             Self::Lifecycle(error) => Some(error),
         }
     }
@@ -278,6 +295,9 @@ pub fn run_goal_turn<D: DecisionSource + ?Sized>(
                 WorkspaceObservation::DirectoryListed { entries, .. } => {
                     format!("listed {} entries", entries.len())
                 }
+                WorkspaceObservation::TextSearched { locations, .. } => {
+                    format!("found {} matching locations", locations.len())
+                }
                 WorkspaceObservation::FileCreated { bytes_written, .. } => {
                     format!("created file ({bytes_written} bytes)")
                 }
@@ -286,6 +306,7 @@ pub fn run_goal_turn<D: DecisionSource + ?Sized>(
                 }
                 WorkspaceObservation::FileCreationFailed { .. }
                 | WorkspaceObservation::TextReplacementFailed { .. }
+                | WorkspaceObservation::TextSearchFailed { .. }
                 | WorkspaceObservation::ActionFailed { .. } => String::new(),
             };
             let activity = summarize_observation(&observation);
@@ -325,9 +346,10 @@ pub fn run_goal_turn<D: DecisionSource + ?Sized>(
 /// Runs up to `max_actions` decisions for one already running, task-owned turn.
 ///
 /// Each decision receives the original goal and every earlier observation in order. The action
-/// budget counts decisions, including explicit completion. Workspace read/list failures are
-/// returned in the observations and recorded as the turn's one failure outcome. Ownership and
-/// turn-state errors return `Err` without invoking the decision source or changing lifecycle state.
+/// budget counts decisions, including explicit completion. Workspace read/list/search failures
+/// are returned in the observations and recorded as the turn's one failure outcome. Ownership
+/// and turn-state errors return `Err` without invoking the decision source or changing lifecycle
+/// state.
 pub fn run_goal_turn_with_budget<D: BoundedDecisionSource + ?Sized>(
     session: &mut TaskSession,
     task_id: Uuid,
@@ -463,6 +485,9 @@ fn summarize_observation(observation: &WorkspaceObservation) -> TurnActivitySumm
                 entry_count: entries.len(),
             }
         }
+        WorkspaceObservation::TextSearched { locations, .. } => TurnActivitySummary::TextSearched {
+            location_count: locations.len(),
+        },
         WorkspaceObservation::FileCreated { bytes_written, .. } => {
             TurnActivitySummary::FileCreated {
                 bytes_written: *bytes_written,
@@ -479,12 +504,16 @@ fn summarize_observation(observation: &WorkspaceObservation) -> TurnActivitySumm
         WorkspaceObservation::TextReplacementFailed { .. } => TurnActivitySummary::ActionFailed {
             action: TurnActivityAction::ReplaceText,
         },
+        WorkspaceObservation::TextSearchFailed { .. } => TurnActivitySummary::ActionFailed {
+            action: TurnActivityAction::SearchText,
+        },
         WorkspaceObservation::ActionFailed { action, .. } => {
             let action = match action {
                 WorkspaceAction::ReadFile { .. } => TurnActivityAction::ReadFile,
                 WorkspaceAction::ListDirectory { .. } => TurnActivityAction::ListDirectory,
                 WorkspaceAction::CreateFile { .. } => TurnActivityAction::CreateFile,
                 WorkspaceAction::ReplaceText { .. } => TurnActivityAction::ReplaceText,
+                WorkspaceAction::SearchText { .. } => TurnActivityAction::SearchText,
                 WorkspaceAction::Complete { .. }
                 | WorkspaceAction::Continue
                 | WorkspaceAction::Cancel
@@ -594,6 +623,27 @@ fn execute_action(
             }
             Err(error) => Err(GoalTurnError::WorkspaceReplace(error)),
         },
+        WorkspaceAction::SearchText { directory, query } => {
+            match session.search_workspace_text(task_id, turn_id, directory, query) {
+                Ok(locations) => Ok(ActionExecution::Observation(
+                    WorkspaceObservation::TextSearched {
+                        directory: directory.clone(),
+                        locations,
+                    },
+                )),
+                Err(error @ WorkspaceSearchError::Search { .. }) => {
+                    let error = GoalTurnError::WorkspaceSearch(error);
+                    Ok(ActionExecution::Failed {
+                        observation: WorkspaceObservation::TextSearchFailed {
+                            directory: directory.clone(),
+                            error: error.clone(),
+                        },
+                        error,
+                    })
+                }
+                Err(error) => Err(GoalTurnError::WorkspaceSearch(error)),
+            }
+        }
         WorkspaceAction::Complete { result } => Ok(ActionExecution::Complete(result.clone())),
         WorkspaceAction::Continue => Ok(ActionExecution::Continue),
         WorkspaceAction::Cancel => Ok(ActionExecution::Cancel),
