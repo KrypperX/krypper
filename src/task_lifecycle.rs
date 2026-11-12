@@ -1,6 +1,7 @@
 use crate::file_safety::{
     capture_workspace_root, create_directory_at, create_text_file_at, list_task_directory_names_at,
-    read_text_file_at, replace_text_file_at, search_text_files_at, WorkspaceRoot,
+    read_text_file_at, replace_text_file_at, search_text_files_at, search_tree_text_files_at,
+    WorkspaceRoot,
 };
 use std::ffi::OsString;
 use std::fmt;
@@ -517,6 +518,8 @@ pub enum TurnActivityAction {
     ReplaceText,
     /// A workspace text search failed.
     SearchText,
+    /// A recursive workspace text search failed.
+    SearchTreeText,
     /// The decision source selected an unsupported action.
     Unsupported,
 }
@@ -543,6 +546,8 @@ pub enum TurnActivitySummary {
     DirectoryListed { entry_count: usize },
     /// Text was searched; only matching location counts are retained.
     TextSearched { location_count: usize },
+    /// Workspace text was searched recursively; only matching location counts are retained.
+    TreeTextSearched { location_count: usize },
     /// The decision source explicitly completed the turn; its result is not retained here.
     Completed,
     /// The caller requested another turn for the same task.
@@ -1468,6 +1473,40 @@ impl TaskSession {
                 message: error.message().to_owned(),
             }
         })
+    }
+
+    /// Searches regular UTF-8 files recursively under one workspace directory for a literal query.
+    ///
+    /// Paths are relative to the task's captured workspace. Entry symlinks and non-regular files
+    /// are skipped; hidden entries are included. Queries, files, cumulative bytes, locations,
+    /// traversal depth, and directory entries are bounded to 4 KiB, 1 MiB, 16 MiB, 10,000,
+    /// 16 levels, and 4,096 entries. Query and file contents are not retained in activity history.
+    pub fn search_workspace_tree_text(
+        &self,
+        task_id: Uuid,
+        turn_id: Uuid,
+        directory: &Path,
+        query: &str,
+    ) -> Result<Vec<WorkspaceSearchLocation>, WorkspaceSearchError> {
+        let task = self
+            .running_workspace_task(task_id, turn_id)
+            .map_err(WorkspaceSearchError::from)?;
+        let root =
+            task.workspace_root
+                .as_ref()
+                .map_err(|message| WorkspaceSearchError::Search {
+                    message: format!("task workspace could not be resolved: {message}"),
+                })?;
+        search_tree_text_files_at(root, directory.as_os_str(), query)
+            .map(|matches| {
+                matches
+                    .into_iter()
+                    .map(|(path, line)| WorkspaceSearchLocation { path, line })
+                    .collect()
+            })
+            .map_err(|error| WorkspaceSearchError::Search {
+                message: error.message().to_owned(),
+            })
     }
 
     /// Creates one UTF-8 file for a currently running turn owned by this session.

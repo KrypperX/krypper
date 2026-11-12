@@ -28,6 +28,8 @@ pub enum WorkspaceAction {
     CreateDirectory { path: PathBuf },
     /// Find a literal query in the immediate regular UTF-8 files of a workspace directory.
     SearchText { directory: PathBuf, query: String },
+    /// Find a literal query recursively in regular UTF-8 workspace files.
+    SearchTreeText { directory: PathBuf, query: String },
     /// Create one UTF-8 file without replacing an existing path under the task's workspace policy.
     CreateFile { path: PathBuf, contents: String },
     /// Replace one unique exact text match in an existing UTF-8 workspace file.
@@ -70,6 +72,11 @@ pub enum WorkspaceObservation {
         directory: PathBuf,
         locations: Vec<WorkspaceSearchLocation>,
     },
+    /// Recursive matches, as workspace-relative paths and one-based lines without line contents.
+    TreeTextSearched {
+        directory: PathBuf,
+        locations: Vec<WorkspaceSearchLocation>,
+    },
     /// A file was created; its contents are not retained in the observation.
     FileCreated { path: PathBuf, bytes_written: usize },
     /// A file creation rejected under the workspace policy; contents are not retained.
@@ -82,6 +89,11 @@ pub enum WorkspaceObservation {
     TextReplacementFailed { path: PathBuf, error: GoalTurnError },
     /// A text search failed; the query and file contents are not retained.
     TextSearchFailed {
+        directory: PathBuf,
+        error: GoalTurnError,
+    },
+    /// A recursive text search failed; the query and file contents are not retained.
+    TreeTextSearchFailed {
         directory: PathBuf,
         error: GoalTurnError,
     },
@@ -328,6 +340,9 @@ pub fn run_goal_turn<D: DecisionSource + ?Sized>(
                 WorkspaceObservation::TextSearched { locations, .. } => {
                     format!("found {} matching locations", locations.len())
                 }
+                WorkspaceObservation::TreeTextSearched { locations, .. } => {
+                    format!("found {} matching locations", locations.len())
+                }
                 WorkspaceObservation::FileCreated { bytes_written, .. } => {
                     format!("created file ({bytes_written} bytes)")
                 }
@@ -338,6 +353,7 @@ pub fn run_goal_turn<D: DecisionSource + ?Sized>(
                 | WorkspaceObservation::DirectoryCreationFailed { .. }
                 | WorkspaceObservation::TextReplacementFailed { .. }
                 | WorkspaceObservation::TextSearchFailed { .. }
+                | WorkspaceObservation::TreeTextSearchFailed { .. }
                 | WorkspaceObservation::ActionFailed { .. } => String::new(),
             };
             let activity = summarize_observation(&observation);
@@ -537,6 +553,11 @@ fn summarize_observation(observation: &WorkspaceObservation) -> TurnActivitySumm
         WorkspaceObservation::TextSearched { locations, .. } => TurnActivitySummary::TextSearched {
             location_count: locations.len(),
         },
+        WorkspaceObservation::TreeTextSearched { locations, .. } => {
+            TurnActivitySummary::TreeTextSearched {
+                location_count: locations.len(),
+            }
+        }
         WorkspaceObservation::FileCreated { bytes_written, .. } => {
             TurnActivitySummary::FileCreated {
                 bytes_written: *bytes_written,
@@ -560,6 +581,9 @@ fn summarize_observation(observation: &WorkspaceObservation) -> TurnActivitySumm
         WorkspaceObservation::TextSearchFailed { .. } => TurnActivitySummary::ActionFailed {
             action: TurnActivityAction::SearchText,
         },
+        WorkspaceObservation::TreeTextSearchFailed { .. } => TurnActivitySummary::ActionFailed {
+            action: TurnActivityAction::SearchTreeText,
+        },
         WorkspaceObservation::ActionFailed { action, .. } => {
             let action = match action {
                 WorkspaceAction::ReadFile { .. } => TurnActivityAction::ReadFile,
@@ -569,6 +593,7 @@ fn summarize_observation(observation: &WorkspaceObservation) -> TurnActivitySumm
                 WorkspaceAction::CreateFile { .. } => TurnActivityAction::CreateFile,
                 WorkspaceAction::ReplaceText { .. } => TurnActivityAction::ReplaceText,
                 WorkspaceAction::SearchText { .. } => TurnActivityAction::SearchText,
+                WorkspaceAction::SearchTreeText { .. } => TurnActivityAction::SearchTreeText,
                 WorkspaceAction::Complete { .. }
                 | WorkspaceAction::Continue
                 | WorkspaceAction::Cancel
@@ -742,6 +767,27 @@ fn execute_action(
                     let error = GoalTurnError::WorkspaceSearch(error);
                     Ok(ActionExecution::Failed {
                         observation: WorkspaceObservation::TextSearchFailed {
+                            directory: directory.clone(),
+                            error: error.clone(),
+                        },
+                        error,
+                    })
+                }
+                Err(error) => Err(GoalTurnError::WorkspaceSearch(error)),
+            }
+        }
+        WorkspaceAction::SearchTreeText { directory, query } => {
+            match session.search_workspace_tree_text(task_id, turn_id, directory, query) {
+                Ok(locations) => Ok(ActionExecution::Observation(
+                    WorkspaceObservation::TreeTextSearched {
+                        directory: directory.clone(),
+                        locations,
+                    },
+                )),
+                Err(error @ WorkspaceSearchError::Search { .. }) => {
+                    let error = GoalTurnError::WorkspaceSearch(error);
+                    Ok(ActionExecution::Failed {
+                        observation: WorkspaceObservation::TreeTextSearchFailed {
                             directory: directory.clone(),
                             error: error.clone(),
                         },

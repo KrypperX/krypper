@@ -429,6 +429,9 @@ fn parse_task_action(line: &str) -> WorkspaceAction {
     let invalid_search = || WorkspaceAction::Unsupported {
         action: "invalid search action".to_owned(),
     };
+    let invalid_search_tree = || WorkspaceAction::Unsupported {
+        action: "invalid search-tree action".to_owned(),
+    };
 
     match name {
         "read" => arguments
@@ -471,6 +474,27 @@ fn parse_task_action(line: &str) -> WorkspaceAction {
                 return invalid_search();
             }
             WorkspaceAction::SearchText {
+                directory: PathBuf::from(directory),
+                query: query.to_owned(),
+            }
+        }
+        "search-tree" => {
+            let Some(arguments) = arguments else {
+                return invalid_search_tree();
+            };
+            let arguments = arguments.trim_start();
+            let Some((separator, whitespace)) = arguments
+                .char_indices()
+                .find(|(_, character)| character.is_whitespace())
+            else {
+                return invalid_search_tree();
+            };
+            let directory = &arguments[..separator];
+            let query = &arguments[separator + whitespace.len_utf8()..];
+            if directory.is_empty() || query.is_empty() {
+                return invalid_search_tree();
+            }
+            WorkspaceAction::SearchTreeText {
                 directory: PathBuf::from(directory),
                 query: query.to_owned(),
             }
@@ -608,6 +632,20 @@ fn write_observation(
                 writeln!(output, "  {:?}:{}", location.path, location.line)?;
             }
         }
+        WorkspaceObservation::TreeTextSearched {
+            directory,
+            locations,
+        } => {
+            writeln!(
+                output,
+                "Observation {number}: search-tree in {} found {} locations",
+                directory.display(),
+                locations.len()
+            )?;
+            for location in locations {
+                writeln!(output, "  {:?}:{}", location.path, location.line)?;
+            }
+        }
         WorkspaceObservation::FileCreated {
             path,
             bytes_written,
@@ -653,6 +691,13 @@ fn write_observation(
             writeln!(
                 output,
                 "Observation {number}: search in {} failed: {error}",
+                directory.display()
+            )?;
+        }
+        WorkspaceObservation::TreeTextSearchFailed { directory, error } => {
+            writeln!(
+                output,
+                "Observation {number}: search-tree in {} failed: {error}",
                 directory.display()
             )?;
         }
@@ -874,11 +919,14 @@ fn write_task_help(output: &mut dyn Write) -> io::Result<()> {
             "  read PATH\n  read-range PATH START_LINE MAX_LINES\n",
             "  list [PATH]\n  mkdir PATH\n  create PATH TEXT\n",
             "  replace PATH MATCH_TEXT => REPLACEMENT_TEXT\n",
-            "  search DIRECTORY QUERY\n  continue\n  complete [RESULT]\n  cancel\n\n",
+            "  search DIRECTORY QUERY\n  search-tree DIRECTORY QUERY\n",
+            "  continue\n  complete [RESULT]\n  cancel\n\n",
             "mkdir creates one directory and requires its parent to exist.\n",
             "read-range uses one-based lines, returns at most 200 lines and 64 KiB, and reports the actual range.\n",
             "replace requires one non-empty exact match; it prints only path and byte-count metadata.\n",
             "search returns relative paths and line numbers without matched text.\n",
+            "search-tree does the same recursively with 4 KiB queries, 1 MiB files, 16 MiB total,\n",
+            "10,000 locations, depth 16, and 4,096 directory entries at most.\n",
             "continue ends this turn and starts another while action budget remains.\n",
             "complete ends the task successfully. Invalid input, end-of-input, action failures,\n",
             "and budget exhaustion fail the task. Explicit cancellation reports a cancelled\n",

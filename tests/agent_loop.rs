@@ -1359,6 +1359,128 @@ fn failed_search_records_one_failure_and_does_not_request_another_decision() {
 }
 
 #[test]
+fn bounded_goal_turn_tree_searches_once_and_retains_only_location_metadata() {
+    let workspace = TempDir::new();
+    let query = "PRIVATE_TREE_SEARCH_QUERY_83";
+    fs::create_dir_all(workspace.path().join("nested")).unwrap();
+    fs::write(
+        workspace.path().join("nested/note.txt"),
+        format!("private line\n{query} matched text\n"),
+    )
+    .unwrap();
+    let goal = "Find the requested literal recursively";
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) =
+        with_current_dir(workspace.path(), || running_turn(&mut session, goal));
+    let mut decisions = [
+        WorkspaceAction::SearchTreeText {
+            directory: PathBuf::from("."),
+            query: query.to_owned(),
+        },
+        WorkspaceAction::Complete {
+            result: "finished".to_owned(),
+        },
+    ]
+    .into_iter();
+    let mut decision_count = 0;
+    let mut source = |_: &str, _: &[WorkspaceObservation]| {
+        decision_count += 1;
+        decisions.next().unwrap()
+    };
+
+    let result =
+        run_goal_turn_with_budget(&mut session, task_id, turn_id, goal, 3, &mut source).unwrap();
+
+    assert_eq!(decision_count, 2);
+    assert_eq!(result.actions_taken(), 2);
+    assert_eq!(
+        result.observations(),
+        [WorkspaceObservation::TreeTextSearched {
+            directory: PathBuf::from("."),
+            locations: vec![WorkspaceSearchLocation {
+                path: PathBuf::from("nested/note.txt"),
+                line: 2,
+            }],
+        }]
+    );
+    assert_eq!(
+        session
+            .get_task(task_id)
+            .unwrap()
+            .get_turn(turn_id)
+            .unwrap()
+            .activity_history(),
+        [
+            TurnActivitySummary::TreeTextSearched { location_count: 1 },
+            TurnActivitySummary::Completed,
+        ]
+    );
+    assert!(!format!("{:?}", result.observations()).contains(query));
+    assert!(!format!("{:?}", result.observations()).contains("private line"));
+    assert!(!format!("{:?}", result.observations()).contains("matched text"));
+    assert!(!format!(
+        "{:?}",
+        session.get_task(task_id).unwrap().activity_history()
+    )
+    .contains(query));
+}
+
+#[test]
+fn failed_tree_search_records_one_failure_and_stops_without_another_decision() {
+    let workspace = TempDir::new();
+    let query = "PRIVATE_FAILED_TREE_SEARCH_QUERY_47";
+    fs::create_dir_all(workspace.path().join("nested")).unwrap();
+    fs::write(
+        workspace.path().join("nested/invalid.txt"),
+        [b"private contents ".as_slice(), &[0xff]].concat(),
+    )
+    .unwrap();
+    let goal = "Reject invalid UTF-8 recursive search input";
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) =
+        with_current_dir(workspace.path(), || running_turn(&mut session, goal));
+    let mut decision_count = 0;
+    let mut source = |_: &str, _: &[WorkspaceObservation]| {
+        decision_count += 1;
+        WorkspaceAction::SearchTreeText {
+            directory: PathBuf::from("."),
+            query: query.to_owned(),
+        }
+    };
+
+    let result =
+        run_goal_turn_with_budget(&mut session, task_id, turn_id, goal, 3, &mut source).unwrap();
+
+    assert_eq!(decision_count, 1);
+    assert_eq!(result.actions_taken(), 1);
+    assert_eq!(result.stop_reason(), GoalTurnStopReason::ActionFailed);
+    assert_eq!(
+        result.outcome(),
+        Some(&TurnOutcome::Failure {
+            detail: "workspace text search failed: file is not valid UTF-8".to_owned(),
+        })
+    );
+    assert!(matches!(
+        result.observations(),
+        [WorkspaceObservation::TreeTextSearchFailed { .. }]
+    ));
+    let turn = session
+        .get_task(task_id)
+        .unwrap()
+        .get_turn(turn_id)
+        .unwrap();
+    assert_eq!(
+        turn.activity_history(),
+        [TurnActivitySummary::ActionFailed {
+            action: TurnActivityAction::SearchTreeText,
+        }]
+    );
+    assert!(!format!("{:?}", result.observations()).contains(query));
+    assert!(!format!("{:?}", result.observations()).contains("private contents"));
+    assert!(!format!("{:?}", turn.activity_history()).contains(query));
+}
+
+#[test]
 fn bounded_goal_turn_creation_counts_toward_action_budget() {
     let workspace = TempDir::new();
     let contents = "private file text";
