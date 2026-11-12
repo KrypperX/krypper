@@ -410,8 +410,14 @@ fn write_turn_outcome(
 
 fn parse_task_action(line: &str) -> WorkspaceAction {
     let line = line.trim_end_matches(&['\r', '\n'][..]);
-    let (name, arguments) = match line.find(char::is_whitespace) {
-        Some(separator) => (&line[..separator], Some(&line[separator + 1..])),
+    let (name, arguments) = match line
+        .char_indices()
+        .find(|(_, character)| character.is_whitespace())
+    {
+        Some((separator, whitespace)) => (
+            &line[..separator],
+            Some(&line[separator + whitespace.len_utf8()..]),
+        ),
         None => (line, None),
     };
     let invalid = || WorkspaceAction::Unsupported {
@@ -459,12 +465,15 @@ fn parse_task_action(line: &str) -> WorkspaceAction {
                 return invalid_replace();
             };
             let arguments = arguments.trim_start();
-            let Some(separator) = arguments.find(char::is_whitespace) else {
+            let Some((separator, whitespace)) = arguments
+                .char_indices()
+                .find(|(_, character)| character.is_whitespace())
+            else {
                 return invalid_replace();
             };
             let path = &arguments[..separator];
             let Some((match_text, replacement_text)) =
-                arguments[separator + 1..].split_once(" => ")
+                arguments[separator + whitespace.len_utf8()..].split_once(" => ")
             else {
                 return invalid_replace();
             };
