@@ -701,8 +701,10 @@ fn task_composes_actions_from_the_observed_search_location_interactively() {
         format!("unrelated first line\n{query} / {old_match}\nunrelated last line\n");
     let final_contents =
         format!("unrelated first line\n{query} / {replacement}\nunrelated last line\n");
-    fs::create_dir(directory.path().join("nested")).unwrap();
-    fs::write(directory.path().join("nested/notes.txt"), &initial_contents).unwrap();
+    let nested_path = "nested space/quoted \" slash \\ café";
+    let relative_path = format!("{nested_path}/notes.txt");
+    fs::create_dir_all(directory.path().join(nested_path)).unwrap();
+    fs::write(directory.path().join(&relative_path), &initial_contents).unwrap();
     fs::write(
         directory.path().join("unrelated.txt"),
         "leave this file alone\n",
@@ -775,19 +777,19 @@ fn task_composes_actions_from_the_observed_search_location_interactively() {
     let search_observation = String::from_utf8(output.clone()).unwrap();
     assert_eq!(
         search_observation,
-        "Observation 1: search-tree in . found 1 locations\n  \"nested/notes.txt\":2\n"
+        "Observation 1: search-tree in . found 1 locations\n  \"nested space/quoted \\\" slash \\\\ café/notes.txt\":2\n"
     );
     let location = search_observation.lines().nth(1).unwrap().trim();
-    let (observed_path, observed_line) = location
-        .strip_prefix('"')
-        .unwrap()
-        .rsplit_once("\":")
-        .unwrap();
-    let observed_path = observed_path.to_owned();
+    let (path_prefix, observed_line) = location.rsplit_once("\":").unwrap();
+    let observed_path_token = format!("{path_prefix}\"");
     let observed_line = observed_line.parse::<usize>().unwrap();
-    assert_eq!(observed_path, "nested/notes.txt");
+    let observed_path = relative_path.as_str();
+    assert_eq!(
+        observed_path_token,
+        "\"nested space/quoted \\\" slash \\\\ café/notes.txt\""
+    );
     assert_eq!(observed_line, 2);
-    writeln!(stdin, "read-range {observed_path} {observed_line} 1").unwrap();
+    writeln!(stdin, "read-range {observed_path_token} {observed_line} 1").unwrap();
     stdin.flush().unwrap();
 
     read_task_cli_until_prompt(&receiver, &mut output, &mut error, 3, 4);
@@ -808,7 +810,7 @@ fn task_composes_actions_from_the_observed_search_location_interactively() {
     let observed_old_match = observed_excerpt.split_once(" / ").unwrap().1;
     writeln!(
         stdin,
-        "replace {observed_path} {observed_old_match} => {replacement}"
+        "replace {observed_path_token} {observed_old_match} => {replacement}"
     )
     .unwrap();
     stdin.flush().unwrap();
@@ -916,7 +918,7 @@ fn task_composes_actions_from_the_observed_search_location_interactively() {
     }
 
     assert_eq!(
-        fs::read_to_string(directory.path().join("nested/notes.txt")).unwrap(),
+        fs::read_to_string(directory.path().join(&relative_path)).unwrap(),
         final_contents
     );
     assert_eq!(
@@ -1691,6 +1693,76 @@ fn task_rejects_outside_and_existing_file_creations_without_writing() {
 }
 
 #[test]
+fn malformed_quoted_path_fails_once_and_stops_the_task() {
+    let directory = TempDir::new();
+    let private_payload = "PRIVATE_CREATE_PAYLOAD";
+    let input = format!("create \"unterminated {private_payload}\ncomplete must_not_run\n");
+    let output = run_with_input(
+        directory.path(),
+        &[
+            "task",
+            "--goal",
+            "Reject malformed input",
+            "--max-actions",
+            "3",
+        ],
+        input.as_bytes(),
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    let output_text = stdout(&output);
+    assert!(output_text.contains("Task state: failed"));
+    assert_eq!(
+        output_text.matches("Observation 1: action failed:").count(),
+        1
+    );
+    assert!(output_text.contains("unsupported workspace action 'invalid quoted path arguments'"));
+    assert!(output_text.contains(
+        "Turn outcome: failure: unsupported workspace action 'invalid quoted path arguments'"
+    ));
+    assert_eq!(
+        output_text
+            .matches("ActionFailed { action: Unsupported }")
+            .count(),
+        1
+    );
+    assert!(output_text.contains("Actions: 1/3"));
+    assert!(!output_text.contains(private_payload));
+    assert!(!output_text.contains("must_not_run"));
+    assert_eq!(stderr(&output), "action 1/3> ");
+    assert_lifecycle_transitions(output_text, "failed");
+}
+
+#[cfg(unix)]
+#[test]
+fn quoted_task_paths_still_reject_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    let directory = TempDir::new();
+    let workspace = directory.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let outside = directory.path().join("outside.txt");
+    fs::write(&outside, "outside contents").unwrap();
+    symlink(&outside, workspace.join("alias.txt")).unwrap();
+
+    let output = run_with_input(
+        &workspace,
+        &[
+            "task",
+            "--goal",
+            "Reject symlink paths",
+            "--max-actions",
+            "1",
+        ],
+        b"read \"alias.txt\"\n",
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stdout(&output).contains("path must stay inside the current directory"));
+    assert!(!stdout(&output).contains("outside contents"));
+}
+
+#[test]
 fn task_requires_a_nonempty_goal_and_positive_action_limit() {
     let directory = TempDir::new();
     let missing_goal = run(Some(directory.path()), &["task", "--max-actions", "1"]);
@@ -1723,7 +1795,30 @@ fn task_help_lists_continue_and_describes_the_whole_task_budget() {
     assert!(stdout(&output).contains("replace PATH MATCH_TEXT => REPLACEMENT_TEXT"));
     assert!(stdout(&output).contains("search DIRECTORY QUERY"));
     assert!(stdout(&output).contains("search-tree DIRECTORY QUERY"));
+    assert!(stdout(&output).contains("JSON double-quoted string"));
+    assert!(stdout(&output).contains("reusable quoted path tokens"));
     assert!(stdout(&output).contains("action limit for the whole task"));
+}
+
+#[test]
+fn task_search_actions_emit_quoted_paths_with_escapes_and_unicode() {
+    let directory = TempDir::new();
+    let path = "quoted \"name\" \\ café.txt";
+    fs::write(directory.path().join(path), "needle\n").unwrap();
+
+    let output = run_with_input(
+        directory.path(),
+        &["task", "--goal", "Find both paths", "--max-actions", "3"],
+        b"search . needle\nsearch-tree . needle\ncomplete done\n",
+    );
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let output = stdout(&output);
+    let token = r#""quoted \"name\" \\ café.txt""#;
+    assert_eq!(output.matches(&format!("  {token}:1\n")).count(), 2);
+    assert!(output.contains("Observation 1: search in . found 1 locations"));
+    assert!(output.contains("Observation 2: search-tree in . found 1 locations"));
+    assert!(output.contains("Turn outcome: success: done"));
 }
 
 #[test]
@@ -1845,7 +1940,7 @@ fn task_search_rejects_workspace_escapes() {
     let output = run_with_input(
         &workspace,
         &["task", "--goal", "Stay in workspace", "--max-actions", "1"],
-        b"search ../ outside\n",
+        b"search \"../\" outside\n",
     );
 
     assert_eq!(output.status.code(), Some(1));
