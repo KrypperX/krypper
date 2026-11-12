@@ -61,7 +61,7 @@ the path.
 
 Quoted path tokens accept literal valid Unicode and JSON escapes: `\\`, `\"`,
 `\/`, `\b`, `\f`, `\n`, `\r`, `\t`, and `\uHHHH` (a supplementary
-character uses a valid surrogate pair). On Unix, `\\xNN` with exactly two
+character uses a valid surrogate pair). On Unix, `\xNN` with exactly two
 hexadecimal digits represents one raw path byte, including non-UTF-8 bytes.
 `search` and `search-tree` print each result as a reusable quoted path token
 followed by `:<line>`. Query and file-content text after the path keeps its
