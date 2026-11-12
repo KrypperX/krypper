@@ -273,6 +273,8 @@ struct TurnCompletionData {
 ///
 /// This preserves the original one-action API. Use [`run_goal_turn_with_budget`] when the
 /// decision source should receive prior observations and the caller needs to set an action cap.
+/// A rejected directory-creation action returns a failed result with its observation; other
+/// pre-existing action errors keep their existing `Err` behavior.
 pub fn run_goal_turn<D: DecisionSource + ?Sized>(
     session: &mut TaskSession,
     task_id: Uuid,
@@ -355,7 +357,11 @@ pub fn run_goal_turn<D: DecisionSource + ?Sized>(
         ActionExecution::Failed { observation, error } => {
             let detail = error.to_string();
             let activity = summarize_observation(&observation);
-            finish_turn(
+            let returns_failed_result = matches!(
+                &observation,
+                WorkspaceObservation::DirectoryCreationFailed { .. }
+            );
+            let result = finish_turn(
                 session,
                 task_id,
                 turn_id,
@@ -367,7 +373,11 @@ pub fn run_goal_turn<D: DecisionSource + ?Sized>(
                     outcome: TurnOutcome::Failure { detail },
                 },
             )?;
-            Err(error)
+            if returns_failed_result {
+                Ok(result)
+            } else {
+                Err(error)
+            }
         }
     }
 }

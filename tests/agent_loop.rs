@@ -1031,6 +1031,61 @@ fn failed_directory_action_records_one_failure_and_stops_deciding() {
 }
 
 #[test]
+fn single_action_directory_failure_returns_failed_observation_and_outcome() {
+    let workspace = TempDir::new();
+    let goal = "Reject a directory with a missing parent";
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) =
+        with_current_dir(workspace.path(), || running_turn(&mut session, goal));
+    let mut decision_count = 0;
+    let mut decisions = |_: &str| {
+        decision_count += 1;
+        WorkspaceAction::CreateDirectory {
+            path: PathBuf::from("missing-parent/private-directory"),
+        }
+    };
+
+    let result = with_current_dir(workspace.path(), || {
+        run_goal_turn(&mut session, task_id, turn_id, goal, &mut decisions)
+    });
+
+    assert!(
+        result.is_ok(),
+        "expected a failed turn result, got {result:?}"
+    );
+    let result = result.unwrap();
+    assert_eq!(decision_count, 1);
+    assert_eq!(result.actions_taken(), 1);
+    assert_eq!(result.stop_reason(), GoalTurnStopReason::ActionFailed);
+    let [WorkspaceObservation::DirectoryCreationFailed { path, error }] = result.observations()
+    else {
+        panic!("expected one failed directory observation");
+    };
+    assert_eq!(path, Path::new("missing-parent/private-directory"));
+    let Some(TurnOutcome::Failure { detail }) = result.outcome() else {
+        panic!("expected a failed turn outcome");
+    };
+    assert_eq!(detail, &error.to_string());
+    assert!(!workspace
+        .path()
+        .join("missing-parent/private-directory")
+        .exists());
+
+    let task = session.get_task(task_id).unwrap();
+    let turn = task.get_turn(turn_id).unwrap();
+    assert_eq!(turn.state(), TurnState::Failed);
+    assert_eq!(turn.outcome(), result.outcome());
+    assert_eq!(
+        turn.activity_history(),
+        [TurnActivitySummary::ActionFailed {
+            action: TurnActivityAction::CreateDirectory,
+        }]
+    );
+    assert!(!format!("{:?}", task.activity_history()).contains("private-directory"));
+    assert!(!format!("{:?}", task.history()).contains("missing-parent"));
+}
+
+#[test]
 fn bounded_goal_turn_replaces_unique_text_and_retains_only_metadata() {
     let workspace = TempDir::new();
     let match_text = "PRIVATE_MATCH_71";
