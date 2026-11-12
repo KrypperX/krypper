@@ -229,6 +229,56 @@ fn running_owned_turn_search_returns_only_matching_locations_without_history_cha
 }
 
 #[test]
+fn running_owned_turn_tree_search_returns_nested_locations_without_history_changes() {
+    let temp = TempDir::new();
+    fs::create_dir_all(temp.path().join("nested/.hidden-dir")).unwrap();
+    fs::write(temp.path().join(".hidden"), "needle hidden\n").unwrap();
+    fs::write(
+        temp.path().join("nested/.hidden-dir/note.txt"),
+        "skip\nneedle private text\n",
+    )
+    .unwrap();
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) = running_turn_in(&mut session, temp.path());
+    let before = lifecycle_snapshot(&session);
+
+    let result = with_current_dir(temp.path(), || {
+        session.search_workspace_tree_text(task_id, turn_id, Path::new("."), "needle")
+    });
+    let no_match = with_current_dir(temp.path(), || {
+        session.search_workspace_tree_text(task_id, turn_id, Path::new("nested"), "absent")
+    });
+    let selected_subtree = with_current_dir(temp.path(), || {
+        session.search_workspace_tree_text(task_id, turn_id, Path::new("nested"), "needle")
+    });
+
+    assert_eq!(
+        result,
+        Ok(vec![
+            WorkspaceSearchLocation {
+                path: PathBuf::from(".hidden"),
+                line: 1,
+            },
+            WorkspaceSearchLocation {
+                path: PathBuf::from("nested/.hidden-dir/note.txt"),
+                line: 2,
+            },
+        ])
+    );
+    assert_eq!(no_match, Ok(Vec::new()));
+    assert_eq!(
+        selected_subtree,
+        Ok(vec![WorkspaceSearchLocation {
+            path: PathBuf::from("nested/.hidden-dir/note.txt"),
+            line: 2,
+        }])
+    );
+    assert_eq!(lifecycle_snapshot(&session), before);
+    assert!(!format!("{result:?}").contains("needle"));
+    assert!(!format!("{result:?}").contains("private text"));
+}
+
+#[test]
 fn running_owned_turn_workspace_operations_stay_bound_after_chdir() {
     let temp = TempDir::new();
     let workspace = temp.path().join("workspace");
