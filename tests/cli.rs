@@ -1435,6 +1435,7 @@ fn task_help_lists_continue_and_describes_the_whole_task_budget() {
     assert!(stdout(&output).contains("at most 200 lines and 64 KiB"));
     assert!(stdout(&output).contains("replace PATH MATCH_TEXT => REPLACEMENT_TEXT"));
     assert!(stdout(&output).contains("search DIRECTORY QUERY"));
+    assert!(stdout(&output).contains("search-tree DIRECTORY QUERY"));
     assert!(stdout(&output).contains("action limit for the whole task"));
 }
 
@@ -1588,4 +1589,114 @@ fn task_search_escapes_control_characters_in_returned_paths() {
     let output = stdout(&output);
     assert!(output.contains("\"line\\nbreak.txt\":1"));
     assert!(!output.contains("line\nbreak.txt"));
+}
+
+#[test]
+fn task_search_tree_finds_nested_hidden_matches_in_order_without_contents() {
+    let directory = TempDir::new();
+    fs::create_dir_all(directory.path().join("nested/.hidden-dir")).unwrap();
+    fs::write(directory.path().join("z.txt"), "needle phrase z\n").unwrap();
+    fs::write(directory.path().join(".hidden"), "needle phrase hidden\n").unwrap();
+    fs::write(
+        directory.path().join("nested/.hidden-dir/a.txt"),
+        "skip\nneedle phrase nested secret\n",
+    )
+    .unwrap();
+
+    let output = run_with_input(
+        directory.path(),
+        &[
+            "task",
+            "--goal",
+            "Find nested literals",
+            "--max-actions",
+            "2",
+        ],
+        b"search-tree . needle phrase\ncomplete done\n",
+    );
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let output = stdout(&output);
+    let hidden = output.find("  \".hidden\":1").unwrap();
+    let nested = output.find("  \"nested/.hidden-dir/a.txt\":2").unwrap();
+    let regular = output.find("  \"z.txt\":1").unwrap();
+    assert!(hidden < nested && nested < regular);
+    assert!(output.contains("Observation 1: search-tree in . found 3 locations"));
+    assert!(output.contains("Turn outcome: success: done"));
+    assert!(output.contains("Actions: 2/2"));
+    assert!(!output.contains("needle phrase"));
+    assert!(!output.contains("hidden secret"));
+    assert!(!output.contains("nested secret"));
+    let activity = output
+        .split("Activity history (metadata only):")
+        .nth(1)
+        .unwrap();
+    assert!(activity.contains("TreeTextSearched { location_count: 3 }"));
+    assert!(!activity.contains("needle"));
+}
+
+#[test]
+fn task_search_tree_no_match_and_failure_are_metadata_only_and_terminal() {
+    let no_match_directory = TempDir::new();
+    fs::create_dir_all(no_match_directory.path().join("nested")).unwrap();
+    fs::write(
+        no_match_directory.path().join("nested/note.txt"),
+        "different text\n",
+    )
+    .unwrap();
+    let no_match = run_with_input(
+        no_match_directory.path(),
+        &[
+            "task",
+            "--goal",
+            "Find a missing literal",
+            "--max-actions",
+            "2",
+        ],
+        b"search-tree nested absent\ncomplete done\n",
+    );
+    assert!(no_match.status.success(), "{}", stderr(&no_match));
+    assert!(stdout(&no_match).contains("search-tree in nested found 0 locations"));
+    assert!(stdout(&no_match).contains("TreeTextSearched { location_count: 0 }"));
+
+    let directory = TempDir::new();
+    let query = "PRIVATE_TREE_FAILURE_QUERY_31";
+    fs::create_dir_all(directory.path().join("nested")).unwrap();
+    fs::write(
+        directory.path().join("nested/a.txt"),
+        format!("{query} private match\n"),
+    )
+    .unwrap();
+    fs::write(
+        directory.path().join("nested/z-invalid.txt"),
+        [b"private bytes ".as_slice(), &[0xff]].concat(),
+    )
+    .unwrap();
+    let input = format!("search-tree . {query}\ncomplete must_not_run\n");
+    let output = run_with_input(
+        directory.path(),
+        &[
+            "task",
+            "--goal",
+            "Reject invalid UTF-8",
+            "--max-actions",
+            "3",
+        ],
+        input.as_bytes(),
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    let stdout_output = stdout(&output);
+    assert!(stdout_output.contains(
+        "search-tree in . failed: workspace text search failed: file is not valid UTF-8"
+    ));
+    assert!(stdout_output.contains("ActionFailed { action: SearchTreeText }"));
+    assert!(stdout_output
+        .contains("Turn outcome: failure: workspace text search failed: file is not valid UTF-8"));
+    assert!(stdout_output.contains("Actions: 1/3"));
+    assert!(!stdout_output.contains(query));
+    assert!(!stdout_output.contains("private bytes"));
+    assert!(!stdout_output.contains("nested/a.txt:1"));
+    assert!(!stdout_output.contains("must_not_run"));
+    assert_eq!(stderr(&output).matches("action ").count(), 1);
 }
