@@ -5,7 +5,7 @@ use crate::file_safety::{create_text_file, list_directory, read_text_file};
 use crate::task_lifecycle::{TaskSession, TaskState, TurnOutcome, TurnState};
 use std::ffi::{OsStr, OsString};
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const MAX_FILE_SIZE: usize = 1024 * 1024;
 // Leave room for the action command and path beside a maximum-size file body.
@@ -423,6 +423,9 @@ fn parse_task_action(line: &str) -> WorkspaceAction {
     let invalid = || WorkspaceAction::Unsupported {
         action: format!("invalid input: {line}"),
     };
+    let invalid_quoted_path = || WorkspaceAction::Unsupported {
+        action: "invalid quoted path arguments".to_owned(),
+    };
     let invalid_replace = || WorkspaceAction::Unsupported {
         action: "invalid replace action".to_owned(),
     };
@@ -434,86 +437,66 @@ fn parse_task_action(line: &str) -> WorkspaceAction {
     };
 
     match name {
-        "read" => arguments
-            .map(str::trim)
-            .filter(|path| !path.is_empty())
-            .map(|path| WorkspaceAction::ReadFile {
-                path: PathBuf::from(path),
-            })
-            .unwrap_or_else(invalid),
-        "read-range" => parse_task_read_range(arguments).unwrap_or_else(invalid),
-        "list" => WorkspaceAction::ListDirectory {
-            path: PathBuf::from(
-                arguments
-                    .map(str::trim)
-                    .filter(|path| !path.is_empty())
-                    .unwrap_or("."),
-            ),
+        "read" => match parse_task_single_path(arguments) {
+            Some(path) => WorkspaceAction::ReadFile { path },
+            None if has_quoted_path(arguments) => invalid_quoted_path(),
+            None => invalid(),
         },
-        "mkdir" => arguments
-            .map(str::trim)
-            .filter(|path| !path.is_empty())
-            .map(|path| WorkspaceAction::CreateDirectory {
-                path: PathBuf::from(path),
-            })
-            .unwrap_or_else(invalid),
+        "read-range" => match parse_task_read_range(arguments) {
+            Some(action) => action,
+            None if has_quoted_path(arguments) => invalid_quoted_path(),
+            None => invalid(),
+        },
+        "list" => match arguments.map(str::trim).filter(|path| !path.is_empty()) {
+            None => WorkspaceAction::ListDirectory {
+                path: PathBuf::from("."),
+            },
+            Some(arguments) => match parse_task_single_path(Some(arguments)) {
+                Some(path) => WorkspaceAction::ListDirectory { path },
+                None if has_quoted_path(Some(arguments)) => invalid_quoted_path(),
+                None => invalid(),
+            },
+        },
+        "mkdir" => match parse_task_single_path(arguments) {
+            Some(path) => WorkspaceAction::CreateDirectory { path },
+            None if has_quoted_path(arguments) => invalid_quoted_path(),
+            None => invalid(),
+        },
         "search" => {
-            let Some(arguments) = arguments else {
+            let Some((directory, query)) = parse_task_search_arguments(arguments) else {
                 return invalid_search();
             };
-            let arguments = arguments.trim_start();
-            let Some((separator, whitespace)) = arguments
-                .char_indices()
-                .find(|(_, character)| character.is_whitespace())
-            else {
-                return invalid_search();
-            };
-            let directory = &arguments[..separator];
-            let query = &arguments[separator + whitespace.len_utf8()..];
-            if directory.is_empty() || query.is_empty() {
-                return invalid_search();
-            }
-            WorkspaceAction::SearchText {
-                directory: PathBuf::from(directory),
-                query: query.to_owned(),
-            }
+            WorkspaceAction::SearchText { directory, query }
         }
         "search-tree" => {
-            let Some(arguments) = arguments else {
+            let Some((directory, query)) = parse_task_search_arguments(arguments) else {
                 return invalid_search_tree();
             };
-            let arguments = arguments.trim_start();
-            let Some((separator, whitespace)) = arguments
-                .char_indices()
-                .find(|(_, character)| character.is_whitespace())
-            else {
-                return invalid_search_tree();
-            };
-            let directory = &arguments[..separator];
-            let query = &arguments[separator + whitespace.len_utf8()..];
-            if directory.is_empty() || query.is_empty() {
-                return invalid_search_tree();
-            }
-            WorkspaceAction::SearchTreeText {
-                directory: PathBuf::from(directory),
-                query: query.to_owned(),
-            }
+            WorkspaceAction::SearchTreeText { directory, query }
         }
         "create" => {
             let Some(arguments) = arguments else {
                 return invalid();
             };
             let arguments = arguments.trim_start();
-            let Some(separator) = arguments.find(char::is_whitespace) else {
-                return invalid();
+            let quoted_path = arguments.starts_with('"');
+            let Some((path, contents, true)) = parse_path_argument_prefix(arguments) else {
+                return if quoted_path {
+                    invalid_quoted_path()
+                } else {
+                    invalid()
+                };
             };
-            let path = &arguments[..separator];
-            if path.is_empty() {
-                return invalid();
+            if path.as_os_str().is_empty() {
+                return if quoted_path {
+                    invalid_quoted_path()
+                } else {
+                    invalid()
+                };
             }
             WorkspaceAction::CreateFile {
-                path: PathBuf::from(path),
-                contents: arguments[separator + 1..].to_owned(),
+                path,
+                contents: contents.to_owned(),
             }
         }
         "replace" => {
@@ -521,20 +504,19 @@ fn parse_task_action(line: &str) -> WorkspaceAction {
                 return invalid_replace();
             };
             let arguments = arguments.trim_start();
-            let Some((separator, whitespace)) = arguments
-                .char_indices()
-                .find(|(_, character)| character.is_whitespace())
+            let Some((path, replacement_arguments, true)) = parse_path_argument_prefix(arguments)
             else {
                 return invalid_replace();
             };
-            let path = &arguments[..separator];
-            let Some((match_text, replacement_text)) =
-                arguments[separator + whitespace.len_utf8()..].split_once(" => ")
+            if path.as_os_str().is_empty() {
+                return invalid_replace();
+            }
+            let Some((match_text, replacement_text)) = replacement_arguments.split_once(" => ")
             else {
                 return invalid_replace();
             };
             WorkspaceAction::ReplaceText {
-                path: PathBuf::from(path),
+                path,
                 match_text: match_text.to_owned(),
                 replacement_text: replacement_text.to_owned(),
             }
@@ -552,8 +534,179 @@ fn parse_task_action(line: &str) -> WorkspaceAction {
     }
 }
 
+fn has_quoted_path(arguments: Option<&str>) -> bool {
+    arguments.is_some_and(|arguments| arguments.trim_start().starts_with('"'))
+}
+
+fn parse_task_single_path(arguments: Option<&str>) -> Option<PathBuf> {
+    let arguments = arguments?.trim();
+    if arguments.is_empty() {
+        return None;
+    }
+
+    if arguments.starts_with('"') {
+        let (path, remainder, _) = parse_path_argument_prefix(arguments)?;
+        if path.as_os_str().is_empty() || !remainder.trim().is_empty() {
+            return None;
+        }
+        Some(path)
+    } else {
+        Some(PathBuf::from(arguments))
+    }
+}
+
+fn parse_task_search_arguments(arguments: Option<&str>) -> Option<(PathBuf, String)> {
+    let arguments = arguments?.trim_start();
+    let (directory, query, has_separator) = parse_path_argument_prefix(arguments)?;
+    if directory.as_os_str().is_empty() || !has_separator || query.is_empty() {
+        return None;
+    }
+    Some((directory, query.to_owned()))
+}
+
+fn parse_path_argument_prefix(arguments: &str) -> Option<(PathBuf, &str, bool)> {
+    if arguments.starts_with('"') {
+        let (path, end) = decode_quoted_path(arguments)?;
+        let remainder = &arguments[end..];
+        let Some(separator) = remainder.chars().next() else {
+            return Some((PathBuf::from(path), "", false));
+        };
+        if !separator.is_whitespace() {
+            return None;
+        }
+        return Some((
+            PathBuf::from(path),
+            &remainder[separator.len_utf8()..],
+            true,
+        ));
+    }
+
+    let Some((separator_index, separator)) = arguments
+        .char_indices()
+        .find(|(_, character)| character.is_whitespace())
+    else {
+        return Some((PathBuf::from(arguments), "", false));
+    };
+    Some((
+        PathBuf::from(&arguments[..separator_index]),
+        &arguments[separator_index + separator.len_utf8()..],
+        true,
+    ))
+}
+
+fn decode_quoted_path(arguments: &str) -> Option<(String, usize)> {
+    let bytes = arguments.as_bytes();
+    let mut path = String::new();
+    let mut index = 1;
+
+    while let Some(byte) = bytes.get(index).copied() {
+        match byte {
+            b'"' => return Some((path, index + 1)),
+            b'\\' => {
+                index += 1;
+                match bytes.get(index).copied()? {
+                    b'"' => path.push('"'),
+                    b'\\' => path.push('\\'),
+                    b'/' => path.push('/'),
+                    b'b' => path.push('\u{0008}'),
+                    b'f' => path.push('\u{000c}'),
+                    b'n' => path.push('\n'),
+                    b'r' => path.push('\r'),
+                    b't' => path.push('\t'),
+                    b'u' => {
+                        let (character, next_index) = decode_json_unicode_escape(bytes, index + 1)?;
+                        path.push(character);
+                        index = next_index;
+                        continue;
+                    }
+                    _ => return None,
+                }
+                index += 1;
+            }
+            0..=0x1f => return None,
+            _ => {
+                let character = arguments.get(index..)?.chars().next()?;
+                path.push(character);
+                index += character.len_utf8();
+            }
+        }
+    }
+
+    None
+}
+
+fn decode_json_unicode_escape(bytes: &[u8], index: usize) -> Option<(char, usize)> {
+    let (high, mut next_index) = read_json_hex_quad(bytes, index)?;
+    let scalar = match high {
+        0xd800..=0xdbff => {
+            let marker_end = next_index.checked_add(2)?;
+            if bytes.get(next_index..marker_end)? != b"\\u" {
+                return None;
+            }
+            let (low, end) = read_json_hex_quad(bytes, marker_end)?;
+            if !(0xdc00..=0xdfff).contains(&low) {
+                return None;
+            }
+            next_index = end;
+            0x1_0000 + (u32::from(high - 0xd800) << 10) + u32::from(low - 0xdc00)
+        }
+        0xdc00..=0xdfff => return None,
+        value => u32::from(value),
+    };
+    Some((char::from_u32(scalar)?, next_index))
+}
+
+fn read_json_hex_quad(bytes: &[u8], index: usize) -> Option<(u16, usize)> {
+    let end = index.checked_add(4)?;
+    let digits = std::str::from_utf8(bytes.get(index..end)?).ok()?;
+    Some((u16::from_str_radix(digits, 16).ok()?, end))
+}
+
+fn quoted_path_token(path: &Path) -> String {
+    let Some(path) = path.to_str() else {
+        return format!("{path:?}");
+    };
+    let mut token = String::with_capacity(path.len() + 2);
+    token.push('"');
+    for character in path.chars() {
+        match character {
+            '"' => token.push_str("\\\""),
+            '\\' => token.push_str("\\\\"),
+            '\u{0008}' => token.push_str("\\b"),
+            '\u{000c}' => token.push_str("\\f"),
+            '\n' => token.push_str("\\n"),
+            '\r' => token.push_str("\\r"),
+            '\t' => token.push_str("\\t"),
+            character if character.is_control() => {
+                token.push_str(&format!("\\u{:04x}", u32::from(character)));
+            }
+            character => token.push(character),
+        }
+    }
+    token.push('"');
+    token
+}
+
 fn parse_task_read_range(arguments: Option<&str>) -> Option<WorkspaceAction> {
     let arguments = arguments?.trim();
+    if arguments.starts_with('"') {
+        let (path, range_arguments, has_separator) = parse_path_argument_prefix(arguments)?;
+        if path.as_os_str().is_empty() || !has_separator {
+            return None;
+        }
+        let mut range_arguments = range_arguments.split_whitespace();
+        let start_line = range_arguments.next()?.parse().ok()?;
+        let max_lines = range_arguments.next()?.parse().ok()?;
+        if range_arguments.next().is_some() {
+            return None;
+        }
+        return Some(WorkspaceAction::ReadRange {
+            path,
+            start_line,
+            max_lines,
+        });
+    }
+
     let max_separator = arguments.rfind(char::is_whitespace)?;
     let max_lines = arguments[max_separator..].trim().parse().ok()?;
     let before_max = arguments[..max_separator].trim_end();
@@ -629,7 +782,12 @@ fn write_observation(
                 locations.len()
             )?;
             for location in locations {
-                writeln!(output, "  {:?}:{}", location.path, location.line)?;
+                writeln!(
+                    output,
+                    "  {}:{}",
+                    quoted_path_token(&location.path),
+                    location.line
+                )?;
             }
         }
         WorkspaceObservation::TreeTextSearched {
@@ -643,7 +801,12 @@ fn write_observation(
                 locations.len()
             )?;
             for location in locations {
-                writeln!(output, "  {:?}:{}", location.path, location.line)?;
+                writeln!(
+                    output,
+                    "  {}:{}",
+                    quoted_path_token(&location.path),
+                    location.line
+                )?;
             }
         }
         WorkspaceObservation::FileCreated {
@@ -921,6 +1084,8 @@ fn write_task_help(output: &mut dyn Write) -> io::Result<()> {
             "  replace PATH MATCH_TEXT => REPLACEMENT_TEXT\n",
             "  search DIRECTORY QUERY\n  search-tree DIRECTORY QUERY\n",
             "  continue\n  complete [RESULT]\n  cancel\n\n",
+            "PATH may be unquoted as before or a JSON double-quoted string; backslash escapes follow JSON.\n",
+            "Search results print reusable quoted path tokens. Text after PATH keeps its existing syntax.\n",
             "mkdir creates one directory and requires its parent to exist.\n",
             "read-range uses one-based lines, returns at most 200 lines and 64 KiB, and reports the actual range.\n",
             "replace requires one non-empty exact match; it prints only path and byte-count metadata.\n",
@@ -956,9 +1121,11 @@ fn write_write_help(output: &mut dyn Write) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::run_with;
+    use super::{parse_task_action, quoted_path_token, run_with};
+    use crate::agent_loop::WorkspaceAction;
     use std::ffi::OsString;
     use std::io::{Cursor, Read};
+    use std::path::{Path, PathBuf};
 
     struct CountingReader {
         input: Cursor<Vec<u8>>,
@@ -971,6 +1138,116 @@ mod tests {
             self.bytes_read += bytes_read;
             Ok(bytes_read)
         }
+    }
+
+    #[test]
+    fn quoted_task_paths_round_trip_and_preserve_action_payloads() {
+        let path = PathBuf::from("nested with \"quotes\" \\ café/file.txt");
+        let token = r#""nested with \"quotes\" \\ café/file.txt""#;
+
+        assert_eq!(quoted_path_token(&path), token);
+        assert!(matches!(
+            parse_task_action(&format!("read {token}")),
+            WorkspaceAction::ReadFile { path: actual } if actual == path
+        ));
+        assert!(matches!(
+            parse_task_action(&format!("read-range {token} 2 3")),
+            WorkspaceAction::ReadRange {
+                path: actual,
+                start_line: 2,
+                max_lines: 3,
+            } if actual == path
+        ));
+        assert!(matches!(
+            parse_task_action(&format!("list {token}")),
+            WorkspaceAction::ListDirectory { path: actual } if actual == path
+        ));
+        assert!(matches!(
+            parse_task_action(&format!("mkdir {token}")),
+            WorkspaceAction::CreateDirectory { path: actual } if actual == path
+        ));
+        assert!(matches!(
+            parse_task_action(&format!("create {token} payload  with spaces")),
+            WorkspaceAction::CreateFile {
+                path: actual,
+                contents,
+            } if actual == path && contents == "payload  with spaces"
+        ));
+        assert!(matches!(
+            parse_task_action(&format!("replace {token} match => replacement")),
+            WorkspaceAction::ReplaceText {
+                path: actual,
+                match_text,
+                replacement_text,
+            } if actual == path && match_text == "match" && replacement_text == "replacement"
+        ));
+        assert!(matches!(
+            parse_task_action(&format!("search {token}  literal query ")),
+            WorkspaceAction::SearchText {
+                directory,
+                query,
+            } if directory == path && query == " literal query "
+        ));
+        assert!(matches!(
+            parse_task_action(&format!("search-tree {token} literal query")),
+            WorkspaceAction::SearchTreeText {
+                directory,
+                query,
+            } if directory == path && query == "literal query"
+        ));
+    }
+
+    #[test]
+    fn unquoted_task_paths_keep_existing_parsing() {
+        assert!(matches!(
+            parse_task_action("read legacy path.txt"),
+            WorkspaceAction::ReadFile { path } if path == Path::new("legacy path.txt")
+        ));
+        assert!(matches!(
+            parse_task_action("read-range legacy path.txt 2 3"),
+            WorkspaceAction::ReadRange {
+                path,
+                start_line: 2,
+                max_lines: 3,
+            } if path == Path::new("legacy path.txt")
+        ));
+        assert!(matches!(
+            parse_task_action("search . phrase with spaces"),
+            WorkspaceAction::SearchText { directory, query }
+                if directory == Path::new(".") && query == "phrase with spaces"
+        ));
+        assert!(matches!(
+            parse_task_action("create note.txt payload  unchanged"),
+            WorkspaceAction::CreateFile { path, contents }
+                if path == Path::new("note.txt") && contents == "payload  unchanged"
+        ));
+    }
+
+    #[test]
+    fn malformed_quoted_task_paths_are_rejected() {
+        for action in [
+            "read \"unterminated",
+            r#"read "invalid\q""#,
+            r#"read "invalid\uD800""#,
+            "search \"path\"suffix query",
+        ] {
+            assert!(
+                matches!(
+                    parse_task_action(action),
+                    WorkspaceAction::Unsupported { .. }
+                ),
+                "accepted malformed task action: {action}"
+            );
+        }
+    }
+
+    #[test]
+    fn quoted_paths_decode_valid_unicode_escapes() {
+        assert!(matches!(
+            parse_task_action(r#"read "unicode \u4e2d\ud83d\ude00.txt""#),
+            WorkspaceAction::ReadFile { path }
+                if path == Path::new("unicode 中😀.txt")
+        ));
     }
 
     #[test]
