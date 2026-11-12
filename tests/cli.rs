@@ -672,6 +672,56 @@ fn task_can_replace_a_match_with_empty_text() {
 }
 
 #[test]
+fn task_replaces_with_multibyte_whitespace_after_the_path() {
+    let directory = TempDir::new();
+    fs::write(directory.path().join("note.txt"), "before needle after").unwrap();
+
+    let input = "replace note.txt\u{2003}needle => fresh\ncomplete done\n";
+    let output = run_with_input(
+        directory.path(),
+        &[
+            "task",
+            "--goal",
+            "Replace a match after Unicode whitespace",
+            "--max-actions",
+            "2",
+        ],
+        input.as_bytes(),
+    );
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        fs::read_to_string(directory.path().join("note.txt")).unwrap(),
+        "before fresh after"
+    );
+}
+
+#[test]
+fn task_replaces_with_multibyte_whitespace_after_the_action() {
+    let directory = TempDir::new();
+    fs::write(directory.path().join("note.txt"), "before needle after").unwrap();
+
+    let input = "replace\u{2003}note.txt needle => fresh\ncomplete done\n";
+    let output = run_with_input(
+        directory.path(),
+        &[
+            "task",
+            "--goal",
+            "Replace a match after Unicode whitespace",
+            "--max-actions",
+            "2",
+        ],
+        input.as_bytes(),
+    );
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        fs::read_to_string(directory.path().join("note.txt")).unwrap(),
+        "before fresh after"
+    );
+}
+
+#[test]
 fn task_rejects_ambiguous_replacement_once_without_printing_text_or_reading_again() {
     let directory = TempDir::new();
     let match_text = "PRIVATE_MATCH_57";
