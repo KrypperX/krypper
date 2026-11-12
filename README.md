@@ -44,7 +44,7 @@ files, or contacts a network service.
 `task --goal <goal> --max-actions <positive-number>` runs one task across
 bounded turns in-process with the current directory as its workspace. It reads
 one caller decision per line from standard input. Enter `read <path>`,
-`list [path]`, `create <path> <text>`,
+`read-range <path> <start-line> <max-lines>`, `list [path]`, `create <path> <text>`,
 `replace <path> <match text> => <replacement text>`,
 `search <directory> <query>`, `continue`,
 `complete [result]`, or `cancel`; a create or replace path is one token, and
@@ -54,7 +54,16 @@ symlink paths, non-regular files, and replacements that would exceed 1 MiB.
 Replacement output and retained activity history contain only path and byte
 count metadata. Read and list actions use the same workspace policy as the
 existing commands, while create is create-only and follows the same path and
-size limits as `write`.
+size limits as `write`. `read-range` uses one-based line numbers, requires a
+positive start and count, accepts at most 200 requested lines, and returns at
+most 64 KiB of excerpt text. It reads the same safe UTF-8 files as `read`.
+Empty files contain no lines; a file containing only a newline has one empty
+line; a final newline does not add an extra line. Returned lines are joined with
+`\n` and omit the final line ending. A start beyond the available lines fails,
+while a range extending past end-of-file returns the remaining lines and their
+actual start and end numbers. Excerpt text appears only in the action
+observation; retained activity and lifecycle summaries contain the actual range
+and excerpt byte count only.
 Search checks immediate regular UTF-8 files in the selected directory, includes
 hidden names, skips entry symlinks and non-regular files, and does not recurse.
 Its case-sensitive literal query is limited to 4 KiB, each file to 1 MiB, total

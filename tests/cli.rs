@@ -886,6 +886,139 @@ fn task_continue_at_the_last_action_fails_without_starting_another_turn() {
 }
 
 #[test]
+fn task_reads_only_the_requested_range_and_keeps_history_metadata_only() {
+    let directory = TempDir::new();
+    fs::write(
+        directory.path().join("notes with spaces.txt"),
+        "first line\nsecond line\nthird line",
+    )
+    .unwrap();
+
+    let output = run_with_input(
+        directory.path(),
+        &[
+            "task",
+            "--goal",
+            "Read selected lines",
+            "--max-actions",
+            "2",
+        ],
+        b"read-range notes with spaces.txt 2 2\ncomplete done\n",
+    );
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let output = stdout(&output);
+    assert!(output.contains("Observation 1: read-range notes with spaces.txt lines 2-3"));
+    assert!(output.contains("second line\nthird line"));
+    assert!(!output.contains("first line"));
+    assert!(output.contains("Actions: 2/2"));
+    let activity = output
+        .split("Activity history (metadata only):")
+        .nth(1)
+        .unwrap();
+    assert!(activity.contains("FileRangeRead { start_line: 2, end_line: 3, bytes_returned: 22 }"));
+    assert!(!activity.contains("second line"));
+    assert!(!activity.contains("third line"));
+}
+
+#[test]
+fn task_range_reads_report_eof_and_newline_boundaries() {
+    let directory = TempDir::new();
+    fs::write(directory.path().join("trailing.txt"), "first\nsecond\n").unwrap();
+    fs::write(directory.path().join("empty-line.txt"), "\n").unwrap();
+    fs::write(directory.path().join("empty.txt"), "").unwrap();
+
+    let past_eof = run_with_input(
+        directory.path(),
+        &["task", "--goal", "Read to EOF", "--max-actions", "2"],
+        b"read-range trailing.txt 2 200\ncomplete done\n",
+    );
+    assert!(past_eof.status.success(), "{}", stderr(&past_eof));
+    let past_eof = stdout(&past_eof);
+    assert!(past_eof.contains("Observation 1: read-range trailing.txt lines 2-2"));
+    assert!(past_eof.contains("second\n"));
+    assert!(!past_eof.contains("first"));
+
+    let empty_line = run_with_input(
+        directory.path(),
+        &["task", "--goal", "Read an empty line", "--max-actions", "2"],
+        b"read-range empty-line.txt 1 1\ncomplete done\n",
+    );
+    assert!(empty_line.status.success(), "{}", stderr(&empty_line));
+    let empty_line = stdout(&empty_line);
+    assert!(empty_line.contains("Observation 1: read-range empty-line.txt lines 1-1\n\n"));
+    assert!(empty_line.contains("FileRangeRead { start_line: 1, end_line: 1, bytes_returned: 0 }"));
+
+    let empty_file_output = run_with_input(
+        directory.path(),
+        &[
+            "task",
+            "--goal",
+            "Reject an empty file start",
+            "--max-actions",
+            "2",
+        ],
+        b"read-range empty.txt 1 1\ncomplete must not run\n",
+    );
+    assert_eq!(empty_file_output.status.code(), Some(1));
+    let empty_file = stdout(&empty_file_output);
+    assert!(empty_file.contains("starting line 1 does not exist"));
+    assert!(empty_file.contains("Actions: 1/2"));
+    assert!(!empty_file.contains("must not run"));
+    assert_eq!(stderr(&empty_file_output).matches("action ").count(), 1);
+}
+
+#[test]
+fn task_range_read_rejects_invalid_arguments_and_oversized_excerpt_once() {
+    let directory = TempDir::new();
+    fs::write(directory.path().join("note.txt"), "available\n").unwrap();
+    fs::write(
+        directory.path().join("large-line.txt"),
+        "x".repeat(64 * 1024 + 1),
+    )
+    .unwrap();
+
+    for (input, expected_error) in [
+        (
+            b"read-range note.txt 0 1\ncomplete later\n".as_slice(),
+            "starting line must be positive",
+        ),
+        (
+            b"read-range note.txt 1 0\ncomplete later\n".as_slice(),
+            "line count must be positive",
+        ),
+        (
+            b"read-range note.txt 1 201\ncomplete later\n".as_slice(),
+            "requested line count exceeds 200 lines",
+        ),
+        (
+            b"read-range large-line.txt 1 1\ncomplete later\n".as_slice(),
+            "selected excerpt exceeds 64 KiB",
+        ),
+    ] {
+        let output = run_with_input(
+            directory.path(),
+            &[
+                "task",
+                "--goal",
+                "Reject invalid range",
+                "--max-actions",
+                "3",
+            ],
+            input,
+        );
+        assert_eq!(output.status.code(), Some(1));
+        let stdout = stdout(&output);
+        assert!(stdout.contains(expected_error), "{stdout}");
+        assert!(stdout.contains("Actions: 1/3"));
+        assert!(stdout.contains("ActionFailed { action: ReadRange }"));
+        assert!(!stdout.contains("must not run"));
+        assert!(!stdout.contains(&"x".repeat(32)));
+        assert_eq!(stderr(&output).matches("action ").count(), 1);
+    }
+}
+
+#[test]
 fn task_shares_the_action_budget_across_continued_turns() {
     let directory = TempDir::new();
 
@@ -1222,6 +1355,8 @@ fn task_help_lists_continue_and_describes_the_whole_task_budget() {
 
     assert!(output.status.success());
     assert!(stdout(&output).contains("  continue\n"));
+    assert!(stdout(&output).contains("read-range PATH START_LINE MAX_LINES"));
+    assert!(stdout(&output).contains("at most 200 lines and 64 KiB"));
     assert!(stdout(&output).contains("replace PATH MATCH_TEXT => REPLACEMENT_TEXT"));
     assert!(stdout(&output).contains("search DIRECTORY QUERY"));
     assert!(stdout(&output).contains("action limit for the whole task"));
