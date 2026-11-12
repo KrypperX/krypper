@@ -47,7 +47,7 @@ one caller decision per line from standard input. Enter `read <path>`,
 `read-range <path> <start-line> <max-lines>`, `list [path]`, `mkdir <path>`,
 `create <path> <text>`,
 `replace <path> <match text> => <replacement text>`,
-`search <directory> <query>`, `continue`,
+`search <directory> <query>`, `search-tree <directory> <query>`, `continue`,
 `complete [result]`, or `cancel`; a create or replace path is one token, and
 the remaining line contains its text. Replace requires one non-empty exact
 match in an existing UTF-8 file. It rejects missing or ambiguous matches,
@@ -74,6 +74,12 @@ bytes scanned to 16 MiB, and returned file-line locations to 10,000. The
 existing 1,024-entry directory limit applies too. Results contain relative paths
 and one-based line numbers, never matching line text; invalid UTF-8 and oversized
 files fail the whole action.
+`search-tree` uses the same literal-match and result format while recursively
+searching regular UTF-8 files beneath the selected directory. It includes hidden
+names, skips symlink and non-regular entries, and limits traversal to depth 16
+and 4,096 directory entries total. Query, per-file size, cumulative bytes, and
+result locations keep the same 4 KiB, 1 MiB, 16 MiB, and 10,000 limits. Any
+limit or invalid UTF-8 failure rejects the action without partial results.
 `continue` ends the active turn and starts another for the same running task.
 The action limit is shared by the whole invocation, and each `continue`
 selection consumes one action. The CLI prints observations before asking for
