@@ -1,6 +1,6 @@
 use krypper::agent_loop::{
-    run_goal_turn, run_goal_turn_with_budget, GoalTurnError, GoalTurnStopReason, WorkspaceAction,
-    WorkspaceObservation,
+    run_goal_turn, run_goal_turn_with_budget, BoundedDecisionSource, GoalTurnError,
+    GoalTurnStopReason, WorkspaceAction, WorkspaceObservation,
 };
 use krypper::task_lifecycle::{
     TaskHistoryTransition, TaskSession, TaskState, TurnActivityAction, TurnActivitySummary,
@@ -2029,4 +2029,283 @@ fn bounded_goal_turn_validates_ownership_and_state_before_deciding() {
     assert_eq!(foreign_turn.state(), TurnState::Running);
     assert_eq!(foreign_turn.outcome(), None);
     assert!(foreign_turn.activity_history().is_empty());
+}
+
+struct MultiActionTaskCaller {
+    query: &'static str,
+    match_text: &'static str,
+    replacement_text: &'static str,
+    selections: usize,
+}
+
+impl BoundedDecisionSource for MultiActionTaskCaller {
+    fn choose_action(
+        &mut self,
+        _goal: &str,
+        observations: &[WorkspaceObservation],
+    ) -> WorkspaceAction {
+        self.selections += 1;
+        let unsupported = || WorkspaceAction::Unsupported {
+            action: "unexpected observation sequence".to_owned(),
+        };
+
+        match observations {
+            [] => WorkspaceAction::SearchTreeText {
+                directory: PathBuf::from("."),
+                query: self.query.to_owned(),
+            },
+            [WorkspaceObservation::TreeTextSearched { locations, .. }] => {
+                let Some(location) = locations.first() else {
+                    return unsupported();
+                };
+                WorkspaceAction::ReadRange {
+                    path: location.path.clone(),
+                    start_line: location.line,
+                    max_lines: 2,
+                }
+            }
+            [WorkspaceObservation::TreeTextSearched { locations, .. }, WorkspaceObservation::FileRangeRead { path, excerpt, .. }] =>
+            {
+                let Some(location) = locations.first() else {
+                    return unsupported();
+                };
+                if path != &location.path || !excerpt.contains(self.match_text) {
+                    return unsupported();
+                }
+                WorkspaceAction::ReplaceText {
+                    path: location.path.clone(),
+                    match_text: self.match_text.to_owned(),
+                    replacement_text: self.replacement_text.to_owned(),
+                }
+            }
+            [WorkspaceObservation::TreeTextSearched { locations, .. }, WorkspaceObservation::FileRangeRead { .. }, WorkspaceObservation::TextReplaced { path, .. }] =>
+            {
+                let Some(location) = locations.first() else {
+                    return unsupported();
+                };
+                if path != &location.path {
+                    return unsupported();
+                }
+                WorkspaceAction::CreateDirectory {
+                    path: PathBuf::from("derived"),
+                }
+            }
+            [WorkspaceObservation::TreeTextSearched { locations, .. }, WorkspaceObservation::FileRangeRead { excerpt, .. }, WorkspaceObservation::TextReplaced {
+                path: replaced_path,
+                bytes_written,
+            }, WorkspaceObservation::DirectoryCreated { path: directory }] => {
+                let Some(location) = locations.first() else {
+                    return unsupported();
+                };
+                if replaced_path != &location.path || directory != Path::new("derived") {
+                    return unsupported();
+                }
+                WorkspaceAction::CreateFile {
+                    path: PathBuf::from("derived/result.txt"),
+                    contents: format!(
+                        "source={}:{}\nexcerpt_bytes={}\nreplacement_bytes={}\n",
+                        location.path.display(),
+                        location.line,
+                        excerpt.len(),
+                        bytes_written,
+                    ),
+                }
+            }
+            [WorkspaceObservation::TreeTextSearched { .. }, WorkspaceObservation::FileRangeRead { .. }, WorkspaceObservation::TextReplaced { .. }, WorkspaceObservation::DirectoryCreated { .. }, WorkspaceObservation::FileCreated { path, .. }]
+                if path == Path::new("derived/result.txt") =>
+            {
+                WorkspaceAction::Complete {
+                    result: "updated the selected file and wrote its derived result".to_owned(),
+                }
+            }
+            _ => unsupported(),
+        }
+    }
+}
+
+#[test]
+fn bounded_task_composes_search_read_replace_create_and_completion() {
+    const QUERY: &str = "PRIVATE_SEARCH_QUERY_284";
+    const MATCH_TEXT: &str = "PRIVATE_OLD_MATCH_284";
+    const REPLACEMENT_TEXT: &str = "PRIVATE_REPLACEMENT_284";
+    const SELECTED_FILE: &str = "nested/deep/selected.txt";
+    const ORIGINAL_FILE: &str =
+        "lead\nPRIVATE_SEARCH_QUERY_284\ncontext PRIVATE_OLD_MATCH_284 tail\nend\n";
+    const UPDATED_FILE: &str =
+        "lead\nPRIVATE_SEARCH_QUERY_284\ncontext PRIVATE_REPLACEMENT_284 tail\nend\n";
+    const EXCERPT: &str = "PRIVATE_SEARCH_QUERY_284\ncontext PRIVATE_OLD_MATCH_284 tail";
+
+    let workspace = TempDir::new();
+    fs::create_dir_all(workspace.path().join("nested/deep")).unwrap();
+    fs::write(workspace.path().join(SELECTED_FILE), ORIGINAL_FILE).unwrap();
+    fs::write(
+        workspace.path().join("nested/decoy.txt"),
+        "PRIVATE_OLD_MATCH_284 is in an unrelated file\n",
+    )
+    .unwrap();
+    fs::write(
+        workspace.path().join("unrelated.txt"),
+        "UNRELATED_FIXTURE_MUST_REMAIN_UNCHANGED\n",
+    )
+    .unwrap();
+
+    let goal = "Find and update the matching note, then write a derived result";
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) =
+        with_current_dir(workspace.path(), || running_turn(&mut session, goal));
+    let mut caller = MultiActionTaskCaller {
+        query: QUERY,
+        match_text: MATCH_TEXT,
+        replacement_text: REPLACEMENT_TEXT,
+        selections: 0,
+    };
+    let result = with_current_dir(workspace.path(), || {
+        run_goal_turn_with_budget(&mut session, task_id, turn_id, goal, 6, &mut caller).unwrap()
+    });
+    session
+        .get_task_mut(task_id)
+        .unwrap()
+        .transition(TaskState::Succeeded)
+        .unwrap();
+
+    let selected_path = PathBuf::from(SELECTED_FILE);
+    assert_eq!(caller.selections, 6);
+    assert_eq!(result.actions_taken(), caller.selections);
+    assert_eq!(result.stop_reason(), GoalTurnStopReason::Completed);
+    let expected_outcome = TurnOutcome::Success {
+        result: "updated the selected file and wrote its derived result".to_owned(),
+    };
+    assert_eq!(result.outcome(), Some(&expected_outcome));
+    assert_eq!(
+        result.observations(),
+        [
+            WorkspaceObservation::TreeTextSearched {
+                directory: PathBuf::from("."),
+                locations: vec![WorkspaceSearchLocation {
+                    path: selected_path.clone(),
+                    line: 2,
+                }],
+            },
+            WorkspaceObservation::FileRangeRead {
+                path: selected_path.clone(),
+                start_line: 2,
+                end_line: 3,
+                excerpt: EXCERPT.to_owned(),
+            },
+            WorkspaceObservation::TextReplaced {
+                path: selected_path,
+                bytes_written: 71,
+            },
+            WorkspaceObservation::DirectoryCreated {
+                path: PathBuf::from("derived"),
+            },
+            WorkspaceObservation::FileCreated {
+                path: PathBuf::from("derived/result.txt"),
+                bytes_written: 72,
+            },
+        ]
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.path().join(SELECTED_FILE)).unwrap(),
+        UPDATED_FILE
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("derived/result.txt")).unwrap(),
+        "source=nested/deep/selected.txt:2\nexcerpt_bytes=59\nreplacement_bytes=71\n"
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("nested/decoy.txt")).unwrap(),
+        "PRIVATE_OLD_MATCH_284 is in an unrelated file\n"
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("unrelated.txt")).unwrap(),
+        "UNRELATED_FIXTURE_MUST_REMAIN_UNCHANGED\n"
+    );
+
+    let task = session.get_task(task_id).unwrap();
+    let turn = task.get_turn(turn_id).unwrap();
+    assert_eq!(task.state(), TaskState::Succeeded);
+    assert_eq!(turn.state(), TurnState::Succeeded);
+    assert_eq!(turn.outcome(), Some(&expected_outcome));
+    assert_eq!(
+        turn.events()
+            .iter()
+            .map(|event| (event.previous_state(), event.new_state()))
+            .collect::<Vec<_>>(),
+        [
+            (TurnState::Pending, TurnState::Running),
+            (TurnState::Running, TurnState::Succeeded),
+        ]
+    );
+    assert_eq!(
+        task.history()
+            .iter()
+            .map(|event| event.transition())
+            .collect::<Vec<_>>(),
+        [
+            TaskHistoryTransition::Task {
+                previous_state: TaskState::Pending,
+                new_state: TaskState::Running,
+            },
+            TaskHistoryTransition::TurnCreated {
+                turn_id,
+                initial_state: TurnState::Pending,
+            },
+            TaskHistoryTransition::Turn {
+                turn_id,
+                previous_state: TurnState::Pending,
+                new_state: TurnState::Running,
+            },
+            TaskHistoryTransition::Turn {
+                turn_id,
+                previous_state: TurnState::Running,
+                new_state: TurnState::Succeeded,
+            },
+            TaskHistoryTransition::Task {
+                previous_state: TaskState::Running,
+                new_state: TaskState::Succeeded,
+            },
+        ]
+    );
+    let expected_activity = [
+        TurnActivitySummary::TreeTextSearched { location_count: 1 },
+        TurnActivitySummary::FileRangeRead {
+            start_line: 2,
+            end_line: 3,
+            bytes_returned: 59,
+        },
+        TurnActivitySummary::TextReplaced { bytes_written: 71 },
+        TurnActivitySummary::DirectoryCreated,
+        TurnActivitySummary::FileCreated { bytes_written: 72 },
+        TurnActivitySummary::Completed,
+    ];
+    assert_eq!(turn.activity_history(), expected_activity);
+    assert_eq!(
+        task.activity_history()
+            .iter()
+            .map(|event| event.summary())
+            .collect::<Vec<_>>(),
+        expected_activity
+    );
+    assert_eq!(
+        task.activity_history()
+            .iter()
+            .map(|event| event.sequence())
+            .collect::<Vec<_>>(),
+        [1, 2, 3, 4, 5, 6]
+    );
+    let retained = format!(
+        "{:?} {:?} {:?} {:?} {:?}",
+        task.activity_history(),
+        turn.activity_history(),
+        task.history(),
+        task.events(),
+        turn.events(),
+    );
+    for sensitive_text in [QUERY, EXCERPT, MATCH_TEXT, REPLACEMENT_TEXT] {
+        assert!(
+            !retained.contains(sensitive_text),
+            "retained history exposed {sensitive_text}"
+        );
+    }
 }
