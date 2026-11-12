@@ -1,8 +1,11 @@
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
+use std::time::Duration;
 
 static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 
@@ -57,6 +60,52 @@ fn run_with_input(cwd: &Path, args: &[&str], input: &[u8]) -> Output {
         .write_all(input)
         .expect("write test input");
     child.wait_with_output().expect("wait for Krypper")
+}
+
+struct KillOnDrop(Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TaskCliStream {
+    Stdout,
+    Stderr,
+}
+
+enum TaskCliOutput {
+    Stdout(Vec<u8>),
+    Stderr(Vec<u8>),
+}
+
+fn read_task_cli_until_prompt(
+    receiver: &Receiver<TaskCliOutput>,
+    stdout: &mut Vec<u8>,
+    stderr: &mut Vec<u8>,
+    action: usize,
+    expected_output_lines: usize,
+) {
+    let prompt = format!("action {action}/6> ");
+    while !stderr.ends_with(prompt.as_bytes())
+        || stdout.iter().filter(|byte| **byte == b'\n').count() < expected_output_lines
+    {
+        let message = receiver
+            .recv_timeout(Duration::from_secs(10))
+            .expect("receive CLI output before the next action prompt");
+        match message {
+            TaskCliOutput::Stdout(bytes) => stdout.extend(bytes),
+            TaskCliOutput::Stderr(bytes) => stderr.extend(bytes),
+        }
+    }
+
+    let expected_prompts = (1..=action)
+        .map(|number| format!("action {number}/6> "))
+        .collect::<String>();
+    assert_eq!(String::from_utf8_lossy(stderr), expected_prompts);
 }
 
 fn stdout(output: &Output) -> &str {
@@ -640,6 +689,244 @@ fn task_mkdir_creates_one_directory_for_existing_file_actions() {
     assert!(history.contains("FileCreated { bytes_written: 25 }"));
     assert!(!history.contains("generated"));
     assert!(!history.contains(payload));
+}
+
+#[test]
+fn task_composes_actions_from_the_observed_search_location_interactively() {
+    let directory = TempDir::new();
+    let query = "PRIVATE_QUERY_82";
+    let old_match = "OLD_MATCH_91";
+    let replacement = "NEW_VALUE_47";
+    let initial_contents =
+        format!("unrelated first line\n{query} / {old_match}\nunrelated last line\n");
+    let final_contents =
+        format!("unrelated first line\n{query} / {replacement}\nunrelated last line\n");
+    fs::create_dir(directory.path().join("nested")).unwrap();
+    fs::write(directory.path().join("nested/notes.txt"), &initial_contents).unwrap();
+    fs::write(
+        directory.path().join("unrelated.txt"),
+        "leave this file alone\n",
+    )
+    .unwrap();
+
+    let mut child = KillOnDrop(
+        command(
+            Some(directory.path()),
+            &[
+                "task",
+                "--goal",
+                "Derive a result from a matching line",
+                "--max-actions",
+                "6",
+            ],
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start interactive Krypper task"),
+    );
+    let mut stdin = child.0.stdin.take().expect("piped stdin");
+    let streams: [(TaskCliStream, Box<dyn Read + Send>); 2] = [
+        (
+            TaskCliStream::Stdout,
+            Box::new(child.0.stdout.take().expect("piped stdout")),
+        ),
+        (
+            TaskCliStream::Stderr,
+            Box::new(child.0.stderr.take().expect("piped stderr")),
+        ),
+    ];
+    let (sender, receiver) = mpsc::channel();
+    let mut reader_threads = Vec::new();
+    for (stream, mut pipe) in streams {
+        let sender = sender.clone();
+        reader_threads.push(thread::spawn(move || {
+            let mut buffer = [0_u8; 512];
+            loop {
+                match pipe.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(length) => {
+                        let message = match stream {
+                            TaskCliStream::Stdout => {
+                                TaskCliOutput::Stdout(buffer[..length].to_vec())
+                            }
+                            TaskCliStream::Stderr => {
+                                TaskCliOutput::Stderr(buffer[..length].to_vec())
+                            }
+                        };
+                        if sender.send(message).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        }));
+    }
+    drop(sender);
+
+    let mut output = Vec::new();
+    let mut error = Vec::new();
+    read_task_cli_until_prompt(&receiver, &mut output, &mut error, 1, 0);
+    writeln!(stdin, "search-tree . {query}").unwrap();
+    stdin.flush().unwrap();
+
+    read_task_cli_until_prompt(&receiver, &mut output, &mut error, 2, 2);
+    let search_observation = String::from_utf8(output.clone()).unwrap();
+    assert_eq!(
+        search_observation,
+        "Observation 1: search-tree in . found 1 locations\n  \"nested/notes.txt\":2\n"
+    );
+    let location = search_observation.lines().nth(1).unwrap().trim();
+    let (observed_path, observed_line) = location
+        .strip_prefix('"')
+        .unwrap()
+        .rsplit_once("\":")
+        .unwrap();
+    let observed_path = observed_path.to_owned();
+    let observed_line = observed_line.parse::<usize>().unwrap();
+    assert_eq!(observed_path, "nested/notes.txt");
+    assert_eq!(observed_line, 2);
+    writeln!(stdin, "read-range {observed_path} {observed_line} 1").unwrap();
+    stdin.flush().unwrap();
+
+    read_task_cli_until_prompt(&receiver, &mut output, &mut error, 3, 4);
+    let observed_output = String::from_utf8(output.clone()).unwrap();
+    let range_header = format!(
+        "Observation 2: read-range {observed_path} lines {observed_line}-{observed_line}\n"
+    );
+    let observed_excerpt = observed_output
+        .split_once(&range_header)
+        .unwrap()
+        .1
+        .lines()
+        .next()
+        .unwrap()
+        .to_owned();
+    assert_eq!(observed_excerpt, format!("{query} / {old_match}"));
+    assert!(observed_output.ends_with(&format!("{range_header}{observed_excerpt}\n")));
+    let observed_old_match = observed_excerpt.split_once(" / ").unwrap().1;
+    writeln!(
+        stdin,
+        "replace {observed_path} {observed_old_match} => {replacement}"
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+
+    read_task_cli_until_prompt(&receiver, &mut output, &mut error, 4, 5);
+    assert!(String::from_utf8_lossy(&output).ends_with(&format!(
+        "Observation 3: replaced text in {observed_path} ({} bytes)\n",
+        final_contents.len()
+    )));
+    writeln!(stdin, "mkdir derived").unwrap();
+    stdin.flush().unwrap();
+
+    read_task_cli_until_prompt(&receiver, &mut output, &mut error, 5, 6);
+    assert!(
+        String::from_utf8_lossy(&output).ends_with("Observation 4: created directory derived\n")
+    );
+    let derived_result = format!("{observed_path}:{observed_line} => {replacement}");
+    writeln!(stdin, "create derived/summary.txt {derived_result}").unwrap();
+    stdin.flush().unwrap();
+
+    read_task_cli_until_prompt(&receiver, &mut output, &mut error, 6, 7);
+    assert!(String::from_utf8_lossy(&output).ends_with(&format!(
+        "Observation 5: created derived/summary.txt ({} bytes)\n",
+        derived_result.len()
+    )));
+    writeln!(stdin, "complete derived result saved").unwrap();
+    stdin.flush().unwrap();
+    drop(stdin);
+
+    let status = child.0.wait().expect("wait for interactive task");
+    for message in receiver {
+        match message {
+            TaskCliOutput::Stdout(bytes) => output.extend(bytes),
+            TaskCliOutput::Stderr(bytes) => error.extend(bytes),
+        }
+    }
+    for reader_thread in reader_threads {
+        reader_thread.join().expect("join CLI stream reader");
+    }
+
+    assert!(status.success(), "{}", String::from_utf8_lossy(&error));
+    assert_eq!(
+        String::from_utf8(error).unwrap(),
+        "action 1/6> action 2/6> action 3/6> action 4/6> action 5/6> action 6/6> "
+    );
+    let output = String::from_utf8(output).unwrap();
+    let search = output
+        .find("Observation 1: search-tree in . found 1 locations")
+        .unwrap();
+    let range = output
+        .find(&format!(
+            "Observation 2: read-range {observed_path} lines 2-2"
+        ))
+        .unwrap();
+    let replace = output
+        .find(&format!("Observation 3: replaced text in {observed_path}"))
+        .unwrap();
+    let mkdir = output
+        .find("Observation 4: created directory derived")
+        .unwrap();
+    let create = output
+        .find("Observation 5: created derived/summary.txt")
+        .unwrap();
+    let task_state = output.find("Task state: succeeded").unwrap();
+    assert!(
+        search < range
+            && range < replace
+            && replace < mkdir
+            && mkdir < create
+            && create < task_state
+    );
+    assert!(output.contains("Task outcome: succeeded"));
+    assert!(output.contains("Turn state: succeeded"));
+    assert!(output.contains("Turn outcome: success: derived result saved"));
+    assert!(output.contains("Actions: 6/6"));
+    assert_lifecycle_transitions(&output, "succeeded");
+
+    let activity = output
+        .split("Activity history (metadata only):")
+        .nth(1)
+        .unwrap();
+    assert!(activity.contains("TreeTextSearched { location_count: 1 }"));
+    assert!(activity.contains("FileRangeRead { start_line: 2, end_line: 2,"));
+    assert!(activity.contains("TextReplaced { bytes_written:"));
+    assert!(activity.contains("DirectoryCreated"));
+    assert!(activity.contains(&format!(
+        "FileCreated {{ bytes_written: {} }}",
+        derived_result.len()
+    )));
+    assert!(activity.contains("Completed"));
+    let retained_summaries = &output[output
+        .find("Task lifecycle history (metadata only):")
+        .unwrap()..];
+    assert_eq!(output.matches(query).count(), 1);
+    assert_eq!(output.matches(observed_excerpt.as_str()).count(), 1);
+    assert_eq!(output.matches(observed_old_match).count(), 1);
+    assert!(!output.contains(replacement));
+    for private_text in [
+        query,
+        observed_excerpt.as_str(),
+        observed_old_match,
+        replacement,
+    ] {
+        assert!(!retained_summaries.contains(private_text));
+    }
+
+    assert_eq!(
+        fs::read_to_string(directory.path().join("nested/notes.txt")).unwrap(),
+        final_contents
+    );
+    assert_eq!(
+        fs::read_to_string(directory.path().join("derived/summary.txt")).unwrap(),
+        derived_result
+    );
+    assert_eq!(
+        fs::read_to_string(directory.path().join("unrelated.txt")).unwrap(),
+        "leave this file alone\n"
+    );
 }
 
 #[test]
