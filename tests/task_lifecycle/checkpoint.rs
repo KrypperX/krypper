@@ -215,6 +215,51 @@ fn task_session_checkpoint_restore_rejects_a_replaced_workspace_at_the_same_path
 }
 
 #[test]
+fn explicit_workspace_restore_rejects_missing_and_different_workspaces() {
+    let original_workspace = TempDir::new();
+    let other_workspace = TempDir::new();
+    let parent = TempDir::new();
+    let missing_workspace = parent.path().join("missing-workspace");
+    let bytes = with_current_dir(original_workspace.path(), || {
+        let mut session = TaskSession::new();
+        session.create_task("workspace-bound task");
+        session.export_checkpoint().unwrap()
+    });
+
+    assert!(matches!(
+        TaskSession::restore_checkpoint_in_workspace(&bytes, other_workspace.path()),
+        Err(TaskSessionCheckpointError::WorkspaceMismatch { .. })
+    ));
+    assert!(matches!(
+        TaskSession::restore_checkpoint_in_workspace(&bytes, &missing_workspace),
+        Err(TaskSessionCheckpointError::WorkspaceUnavailable { task_id: None })
+    ));
+}
+
+#[test]
+fn explicit_workspace_restore_rejects_a_replaced_directory_at_the_recorded_path() {
+    let parent = TempDir::new();
+    let workspace_path = parent.path().join("workspace");
+    let replacement_path = parent.path().join("replacement");
+    let moved_path = parent.path().join("moved-workspace");
+    fs::create_dir(&workspace_path).unwrap();
+    fs::create_dir(&replacement_path).unwrap();
+    let bytes = with_current_dir(&workspace_path, || {
+        let mut session = TaskSession::new();
+        session.create_task("workspace identity task");
+        session.export_checkpoint().unwrap()
+    });
+
+    fs::rename(&workspace_path, &moved_path).unwrap();
+    fs::rename(&replacement_path, &workspace_path).unwrap();
+
+    assert!(matches!(
+        TaskSession::restore_checkpoint_in_workspace(&bytes, &workspace_path),
+        Err(TaskSessionCheckpointError::WorkspaceMismatch { .. })
+    ));
+}
+
+#[test]
 fn task_session_checkpoint_export_rejects_replaced_workspace_identity_at_the_same_path() {
     let parent = TempDir::new();
     let workspace_path = parent.path().join("workspace");
@@ -372,5 +417,75 @@ fn restoring_a_checkpoint_preserves_the_first_action_and_allows_a_fresh_selected
             task.get_turn(new_turn_id).unwrap().state(),
             TurnState::Succeeded
         );
+    });
+}
+
+#[test]
+fn task_session_checkpoint_restores_from_explicit_workspace_without_changing_current_directory() {
+    let workspace = TempDir::new();
+    let caller_directory = TempDir::new();
+    let (bytes, task_id, first_turn_id) = with_current_dir(workspace.path(), || {
+        let mut session = TaskSession::new();
+        let (task_id, turn_id) = running_turn(&mut session);
+        session
+            .create_workspace_file(task_id, turn_id, Path::new("first.txt"), "created once")
+            .unwrap();
+        session
+            .complete_turn(
+                task_id,
+                turn_id,
+                TurnOutcome::Success {
+                    result: "first action complete".to_owned(),
+                },
+            )
+            .unwrap();
+        (session.export_checkpoint().unwrap(), task_id, turn_id)
+    });
+
+    with_current_dir(caller_directory.path(), || {
+        let original_directory = std::env::current_dir().unwrap();
+        let mut restored =
+            TaskSession::restore_checkpoint_in_workspace(&bytes, workspace.path()).unwrap();
+
+        assert_eq!(std::env::current_dir().unwrap(), original_directory);
+        let restored_task = restored.get_task(task_id).unwrap();
+        assert_eq!(restored_task.state(), TaskState::Running);
+        let restored_first_turn = restored_task.get_turn(first_turn_id).unwrap();
+        assert_eq!(restored_first_turn.state(), TurnState::Succeeded);
+        assert!(matches!(
+            restored_first_turn.outcome(),
+            Some(TurnOutcome::Success { result }) if result == "first action complete"
+        ));
+        assert_eq!(
+            fs::read_to_string(workspace.path().join("first.txt")).unwrap(),
+            "created once"
+        );
+        assert!(!caller_directory.path().join("first.txt").exists());
+
+        let new_turn_id = restored
+            .get_task_mut(task_id)
+            .unwrap()
+            .create_turn()
+            .unwrap();
+        restored
+            .get_task_mut(task_id)
+            .unwrap()
+            .transition_turn(new_turn_id, TurnState::Running)
+            .unwrap();
+        restored
+            .create_workspace_file(
+                task_id,
+                new_turn_id,
+                Path::new("selected.txt"),
+                "selected after restore",
+            )
+            .unwrap();
+
+        assert_eq!(std::env::current_dir().unwrap(), original_directory);
+        assert_eq!(
+            fs::read_to_string(workspace.path().join("selected.txt")).unwrap(),
+            "selected after restore"
+        );
+        assert!(!caller_directory.path().join("selected.txt").exists());
     });
 }
