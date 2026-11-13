@@ -160,7 +160,7 @@ fn model_name_validation_rejects_cloud_models() {
 #[test]
 fn parser_maps_only_one_supported_tool_call() {
     let action = parse_model_response(
-            br#"{"message":{"tool_calls":[{"function":{"name":"create_file","arguments":{"path":"notes.txt","contents":"hello"}}}]}}"#,
+            br#"{"message":{"role":"assistant","tool_calls":[{"function":{"name":"create_file","arguments":{"path":"notes.txt","contents":"hello"}}}]}}"#,
         )
         .expect("parse supported action");
     assert_eq!(
@@ -184,6 +184,18 @@ fn parser_maps_only_one_supported_tool_call() {
             br#"{"message":{"tool_calls":[{"function":{"name":"create_file","arguments":{"path":"notes.txt","contents":"hello","command":"unsafe"}}}]}}"#
         )
         .is_err());
+}
+
+#[test]
+fn parser_rejects_tool_calls_without_an_assistant_role() {
+    assert!(parse_model_response(
+        br#"{"message":{"tool_calls":[{"function":{"name":"create_file","arguments":{"path":"unsafe.txt","contents":"must not write"}}}]}}"#
+    )
+    .is_err());
+    assert!(parse_model_response(
+        br#"{"message":{"role":"user","tool_calls":[{"function":{"name":"create_file","arguments":{"path":"unsafe.txt","contents":"must not write"}}}]}}"#
+    )
+    .is_err());
 }
 
 #[test]
