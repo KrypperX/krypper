@@ -44,12 +44,13 @@ partial file if a write fails. It never creates parent directories, overwrites
 files, or contacts a network service.
 
 `task --goal <goal> --max-actions <positive-number> [--workspace PATH]`
-runs one task across bounded turns in-process. Without `--workspace`, the
-current directory is its workspace. With `--workspace PATH`, Krypper validates
-and captures that existing directory before task history starts; it does not
-change the process current directory. The same captured workspace is used for
-caller-directed and model-selected actions. It reads one caller decision per
-line from standard input when `--model` is omitted. Enter `read <path>`,
+runs one task across bounded turns in-process. The action limit applies to
+that invocation and is shared across its continued turns. Without
+`--workspace`, the current directory is its workspace. With `--workspace PATH`,
+Krypper validates and captures that existing directory before task history
+starts; it does not change the process current directory. The same captured
+workspace is used for caller-directed and model-selected actions. It reads one
+caller decision per line from standard input when `--model` is omitted. Enter `read <path>`,
 `read-range <path> <start-line> <max-lines>`, `list [path]`, `mkdir <path>`,
 `create <path> <text>`,
 `replace <path> <match text> => <replacement text>`,
@@ -72,6 +73,44 @@ hexadecimal digits represents one raw path byte, including non-UTF-8 bytes.
 `search` and `search-tree` print each result as a reusable quoted path token
 followed by `:<line>`. Query and file-content text after the path keeps its
 existing syntax; only the path is decoded as a token.
+
+### Pause and resume a task
+
+`--checkpoint-out PATH` opts into one bounded turn for this invocation. If that
+turn completes with `continue`, Krypper writes a checkpoint at the safe turn
+boundary and reports `Task state: running` and `Task outcome: paused (still running)`.
+It does not report task success. The output path must name a new
+file; Krypper refuses to overwrite an existing file. If the turn completes the
+task or fails, no checkpoint is written.
+
+Resume one running task with `--resume PATH --max-actions N`. Krypper restores
+the stored task description and starts a fresh turn. Supply `--workspace PATH`
+to restore from another process current directory; it must identify the same
+captured workspace. Without it, the process current directory must match the
+checkpoint workspace. `--goal` is omitted when resuming. The invocation can
+also specify `--model NAME` to opt into the existing local Ollama decision path.
+Combine `--resume` with `--checkpoint-out` to save a later pause to a separate,
+new file.
+
+Checkpoints retain session and lifecycle metadata, including metadata-only
+activity summaries, but not prior observations, workspace action inputs, or
+file contents. Restored tasks do not replay earlier workspace actions; resumed
+decisions receive fresh observations from the current workspace. Resume from
+the newest checkpoint and choose a new output path for every pause.
+
+For example, run a caller-directed task and enter `create first.txt saved`
+followed by `continue`:
+
+```sh
+cargo run -- task --goal "Save work between turns" --max-actions 3 --checkpoint-out "task pause.json"
+```
+
+In a later process, resume it and choose a different checkpoint path for any
+subsequent pause:
+
+```sh
+cargo run -- task --resume "task pause.json" --max-actions 3 --checkpoint-out "task pause 2.json"
+```
 
 For example, after `search . needle` prints:
 

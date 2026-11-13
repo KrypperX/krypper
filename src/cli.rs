@@ -6,8 +6,11 @@ use crate::file_safety::{create_text_file, list_directory, read_text_file};
 use crate::model::{
     validate_model_name, workspace_action_name, OllamaDecisionSource, OLLAMA_ADDRESS,
 };
-use crate::task_lifecycle::{TaskSession, TaskState, TurnOutcome, TurnState};
+use crate::task_lifecycle::{
+    TaskSession, TaskState, TurnOutcome, TurnState, MAX_TASK_SESSION_CHECKPOINT_BYTES,
+};
 use std::ffi::{OsStr, OsString};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -100,6 +103,8 @@ fn run_task_with_endpoint(
     let mut max_actions = None;
     let mut model = None;
     let mut workspace = None;
+    let mut checkpoint_out = None;
+    let mut resume = None;
     let mut position = 0;
     while let Some(argument) = arguments.get(position) {
         let Some(option) = argument.to_str() else {
@@ -188,6 +193,38 @@ fn run_task_with_endpoint(
                 workspace = Some(PathBuf::from(value.as_os_str()));
                 position += 1;
             }
+            "--checkpoint-out" => {
+                if checkpoint_out.is_some() {
+                    return usage_error(
+                        error,
+                        Some("task"),
+                        "--checkpoint-out may be provided only once",
+                    );
+                }
+                let Some(value) = arguments.get(position) else {
+                    return usage_error(
+                        error,
+                        Some("task"),
+                        "the following argument is required: --checkpoint-out",
+                    );
+                };
+                checkpoint_out = Some(PathBuf::from(value.as_os_str()));
+                position += 1;
+            }
+            "--resume" => {
+                if resume.is_some() {
+                    return usage_error(error, Some("task"), "--resume may be provided only once");
+                }
+                let Some(value) = arguments.get(position) else {
+                    return usage_error(
+                        error,
+                        Some("task"),
+                        "the following argument is required: --resume",
+                    );
+                };
+                resume = Some(PathBuf::from(value.as_os_str()));
+                position += 1;
+            }
             _ => {
                 return usage_error(
                     error,
@@ -198,16 +235,6 @@ fn run_task_with_endpoint(
         }
     }
 
-    let Some(goal) = goal else {
-        return usage_error(
-            error,
-            Some("task"),
-            "the following argument is required: --goal",
-        );
-    };
-    if goal.trim().is_empty() {
-        return usage_error(error, Some("task"), "goal must not be empty");
-    }
     let Some(max_actions) = max_actions else {
         return usage_error(
             error,
@@ -215,39 +242,139 @@ fn run_task_with_endpoint(
             "the following argument is required: --max-actions",
         );
     };
+    if resume.is_some() && goal.is_some() {
+        return usage_error(
+            error,
+            Some("task"),
+            "--goal cannot be used with --resume; the checkpoint stores the task description",
+        );
+    }
+    if resume.is_none() {
+        let Some(goal) = goal.as_deref() else {
+            return usage_error(
+                error,
+                Some("task"),
+                "the following argument is required: --goal",
+            );
+        };
+        if goal.trim().is_empty() {
+            return usage_error(error, Some("task"), "goal must not be empty");
+        }
+    }
     if let Some(model) = model.as_deref() {
         if let Err(message) = validate_model_name(model) {
             return usage_error(error, Some("task"), message);
         }
     }
 
-    let mut session = match workspace {
-        Some(path) => match TaskSession::new_in_workspace(&path) {
+    if let Some(path) = checkpoint_out.as_deref() {
+        if let Err(cause) = validate_checkpoint_output_path(path) {
+            return usage_error(
+                error,
+                Some("task"),
+                &format!(
+                    "invalid checkpoint output path '{}': {cause}",
+                    path.display()
+                ),
+            );
+        }
+    }
+
+    let (mut session, task_id, mut turn_id, goal) = if let Some(path) = resume.as_deref() {
+        let checkpoint = match read_task_checkpoint(path) {
+            Ok(checkpoint) => checkpoint,
+            Err(cause) => {
+                return usage_error(
+                    error,
+                    Some("task"),
+                    &format!("cannot read checkpoint '{}': {cause}", path.display()),
+                );
+            }
+        };
+        let restored = match workspace.as_deref() {
+            Some(workspace_path) => {
+                TaskSession::restore_checkpoint_in_workspace(&checkpoint, workspace_path)
+            }
+            None => TaskSession::restore_checkpoint(&checkpoint),
+        };
+        let mut session = match restored {
             Ok(session) => session,
             Err(cause) => {
                 return usage_error(
                     error,
                     Some("task"),
-                    &format!("invalid workspace path '{}': {cause}", path.display()),
+                    &format!("cannot restore checkpoint '{}': {cause}", path.display()),
                 );
             }
-        },
-        None => TaskSession::new(),
+        };
+        if session.list_tasks().len() != 1 {
+            return usage_error(
+                error,
+                Some("task"),
+                &format!(
+                    "checkpoint must contain exactly one task, found {}",
+                    session.list_tasks().len()
+                ),
+            );
+        }
+        let (task_id, goal) = {
+            let task = &session.list_tasks()[0];
+            if task.state() != TaskState::Running {
+                return usage_error(
+                    error,
+                    Some("task"),
+                    &format!("checkpoint task must be running, found {}", task.state()),
+                );
+            }
+            (task.id(), task.description().to_owned())
+        };
+        let turn_id = {
+            let task = session
+                .get_task_mut(task_id)
+                .ok_or_else(|| io::Error::other("restored task was not found in its session"))?;
+            let turn_id = task.create_turn().map_err(io::Error::other)?;
+            task.transition_turn(turn_id, TurnState::Running)
+                .map_err(io::Error::other)?;
+            turn_id
+        };
+        (session, task_id, turn_id, goal)
+    } else {
+        let Some(goal) = goal else {
+            return usage_error(
+                error,
+                Some("task"),
+                "the following argument is required: --goal",
+            );
+        };
+        let mut session = match workspace {
+            Some(path) => match TaskSession::new_in_workspace(&path) {
+                Ok(session) => session,
+                Err(cause) => {
+                    return usage_error(
+                        error,
+                        Some("task"),
+                        &format!("invalid workspace path '{}': {cause}", path.display()),
+                    );
+                }
+            },
+            None => TaskSession::new(),
+        };
+        let task_id = session.create_task(goal.clone()).id();
+        let turn_id = {
+            let task = session
+                .get_task_mut(task_id)
+                .ok_or_else(|| io::Error::other("task was not found in its session"))?;
+            task.transition(TaskState::Running)
+                .map_err(io::Error::other)?;
+            let turn_id = task.create_turn().map_err(io::Error::other)?;
+            task.transition_turn(turn_id, TurnState::Running)
+                .map_err(io::Error::other)?;
+            turn_id
+        };
+        (session, task_id, turn_id, goal)
     };
     let mut model_source =
         model.map(|name| OllamaDecisionSource::with_endpoint(name, max_actions, model_endpoint));
-    let task_id = session.create_task(goal.clone()).id();
-    let mut turn_id = {
-        let task = session
-            .get_task_mut(task_id)
-            .ok_or_else(|| io::Error::other("task was not found in its session"))?;
-        task.transition(TaskState::Running)
-            .map_err(io::Error::other)?;
-        let turn_id = task.create_turn().map_err(io::Error::other)?;
-        task.transition_turn(turn_id, TurnState::Running)
-            .map_err(io::Error::other)?;
-        turn_id
-    };
 
     let mut reader = BufReader::new(input);
     let mut line = Vec::new();
@@ -256,6 +383,7 @@ fn run_task_with_endpoint(
     let mut stream_error = None;
     let mut actions_taken = 0;
     let mut turn_results = Vec::new();
+    let mut paused_checkpoint = None;
     loop {
         let mut displayed_observations = 0;
         let result = {
@@ -381,6 +509,20 @@ fn run_task_with_endpoint(
 
         match stop_reason {
             GoalTurnStopReason::Continued => {
+                if let Some(path) = checkpoint_out.as_deref() {
+                    let task = session
+                        .get_task(task_id)
+                        .ok_or_else(|| io::Error::other("task was not found in its session"))?;
+                    if task.state() != TaskState::Running {
+                        return Err(io::Error::other(
+                            "continued task was not running at the checkpoint boundary",
+                        ));
+                    }
+                    let checkpoint = session.export_checkpoint().map_err(io::Error::other)?;
+                    write_task_checkpoint(path, &checkpoint)?;
+                    paused_checkpoint = Some(path.to_path_buf());
+                    break;
+                }
                 let task = session
                     .get_task_mut(task_id)
                     .ok_or_else(|| io::Error::other("task was not found in its session"))?;
@@ -422,13 +564,20 @@ fn run_task_with_endpoint(
     }
 
     writeln!(output, "Task state: {}", task.state())?;
-    let task_outcome = match task.state() {
-        TaskState::Succeeded => "succeeded",
-        TaskState::Failed => "failed",
-        TaskState::Cancelled => "cancelled by caller",
-        TaskState::Pending | TaskState::Running => "still running",
+    let task_outcome = if paused_checkpoint.is_some() {
+        "paused (still running)"
+    } else {
+        match task.state() {
+            TaskState::Succeeded => "succeeded",
+            TaskState::Failed => "failed",
+            TaskState::Cancelled => "cancelled by caller",
+            TaskState::Pending | TaskState::Running => "still running",
+        }
     };
     writeln!(output, "Task outcome: {task_outcome}")?;
+    if let Some(path) = paused_checkpoint.as_deref() {
+        writeln!(output, "Checkpoint saved: {}", path.display())?;
+    }
     writeln!(output, "Turn state: {}", turn.state())?;
     write_turn_outcome(output, "Turn outcome: ", result.outcome())?;
     writeln!(output, "Actions: {actions_taken}/{max_actions}")?;
@@ -482,13 +631,68 @@ fn run_task_with_endpoint(
         }
     }
 
-    Ok(if succeeded {
+    Ok(if succeeded || paused_checkpoint.is_some() {
         0
     } else if cancelled {
         130
     } else {
         1
     })
+}
+
+fn read_task_checkpoint(path: &Path) -> io::Result<Vec<u8>> {
+    let file = File::open(path)?;
+    let mut bytes = Vec::with_capacity(MAX_TASK_SESSION_CHECKPOINT_BYTES + 1);
+    file.take((MAX_TASK_SESSION_CHECKPOINT_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_TASK_SESSION_CHECKPOINT_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("checkpoint exceeds {MAX_TASK_SESSION_CHECKPOINT_BYTES} bytes"),
+        ));
+    }
+    Ok(bytes)
+}
+
+fn validate_checkpoint_output_path(path: &Path) -> io::Result<()> {
+    if path.file_name().is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "checkpoint output must name a new file",
+        ));
+    }
+    match fs::symlink_metadata(path) {
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "checkpoint output already exists",
+            ));
+        }
+        Err(cause) if cause.kind() == io::ErrorKind::NotFound => {}
+        Err(cause) => return Err(cause),
+    }
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    if !fs::metadata(parent)?.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotADirectory,
+            "checkpoint output parent is not a directory",
+        ));
+    }
+    Ok(())
+}
+
+fn write_task_checkpoint(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    if bytes.len() > MAX_TASK_SESSION_CHECKPOINT_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("checkpoint exceeds {MAX_TASK_SESSION_CHECKPOINT_BYTES} bytes"),
+        ));
+    }
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    file.write_all(bytes)
 }
 
 fn write_turn_outcome(
@@ -1210,7 +1414,7 @@ fn usage_error(error: &mut dyn Write, command: Option<&str>, message: &str) -> i
         Some("list") => "usage: krypper list [-h] [path]",
         Some("write") => "usage: krypper write [-h] [--stdin] path ...",
         Some("task") => {
-            "usage: krypper task [-h] --goal GOAL --max-actions N [--workspace PATH] [--model NAME]"
+            "usage: krypper task [-h] [--goal GOAL] --max-actions N [--workspace PATH] [--model NAME] [--checkpoint-out PATH] [--resume PATH]"
         }
         _ => "usage: krypper [-h] {show,list,write,task} ...",
     };
@@ -1229,19 +1433,25 @@ fn write_root_help(output: &mut dyn Write) -> io::Result<()> {
 fn write_task_help(output: &mut dyn Write) -> io::Result<()> {
     output.write_all(
         concat!(
-            "usage: krypper task [-h] --goal GOAL --max-actions N [--workspace PATH] [--model NAME]\n\n",
+            "usage: krypper task [-h] [--goal GOAL] --max-actions N [--workspace PATH] [--model NAME] [--checkpoint-out PATH] [--resume PATH]\n\n",
             "run a bounded task in the selected workspace or current directory\n\n",
-            "options:\n  --goal GOAL          required task goal\n",
-            "  --max-actions N      required positive action limit for the whole task\n",
+            "options:\n  --goal GOAL          task goal (required unless --resume is used)\n",
+            "  --max-actions N      required positive action limit for this invocation\n",
             "  --workspace PATH     use an existing directory as the captured task workspace\n",
             "  --model NAME         opt in to local Ollama action selection\n",
+            "  --checkpoint-out PATH save a checkpoint after a continued turn; file must be new\n",
+            "  --resume PATH        restore one running task and start a fresh turn\n",
             "  -h, --help           show this help message and exit\n\n",
             "Without --workspace, task captures the current directory as its workspace.\n",
             "With --workspace, the selected directory is validated before task history starts;\n",
             "the process current directory is not changed.\n",
             "Without --model, task remains caller-directed and makes no model requests.\n",
             "--workspace PATH works with --model NAME and uses the same captured workspace.\n",
-            "Model mode sends the goal and prior observations to http://127.0.0.1:11434/api/chat.\n",
+            "Without --checkpoint-out, task can continue across turns up to the action limit.\n",
+            "With --checkpoint-out, task runs one bounded turn and saves only after continue.\n",
+            "Checkpoint files retain lifecycle metadata, not prior observations or file contents.\n",
+            "Resume from the newest checkpoint and use a new --checkpoint-out path for each pause.\n",
+            "Model mode sends the task description and current-turn observations to http://127.0.0.1:11434/api/chat.\n",
             "Read observations can include workspace file text. Ollama must be running locally\n",
             "with the named model available. Only supported task actions and completion are exposed.\n\n",
             "Enter one action per line on standard input:\n",

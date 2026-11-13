@@ -1,4 +1,5 @@
 use super::run_task_with_endpoint;
+use crate::task_lifecycle::{TaskSession, TaskState};
 use serde_json::{json, Value};
 use std::ffi::OsString;
 use std::fs;
@@ -349,6 +350,60 @@ fn model_cli_reports_successful_task_and_turn_outcomes() {
         "done"
     );
     assert_eq!(server.join().expect("join mock server").len(), 2);
+}
+
+#[test]
+fn resumed_model_cli_uses_the_stored_description_with_the_local_mock_server() {
+    let (endpoint, server) = mock_server(vec![MockResponse {
+        status: 200,
+        body: tool_response("complete_task", json!({"result":"resumed task complete"})),
+    }]);
+    let temporary = TempDir::new();
+    let workspace = temporary.path().join("saved workspace");
+    fs::create_dir(&workspace).expect("create checkpoint workspace");
+    let checkpoint_path = temporary.path().join("saved task.json");
+    let stored_description = "Use the description stored in the checkpoint";
+    let mut session = TaskSession::new_in_workspace(&workspace).expect("bind checkpoint workspace");
+    session
+        .create_task(stored_description)
+        .transition(TaskState::Running)
+        .expect("start checkpoint task");
+    fs::write(
+        &checkpoint_path,
+        session
+            .export_checkpoint()
+            .expect("export running checkpoint"),
+    )
+    .expect("write checkpoint");
+
+    let args = vec![
+        OsString::from("--resume"),
+        checkpoint_path.as_os_str().to_owned(),
+        OsString::from("--max-actions"),
+        OsString::from("2"),
+        OsString::from("--workspace"),
+        workspace.as_os_str().to_owned(),
+        OsString::from("--model"),
+        OsString::from("mock-model"),
+    ];
+    let mut input = Cursor::new(Vec::<u8>::new());
+    let mut output = Vec::new();
+    let mut error = Vec::new();
+    let code = run_task_with_endpoint(&args, &mut input, &mut output, &mut error, endpoint)
+        .expect("run resumed model task");
+    let requests = server.join().expect("join mock server");
+
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&error));
+    assert!(String::from_utf8_lossy(&output).contains("Task outcome: succeeded"));
+    assert_eq!(requests.len(), 1);
+    let request = String::from_utf8_lossy(&requests[0]);
+    let (_, body) = request.split_once("\r\n\r\n").expect("HTTP request body");
+    let request: Value = serde_json::from_str(body).expect("decode model request");
+    let prompt = request["messages"][1]["content"]
+        .as_str()
+        .expect("model prompt");
+    assert!(prompt.contains(stored_description));
+    assert!(prompt.contains("Prior workspace observations (JSON):\n[]"));
 }
 
 #[test]

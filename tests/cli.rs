@@ -1,3 +1,4 @@
+use krypper::task_lifecycle::{TaskSession, TaskState};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -1816,7 +1817,7 @@ fn task_requires_a_nonempty_goal_and_positive_action_limit() {
 }
 
 #[test]
-fn task_help_lists_continue_and_describes_the_whole_task_budget() {
+fn task_help_lists_checkpoint_options_and_describes_the_invocation_budget() {
     let directory = TempDir::new();
     let output = run(Some(directory.path()), &["task", "--help"]);
 
@@ -1829,14 +1830,18 @@ fn task_help_lists_continue_and_describes_the_whole_task_budget() {
     assert!(stdout(&output).contains("search-tree DIRECTORY QUERY"));
     assert!(stdout(&output).contains("JSON double-quoted string"));
     assert!(stdout(&output).contains("reusable quoted path tokens"));
-    assert!(stdout(&output).contains("action limit for the whole task"));
+    assert!(stdout(&output).contains("action limit for this invocation"));
     assert!(stdout(&output).contains("--model NAME"));
     assert!(stdout(&output).contains("--workspace PATH"));
+    assert!(stdout(&output).contains("--checkpoint-out PATH"));
+    assert!(stdout(&output).contains("--resume PATH"));
     assert!(stdout(&output).contains("Without --workspace"));
     assert!(stdout(&output).contains("--workspace PATH works with --model NAME"));
     assert!(stdout(&output).contains("127.0.0.1:11434"));
     assert!(stdout(&output).contains("Without --model, task remains caller-directed"));
     assert!(stdout(&output).contains("Read observations can include workspace file text."));
+    assert!(stdout(&output).contains("not prior observations or file contents"));
+    assert!(stdout(&output).contains("new --checkpoint-out path for each pause"));
 }
 
 #[test]
@@ -2120,4 +2125,259 @@ fn task_search_tree_no_match_and_failure_are_metadata_only_and_terminal() {
     assert!(!stdout_output.contains("nested/a.txt:1"));
     assert!(!stdout_output.contains("must_not_run"));
     assert_eq!(stderr(&output).matches("action ").count(), 1);
+}
+
+#[test]
+fn task_checkpoint_out_pauses_after_a_completed_turn_and_resume_does_not_replay_actions() {
+    let temporary = TempDir::new();
+    let workspace = temporary.path().join("task workspace");
+    fs::create_dir(&workspace).unwrap();
+    let checkpoint = temporary.path().join("task checkpoint.json");
+    let checkpoint_arg = checkpoint.to_str().unwrap();
+    let original_contents = "prior file contents stay outside the checkpoint";
+
+    let save = run_with_input(
+        &workspace,
+        &[
+            "task",
+            "--goal",
+            "Save this task",
+            "--max-actions",
+            "3",
+            "--checkpoint-out",
+            checkpoint_arg,
+        ],
+        format!("create \"first file.txt\" {original_contents}\ncontinue\n").as_bytes(),
+    );
+
+    assert_eq!(save.status.code(), Some(0), "{}", stderr(&save));
+    assert!(stdout(&save).contains("Task state: running"));
+    assert!(stdout(&save).contains("Task outcome: paused (still running)"));
+    assert!(!stdout(&save).contains("Task outcome: succeeded"));
+    let checkpoint_bytes = fs::read(&checkpoint).unwrap();
+    assert!(!checkpoint_bytes
+        .windows(original_contents.len())
+        .any(|window| window == original_contents.as_bytes()));
+    assert_eq!(
+        fs::read_to_string(workspace.join("first file.txt")).unwrap(),
+        original_contents
+    );
+
+    let next_checkpoint = temporary.path().join("next task checkpoint.json");
+    let next_checkpoint_arg = next_checkpoint.to_str().unwrap();
+    let pause_again = run_with_input(
+        &workspace,
+        &[
+            "task",
+            "--resume",
+            checkpoint_arg,
+            "--max-actions",
+            "2",
+            "--checkpoint-out",
+            next_checkpoint_arg,
+        ],
+        b"continue\n",
+    );
+
+    assert!(pause_again.status.success(), "{}", stderr(&pause_again));
+    assert!(stdout(&pause_again).contains("Task outcome: paused (still running)"));
+    let next_checkpoint_bytes = fs::read(&next_checkpoint).unwrap();
+    assert_ne!(next_checkpoint_bytes, checkpoint_bytes);
+    assert_eq!(fs::read(&checkpoint).unwrap(), checkpoint_bytes);
+
+    let resume = run_with_input(
+        &workspace,
+        &[
+            "task",
+            "--resume",
+            next_checkpoint_arg,
+            "--max-actions",
+            "2",
+        ],
+        b"create \"second file.txt\" fresh turn\ncomplete resumed task\n",
+    );
+
+    assert!(resume.status.success(), "{}", stderr(&resume));
+    assert!(stdout(&resume).contains("Task outcome: succeeded"));
+    assert_eq!(stdout(&resume).matches("TurnCreated {").count(), 3);
+    assert_eq!(
+        fs::read_to_string(workspace.join("first file.txt")).unwrap(),
+        original_contents
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.join("second file.txt")).unwrap(),
+        "fresh turn"
+    );
+    assert_eq!(fs::read(&checkpoint).unwrap(), checkpoint_bytes);
+    assert_eq!(fs::read(&next_checkpoint).unwrap(), next_checkpoint_bytes);
+}
+
+#[test]
+fn task_checkpoint_output_collision_is_rejected_before_workspace_actions() {
+    let temporary = TempDir::new();
+    let workspace = temporary.path().join("task workspace");
+    fs::create_dir(&workspace).unwrap();
+    let checkpoint = temporary.path().join("existing checkpoint.json");
+    fs::write(&checkpoint, b"keep existing checkpoint").unwrap();
+
+    let output = run(
+        Some(&workspace),
+        &[
+            "task",
+            "--goal",
+            "Do not run before checkpoint collision is found",
+            "--max-actions",
+            "2",
+            "--checkpoint-out",
+            checkpoint.to_str().unwrap(),
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("already exists"));
+    assert!(!workspace.join("must-not-exist.txt").exists());
+    assert_eq!(fs::read(&checkpoint).unwrap(), b"keep existing checkpoint");
+}
+
+#[test]
+fn task_resume_rejects_malformed_and_oversized_checkpoints_before_actions() {
+    for (name, bytes, expected_error) in [
+        (
+            "malformed.json",
+            b"not a checkpoint".to_vec(),
+            "invalid TaskSession checkpoint",
+        ),
+        (
+            "oversized.json",
+            vec![b' '; 1_048_577],
+            "checkpoint exceeds 1048576 bytes",
+        ),
+    ] {
+        let temporary = TempDir::new();
+        let workspace = temporary.path().join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        let checkpoint = temporary.path().join(name);
+        fs::write(&checkpoint, bytes).unwrap();
+
+        let output = run(
+            Some(&workspace),
+            &[
+                "task",
+                "--resume",
+                checkpoint.to_str().unwrap(),
+                "--max-actions",
+                "2",
+            ],
+        );
+
+        assert_eq!(output.status.code(), Some(2));
+        assert!(stderr(&output).contains(expected_error));
+        assert!(stdout(&output).is_empty());
+        assert!(!workspace.join("must-not-exist.txt").exists());
+    }
+}
+
+#[test]
+fn task_resume_rejects_unsupported_terminal_and_ambiguous_checkpoints() {
+    let temporary = TempDir::new();
+    let workspace = temporary.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let running = checkpoint_with_tasks(&workspace, 1, false);
+
+    let mut unsupported: serde_json::Value = serde_json::from_slice(&running).unwrap();
+    unsupported["version"] = serde_json::json!(2);
+    let terminal = checkpoint_with_tasks(&workspace, 1, true);
+    let ambiguous = checkpoint_with_tasks(&workspace, 2, false);
+    let cases = [
+        (
+            "unsupported.json",
+            serde_json::to_vec(&unsupported).unwrap(),
+            "unsupported TaskSession checkpoint version 2",
+        ),
+        (
+            "terminal.json",
+            terminal,
+            "checkpoint task must be running, found succeeded",
+        ),
+        (
+            "ambiguous.json",
+            ambiguous,
+            "checkpoint must contain exactly one task, found 2",
+        ),
+    ];
+
+    for (name, bytes, expected_error) in cases {
+        let checkpoint = temporary.path().join(name);
+        fs::write(&checkpoint, bytes).unwrap();
+        let output = run(
+            Some(&workspace),
+            &[
+                "task",
+                "--resume",
+                checkpoint.to_str().unwrap(),
+                "--max-actions",
+                "2",
+            ],
+        );
+
+        assert_eq!(output.status.code(), Some(2));
+        assert!(stderr(&output).contains(expected_error));
+        assert!(stdout(&output).is_empty());
+        assert!(!workspace.join("must-not-exist.txt").exists());
+    }
+}
+
+#[test]
+fn task_resume_uses_explicit_workspace_without_changing_the_caller_directory() {
+    let temporary = TempDir::new();
+    let workspace = temporary.path().join("saved workspace");
+    let caller_directory = temporary.path().join("different caller directory");
+    fs::create_dir(&workspace).unwrap();
+    fs::create_dir(&caller_directory).unwrap();
+    let checkpoint = temporary.path().join("saved task.json");
+    fs::write(&checkpoint, checkpoint_with_tasks(&workspace, 1, false)).unwrap();
+
+    let mismatch = run(
+        Some(&caller_directory),
+        &[
+            "task",
+            "--resume",
+            checkpoint.to_str().unwrap(),
+            "--max-actions",
+            "1",
+        ],
+    );
+    assert_eq!(mismatch.status.code(), Some(2));
+    assert!(stderr(&mismatch).contains("workspace binding"));
+    assert!(stdout(&mismatch).is_empty());
+
+    let resumed = run_with_input(
+        &caller_directory,
+        &[
+            "task",
+            "--resume",
+            checkpoint.to_str().unwrap(),
+            "--max-actions",
+            "1",
+            "--workspace",
+            workspace.to_str().unwrap(),
+        ],
+        b"complete restored task\n",
+    );
+
+    assert!(resumed.status.success(), "{}", stderr(&resumed));
+    assert!(stdout(&resumed).contains("Task outcome: succeeded"));
+    assert!(!caller_directory.join("result.txt").exists());
+}
+
+fn checkpoint_with_tasks(workspace: &Path, task_count: usize, terminal_first: bool) -> Vec<u8> {
+    let mut session = TaskSession::new_in_workspace(workspace).unwrap();
+    for index in 0..task_count {
+        let task = session.create_task(format!("stored task {index}"));
+        task.transition(TaskState::Running).unwrap();
+        if terminal_first && index == 0 {
+            task.transition(TaskState::Succeeded).unwrap();
+        }
+    }
+    session.export_checkpoint().unwrap()
 }
