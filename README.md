@@ -174,14 +174,62 @@ checks; model output cannot request shell or process execution. See Ollama's
 [tool-calling API example](https://github.com/ollama/ollama/blob/main/docs/capabilities/tool-calling.mdx)
 for its local chat tool-call format.
 
+## In-process local model decisions (opt in)
+
+In-process callers can explicitly select the same local Ollama adapter used by
+`krypper task --model NAME`. Create
+`krypper::OllamaDecisionSource::new(model, action_budget)` and pass it to
+`run_goal_turn_with_budget`:
+
+```rust
+let mut model = OllamaDecisionSource::new("qwen3", max_actions);
+let result = run_goal_turn_with_budget(
+    &mut session,
+    task_id,
+    turn_id,
+    goal,
+    max_actions,
+    &mut model,
+)?;
+```
+
+The caller creates and retains its `TaskSession`, task ID, turn ID, and
+lifecycle. The runner returns ordered observations, action count, stop reason,
+and turn outcome; the caller updates the task state and starts another turn
+after `continue`, as the example does.
+
+Constructing or omitting the adapter makes no request. When explicitly passed
+to the bounded runner, it sends requests only to
+`http://127.0.0.1:11434/api/chat`; the endpoint cannot be changed. Each request
+contains the task goal, tool schemas, remaining action budget, and prior
+workspace observations. Read observations can contain full file text or range
+excerpts. Model-selected tools and arguments are validated, then run through
+the same existing action, containment, symlink, UTF-8, size, lifecycle, and
+budget checks as caller-directed turns.
+
+The adapter also works with a fresh turn on a session returned by
+`TaskSession::restore_checkpoint_in_workspace`. The caller supplies the
+captured workspace path and creates the new running turn; the adapter does not
+change the process current directory or replay earlier workspace actions. The
+restored-session mock test covers this path without contacting Ollama.
+
+Build and run the in-process model example with a local Ollama service and a
+tool-calling model such as `qwen3`:
+
+```sh
+cargo build --example bounded_local_model_task_turn --locked
+cargo run --example bounded_local_model_task_turn --locked
+```
+
 ## Bounded task-turn example
 
-The task-turn library API runs in-process and offline. Callers supply the
-decision source; the library does not connect to a model or make decisions for
-them. The example creates a unique temporary workspace, reads a brief through a
-task-owned turn, creates a new summary file, explicitly completes the turn, and
-prints the result and metadata-only activity history. It removes only the
-temporary directory it created.
+The default task-turn library API remains caller-directed and offline. Callers
+supply a decision source; the library does not connect to a model unless the
+caller explicitly supplies `OllamaDecisionSource`. The caller-directed example
+creates a unique temporary workspace, reads a brief through a task-owned turn,
+creates a new summary file, explicitly completes the turn, and prints the
+result and metadata-only activity history. It removes only the temporary
+directory it created.
 
 Build and run the example from the repository root:
 

@@ -6,3 +6,5 @@ pub mod cli;
 mod file_safety;
 mod model;
 pub mod task_lifecycle;
+
+pub use model::OllamaDecisionSource;
