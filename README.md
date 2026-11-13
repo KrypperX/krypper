@@ -156,6 +156,20 @@ them by ID, and lists them without exposing mutable turn or event collections;
 each turn's events include its task and turn IDs. Sessions find tasks by ID and
 list them in creation order.
 
+`TaskSession::export_checkpoint()` returns versioned JSON bytes for in-process
+persistence. Export is allowed only when no turn is running, all tasks share the
+same captured workspace, and the encoded checkpoint is at most 1 MiB. It retains
+task and turn IDs, descriptions, states, outcomes, ordered lifecycle histories,
+workspace binding, and the existing metadata-only activity summaries. It omits
+workspace action inputs and observations. The caller chooses whether and where to
+store the bytes; export does not write a file.
+
+`TaskSession::restore_checkpoint(&bytes)` validates the version, size, IDs,
+histories, outcomes, activity summaries, and workspace binding before returning
+a session. Restore must run from the same current directory as the checkpoint's
+tasks. It rebuilds in-memory lifecycle state and never replays workspace actions.
+A restored running task with no running turn can create a fresh turn.
+
 ## Checks
 
 Run formatting, build, check, lint, and the complete Rust test suite with:

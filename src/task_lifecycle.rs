@@ -8,6 +8,9 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+mod checkpoint;
+pub use checkpoint::{TaskSessionCheckpointError, MAX_TASK_SESSION_CHECKPOINT_BYTES};
+
 /// The lifecycle states supported by a task.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TaskState {

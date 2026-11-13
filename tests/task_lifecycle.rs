@@ -1,3 +1,6 @@
+#[path = "task_lifecycle/checkpoint.rs"]
+mod checkpoint;
+
 use krypper::task_lifecycle::{
     Task, TaskEvent, TaskHistoryEvent, TaskHistoryTransition, TaskSession, TaskState,
     TurnActivitySummary, TurnCompletionError, TurnEvent, TurnOutcome, TurnState,
