@@ -155,6 +155,9 @@ fn model_name_validation_rejects_cloud_models() {
     assert!(validate_model_name("gemma4:cloud").is_err());
     assert!(validate_model_name("gemma4:cloud ").is_err());
     assert!(validate_model_name("namespace/model:cloud").is_err());
+    assert!(validate_model_name("qwen3-coder:480b-cloud").is_err());
+    assert!(validate_model_name("gpt-oss:20b-cloud").is_err());
+    assert!(validate_model_name("qwen3-coder:480b-Cloud").is_err());
 }
 
 #[test]
