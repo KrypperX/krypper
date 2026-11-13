@@ -371,6 +371,62 @@ fn parser_rejects_tool_calls_without_an_assistant_role() {
 }
 
 #[test]
+fn mocked_model_uses_an_explicit_workspace_without_changing_current_directory() {
+    let _lock = crate::CURRENT_DIR_TEST_LOCK
+        .lock()
+        .expect("lock current directory");
+    let (address, server) = mock_server(vec![
+        ok(tool_response(
+            "create_file",
+            json!({"path":"model result.txt","contents":"created in selected workspace"}),
+        )),
+        ok(tool_response(
+            "complete_task",
+            json!({"result":"created model result.txt"}),
+        )),
+    ]);
+    let temporary = TempDir::new();
+    let workspace = temporary.path().join("selected workspace");
+    fs::create_dir(&workspace).expect("create selected workspace");
+    let original_directory = std::env::current_dir().expect("read current directory");
+    assert_ne!(
+        fs::canonicalize(&workspace).expect("canonicalize workspace"),
+        original_directory
+    );
+
+    let mut session =
+        TaskSession::new_in_workspace(&workspace).expect("capture selected workspace");
+    let task = session.create_task("Create a result in the selected workspace");
+    task.transition(TaskState::Running).expect("start task");
+    let task_id = task.id();
+    let turn_id = task.create_turn().expect("create turn");
+    task.transition_turn(turn_id, TurnState::Running)
+        .expect("start turn");
+    let mut source = OllamaDecisionSource::with_endpoint("mock-model", 2, address);
+
+    let result = run_goal_turn_with_budget(
+        &mut session,
+        task_id,
+        turn_id,
+        "Create a result file",
+        2,
+        &mut source,
+    )
+    .expect("run mocked local-model turn");
+
+    assert_eq!(result.stop_reason(), GoalTurnStopReason::Completed);
+    assert_eq!(
+        fs::read_to_string(workspace.join("model result.txt")).expect("read model result"),
+        "created in selected workspace"
+    );
+    assert_eq!(
+        std::env::current_dir().expect("read current directory"),
+        original_directory
+    );
+    assert_eq!(server.join().expect("join mock server").len(), 2);
+}
+
+#[test]
 fn mocked_model_performs_multiple_actions_and_completes_the_task() {
     let (address, server) = mock_server(vec![
         ok(tool_response("create_directory", json!({"path":"notes"}))),

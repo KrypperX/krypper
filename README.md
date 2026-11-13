@@ -312,6 +312,28 @@ missing, different, or replaced workspace is rejected. Restore rebuilds
 in-memory lifecycle state and never replays workspace actions. A restored
 running task with no running turn can create a fresh turn.
 
+### Select a task session workspace
+
+`TaskSession::new_in_workspace(path)` opts into a selected directory. It captures
+and verifies the directory before returning, and every task created by that
+session keeps using the captured root even if the process current directory
+later changes. The constructor does not change process-wide directory state.
+`TaskSession::new()` retains its current behavior and captures the current
+directory when each task is created. Invalid and non-directory paths return an
+error before a session is created.
+
+```rust
+let mut session = TaskSession::new_in_workspace("./project")?;
+let task_id = session.create_task("Summarize the project").id();
+```
+
+The in-process `bounded_task_turn` example creates a temporary workspace with
+this constructor and runs caller-directed actions through the bounded runner.
+The `bounded_local_model_task_turn` example uses the same constructor with the
+explicit local-model adapter. Both examples leave the process current directory
+unchanged.
+Use the build and run commands in the Bounded task-turn example section above.
+
 ## Checks
 
 Run formatting, build, check, lint, and the complete Rust test suite with:

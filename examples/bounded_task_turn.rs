@@ -49,39 +49,6 @@ impl Drop for TemporaryWorkspace {
     }
 }
 
-struct CurrentDirectory {
-    previous: Option<PathBuf>,
-}
-
-impl CurrentDirectory {
-    fn enter(path: &Path) -> io::Result<Self> {
-        let previous = std::env::current_dir()?;
-        std::env::set_current_dir(path)?;
-        Ok(Self {
-            previous: Some(previous),
-        })
-    }
-
-    fn restore(mut self) -> io::Result<()> {
-        if let Some(previous) = &self.previous {
-            std::env::set_current_dir(previous)?;
-        }
-        self.previous = None;
-        Ok(())
-    }
-}
-
-impl Drop for CurrentDirectory {
-    fn drop(&mut self) {
-        let Some(previous) = self.previous.take() else {
-            return;
-        };
-        if let Err(error) = std::env::set_current_dir(&previous) {
-            eprintln!("could not restore current directory: {error}");
-        }
-    }
-}
-
 fn missing_task() -> io::Error {
     io::Error::new(io::ErrorKind::NotFound, "task was not found in the session")
 }
@@ -93,10 +60,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         "The task API reads files safely and creates new files without overwriting them.\n",
     )?;
 
-    let mut session = TaskSession::new();
-    let working_directory = CurrentDirectory::enter(workspace.path())?;
+    let original_directory = std::env::current_dir()?;
+    let mut session = TaskSession::new_in_workspace(workspace.path())?;
     let task_id = session.create_task(GOAL).id();
-    working_directory.restore()?;
+    if std::env::current_dir()? != original_directory {
+        return Err(io::Error::other("the process current directory changed").into());
+    }
 
     let turn_id = {
         let task = session.get_task_mut(task_id).ok_or_else(missing_task)?;

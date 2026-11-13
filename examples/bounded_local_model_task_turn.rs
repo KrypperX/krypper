@@ -48,34 +48,6 @@ impl Drop for TemporaryWorkspace {
     }
 }
 
-struct CurrentDirectory(Option<PathBuf>);
-
-impl CurrentDirectory {
-    fn enter(path: &Path) -> io::Result<Self> {
-        let previous = std::env::current_dir()?;
-        std::env::set_current_dir(path)?;
-        Ok(Self(Some(previous)))
-    }
-
-    fn restore(mut self) -> io::Result<()> {
-        if let Some(previous) = &self.0 {
-            std::env::set_current_dir(previous)?;
-        }
-        self.0 = None;
-        Ok(())
-    }
-}
-
-impl Drop for CurrentDirectory {
-    fn drop(&mut self) {
-        if let Some(previous) = self.0.take() {
-            if let Err(error) = std::env::set_current_dir(previous) {
-                eprintln!("could not restore current directory: {error}");
-            }
-        }
-    }
-}
-
 fn main() -> Result<(), Box<dyn Error>> {
     let workspace = TemporaryWorkspace::create()?;
     fs::write(
@@ -83,13 +55,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         "Krypper tasks use bounded workspace actions and preserve caller-owned lifecycle state.\n",
     )?;
 
-    let (mut session, task_id) = {
-        let current_directory = CurrentDirectory::enter(workspace.path())?;
-        let mut session = TaskSession::new();
-        let task_id = session.create_task(GOAL).id();
-        current_directory.restore()?;
-        (session, task_id)
-    };
+    let original_directory = std::env::current_dir()?;
+    let mut session = TaskSession::new_in_workspace(workspace.path())?;
+    let task_id = session.create_task(GOAL).id();
+    if std::env::current_dir()? != original_directory {
+        return Err(io::Error::other("the process current directory changed").into());
+    }
     session
         .get_task_mut(task_id)
         .ok_or_else(missing_task)?
