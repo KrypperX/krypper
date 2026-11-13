@@ -398,10 +398,15 @@ fn post_chat(agent: &Agent, address: SocketAddr, body: &[u8]) -> Result<Vec<u8>,
 fn parse_model_response(response: &[u8]) -> Result<WorkspaceAction, ModelError> {
     let response: OllamaChatResponse =
         serde_json::from_slice(response).map_err(|_| ModelError::InvalidJson)?;
-    let calls = response
+    let message = response
         .message
-        .ok_or(ModelError::InvalidToolCall("missing assistant message"))?
-        .tool_calls;
+        .ok_or(ModelError::InvalidToolCall("missing assistant message"))?;
+    if message.role != OllamaMessageRole::Assistant {
+        return Err(ModelError::InvalidToolCall(
+            "tool calls must come from an assistant message",
+        ));
+    }
+    let calls = message.tool_calls;
     if calls.len() != 1 {
         return Err(ModelError::InvalidToolCall(
             "expected exactly one tool call",
@@ -579,8 +584,18 @@ struct OllamaChatResponse {
 
 #[derive(Deserialize)]
 struct OllamaMessage {
+    role: OllamaMessageRole,
     #[serde(default)]
     tool_calls: Vec<OllamaToolCall>,
+}
+
+#[derive(Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+enum OllamaMessageRole {
+    Assistant,
+    User,
+    System,
+    Tool,
 }
 
 #[derive(Deserialize)]
