@@ -61,6 +61,16 @@ pub(crate) fn capture_workspace_root() -> Result<WorkspaceRoot, String> {
     Ok(WorkspaceRoot { descriptor, path })
 }
 
+pub(crate) fn capture_workspace_root_at(path: &Path) -> Result<WorkspaceRoot, String> {
+    let path = fs::canonicalize(path)
+        .map_err(|error| format!("unable to resolve workspace path: {error}"))?;
+    let descriptor = open_directory_path(&path)
+        .map_err(|error| format!("unable to open workspace path: {error}"))?;
+    verify_root_descriptor(descriptor.as_raw_fd(), &path)
+        .map_err(|error| format!("unable to verify workspace path: {}", error.message()))?;
+    Ok(WorkspaceRoot { descriptor, path })
+}
+
 pub(crate) fn read_text_file(path: &OsStr) -> Result<String, CliError> {
     read_open_text_file(open_cwd_relative(path, false)?)
 }
@@ -796,6 +806,18 @@ fn write_to_fd(fd: RawFd, bytes: &[u8]) -> io::Result<usize> {
 
 fn open_current_directory() -> io::Result<OwnedFd> {
     let path = CString::new(".").expect("invariant: a dot path contains no NUL byte");
+    // SAFETY: `path` is NUL-terminated and remains valid for this call.
+    let descriptor = unsafe {
+        libc::open(
+            path.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    owned_fd_or_error(descriptor)
+}
+
+fn open_directory_path(path: &Path) -> io::Result<OwnedFd> {
+    let path = c_string(path.as_os_str())?;
     // SAFETY: `path` is NUL-terminated and remains valid for this call.
     let descriptor = unsafe {
         libc::open(
