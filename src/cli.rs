@@ -99,6 +99,7 @@ fn run_task_with_endpoint(
     let mut goal = None;
     let mut max_actions = None;
     let mut model = None;
+    let mut workspace = None;
     let mut position = 0;
     while let Some(argument) = arguments.get(position) {
         let Some(option) = argument.to_str() else {
@@ -169,6 +170,24 @@ fn run_task_with_endpoint(
                 model = Some(value.to_owned());
                 position += 1;
             }
+            "--workspace" => {
+                if workspace.is_some() {
+                    return usage_error(
+                        error,
+                        Some("task"),
+                        "--workspace may be provided only once",
+                    );
+                }
+                let Some(value) = arguments.get(position) else {
+                    return usage_error(
+                        error,
+                        Some("task"),
+                        "the following argument is required: --workspace",
+                    );
+                };
+                workspace = Some(PathBuf::from(value.as_os_str()));
+                position += 1;
+            }
             _ => {
                 return usage_error(
                     error,
@@ -202,9 +221,21 @@ fn run_task_with_endpoint(
         }
     }
 
+    let mut session = match workspace {
+        Some(path) => match TaskSession::new_in_workspace(&path) {
+            Ok(session) => session,
+            Err(cause) => {
+                return usage_error(
+                    error,
+                    Some("task"),
+                    &format!("invalid workspace path '{}': {cause}", path.display()),
+                );
+            }
+        },
+        None => TaskSession::new(),
+    };
     let mut model_source =
         model.map(|name| OllamaDecisionSource::with_endpoint(name, max_actions, model_endpoint));
-    let mut session = TaskSession::new();
     let task_id = session.create_task(goal.clone()).id();
     let mut turn_id = {
         let task = session
@@ -1178,7 +1209,9 @@ fn usage_error(error: &mut dyn Write, command: Option<&str>, message: &str) -> i
         Some("show") => "usage: krypper show [-h] path",
         Some("list") => "usage: krypper list [-h] [path]",
         Some("write") => "usage: krypper write [-h] [--stdin] path ...",
-        Some("task") => "usage: krypper task [-h] --goal GOAL --max-actions N",
+        Some("task") => {
+            "usage: krypper task [-h] --goal GOAL --max-actions N [--workspace PATH] [--model NAME]"
+        }
         _ => "usage: krypper [-h] {show,list,write,task} ...",
     };
     let program = command.map_or_else(|| "krypper".to_owned(), |name| format!("krypper {name}"));
@@ -1196,13 +1229,18 @@ fn write_root_help(output: &mut dyn Write) -> io::Result<()> {
 fn write_task_help(output: &mut dyn Write) -> io::Result<()> {
     output.write_all(
         concat!(
-            "usage: krypper task [-h] --goal GOAL --max-actions N [--model NAME]\n\n",
-            "run a bounded task in the current directory\n\n",
+            "usage: krypper task [-h] --goal GOAL --max-actions N [--workspace PATH] [--model NAME]\n\n",
+            "run a bounded task in the selected workspace or current directory\n\n",
             "options:\n  --goal GOAL          required task goal\n",
             "  --max-actions N      required positive action limit for the whole task\n",
+            "  --workspace PATH     use an existing directory as the captured task workspace\n",
             "  --model NAME         opt in to local Ollama action selection\n",
             "  -h, --help           show this help message and exit\n\n",
+            "Without --workspace, task captures the current directory as its workspace.\n",
+            "With --workspace, the selected directory is validated before task history starts;\n",
+            "the process current directory is not changed.\n",
             "Without --model, task remains caller-directed and makes no model requests.\n",
+            "--workspace PATH works with --model NAME and uses the same captured workspace.\n",
             "Model mode sends the goal and prior observations to http://127.0.0.1:11434/api/chat.\n",
             "Read observations can include workspace file text. Ollama must be running locally\n",
             "with the named model available. Only supported task actions and completion are exposed.\n\n",

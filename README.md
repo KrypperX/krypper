@@ -15,6 +15,8 @@ cargo run -- list docs
 cargo run -- write notes/today.txt "Remember to review the change."
 cargo run -- write --stdin notes/from-pipe.txt < notes/draft.txt
 cargo run -- task --goal "Summarize the brief" --max-actions 3
+mkdir -p "task workspace"
+cargo run -- task --goal "Summarize the brief" --max-actions 3 --workspace "task workspace"
 ```
 
 The release binary is `target/release/krypper`. Run it with the directory you
@@ -41,9 +43,13 @@ components and existing targets, creates files exclusively, and removes its
 partial file if a write fails. It never creates parent directories, overwrites
 files, or contacts a network service.
 
-`task --goal <goal> --max-actions <positive-number>` runs one task across
-bounded turns in-process with the current directory as its workspace. It reads
-one caller decision per line from standard input. Enter `read <path>`,
+`task --goal <goal> --max-actions <positive-number> [--workspace PATH]`
+runs one task across bounded turns in-process. Without `--workspace`, the
+current directory is its workspace. With `--workspace PATH`, Krypper validates
+and captures that existing directory before task history starts; it does not
+change the process current directory. The same captured workspace is used for
+caller-directed and model-selected actions. It reads one caller decision per
+line from standard input when `--model` is omitted. Enter `read <path>`,
 `read-range <path> <start-line> <max-lines>`, `list [path]`, `mkdir <path>`,
 `create <path> <text>`,
 `replace <path> <match text> => <replacement text>`,
@@ -149,6 +155,15 @@ Model selection is explicitly opt in with `--model NAME`:
 ```sh
 cargo run -- task --goal "Read the brief and create a short summary file" \
   --max-actions 6 --model qwen3
+```
+
+Combine `--workspace PATH` with `--model NAME` to keep model-selected actions
+inside the selected directory. The workspace path may contain spaces:
+
+```sh
+mkdir -p "task workspace"
+cargo run -- task --goal "Read the brief and create a short summary file" \
+  --max-actions 6 --workspace "task workspace" --model qwen3
 ```
 
 Without `--model`, `task` stays caller-directed, remains offline, and does not

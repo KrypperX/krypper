@@ -139,6 +139,173 @@ fn task_args(max_actions: &str) -> Vec<OsString> {
 }
 
 #[test]
+fn caller_directed_cli_uses_explicit_workspace_without_changing_current_directory() {
+    let temporary = TempDir::new();
+    let process_directory = temporary.path().join("caller directory");
+    let workspace = temporary.path().join("selected workspace");
+    fs::create_dir(&process_directory).expect("create caller directory");
+    fs::create_dir(&workspace).expect("create selected workspace");
+
+    let (code, output, error, current_directory) = in_workspace(&process_directory, || {
+        let original_directory = std::env::current_dir().expect("read current directory");
+        let mut args = [
+            "--goal",
+            "Create a file in the selected workspace",
+            "--max-actions",
+            "2",
+            "--workspace",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect::<Vec<_>>();
+        args.push(workspace.as_os_str().to_owned());
+        let mut input =
+            Cursor::new(b"create \"selected file.txt\" created\ncomplete saved\n".to_vec());
+        let mut output = Vec::new();
+        let mut error = Vec::new();
+        let code = run_task_with_endpoint(
+            &args,
+            &mut input,
+            &mut output,
+            &mut error,
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+        )
+        .expect("run caller-directed task");
+        let current_directory = std::env::current_dir().expect("read current directory after task");
+        assert_eq!(current_directory, original_directory);
+        (
+            code,
+            String::from_utf8(output).expect("UTF-8 output"),
+            String::from_utf8(error).expect("UTF-8 error output"),
+            current_directory,
+        )
+    });
+
+    assert_eq!(code, 0, "{error}");
+    assert!(output.contains("Task outcome: succeeded"));
+    assert_eq!(
+        fs::read_to_string(workspace.join("selected file.txt")).expect("read selected result"),
+        "created"
+    );
+    assert!(!process_directory.join("selected file.txt").exists());
+    assert_eq!(current_directory, process_directory);
+}
+
+#[test]
+fn caller_directed_cli_without_workspace_uses_current_directory() {
+    let workspace = TempDir::new();
+    let (code, output, error, current_directory) = in_workspace(workspace.path(), || {
+        let original_directory = std::env::current_dir().expect("read current directory");
+        let args = [
+            "--goal",
+            "Create a file in the current directory",
+            "--max-actions",
+            "2",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect::<Vec<_>>();
+        let mut input = Cursor::new(b"create default.txt created\ncomplete saved\n".to_vec());
+        let mut output = Vec::new();
+        let mut error = Vec::new();
+        let code = run_task_with_endpoint(
+            &args,
+            &mut input,
+            &mut output,
+            &mut error,
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+        )
+        .expect("run caller-directed task");
+        let current_directory = std::env::current_dir().expect("read current directory after task");
+        assert_eq!(current_directory, original_directory);
+        (
+            code,
+            String::from_utf8(output).expect("UTF-8 output"),
+            String::from_utf8(error).expect("UTF-8 error output"),
+            current_directory,
+        )
+    });
+
+    assert_eq!(code, 0, "{error}");
+    assert!(output.contains("Task outcome: succeeded"));
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("default.txt")).expect("read default result"),
+        "created"
+    );
+    assert_eq!(current_directory, workspace.path());
+}
+
+#[test]
+fn task_cli_rejects_missing_and_invalid_workspace_before_lifecycle() {
+    let temporary = TempDir::new();
+    let process_directory = temporary.path().join("caller directory");
+    let file_workspace = temporary.path().join("workspace file");
+    let missing_workspace = temporary.path().join("missing workspace");
+    fs::create_dir(&process_directory).expect("create caller directory");
+    fs::write(&file_workspace, "not a directory").expect("create workspace file");
+
+    let (results, current_directory) = in_workspace(&process_directory, || {
+        let original_directory = std::env::current_dir().expect("read current directory");
+        let mut cases = vec![[
+            "--goal",
+            "Check workspace input",
+            "--max-actions",
+            "1",
+            "--workspace",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect::<Vec<_>>()];
+        for workspace in [&missing_workspace, &file_workspace] {
+            let mut args = [
+                "--goal",
+                "Check workspace input",
+                "--max-actions",
+                "1",
+                "--workspace",
+            ]
+            .into_iter()
+            .map(OsString::from)
+            .collect::<Vec<_>>();
+            args.push(workspace.as_os_str().to_owned());
+            cases.push(args);
+        }
+
+        let results = cases
+            .into_iter()
+            .map(|args| {
+                let mut input = Cursor::new(Vec::<u8>::new());
+                let mut output = Vec::new();
+                let mut error = Vec::new();
+                let code = run_task_with_endpoint(
+                    &args,
+                    &mut input,
+                    &mut output,
+                    &mut error,
+                    SocketAddr::from(([127, 0, 0, 1], 0)),
+                )
+                .expect("reject invalid workspace before task start");
+                (code, output, error)
+            })
+            .collect::<Vec<_>>();
+        let current_directory = std::env::current_dir().expect("read current directory after task");
+        assert_eq!(current_directory, original_directory);
+        (results, current_directory)
+    });
+
+    assert_eq!(current_directory, process_directory);
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0].0, 2);
+    assert!(String::from_utf8_lossy(&results[0].2)
+        .contains("the following argument is required: --workspace"));
+    for (code, output, error) in &results[1..] {
+        assert_eq!(*code, 2);
+        assert!(String::from_utf8_lossy(error).contains("invalid workspace path"));
+        assert!(output.is_empty());
+    }
+}
+
+#[test]
 fn model_cli_reports_successful_task_and_turn_outcomes() {
     let (endpoint, server) = mock_server(vec![
         MockResponse {
@@ -181,6 +348,62 @@ fn model_cli_reports_successful_task_and_turn_outcomes() {
         fs::read_to_string(workspace.path().join("result.txt")).expect("read result"),
         "done"
     );
+    assert_eq!(server.join().expect("join mock server").len(), 2);
+}
+
+#[test]
+fn model_cli_uses_explicit_workspace_without_changing_current_directory() {
+    let (endpoint, server) = mock_server(vec![
+        MockResponse {
+            status: 200,
+            body: tool_response(
+                "create_file",
+                json!({"path":"model result.txt","contents":"selected workspace"}),
+            ),
+        },
+        MockResponse {
+            status: 200,
+            body: tool_response(
+                "complete_task",
+                json!({"result":"Created model result.txt."}),
+            ),
+        },
+    ]);
+    let temporary = TempDir::new();
+    let process_directory = temporary.path().join("caller directory");
+    let workspace = temporary.path().join("selected workspace");
+    fs::create_dir(&process_directory).expect("create caller directory");
+    fs::create_dir(&workspace).expect("create selected workspace");
+
+    let (code, output, error, current_directory) = in_workspace(&process_directory, || {
+        let original_directory = std::env::current_dir().expect("read current directory");
+        let mut args = task_args("2");
+        args.push(OsString::from("--workspace"));
+        args.push(workspace.as_os_str().to_owned());
+        let mut input = Cursor::new(Vec::<u8>::new());
+        let mut output = Vec::new();
+        let mut error = Vec::new();
+        let code = run_task_with_endpoint(&args, &mut input, &mut output, &mut error, endpoint)
+            .expect("run mocked model task");
+        let current_directory = std::env::current_dir().expect("read current directory after task");
+        assert_eq!(current_directory, original_directory);
+        (
+            code,
+            String::from_utf8(output).expect("UTF-8 output"),
+            String::from_utf8(error).expect("UTF-8 error output"),
+            current_directory,
+        )
+    });
+
+    assert_eq!(code, 0, "{error}");
+    assert!(output.contains("Model selected action: create_file"));
+    assert!(output.contains("Task outcome: succeeded"));
+    assert_eq!(
+        fs::read_to_string(workspace.join("model result.txt")).expect("read model result"),
+        "selected workspace"
+    );
+    assert!(!process_directory.join("model result.txt").exists());
+    assert_eq!(current_directory, process_directory);
     assert_eq!(server.join().expect("join mock server").len(), 2);
 }
 
