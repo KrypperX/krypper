@@ -1,5 +1,7 @@
 use super::*;
-use crate::agent_loop::{run_goal_turn_with_budget, GoalTurnStopReason, WorkspaceAction};
+use crate::agent_loop::{
+    run_goal_turn_with_budget, GoalTurnResult, GoalTurnStopReason, WorkspaceAction,
+};
 use crate::task_lifecycle::{TaskSession, TaskState, TurnOutcome, TurnState};
 use serde_json::{json, Value};
 use std::fs;
@@ -51,6 +53,23 @@ fn in_workspace<T>(path: &Path, operation: impl FnOnce() -> T) -> T {
         .expect("lock current directory");
     let _restore = RestoreCurrentDir::enter(path);
     operation()
+}
+
+fn assert_failed_turn(
+    result: &GoalTurnResult,
+    session: &TaskSession,
+    task_id: Uuid,
+    turn_id: Uuid,
+) {
+    assert!(matches!(
+        result.outcome(),
+        Some(TurnOutcome::Failure { .. })
+    ));
+    let task = session.get_task(task_id).expect("task exists");
+    assert_eq!(task.state(), TaskState::Running);
+    let turn = task.get_turn(turn_id).expect("turn exists");
+    assert_eq!(turn.state(), TurnState::Failed);
+    assert!(matches!(turn.outcome(), Some(TurnOutcome::Failure { .. })));
 }
 
 fn running_turn() -> (TaskSession, Uuid, Uuid) {
@@ -158,6 +177,156 @@ fn model_name_validation_rejects_cloud_models() {
     assert!(validate_model_name("qwen3-coder:480b-cloud").is_err());
     assert!(validate_model_name("gpt-oss:20b-cloud").is_err());
     assert!(validate_model_name("qwen3-coder:480b-Cloud").is_err());
+}
+
+#[test]
+fn public_model_source_can_be_constructed_without_a_request() {
+    let _source = crate::OllamaDecisionSource::new("mock-model", 1);
+}
+
+#[test]
+fn restored_task_session_runs_a_fresh_model_turn_without_changing_directory() {
+    let (address, server) = mock_server(vec![
+        ok(tool_response(
+            "create_file",
+            json!({"path":"first-turn.txt","contents":"created before restore"}),
+        )),
+        ok(tool_response(
+            "complete_task",
+            json!({"result":"first turn complete"}),
+        )),
+        ok(tool_response("read_file", json!({"path":"first-turn.txt"}))),
+        ok(tool_response(
+            "complete_task",
+            json!({"result":"fresh turn complete"}),
+        )),
+    ]);
+    let workspace = TempDir::new();
+    let other_directory = TempDir::new();
+    let (result, session, task_id, first_turn_id, second_turn_id) =
+        in_workspace(workspace.path(), || {
+            let (mut session, task_id, first_turn_id) = running_turn();
+            let mut first_source = OllamaDecisionSource::with_endpoint("mock-model", 2, address);
+            let first_result = run_goal_turn_with_budget(
+                &mut session,
+                task_id,
+                first_turn_id,
+                "Create the first turn file",
+                2,
+                &mut first_source,
+            )
+            .expect("first mocked turn succeeds");
+            assert_eq!(first_result.stop_reason(), GoalTurnStopReason::Completed);
+
+            let checkpoint = session
+                .export_checkpoint()
+                .expect("export completed turn checkpoint");
+            std::env::set_current_dir(other_directory.path())
+                .expect("change to unrelated process directory");
+            let original_directory =
+                std::env::current_dir().expect("read unrelated process directory");
+            let mut restored =
+                TaskSession::restore_checkpoint_in_workspace(&checkpoint, workspace.path())
+                    .expect("restore the session at its explicit workspace");
+            assert_eq!(
+                std::env::current_dir().expect("read process directory after restore"),
+                original_directory
+            );
+
+            let second_turn_id = {
+                let task = restored
+                    .get_task_mut(task_id)
+                    .expect("restored task exists");
+                let turn_id = task.create_turn().expect("create fresh restored turn");
+                task.transition_turn(turn_id, TurnState::Running)
+                    .expect("start fresh restored turn");
+                turn_id
+            };
+            let mut second_source = OllamaDecisionSource::with_endpoint("mock-model", 2, address);
+            let result = run_goal_turn_with_budget(
+                &mut restored,
+                task_id,
+                second_turn_id,
+                "Read the first turn file",
+                2,
+                &mut second_source,
+            );
+            assert_eq!(
+                std::env::current_dir().expect("read process directory after fresh turn"),
+                original_directory
+            );
+            (result, restored, task_id, first_turn_id, second_turn_id)
+        });
+
+    let result = result.expect("fresh turn on restored session succeeds");
+    assert_eq!(result.actions_taken(), 2);
+    assert_eq!(result.observations().len(), 1);
+    assert!(matches!(
+        &result.observations()[0],
+        crate::agent_loop::WorkspaceObservation::FileRead { contents, .. }
+            if contents == "created before restore"
+    ));
+    let task = session.get_task(task_id).expect("restored task exists");
+    assert_eq!(task.state(), TaskState::Running);
+    assert_eq!(
+        task.get_turn(first_turn_id)
+            .expect("first turn exists")
+            .state(),
+        TurnState::Succeeded
+    );
+    assert_eq!(
+        task.get_turn(second_turn_id)
+            .expect("fresh turn exists")
+            .state(),
+        TurnState::Succeeded
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("first-turn.txt")).expect("read original file"),
+        "created before restore"
+    );
+    let requests = server.join().expect("join mock server");
+    assert_eq!(requests.len(), 4);
+    let third_request = request_json(&requests[2]);
+    let fresh_turn_prompt = third_request["messages"][1]["content"]
+        .as_str()
+        .expect("fresh turn prompt");
+    assert!(fresh_turn_prompt.contains("Read the first turn file"));
+    assert!(!fresh_turn_prompt.contains("file_created"));
+}
+
+#[test]
+fn malformed_and_unsupported_model_calls_fail_the_active_turn() {
+    for response in [
+        ok("not json".to_owned()),
+        ok(tool_response(
+            "run_shell",
+            json!({"command":"touch must-not-exist"}),
+        )),
+    ] {
+        let (address, server) = mock_server(vec![response]);
+        let workspace = TempDir::new();
+        let (result, session, task_id, turn_id) = in_workspace(workspace.path(), || {
+            let (mut session, task_id, turn_id) = running_turn();
+            let mut source = OllamaDecisionSource::with_endpoint("mock-model", 1, address);
+            let result = run_goal_turn_with_budget(
+                &mut session,
+                task_id,
+                turn_id,
+                "Reject malformed or unsupported calls",
+                1,
+                &mut source,
+            );
+            (result, session, task_id, turn_id)
+        });
+        let result = result.expect("model call failure is recorded in the turn");
+        assert_eq!(result.stop_reason(), GoalTurnStopReason::ActionFailed);
+        assert_failed_turn(&result, &session, task_id, turn_id);
+        assert!(fs::read_dir(workspace.path())
+            .expect("list workspace")
+            .next()
+            .is_none());
+        assert_eq!(server.join().expect("join mock server").len(), 1);
+    }
 }
 
 #[test]
@@ -301,7 +470,7 @@ fn model_decisions_stop_at_the_existing_action_budget() {
         )),
     ]);
     let workspace = TempDir::new();
-    let (result, session, task_id) = in_workspace(workspace.path(), || {
+    let (result, session, task_id, turn_id) = in_workspace(workspace.path(), || {
         let (mut session, task_id, turn_id) = running_turn();
         let mut source = OllamaDecisionSource::with_endpoint("mock-model", 2, address);
         let result = run_goal_turn_with_budget(
@@ -312,7 +481,7 @@ fn model_decisions_stop_at_the_existing_action_budget() {
             2,
             &mut source,
         );
-        (result, session, task_id)
+        (result, session, task_id, turn_id)
     });
     let result = result.expect("bounded model turn");
     assert_eq!(
@@ -324,6 +493,7 @@ fn model_decisions_stop_at_the_existing_action_budget() {
         result.outcome(),
         Some(TurnOutcome::Failure { .. })
     ));
+    assert_failed_turn(&result, &session, task_id, turn_id);
     let requests = server.join().expect("join mock server");
     assert_eq!(requests.len(), 2);
     assert!(fs::read(workspace.path().join("one/two.txt")).is_ok());
@@ -342,7 +512,7 @@ fn unsafe_model_path_fails_without_writing_outside_the_workspace() {
     let root = TempDir::new();
     let workspace = root.path().join("workspace");
     fs::create_dir(&workspace).expect("create workspace");
-    let (result, _) = in_workspace(&workspace, || {
+    let (result, session, task_id, turn_id) = in_workspace(&workspace, || {
         let (mut session, task_id, turn_id) = running_turn();
         let mut source = OllamaDecisionSource::with_endpoint("mock-model", 1, address);
         let result = run_goal_turn_with_budget(
@@ -353,7 +523,7 @@ fn unsafe_model_path_fails_without_writing_outside_the_workspace() {
             1,
             &mut source,
         );
-        (result, session)
+        (result, session, task_id, turn_id)
     });
     let result = result.expect("unsafe action is a recorded failure");
     assert_eq!(result.stop_reason(), GoalTurnStopReason::ActionFailed);
@@ -361,6 +531,7 @@ fn unsafe_model_path_fails_without_writing_outside_the_workspace() {
         result.outcome(),
         Some(TurnOutcome::Failure { .. })
     ));
+    assert_failed_turn(&result, &session, task_id, turn_id);
     assert!(!root.path().join("outside.txt").exists());
     assert!(fs::read_dir(&workspace)
         .expect("list workspace")
@@ -380,20 +551,22 @@ fn http_and_response_decoding_failures_become_failed_actions() {
     ] {
         let (address, server) = mock_server(vec![response]);
         let workspace = TempDir::new();
-        let result = in_workspace(workspace.path(), || {
+        let (result, session, task_id, turn_id) = in_workspace(workspace.path(), || {
             let (mut session, task_id, turn_id) = running_turn();
             let mut source = OllamaDecisionSource::with_endpoint("mock-model", 1, address);
-            run_goal_turn_with_budget(
+            let result = run_goal_turn_with_budget(
                 &mut session,
                 task_id,
                 turn_id,
                 "Fail clearly",
                 1,
                 &mut source,
-            )
-        })
-        .expect("model failure is recorded in the turn");
+            );
+            (result, session, task_id, turn_id)
+        });
+        let result = result.expect("model failure is recorded in the turn");
         assert_eq!(result.stop_reason(), GoalTurnStopReason::ActionFailed);
+        assert_failed_turn(&result, &session, task_id, turn_id);
         assert!(matches!(
             result.outcome(),
             Some(TurnOutcome::Failure { .. })
@@ -402,24 +575,26 @@ fn http_and_response_decoding_failures_become_failed_actions() {
     }
 
     let workspace = TempDir::new();
-    let result = in_workspace(workspace.path(), || {
+    let (result, session, task_id, turn_id) = in_workspace(workspace.path(), || {
         let (mut session, task_id, turn_id) = running_turn();
         let mut source = OllamaDecisionSource::with_endpoint(
             "mock-model",
             1,
             SocketAddr::from(([127, 0, 0, 1], 0)),
         );
-        run_goal_turn_with_budget(
+        let result = run_goal_turn_with_budget(
             &mut session,
             task_id,
             turn_id,
             "Fail when the service cannot be reached",
             1,
             &mut source,
-        )
-    })
-    .expect("connection failure is recorded in the turn");
+        );
+        (result, session, task_id, turn_id)
+    });
+    let result = result.expect("connection failure is recorded in the turn");
     assert_eq!(result.stop_reason(), GoalTurnStopReason::ActionFailed);
+    assert_failed_turn(&result, &session, task_id, turn_id);
     assert!(matches!(
         result.outcome(),
         Some(TurnOutcome::Failure { .. })
