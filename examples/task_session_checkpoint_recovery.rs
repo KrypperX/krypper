@@ -89,6 +89,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let first_file_before_restore = fs::read_to_string(workspace.path().join(FIRST_FILE))?;
     let checkpoint_bytes = session.export_checkpoint()?;
+    let checkpoint_path = workspace.path().join("task-session.checkpoint.json");
+    fs::write(&checkpoint_path, &checkpoint_bytes)?;
     println!(
         "First turn state: {}",
         session
@@ -99,11 +101,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             .state()
     );
     println!(
-        "Checkpoint retained in caller memory: {} bytes",
-        checkpoint_bytes.len()
+        "Caller wrote {} checkpoint bytes to {}",
+        checkpoint_bytes.len(),
+        checkpoint_path.display()
     );
 
     drop(session);
+    let checkpoint_bytes = fs::read(&checkpoint_path)?;
     let mut resumed = TaskSession::restore_checkpoint(&checkpoint_bytes)?;
     let first_file_after_restore = fs::read_to_string(workspace.path().join(FIRST_FILE))?;
     if first_file_after_restore != first_file_before_restore {
