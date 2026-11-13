@@ -651,6 +651,38 @@ fn task_shows_ordered_observations_completion_and_metadata_history() {
 }
 
 #[test]
+fn task_cli_uses_the_selected_workspace_path() {
+    let directory = TempDir::new();
+    let caller_directory = directory.path().join("caller directory");
+    let workspace = directory.path().join("selected workspace");
+    fs::create_dir(&caller_directory).unwrap();
+    fs::create_dir(&workspace).unwrap();
+    let workspace_argument = workspace.to_str().expect("UTF-8 workspace path");
+
+    let output = run_with_input(
+        &caller_directory,
+        &[
+            "task",
+            "--goal",
+            "Create a file in the selected workspace",
+            "--max-actions",
+            "2",
+            "--workspace",
+            workspace_argument,
+        ],
+        b"create selected.txt created\ncomplete saved\n",
+    );
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stdout(&output).contains("Task outcome: succeeded"));
+    assert_eq!(
+        fs::read_to_string(workspace.join("selected.txt")).unwrap(),
+        "created"
+    );
+    assert!(!caller_directory.join("selected.txt").exists());
+}
+
+#[test]
 fn task_mkdir_creates_one_directory_for_existing_file_actions() {
     let directory = TempDir::new();
     let payload = "private directory payload";
@@ -1799,6 +1831,9 @@ fn task_help_lists_continue_and_describes_the_whole_task_budget() {
     assert!(stdout(&output).contains("reusable quoted path tokens"));
     assert!(stdout(&output).contains("action limit for the whole task"));
     assert!(stdout(&output).contains("--model NAME"));
+    assert!(stdout(&output).contains("--workspace PATH"));
+    assert!(stdout(&output).contains("Without --workspace"));
+    assert!(stdout(&output).contains("--workspace PATH works with --model NAME"));
     assert!(stdout(&output).contains("127.0.0.1:11434"));
     assert!(stdout(&output).contains("Without --model, task remains caller-directed"));
     assert!(stdout(&output).contains("Read observations can include workspace file text."));
