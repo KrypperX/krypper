@@ -15,6 +15,7 @@ cargo run -- list docs
 cargo run -- write notes/today.txt "Remember to review the change."
 cargo run -- write --stdin notes/from-pipe.txt < notes/draft.txt
 cargo run -- task --goal "Summarize the brief" --max-actions 3
+mkdir -p "task workspace"
 cargo run -- task --goal "Summarize the brief" --max-actions 3 --workspace "task workspace"
 ```
 
@@ -160,6 +161,7 @@ Combine `--workspace PATH` with `--model NAME` to keep model-selected actions
 inside the selected directory. The workspace path may contain spaces:
 
 ```sh
+mkdir -p "task workspace"
 cargo run -- task --goal "Read the brief and create a short summary file" \
   --max-actions 6 --workspace "task workspace" --model qwen3
 ```
