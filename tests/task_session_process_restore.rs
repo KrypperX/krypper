@@ -52,7 +52,12 @@ fn process_example_child() {
         args.push(env::var_os(CHILD_CONTENT).expect("resume content is configured"));
     }
 
+    let original_directory = env::current_dir().expect("test process has a current directory");
     let result = process_example::run(args);
+    assert_eq!(
+        env::current_dir().expect("test process has a current directory"),
+        original_directory
+    );
     if env::var(CHILD_EXPECT_ERROR).is_ok_and(|value| value == "1") {
         assert!(
             result.is_err(),
@@ -166,6 +171,7 @@ fn run_child(
     let mut command = Command::new(env::current_exe().expect("integration test executable"));
     command
         .args(["--exact", "process_example_child", "--nocapture"])
+        .current_dir(env::temp_dir())
         .env(CHILD_MODE, mode)
         .env(CHILD_STATE_DIR, state_dir)
         .env(CHILD_EXPECT_ERROR, if expect_error { "1" } else { "0" });
