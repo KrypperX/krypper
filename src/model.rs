@@ -95,10 +95,8 @@ pub(crate) fn validate_model_name(name: &str) -> Result<(), &'static str> {
     if name.chars().any(char::is_control) {
         return Err("model name must not contain control characters");
     }
-    if name
-        .rsplit_once(':')
-        .is_some_and(|(_, tag)| tag.eq_ignore_ascii_case("cloud"))
-    {
+    let lower_name = name.to_ascii_lowercase();
+    if lower_name.ends_with(":cloud") || lower_name.ends_with("-cloud") {
         return Err("cloud models are not supported; choose a locally installed model");
     }
     Ok(())
