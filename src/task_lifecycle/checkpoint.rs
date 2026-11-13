@@ -420,7 +420,8 @@ impl TaskSession {
     /// bindings, and metadata-only activity summaries. They do not include workspace action
     /// inputs or observations. The caller decides whether and where to store the bytes. Export
     /// fails while any turn is running, when tasks are bound to different workspaces, or when the
-    /// encoded checkpoint exceeds 1 MiB. Restore the bytes from the same current directory.
+    /// encoded checkpoint exceeds 1 MiB. Restore the bytes from the same current directory, or
+    /// use [`Self::restore_checkpoint_in_workspace`] to supply the captured workspace explicitly.
     pub fn export_checkpoint(&self) -> Result<Vec<u8>, TaskSessionCheckpointError> {
         if checkpoint_text_size(self).is_none_or(|size| size > MAX_TASK_SESSION_CHECKPOINT_BYTES) {
             return Err(TaskSessionCheckpointError::TooLarge);
@@ -471,6 +472,25 @@ impl TaskSession {
     /// rebuilds in-memory state; it never repeats a workspace action. A running task with no
     /// running turn can be restored and continued with a newly created turn.
     pub fn restore_checkpoint(bytes: &[u8]) -> Result<Self, TaskSessionCheckpointError> {
+        Self::restore_checkpoint_for_workspace(bytes, None)
+    }
+
+    /// Restores a checkpoint against an explicitly supplied workspace path.
+    ///
+    /// The supplied path must resolve to the checkpoint's recorded canonical path and device/inode
+    /// identity. This method does not change the process current directory. It rebuilds in-memory
+    /// state only and never repeats a workspace action.
+    pub fn restore_checkpoint_in_workspace(
+        bytes: &[u8],
+        workspace_path: impl AsRef<Path>,
+    ) -> Result<Self, TaskSessionCheckpointError> {
+        Self::restore_checkpoint_for_workspace(bytes, Some(workspace_path.as_ref()))
+    }
+
+    fn restore_checkpoint_for_workspace(
+        bytes: &[u8],
+        workspace_path: Option<&Path>,
+    ) -> Result<Self, TaskSessionCheckpointError> {
         if bytes.len() > MAX_TASK_SESSION_CHECKPOINT_BYTES {
             return Err(TaskSessionCheckpointError::TooLarge);
         }
@@ -485,12 +505,16 @@ impl TaskSession {
         let mut identifiers = HashSet::with_capacity(checkpoint.tasks.len() + 1);
         let session_id = claim_checkpoint_id(&checkpoint.session_id, &mut identifiers)?;
         let current_workspace =
-            if checkpoint.tasks.is_empty() {
-                None
-            } else {
-                Some(capture_workspace_root().map_err(|_| {
+            match workspace_path {
+                Some(workspace_path) => {
+                    Some(capture_workspace_root_at(workspace_path).map_err(|_| {
+                        TaskSessionCheckpointError::WorkspaceUnavailable { task_id: None }
+                    })?)
+                }
+                None if checkpoint.tasks.is_empty() => None,
+                None => Some(capture_workspace_root().map_err(|_| {
                     TaskSessionCheckpointError::WorkspaceUnavailable { task_id: None }
-                })?)
+                })?),
             };
         let mut tasks = Vec::with_capacity(checkpoint.tasks.len());
         for checkpoint_task in checkpoint.tasks {

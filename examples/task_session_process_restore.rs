@@ -158,8 +158,7 @@ fn resume(
     let state_root = fs::canonicalize(state_directory)?;
     let workspace = fs::canonicalize(state_root.join(WORKSPACE_DIRECTORY))?;
     let checkpoint_bytes = fs::read(state_root.join(CHECKPOINT_FILE))?;
-    let _current_directory = CurrentDirectory::enter(&workspace)?;
-    let mut session = TaskSession::restore_checkpoint(&checkpoint_bytes)?;
+    let mut session = TaskSession::restore_checkpoint_in_workspace(&checkpoint_bytes, &workspace)?;
     let (task_id, first_turn_id) = restored_first_turn(&session)?;
 
     let second_turn_id = begin_turn(&mut session, task_id)?;
