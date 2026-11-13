@@ -128,6 +128,52 @@ its line ending when present. Oversized lines fail the active turn and task
 before parsing or workspace access. This limit leaves room for the command and
 a relative path alongside a maximum-size create body.
 
+## Model-selected task actions (opt in)
+
+The task CLI can ask a local Ollama model to choose the next bounded action.
+Install Ollama using its [official instructions](https://ollama.com/download),
+then pull a locally served model that supports tool calls. Ollama's tool-call
+examples use `qwen3`:
+
+```sh
+ollama pull qwen3
+ollama serve
+```
+
+Run `ollama serve` in a terminal only when the Ollama service is not already
+running. The first pull downloads the model; the task command itself uses the
+local service at `http://127.0.0.1:11434/api/chat`.
+
+Model selection is explicitly opt in with `--model NAME`:
+
+```sh
+cargo run -- task --goal "Read the brief and create a short summary file" \
+  --max-actions 6 --model qwen3
+```
+
+Without `--model`, `task` stays caller-directed, remains offline, and does not
+contact Ollama. Model mode uses the same action budget as caller-directed mode;
+completion also uses one action. A missing local service, failed request,
+invalid response, unsupported tool call, or exhausted budget fails the task
+with visible task and turn outcomes. Krypper does not fall back to caller input
+or another model. Model names ending in `:cloud` or `-cloud` are rejected so
+workspace observations stay with local inference.
+
+Each model request includes the selected model name, task goal, supported tool
+schemas, remaining action budget, and prior workspace observations. Read
+observations can include full workspace file text; range reads include their
+excerpt. Directory listings, search locations, and action outcomes are also
+sent to the local service when model mode is enabled. Requests and accumulated
+observations have size limits. No remote endpoint or cloud-provider option is
+available.
+
+The adapter exposes only the existing task workspace actions and task
+completion. Every selected action still passes through Krypper's existing
+workspace containment, symlink, UTF-8, size, lifecycle, and action-budget
+checks; model output cannot request shell or process execution. See Ollama's
+[tool-calling API example](https://github.com/ollama/ollama/blob/main/docs/capabilities/tool-calling.mdx)
+for its local chat tool-call format.
+
 ## Bounded task-turn example
 
 The task-turn library API runs in-process and offline. Callers supply the

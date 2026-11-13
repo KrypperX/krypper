@@ -1798,6 +1798,10 @@ fn task_help_lists_continue_and_describes_the_whole_task_budget() {
     assert!(stdout(&output).contains("JSON double-quoted string"));
     assert!(stdout(&output).contains("reusable quoted path tokens"));
     assert!(stdout(&output).contains("action limit for the whole task"));
+    assert!(stdout(&output).contains("--model NAME"));
+    assert!(stdout(&output).contains("127.0.0.1:11434"));
+    assert!(stdout(&output).contains("Without --model, task remains caller-directed"));
+    assert!(stdout(&output).contains("Read observations can include workspace file text."));
 }
 
 #[test]
