@@ -182,11 +182,12 @@ cargo run --example task_session_process_restore --locked -- resume "$STATE_DIR"
 ```
 
 Keep the same `workspace` directory in place between invocations so restore
-can validate the captured workspace identity. Resume restores lifecycle state
-without replaying the first file action, then creates only the file and content
-selected in its command. The caller controls the state directory and checkpoint
-location and is responsible for cleanup; the example does not delete caller
-state.
+can validate the captured workspace identity. Resume supplies that workspace
+path explicitly, so it can run from a different process current directory
+without changing it. Resume restores lifecycle state without replaying the
+first file action, then creates only the file and content selected in its
+command. The caller controls the state directory and checkpoint location and
+is responsible for cleanup; the example does not delete caller state.
 
 ## Task lifecycle
 
@@ -208,10 +209,14 @@ store the bytes; export does not write a file.
 
 `TaskSession::restore_checkpoint(&bytes)` validates the version, size, IDs,
 histories, outcomes, activity summaries, and workspace binding before returning
-a session. Restore must run from the same captured workspace as the checkpoint's
-tasks; a different workspace or a replacement directory at the same path is
-rejected. It rebuilds in-memory lifecycle state and never replays workspace actions.
-A restored running task with no running turn can create a fresh turn.
+a session. This existing API uses the process current directory as the workspace.
+`TaskSession::restore_checkpoint_in_workspace(&bytes, workspace_path)` accepts
+the captured workspace explicitly, allowing restore from a different process
+current directory without changing it. Both APIs validate the recorded
+canonical path and device/inode identity for task-bearing checkpoints; a
+missing, different, or replaced workspace is rejected. Restore rebuilds
+in-memory lifecycle state and never replays workspace actions. A restored
+running task with no running turn can create a fresh turn.
 
 ## Checks
 
