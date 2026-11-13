@@ -215,6 +215,32 @@ fn task_session_checkpoint_restore_rejects_a_replaced_workspace_at_the_same_path
 }
 
 #[test]
+fn task_session_checkpoint_export_rejects_replaced_workspace_identity_at_the_same_path() {
+    let parent = TempDir::new();
+    let workspace_path = parent.path().join("workspace");
+    let replacement_path = parent.path().join("replacement");
+    let moved_path = parent.path().join("moved-workspace");
+    fs::create_dir(&workspace_path).unwrap();
+    fs::create_dir(&replacement_path).unwrap();
+
+    let mut session = TaskSession::new();
+    with_current_dir(&workspace_path, || {
+        session.create_task("original workspace identity");
+    });
+
+    fs::rename(&workspace_path, &moved_path).unwrap();
+    fs::rename(&replacement_path, &workspace_path).unwrap();
+    with_current_dir(&workspace_path, || {
+        session.create_task("replacement workspace identity");
+    });
+
+    assert!(matches!(
+        session.export_checkpoint(),
+        Err(TaskSessionCheckpointError::WorkspaceMismatch { .. })
+    ));
+}
+
+#[test]
 fn task_session_checkpoint_export_rejects_tasks_bound_to_different_workspaces() {
     let first_workspace = TempDir::new();
     let second_workspace = TempDir::new();

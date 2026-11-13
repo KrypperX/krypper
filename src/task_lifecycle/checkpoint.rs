@@ -427,8 +427,14 @@ impl TaskSession {
         }
         let mut tasks = Vec::with_capacity(self.tasks.len());
         let mut workspace_path: Option<Vec<u8>> = None;
+        let mut workspace_identity: Option<(u64, u64)> = None;
         for task in &self.tasks {
             let workspace_root = task.workspace_root.as_ref().map_err(|_| {
+                TaskSessionCheckpointError::WorkspaceUnavailable {
+                    task_id: Some(task.id),
+                }
+            })?;
+            let task_workspace_identity = workspace_root.identity().map_err(|_| {
                 TaskSessionCheckpointError::WorkspaceUnavailable {
                     task_id: Some(task.id),
                 }
@@ -437,11 +443,13 @@ impl TaskSession {
             if workspace_path
                 .as_deref()
                 .is_some_and(|path| path != task_workspace_path)
+                || workspace_identity.is_some_and(|identity| identity != task_workspace_identity)
             {
                 return Err(TaskSessionCheckpointError::WorkspaceMismatch { task_id: task.id });
             }
             workspace_path.get_or_insert_with(|| task_workspace_path.to_vec());
-            tasks.push(checkpoint_task(task)?);
+            workspace_identity.get_or_insert(task_workspace_identity);
+            tasks.push(checkpoint_task(task, task_workspace_identity)?);
         }
         let checkpoint = CheckpointSession {
             version: TASK_SESSION_CHECKPOINT_VERSION,
@@ -523,18 +531,17 @@ impl TaskSession {
     }
 }
 
-fn checkpoint_task(task: &Task) -> Result<CheckpointTask, TaskSessionCheckpointError> {
+fn checkpoint_task(
+    task: &Task,
+    workspace_identity: (u64, u64),
+) -> Result<CheckpointTask, TaskSessionCheckpointError> {
     validate_restored_task(task)?;
     let workspace_root = task.workspace_root.as_ref().map_err(|_| {
         TaskSessionCheckpointError::WorkspaceUnavailable {
             task_id: Some(task.id),
         }
     })?;
-    let (workspace_device, workspace_inode) = workspace_root.identity().map_err(|_| {
-        TaskSessionCheckpointError::WorkspaceUnavailable {
-            task_id: Some(task.id),
-        }
-    })?;
+    let (workspace_device, workspace_inode) = workspace_identity;
 
     Ok(CheckpointTask {
         id: task.id.to_string(),
