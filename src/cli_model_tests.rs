@@ -60,6 +60,7 @@ struct MockResponse {
 fn tool_response(name: &str, arguments: Value) -> String {
     json!({
         "message": {
+            "role": "assistant",
             "tool_calls": [{
                 "function": { "name": name, "arguments": arguments }
             }]
