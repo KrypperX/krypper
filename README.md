@@ -156,7 +156,8 @@ contact Ollama. Model mode uses the same action budget as caller-directed mode;
 completion also uses one action. A missing local service, failed request,
 invalid response, unsupported tool call, or exhausted budget fails the task
 with visible task and turn outcomes. Krypper does not fall back to caller input
-or another model. Model names ending in `:cloud` are rejected.
+or another model. Model names ending in `:cloud` or `-cloud` are rejected so
+workspace observations stay with local inference.
 
 Each model request includes the selected model name, task goal, supported tool
 schemas, remaining action budget, and prior workspace observations. Read
