@@ -1,6 +1,9 @@
 #[path = "task_lifecycle/checkpoint.rs"]
 mod checkpoint;
 
+use krypper::agent_loop::{
+    run_goal_turn_with_budget, GoalTurnStopReason, WorkspaceAction, WorkspaceObservation,
+};
 use krypper::task_lifecycle::{
     Task, TaskEvent, TaskHistoryEvent, TaskHistoryTransition, TaskSession, TaskState,
     TurnActivitySummary, TurnCompletionError, TurnEvent, TurnOutcome, TurnState,
@@ -59,6 +62,105 @@ fn with_current_dir<T>(path: &Path, operation: impl FnOnce() -> T) -> T {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _restore = RestoreCurrentDir::enter(path);
     operation()
+}
+
+#[test]
+fn explicit_workspace_session_uses_the_selected_root_without_changing_current_directory() {
+    let _lock = CURRENT_DIR_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temporary = TempDir::new();
+    let workspace = temporary.path().join("selected workspace");
+    fs::create_dir(&workspace).unwrap();
+    fs::write(workspace.join("brief.txt"), "selected workspace contents").unwrap();
+    let original_directory = std::env::current_dir().unwrap();
+    assert_ne!(fs::canonicalize(&workspace).unwrap(), original_directory);
+
+    let mut session = TaskSession::new_in_workspace(&workspace).unwrap();
+    let (task_id, turn_id) = running_turn(&mut session);
+    let contents = session.read_workspace_file(task_id, turn_id, Path::new("brief.txt"));
+
+    assert_eq!(contents, Ok("selected workspace contents".to_owned()));
+    assert_eq!(std::env::current_dir().unwrap(), original_directory);
+}
+
+#[test]
+fn explicit_workspace_session_keeps_its_root_for_bounded_turns_after_directory_changes() {
+    let _lock = CURRENT_DIR_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temporary = TempDir::new();
+    let workspace = temporary.path().join("selected workspace");
+    let other_directory = temporary.path().join("other directory");
+    fs::create_dir(&workspace).unwrap();
+    fs::create_dir(&other_directory).unwrap();
+    let original_directory = std::env::current_dir().unwrap();
+    let mut session = TaskSession::new_in_workspace(&workspace).unwrap();
+    let (task_id, turn_id) = running_turn(&mut session);
+    let mut actions = [
+        WorkspaceAction::CreateFile {
+            path: PathBuf::from("result.txt"),
+            contents: "written to the selected workspace".to_owned(),
+        },
+        WorkspaceAction::Complete {
+            result: "created result.txt".to_owned(),
+        },
+    ]
+    .into_iter();
+    let mut decisions =
+        |_: &str, _: &[WorkspaceObservation]| actions.next().expect("two decisions are available");
+
+    let restore_directory = RestoreCurrentDir::enter(&other_directory);
+    let result = run_goal_turn_with_budget(
+        &mut session,
+        task_id,
+        turn_id,
+        "Create result.txt in the selected workspace",
+        2,
+        &mut decisions,
+    )
+    .unwrap();
+    drop(restore_directory);
+
+    assert_eq!(result.stop_reason(), GoalTurnStopReason::Completed);
+    assert_eq!(
+        fs::read_to_string(workspace.join("result.txt")).unwrap(),
+        "written to the selected workspace"
+    );
+    assert!(!other_directory.join("result.txt").exists());
+    assert_eq!(std::env::current_dir().unwrap(), original_directory);
+}
+
+#[test]
+fn explicit_workspace_session_rejects_missing_and_non_directory_paths() {
+    let temporary = TempDir::new();
+    let missing = temporary.path().join("missing workspace");
+    let file = temporary.path().join("workspace file");
+    fs::write(&file, "not a directory").unwrap();
+
+    let missing_error = TaskSession::new_in_workspace(&missing).unwrap_err();
+    let file_error = TaskSession::new_in_workspace(&file).unwrap_err();
+
+    assert!(missing_error.to_string().contains("workspace path"));
+    assert!(file_error.to_string().contains("workspace path"));
+    assert!(!missing.exists());
+    assert_eq!(fs::read_to_string(file).unwrap(), "not a directory");
+}
+
+#[test]
+fn default_session_keeps_capturing_the_current_directory_when_each_task_is_created() {
+    let temporary = TempDir::new();
+    fs::write(
+        temporary.path().join("note.txt"),
+        "default workspace contents",
+    )
+    .unwrap();
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) = with_current_dir(temporary.path(), || running_turn(&mut session));
+
+    let contents = session.read_workspace_file(task_id, turn_id, Path::new("note.txt"));
+
+    assert_eq!(contents, Ok("default workspace contents".to_owned()));
 }
 
 fn running_turn(session: &mut TaskSession) -> (Uuid, Uuid) {

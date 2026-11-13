@@ -2,6 +2,7 @@ use super::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::os::unix::ffi::OsStrExt;
+use std::sync::Arc;
 
 /// Maximum encoded size accepted for a TaskSession checkpoint.
 pub const MAX_TASK_SESSION_CHECKPOINT_BYTES: usize = 1024 * 1024;
@@ -550,6 +551,7 @@ impl TaskSession {
 
         Ok(Self {
             id: session_id,
+            workspace_root: None,
             tasks,
         })
     }
@@ -714,7 +716,7 @@ impl CheckpointTask {
         Ok(Task {
             id: task_id,
             description: self.description,
-            workspace_root: Ok(workspace_root),
+            workspace_root: Ok(Arc::new(workspace_root)),
             state: self.state.into(),
             events,
             history,

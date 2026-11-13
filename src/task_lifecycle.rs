@@ -6,6 +6,7 @@ use crate::file_safety::{
 use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use uuid::Uuid;
 
 mod checkpoint;
@@ -886,7 +887,7 @@ impl Turn {
 pub struct Task {
     id: Uuid,
     description: String,
-    workspace_root: Result<WorkspaceRoot, String>,
+    workspace_root: Result<Arc<WorkspaceRoot>, String>,
     state: TaskState,
     events: Vec<TaskEvent>,
     history: Vec<TaskHistoryEvent>,
@@ -899,7 +900,13 @@ impl Task {
     ///
     /// Workspace operations report an error if that directory cannot be resolved.
     pub fn new(description: impl Into<String>) -> Self {
-        let workspace_root = capture_workspace_root();
+        Self::new_with_workspace_root(description, capture_workspace_root().map(Arc::new))
+    }
+
+    fn new_with_workspace_root(
+        description: impl Into<String>,
+        workspace_root: Result<Arc<WorkspaceRoot>, String>,
+    ) -> Self {
         Self {
             id: Uuid::new_v4(),
             description: description.into(),
@@ -1186,16 +1193,70 @@ impl Task {
 #[derive(Debug)]
 pub struct TaskSession {
     id: Uuid,
+    workspace_root: Option<Arc<WorkspaceRoot>>,
     tasks: Vec<Task>,
 }
+
+/// A requested TaskSession workspace could not be captured safely.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskSessionWorkspaceError(String);
+
+impl fmt::Display for TaskSessionWorkspaceError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "unable to capture task session workspace: {}",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for TaskSessionWorkspaceError {}
 
 impl TaskSession {
     /// Creates an empty task session.
     pub fn new() -> Self {
         Self {
             id: Uuid::new_v4(),
+            workspace_root: None,
             tasks: Vec::new(),
         }
+    }
+
+    /// Creates an empty task session bound to an explicitly selected workspace directory.
+    ///
+    /// The directory is canonicalized and captured with the same filesystem identity and path
+    /// containment protections used by task workspace actions. Tasks created by this session keep
+    /// using that captured directory even if the process current directory later changes. This
+    /// opt-in constructor does not change the process current directory. [`Self::new`] retains its
+    /// existing behavior of capturing the current directory when each task is created.
+    ///
+    /// # Errors
+    ///
+    /// Returns a clear error if the path cannot be resolved, opened, or verified as a directory.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use krypper::task_lifecycle::TaskSession;
+    ///
+    /// fn main() -> Result<(), Box<dyn std::error::Error>> {
+    ///     let mut session = TaskSession::new_in_workspace(".")?;
+    ///     let task_id = session.create_task("Summarize the selected workspace").id();
+    ///     assert!(session.get_task(task_id).is_some());
+    ///     Ok(())
+    /// }
+    /// ```
+    pub fn new_in_workspace(
+        workspace_path: impl AsRef<Path>,
+    ) -> Result<Self, TaskSessionWorkspaceError> {
+        let workspace_root = capture_workspace_root_at(workspace_path.as_ref())
+            .map_err(TaskSessionWorkspaceError)?;
+        Ok(Self {
+            id: Uuid::new_v4(),
+            workspace_root: Some(Arc::new(workspace_root)),
+            tasks: Vec::new(),
+        })
     }
 
     /// Returns the stable session identifier.
@@ -1205,7 +1266,12 @@ impl TaskSession {
 
     /// Creates and stores a pending task, returning it for immediate use.
     pub fn create_task(&mut self, description: impl Into<String>) -> &mut Task {
-        self.tasks.push(Task::new(description));
+        let workspace_root = match &self.workspace_root {
+            Some(root) => Ok(Arc::clone(root)),
+            None => capture_workspace_root().map(Arc::new),
+        };
+        self.tasks
+            .push(Task::new_with_workspace_root(description, workspace_root));
         self.tasks
             .last_mut()
             .expect("invariant: a task was just appended")
