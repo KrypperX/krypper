@@ -256,7 +256,7 @@ fn task_session_checkpoint_export_rejects_tasks_bound_to_different_workspaces() 
 }
 
 #[test]
-fn restoring_a_checkpoint_does_not_repeat_workspace_file_creation() {
+fn restoring_a_checkpoint_preserves_the_first_action_and_allows_a_fresh_selected_turn() {
     let workspace = TempDir::new();
     let payload = "checkpoint-create-payload-sentinel";
     with_current_dir(workspace.path(), || {
@@ -279,11 +279,69 @@ fn restoring_a_checkpoint_does_not_repeat_workspace_file_creation() {
         assert!(!bytes
             .windows(payload.len())
             .any(|window| window == payload.as_bytes()));
-        let restored = TaskSession::restore_checkpoint(&bytes).unwrap();
+        let mut restored = TaskSession::restore_checkpoint(&bytes).unwrap();
         assert_eq!(
             fs::read_to_string(workspace.path().join("created.txt")).unwrap(),
             payload
         );
+        assert!(!workspace.path().join("selected-after-restore.txt").exists());
         assert_eq!(restored.list_tasks().len(), 1);
+        assert_eq!(
+            restored
+                .get_task(task_id)
+                .unwrap()
+                .get_turn(turn_id)
+                .unwrap()
+                .state(),
+            TurnState::Succeeded
+        );
+
+        let new_turn_id = restored
+            .get_task_mut(task_id)
+            .unwrap()
+            .create_turn()
+            .unwrap();
+        restored
+            .get_task_mut(task_id)
+            .unwrap()
+            .transition_turn(new_turn_id, TurnState::Running)
+            .unwrap();
+        restored
+            .create_workspace_file(
+                task_id,
+                new_turn_id,
+                Path::new("selected-after-restore.txt"),
+                "caller-selected action",
+            )
+            .unwrap();
+        restored
+            .complete_turn(
+                task_id,
+                new_turn_id,
+                TurnOutcome::Success {
+                    result: "selected action complete".to_owned(),
+                },
+            )
+            .unwrap();
+        restored
+            .get_task_mut(task_id)
+            .unwrap()
+            .transition(TaskState::Succeeded)
+            .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(workspace.path().join("created.txt")).unwrap(),
+            payload
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.path().join("selected-after-restore.txt")).unwrap(),
+            "caller-selected action"
+        );
+        let task = restored.get_task(task_id).unwrap();
+        assert_eq!(task.state(), TaskState::Succeeded);
+        assert_eq!(
+            task.get_turn(new_turn_id).unwrap().state(),
+            TurnState::Succeeded
+        );
     });
 }

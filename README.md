@@ -146,6 +146,19 @@ cargo run --example bounded_task_turn --locked
 
 Command and input errors print usage and a diagnostic and exit with status 2.
 
+The checkpoint recovery example completes one turn after creating a file,
+exports checkpoint bytes into a caller-owned `Vec<u8>`, then drops and restores
+the session in the same temporary workspace. Restore leaves the first file
+unchanged; the caller explicitly selects the file created by the fresh turn.
+The checkpoint bytes stay in memory and are not written to disk.
+
+Build and run it from the repository root:
+
+```sh
+cargo build --example task_session_checkpoint_recovery --locked
+cargo run --example task_session_checkpoint_recovery --locked
+```
+
 ## Task lifecycle
 
 `krypper::task_lifecycle` provides `Task`, `TaskSession`, `TaskState`, `Turn`,
@@ -166,8 +179,9 @@ store the bytes; export does not write a file.
 
 `TaskSession::restore_checkpoint(&bytes)` validates the version, size, IDs,
 histories, outcomes, activity summaries, and workspace binding before returning
-a session. Restore must run from the same current directory as the checkpoint's
-tasks. It rebuilds in-memory lifecycle state and never replays workspace actions.
+a session. Restore must run from the same captured workspace as the checkpoint's
+tasks; a different workspace or a replacement directory at the same path is
+rejected. It rebuilds in-memory lifecycle state and never replays workspace actions.
 A restored running task with no running turn can create a fresh turn.
 
 ## Checks
