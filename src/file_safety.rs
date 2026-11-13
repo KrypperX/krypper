@@ -33,6 +33,24 @@ pub(crate) struct WorkspaceRoot {
     path: PathBuf,
 }
 
+impl WorkspaceRoot {
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub(crate) fn identity(&self) -> io::Result<(u64, u64)> {
+        let metadata = fstat(self.descriptor.as_raw_fd())?;
+        Ok((metadata.st_dev as u64, metadata.st_ino as u64))
+    }
+
+    pub(crate) fn duplicate(&self) -> io::Result<Self> {
+        Ok(Self {
+            descriptor: self.descriptor.try_clone()?,
+            path: self.path.clone(),
+        })
+    }
+}
+
 pub(crate) fn capture_workspace_root() -> Result<WorkspaceRoot, String> {
     let descriptor = open_current_directory()
         .map_err(|error| format!("unable to open current directory: {error}"))?;
