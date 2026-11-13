@@ -1,10 +1,15 @@
 use crate::agent_loop::{
-    run_goal_turn_with_budget, GoalTurnStopReason, WorkspaceAction, WorkspaceObservation,
+    run_goal_turn_with_budget, BoundedDecisionSource, GoalTurnStopReason, WorkspaceAction,
+    WorkspaceObservation,
 };
 use crate::file_safety::{create_text_file, list_directory, read_text_file};
+use crate::model::{
+    validate_model_name, workspace_action_name, OllamaDecisionSource, OLLAMA_ADDRESS,
+};
 use crate::task_lifecycle::{TaskSession, TaskState, TurnOutcome, TurnState};
 use std::ffi::{OsStr, OsString};
 use std::io::{self, BufRead, BufReader, Read, Write};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 const MAX_FILE_SIZE: usize = 1024 * 1024;
@@ -76,6 +81,16 @@ fn run_task(
     output: &mut dyn Write,
     error: &mut dyn Write,
 ) -> io::Result<i32> {
+    run_task_with_endpoint(arguments, input, output, error, OLLAMA_ADDRESS)
+}
+
+fn run_task_with_endpoint(
+    arguments: &[OsString],
+    input: &mut dyn Read,
+    output: &mut dyn Write,
+    error: &mut dyn Write,
+    model_endpoint: SocketAddr,
+) -> io::Result<i32> {
     if contains_help_before_terminator(arguments) {
         write_task_help(output)?;
         return Ok(0);
@@ -83,6 +98,7 @@ fn run_task(
 
     let mut goal = None;
     let mut max_actions = None;
+    let mut model = None;
     let mut position = 0;
     while let Some(argument) = arguments.get(position) {
         let Some(option) = argument.to_str() else {
@@ -136,6 +152,23 @@ fn run_task(
                 max_actions = Some(limit);
                 position += 1;
             }
+            "--model" => {
+                if model.is_some() {
+                    return usage_error(error, Some("task"), "--model may be provided only once");
+                }
+                let Some(value) = arguments.get(position) else {
+                    return usage_error(
+                        error,
+                        Some("task"),
+                        "the following argument is required: --model",
+                    );
+                };
+                let Some(value) = value.to_str() else {
+                    return usage_error(error, Some("task"), "model name must be valid UTF-8");
+                };
+                model = Some(value.to_owned());
+                position += 1;
+            }
             _ => {
                 return usage_error(
                     error,
@@ -163,7 +196,14 @@ fn run_task(
             "the following argument is required: --max-actions",
         );
     };
+    if let Some(model) = model.as_deref() {
+        if let Err(message) = validate_model_name(model) {
+            return usage_error(error, Some("task"), message);
+        }
+    }
 
+    let mut model_source =
+        model.map(|name| OllamaDecisionSource::with_endpoint(name, max_actions, model_endpoint));
     let mut session = TaskSession::new();
     let task_id = session.create_task(goal.clone()).id();
     let mut turn_id = {
@@ -188,64 +228,88 @@ fn run_task(
     loop {
         let mut displayed_observations = 0;
         let result = {
-            let mut decision_source = |_goal: &str, observations: &[WorkspaceObservation]| {
-                while displayed_observations < observations.len() {
-                    if let Err(cause) = write_observation(
-                        output,
-                        observation_number + 1,
-                        &observations[displayed_observations],
-                    ) {
+            let mut decision_source =
+                |decision_goal: &str, observations: &[WorkspaceObservation]| {
+                    while displayed_observations < observations.len() {
+                        if let Err(cause) = write_observation(
+                            output,
+                            observation_number + 1,
+                            &observations[displayed_observations],
+                        ) {
+                            stream_error = Some(cause);
+                            return WorkspaceAction::Unsupported {
+                                action: "unable to display action observation".to_owned(),
+                            };
+                        }
+                        displayed_observations += 1;
+                        observation_number += 1;
+                    }
+                    if let Err(cause) = output.flush() {
                         stream_error = Some(cause);
                         return WorkspaceAction::Unsupported {
                             action: "unable to display action observation".to_owned(),
                         };
                     }
-                    displayed_observations += 1;
-                    observation_number += 1;
-                }
-                if let Err(cause) = output.flush() {
-                    stream_error = Some(cause);
-                    return WorkspaceAction::Unsupported {
-                        action: "unable to display action observation".to_owned(),
-                    };
-                }
 
-                decisions += 1;
-                if let Err(cause) =
-                    write!(error, "action {decisions}/{max_actions}> ").and_then(|()| error.flush())
-                {
-                    stream_error = Some(cause);
-                    return WorkspaceAction::Unsupported {
-                        action: "unable to display action prompt".to_owned(),
-                    };
-                }
+                    decisions += 1;
+                    if let Some(model_source) = model_source.as_mut() {
+                        if let Err(cause) =
+                            writeln!(error, "model decision {decisions}/{max_actions}")
+                                .and_then(|()| error.flush())
+                        {
+                            stream_error = Some(cause);
+                            return WorkspaceAction::Unsupported {
+                                action: "unable to display model decision progress".to_owned(),
+                            };
+                        }
+                        let action = model_source.choose_action(decision_goal, observations);
+                        if let Err(cause) = writeln!(
+                            output,
+                            "Model selected action: {}",
+                            workspace_action_name(&action)
+                        ) {
+                            stream_error = Some(cause);
+                            return WorkspaceAction::Unsupported {
+                                action: "unable to display model action".to_owned(),
+                            };
+                        }
+                        return action;
+                    }
+                    if let Err(cause) = write!(error, "action {decisions}/{max_actions}> ")
+                        .and_then(|()| error.flush())
+                    {
+                        stream_error = Some(cause);
+                        return WorkspaceAction::Unsupported {
+                            action: "unable to display action prompt".to_owned(),
+                        };
+                    }
 
-                line.clear();
-                match (&mut reader)
-                    .take(MAX_TASK_ACTION_LINE_BYTES as u64 + 1)
-                    .read_until(b'\n', &mut line)
-                {
-                    Ok(0) => WorkspaceAction::Unsupported {
-                        action: "end of input before the next action".to_owned(),
-                    },
-                    Ok(bytes_read) if bytes_read > MAX_TASK_ACTION_LINE_BYTES => {
-                        WorkspaceAction::Unsupported {
-                            action: format!(
+                    line.clear();
+                    match (&mut reader)
+                        .take(MAX_TASK_ACTION_LINE_BYTES as u64 + 1)
+                        .read_until(b'\n', &mut line)
+                    {
+                        Ok(0) => WorkspaceAction::Unsupported {
+                            action: "end of input before the next action".to_owned(),
+                        },
+                        Ok(bytes_read) if bytes_read > MAX_TASK_ACTION_LINE_BYTES => {
+                            WorkspaceAction::Unsupported {
+                                action: format!(
                                 "action line exceeds limit of {MAX_TASK_ACTION_LINE_BYTES} bytes"
                             ),
+                            }
                         }
-                    }
-                    Ok(_) => match std::str::from_utf8(&line) {
-                        Ok(line) => parse_task_action(line),
+                        Ok(_) => match std::str::from_utf8(&line) {
+                            Ok(line) => parse_task_action(line),
+                            Err(cause) => WorkspaceAction::Unsupported {
+                                action: format!("input error: {cause}"),
+                            },
+                        },
                         Err(cause) => WorkspaceAction::Unsupported {
                             action: format!("input error: {cause}"),
                         },
-                    },
-                    Err(cause) => WorkspaceAction::Unsupported {
-                        action: format!("input error: {cause}"),
-                    },
-                }
-            };
+                    }
+                };
             run_goal_turn_with_budget(
                 &mut session,
                 task_id,
@@ -1132,11 +1196,16 @@ fn write_root_help(output: &mut dyn Write) -> io::Result<()> {
 fn write_task_help(output: &mut dyn Write) -> io::Result<()> {
     output.write_all(
         concat!(
-            "usage: krypper task [-h] --goal GOAL --max-actions N\n\n",
-            "run a caller-directed task across bounded turns in the current directory\n\n",
+            "usage: krypper task [-h] --goal GOAL --max-actions N [--model NAME]\n\n",
+            "run a bounded task in the current directory\n\n",
             "options:\n  --goal GOAL          required task goal\n",
             "  --max-actions N      required positive action limit for the whole task\n",
+            "  --model NAME         opt in to local Ollama action selection\n",
             "  -h, --help           show this help message and exit\n\n",
+            "Without --model, task remains caller-directed and makes no model requests.\n",
+            "Model mode sends the goal and prior observations to http://127.0.0.1:11434/api/chat.\n",
+            "Read observations can include workspace file text. Ollama must be running locally\n",
+            "with the named model available. Only supported task actions and completion are exposed.\n\n",
             "Enter one action per line on standard input:\n",
             "  read PATH\n  read-range PATH START_LINE MAX_LINES\n",
             "  list [PATH]\n  mkdir PATH\n  create PATH TEXT\n",
@@ -1405,3 +1474,7 @@ mod tests {
             .contains("action line exceeds limit of 1052672 bytes"));
     }
 }
+
+#[cfg(test)]
+#[path = "cli_model_tests.rs"]
+mod model_cli_tests;
