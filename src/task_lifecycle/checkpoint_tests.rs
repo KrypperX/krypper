@@ -1,8 +1,6 @@
 use super::*;
+use crate::CURRENT_DIR_TEST_LOCK;
 use std::fs;
-use std::sync::Mutex;
-
-static CURRENT_DIR_LOCK: Mutex<()> = Mutex::new(());
 
 struct TempWorkspace(PathBuf);
 
@@ -41,7 +39,7 @@ impl Drop for RestoreCurrentDir {
 
 #[test]
 fn checkpoint_preserves_only_metadata_for_workspace_activity() {
-    let _lock = CURRENT_DIR_LOCK
+    let _lock = CURRENT_DIR_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let workspace = TempWorkspace::new();

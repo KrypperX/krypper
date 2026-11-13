@@ -163,6 +163,31 @@ cargo build --example task_session_checkpoint_recovery --locked
 cargo run --example task_session_checkpoint_recovery --locked
 ```
 
+## Restore a task session in a later process
+
+The process-restore example has separate `save` and `resume` invocations. Save
+requires a state-directory path that does not already exist. It creates a
+`workspace` directory there, completes one turn that creates `first-turn.txt`,
+and writes checkpoint bytes to the sibling
+`task-session.checkpoint.json` file using exclusive file creation. The
+checkpoint stays outside the captured workspace.
+
+Build and run the two invocations separately from the repository root:
+
+```sh
+cargo build --example task_session_process_restore --locked
+STATE_DIR="/path/to/krypper saved task"
+cargo run --example task_session_process_restore --locked -- save "$STATE_DIR"
+cargo run --example task_session_process_restore --locked -- resume "$STATE_DIR" "selected after restore.txt" "Created by the fresh turn."
+```
+
+Keep the same `workspace` directory in place between invocations so restore
+can validate the captured workspace identity. Resume restores lifecycle state
+without replaying the first file action, then creates only the file and content
+selected in its command. The caller controls the state directory and checkpoint
+location and is responsible for cleanup; the example does not delete caller
+state.
+
 ## Task lifecycle
 
 `krypper::task_lifecycle` provides `Task`, `TaskSession`, `TaskState`, `Turn`,

@@ -1321,6 +1321,9 @@ mod tests {
 
     #[test]
     fn write_enforces_the_encoded_one_mib_limit_before_creation() {
+        let _lock = crate::CURRENT_DIR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let previous_directory = std::env::current_dir().unwrap();
         let path = std::env::temp_dir().join(format!(
             "krypper-write-limit-{}-{}",
