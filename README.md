@@ -83,6 +83,12 @@ It does not report task success. The output path must name a new
 file; Krypper refuses to overwrite an existing file. If the turn completes the
 task or fails, no checkpoint is written.
 
+The turn must complete with `continue` to reach that save boundary. A failed or
+interrupted turn may already have changed workspace files while leaving the
+most recent checkpoint unchanged or the requested new checkpoint absent.
+Inspect and reconcile the current workspace before resuming from an older
+checkpoint after such a turn.
+
 Resume one running task with `--resume PATH --max-actions N`. Krypper restores
 the stored task description and starts a fresh turn. Supply `--workspace PATH`
 to restore from another process current directory; it must identify the same

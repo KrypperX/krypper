@@ -1842,6 +1842,15 @@ fn task_help_lists_checkpoint_options_and_describes_the_invocation_budget() {
     assert!(stdout(&output).contains("Read observations can include workspace file text."));
     assert!(stdout(&output).contains("not prior observations or file contents"));
     assert!(stdout(&output).contains("new --checkpoint-out path for each pause"));
+    assert!(stdout(&output).contains("new checkpoint is written only after a completed"));
+    assert!(stdout(&output).contains("turn reaches the safe continue boundary"));
+    assert!(stdout(&output)
+        .contains("A failed or interrupted turn may already have changed workspace files."));
+    assert!(stdout(&output)
+        .contains("The most recent checkpoint stays unchanged or the requested new checkpoint"));
+    assert!(stdout(&output)
+        .contains("Inspect and reconcile the current workspace before resuming from an older"));
+    assert!(stdout(&output).contains("checkpoint after such a turn."));
 }
 
 #[test]
@@ -2210,6 +2219,60 @@ fn task_checkpoint_out_pauses_after_a_completed_turn_and_resume_does_not_replay_
     );
     assert_eq!(fs::read(&checkpoint).unwrap(), checkpoint_bytes);
     assert_eq!(fs::read(&next_checkpoint).unwrap(), next_checkpoint_bytes);
+}
+
+#[test]
+fn task_checkpoint_out_failure_keeps_completed_workspace_actions_without_saving_checkpoint() {
+    let temporary = TempDir::new();
+    let workspace = temporary.path().join("task workspace");
+    fs::create_dir(&workspace).unwrap();
+    let checkpoint = temporary.path().join("running task checkpoint.json");
+    let checkpoint_arg = checkpoint.to_str().unwrap();
+    let save = run_with_input(
+        &workspace,
+        &[
+            "task",
+            "--goal",
+            "Save a running task before the failed turn",
+            "--max-actions",
+            "3",
+            "--checkpoint-out",
+            checkpoint_arg,
+        ],
+        b"create \"first file.txt\" saved before resume\ncontinue\n",
+    );
+
+    assert_eq!(save.status.code(), Some(0), "{}", stderr(&save));
+    assert!(stdout(&save).contains("Task state: running"));
+    assert!(stdout(&save).contains("Task outcome: paused (still running)"));
+    let checkpoint_bytes = fs::read(&checkpoint).unwrap();
+
+    let next_checkpoint = temporary.path().join("next task checkpoint.json");
+    let failed = run_with_input(
+        &workspace,
+        &[
+            "task",
+            "--resume",
+            checkpoint_arg,
+            "--max-actions",
+            "3",
+            "--checkpoint-out",
+            next_checkpoint.to_str().unwrap(),
+        ],
+        b"create \"completed before failure.txt\" remains in workspace\n",
+    );
+
+    assert_eq!(failed.status.code(), Some(1), "{}", stderr(&failed));
+    assert!(stdout(&failed).contains("Task outcome: failed"));
+    assert!(!stdout(&failed).contains("Task outcome: paused"));
+    assert!(!stdout(&failed).contains("Task outcome: succeeded"));
+    assert!(!stdout(&failed).contains("Checkpoint saved:"));
+    assert_eq!(
+        fs::read_to_string(workspace.join("completed before failure.txt")).unwrap(),
+        "remains in workspace"
+    );
+    assert_eq!(fs::read(&checkpoint).unwrap(), checkpoint_bytes);
+    assert!(!next_checkpoint.exists());
 }
 
 #[test]
