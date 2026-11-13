@@ -146,11 +146,15 @@ cargo run --example bounded_task_turn --locked
 
 Command and input errors print usage and a diagnostic and exit with status 2.
 
-The checkpoint recovery example completes one turn after creating a file,
-exports checkpoint bytes into a caller-owned `Vec<u8>`, then drops and restores
-the session in the same temporary workspace. Restore leaves the first file
+The checkpoint recovery example completes one turn after creating a file, then
+exports checkpoint bytes at the safe boundary. Caller-side `std::fs` code writes
+them to the explicitly chosen `task-session.checkpoint.json` file in the
+temporary workspace. The example drops the original session, reads that file,
+and restores in the same captured workspace. Restore leaves the first file
 unchanged; the caller explicitly selects the file created by the fresh turn.
-The checkpoint bytes stay in memory and are not written to disk.
+The TaskSession API returns checkpoint bytes but does not write files or add a
+storage backend. Restore requires the original captured workspace, and the
+example removes its temporary workspace and checkpoint file when it finishes.
 
 Build and run it from the repository root:
 

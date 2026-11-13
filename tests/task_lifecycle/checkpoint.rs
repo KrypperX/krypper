@@ -274,18 +274,38 @@ fn restoring_a_checkpoint_preserves_the_first_action_and_allows_a_fresh_selected
                 },
             )
             .unwrap();
+        let first_activity = session
+            .get_task(task_id)
+            .unwrap()
+            .get_turn(turn_id)
+            .unwrap()
+            .activity_history()
+            .to_vec();
 
         let bytes = session.export_checkpoint().unwrap();
         assert!(!bytes
             .windows(payload.len())
             .any(|window| window == payload.as_bytes()));
-        let mut restored = TaskSession::restore_checkpoint(&bytes).unwrap();
+        let checkpoint_path = workspace.path().join("caller-selected.checkpoint.json");
+        fs::write(&checkpoint_path, &bytes).unwrap();
+        drop(session);
+
+        let stored_bytes = fs::read(&checkpoint_path).unwrap();
+        assert_eq!(stored_bytes, bytes);
+        assert!(!stored_bytes
+            .windows(payload.len())
+            .any(|window| window == payload.as_bytes()));
+        let mut restored = TaskSession::restore_checkpoint(&stored_bytes).unwrap();
         assert_eq!(
             fs::read_to_string(workspace.path().join("created.txt")).unwrap(),
             payload
         );
         assert!(!workspace.path().join("selected-after-restore.txt").exists());
         assert_eq!(restored.list_tasks().len(), 1);
+        assert_eq!(
+            restored.get_task(task_id).unwrap().state(),
+            TaskState::Running
+        );
         assert_eq!(
             restored
                 .get_task(task_id)
@@ -294,6 +314,15 @@ fn restoring_a_checkpoint_preserves_the_first_action_and_allows_a_fresh_selected
                 .unwrap()
                 .state(),
             TurnState::Succeeded
+        );
+        assert_eq!(
+            restored
+                .get_task(task_id)
+                .unwrap()
+                .get_turn(turn_id)
+                .unwrap()
+                .activity_history(),
+            first_activity
         );
 
         let new_turn_id = restored
