@@ -168,6 +168,28 @@ fn request_json(request: &[u8]) -> Value {
     serde_json::from_slice(&request[body_start..]).expect("decode model request")
 }
 
+fn assert_anthropic_schema_supported(schema: &Value) {
+    match schema {
+        Value::Object(fields) => {
+            for unsupported in ["minimum", "maximum", "minLength", "maxLength"] {
+                assert!(
+                    !fields.contains_key(unsupported),
+                    "Anthropic schema contains unsupported `{unsupported}`"
+                );
+            }
+            if fields.get("type").and_then(Value::as_str) == Some("object") {
+                assert_eq!(
+                    fields.get("additionalProperties"),
+                    Some(&Value::Bool(false))
+                );
+            }
+            fields.values().for_each(assert_anthropic_schema_supported);
+        }
+        Value::Array(values) => values.iter().for_each(assert_anthropic_schema_supported),
+        _ => {}
+    }
+}
+
 #[test]
 fn model_name_validation_rejects_cloud_models() {
     assert!(validate_model_name_for_provider("qwen3", ModelProvider::Ollama).is_ok());
@@ -801,8 +823,12 @@ fn anthropic_messages_request_uses_fixed_contract_and_normalizes_one_action() {
         body["tools"][0]["input_schema"]["properties"]["path"]["type"],
         "string"
     );
-    assert_eq!(body["tool_choice"]["type"], "any");
+    assert_eq!(body["tool_choice"]["type"], "auto");
     assert_eq!(body["tool_choice"]["disable_parallel_tool_use"], true);
+    for tool in body["tools"].as_array().expect("Anthropic tools array") {
+        assert_eq!(tool["strict"], true);
+        assert_anthropic_schema_supported(&tool["input_schema"]);
+    }
     assert!(!body.to_string().contains(api_key));
     assert_eq!(
         action,
@@ -849,6 +875,9 @@ fn anthropic_messages_parser_rejects_malformed_unsupported_and_multiple_calls() 
         json!({"stop_reason":"end_turn", "content":[]})
             .to_string()
             .into_bytes(),
+        json!({"stop_reason":"tool_use", "content":[]})
+            .to_string()
+            .into_bytes(),
         json!({"stop_reason":"tool_use", "content":[one_call.clone(), one_call]})
             .to_string()
             .into_bytes(),
@@ -864,6 +893,52 @@ fn anthropic_messages_parser_rejects_malformed_unsupported_and_multiple_calls() 
 
     for response in invalid_responses {
         assert!(parse_anthropic_response(&response).is_err());
+    }
+}
+
+#[test]
+fn anthropic_schema_drops_provider_unsupported_bounds_but_runtime_validation_remains() {
+    let tools = anthropic_tool_definitions();
+    let tools = tools.as_array().expect("Anthropic tools array");
+    let read_range = tools
+        .iter()
+        .find(|tool| tool["name"] == "read_range")
+        .expect("read_range tool");
+    assert_eq!(
+        read_range["input_schema"]["properties"]["start_line"],
+        json!({"type":"integer"})
+    );
+    assert_eq!(
+        read_range["input_schema"]["properties"]["max_lines"],
+        json!({"type":"integer"})
+    );
+
+    let invalid_calls = [
+        (
+            "read_range",
+            json!({"path":"notes.txt", "start_line":0, "max_lines":1}),
+        ),
+        (
+            "read_range",
+            json!({"path":"notes.txt", "start_line":1, "max_lines":201}),
+        ),
+        ("search_text", json!({"directory":".", "query":""})),
+        (
+            "search_text",
+            json!({"directory":".", "query":"x".repeat(4097)}),
+        ),
+        (
+            "replace_text",
+            json!({"path":"notes.txt", "match_text":"", "replacement_text":"next"}),
+        ),
+    ];
+
+    for (name, input) in invalid_calls {
+        let response = json!({
+            "stop_reason":"tool_use",
+            "content":[anthropic_tool_use(name, input)]
+        });
+        assert!(parse_anthropic_response(response.to_string().as_bytes()).is_err());
     }
 }
 
