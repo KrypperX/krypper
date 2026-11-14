@@ -9,6 +9,8 @@ use ureq::Agent;
 
 const OPENAI_RESPONSES_URL: &str = "https://api.openai.com/v1/responses";
 const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
+pub(super) const GEMINI_GENERATE_CONTENT_URL: &str =
+    "https://generativelanguage.googleapis.com/v1beta/models";
 const ANTHROPIC_API_VERSION: &str = "2026-10-21";
 const GROQ_CHAT_COMPLETIONS_URL: &str = "https://api.groq.com/openai/v1/chat/completions";
 const OPENROUTER_CHAT_COMPLETIONS_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
@@ -70,6 +72,32 @@ impl TryFrom<&str> for CloudflareAccountId {
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
         {
             return Err("CLOUDFLARE_ACCOUNT_ID must be one safe path component");
+        }
+        Ok(Self(value.to_owned()))
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct GeminiModelName(String);
+
+impl GeminiModelName {
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<&str> for GeminiModelName {
+    type Error = &'static str;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        if value.is_empty()
+            || value.len() > 256
+            || matches!(value, "." | "..")
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        {
+            return Err("Gemini model name must be one safe path component");
         }
         Ok(Self(value.to_owned()))
     }
@@ -223,6 +251,7 @@ pub(super) fn parse_compatible_chat_response(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ModelProvider {
     Ollama,
+    Gemini,
     OpenAi,
     Anthropic,
     OpenAiCompatible(OpenAiCompatibleProvider),
@@ -232,6 +261,7 @@ impl ModelProvider {
     pub(crate) fn parse(name: &str) -> Option<Self> {
         match name {
             "ollama" => Some(Self::Ollama),
+            "gemini" => Some(Self::Gemini),
             "openai" => Some(Self::OpenAi),
             "anthropic" => Some(Self::Anthropic),
             "cloudflare" => Some(Self::OpenAiCompatible(OpenAiCompatibleProvider::Cloudflare)),
@@ -244,6 +274,7 @@ impl ModelProvider {
     pub(super) fn label(self) -> &'static str {
         match self {
             Self::Ollama => "Ollama",
+            Self::Gemini => "Gemini",
             Self::OpenAi => "OpenAI",
             Self::Anthropic => "Anthropic",
             Self::OpenAiCompatible(provider) => provider.label(),
@@ -253,6 +284,7 @@ impl ModelProvider {
 
 pub(crate) enum ModelDecisionSource {
     Ollama(OllamaDecisionSource),
+    Gemini(GeminiDecisionSource),
     OpenAi(OpenAiDecisionSource),
     Anthropic(AnthropicDecisionSource),
     OpenAiCompatible(OpenAiCompatibleDecisionSource),
@@ -266,10 +298,87 @@ impl BoundedDecisionSource for ModelDecisionSource {
     ) -> WorkspaceAction {
         match self {
             Self::Ollama(source) => source.choose_action(goal, observations),
+            Self::Gemini(source) => source.choose_action(goal, observations),
             Self::OpenAi(source) => source.choose_action(goal, observations),
             Self::Anthropic(source) => source.choose_action(goal, observations),
             Self::OpenAiCompatible(source) => source.choose_action(goal, observations),
         }
+    }
+}
+
+pub(crate) struct GeminiDecisionSource {
+    model: String,
+    api_key: String,
+    endpoint: String,
+    agent: Agent,
+    remaining_decisions: usize,
+}
+
+impl GeminiDecisionSource {
+    pub(crate) fn new(
+        model: impl Into<String>,
+        api_key: String,
+        action_budget: usize,
+    ) -> Result<Self, &'static str> {
+        let model = model.into();
+        let endpoint = super::gemini_generate_content_endpoint(&model)?;
+        Ok(Self::with_url(model, api_key, action_budget, endpoint))
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_endpoint(
+        model: impl Into<String>,
+        api_key: impl Into<String>,
+        action_budget: usize,
+        endpoint: String,
+    ) -> Self {
+        Self::with_url(model, api_key.into(), action_budget, endpoint)
+    }
+
+    fn with_url(
+        model: impl Into<String>,
+        api_key: String,
+        action_budget: usize,
+        endpoint: String,
+    ) -> Self {
+        Self {
+            model: model.into(),
+            api_key,
+            endpoint,
+            agent: super::model_agent(),
+            remaining_decisions: action_budget,
+        }
+    }
+
+    fn choose(
+        &mut self,
+        goal: &str,
+        observations: &[WorkspaceObservation],
+    ) -> Result<WorkspaceAction, ModelError> {
+        let remaining = super::consume_decision_budget(&mut self.remaining_decisions)?;
+        let request = super::build_gemini_request(&self.model, goal, observations, remaining)?;
+        let response = super::post_hosted(
+            &self.agent,
+            ModelProvider::Gemini,
+            &self.endpoint,
+            &self.api_key,
+            None,
+            &request,
+        )?;
+        super::parse_gemini_response(&response)
+    }
+}
+
+impl BoundedDecisionSource for GeminiDecisionSource {
+    fn choose_action(
+        &mut self,
+        goal: &str,
+        observations: &[WorkspaceObservation],
+    ) -> WorkspaceAction {
+        self.choose(goal, observations)
+            .unwrap_or_else(|error| WorkspaceAction::Unsupported {
+                action: error.to_string(),
+            })
     }
 }
 
