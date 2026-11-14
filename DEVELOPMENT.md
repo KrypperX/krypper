@@ -1,17 +1,22 @@
 # Development guide
 
 This guide records implemented code separately from a staged, revisable
-direction for future structural changes. `src/core/lifecycle.rs` is the
-implemented Core slice; the broader **Core**, **Brain**, and **Tools** layout
-remains proposed.
+direction for future structural changes. `src/core/task.rs` and
+`src/core/lifecycle.rs` are implemented Core slices; the broader **Core**,
+**Brain**, and **Tools** layout remains proposed.
 
 ## Current implementation
 
+- [`src/core/task.rs`](src/core/task.rs) defines the `Task` and `Turn` domain
+  types, their state transitions, and their lifecycle and metadata-only
+  activity records.
 - [`src/core/lifecycle.rs`](src/core/lifecycle.rs) defines `TaskSession` and
-  owns the current in-memory session, task, turn, lifecycle history, and
-  checkpoint behavior.
+  owns session-wide task ordering and lifecycle coordination, snapshots, and
+  checkpoint and recovery behavior. It re-exports the task domain types for
+  compatibility.
 - [`src/task_lifecycle.rs`](src/task_lifecycle.rs) re-exports that lifecycle
-  API as a compatibility facade for existing callers.
+  API as a compatibility facade for existing callers, including the types
+  exposed by `core::task`.
 - [`src/harness/`](src/harness/) contains task-turn execution. It coordinates
   decisions and workspace actions through the current session API.
 - [`src/model.rs`](src/model.rs) and its provider submodule turn observations
@@ -21,19 +26,21 @@ remains proposed.
 - [`src/cli.rs`](src/cli.rs) parses and runs the CLI, drives the current
   session and turn APIs, and presents command output.
 
-Only `core::lifecycle` is implemented from the proposed module layout. The
-broader Core boundary, Brain, and Tools are not yet implemented modules. The
-current CLI still drives task execution, and workspace safety remains in
-`file_safety.rs`; the layout below describes a staged direction for those
-responsibilities.
+Only `core::task` and `core::lifecycle` are implemented from the proposed
+module layout. The broader Core boundary, Brain, and Tools are not yet
+implemented modules. The current CLI still drives task execution, and
+workspace safety remains in `file_safety.rs`; the layout below describes a
+staged direction for those responsibilities.
 
 ## Proposed boundaries
 
 Treat these boundaries as a revisable direction and introduce them incrementally:
 
 - **Core** is intended to own runtime, task, session, and lifecycle state. Its
-  implemented `core::lifecycle` slice remains the single owner of current
-  task/session state and supplies read-only snapshots to interfaces.
+  implemented `core::task` slice contains the task and turn domain
+  implementation; `core::lifecycle` remains the sole owner of session-wide
+  task ordering, coordination, snapshots, and checkpoint recovery. The two
+  modules share the existing lifecycle, history, and activity records.
 - **Brain** turns observations into proposed decisions through provider
   interfaces. It proposes actions; it does not execute workspace capabilities.
 - **Harness** coordinates context, execution, recovery, and verification. It

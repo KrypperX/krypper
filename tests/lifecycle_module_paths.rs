@@ -1,4 +1,83 @@
-use krypper::{core::lifecycle as core_lifecycle, task_lifecycle as compatibility};
+use krypper::{
+    core::{lifecycle as core_lifecycle, task as core_task},
+    task_lifecycle as compatibility,
+};
+
+#[test]
+fn core_task_preserves_public_type_identity_and_transitions() {
+    fn same_type<T: 'static, U: 'static>() {
+        assert_eq!(std::any::TypeId::of::<T>(), std::any::TypeId::of::<U>());
+    }
+
+    same_type::<core_task::Task, core_lifecycle::Task>();
+    same_type::<core_task::Task, compatibility::Task>();
+    same_type::<core_task::Turn, core_lifecycle::Turn>();
+    same_type::<core_task::Turn, compatibility::Turn>();
+    same_type::<core_task::TaskState, core_lifecycle::TaskState>();
+    same_type::<core_task::TaskState, compatibility::TaskState>();
+    same_type::<core_task::TurnState, core_lifecycle::TurnState>();
+    same_type::<core_task::TurnState, compatibility::TurnState>();
+    same_type::<core_task::TurnOutcome, core_lifecycle::TurnOutcome>();
+    same_type::<core_task::TurnOutcome, compatibility::TurnOutcome>();
+    same_type::<core_task::TaskEvent, core_lifecycle::TaskEvent>();
+    same_type::<core_task::TaskEvent, compatibility::TaskEvent>();
+    same_type::<core_task::TaskHistoryEvent, core_lifecycle::TaskHistoryEvent>();
+    same_type::<core_task::TaskHistoryEvent, compatibility::TaskHistoryEvent>();
+    same_type::<core_task::TaskHistoryTransition, core_lifecycle::TaskHistoryTransition>();
+    same_type::<core_task::TaskHistoryTransition, compatibility::TaskHistoryTransition>();
+    same_type::<core_task::TaskActivityEvent, core_lifecycle::TaskActivityEvent>();
+    same_type::<core_task::TaskActivityEvent, compatibility::TaskActivityEvent>();
+    same_type::<core_task::TransitionError, core_lifecycle::TransitionError>();
+    same_type::<core_task::TransitionError, compatibility::TransitionError>();
+    same_type::<core_task::TurnCreationError, core_lifecycle::TurnCreationError>();
+    same_type::<core_task::TurnCreationError, compatibility::TurnCreationError>();
+    same_type::<core_task::TurnEvent, core_lifecycle::TurnEvent>();
+    same_type::<core_task::TurnEvent, compatibility::TurnEvent>();
+    same_type::<core_task::TurnActivityAction, core_lifecycle::TurnActivityAction>();
+    same_type::<core_task::TurnActivityAction, compatibility::TurnActivityAction>();
+    same_type::<core_task::TurnActivitySummary, core_lifecycle::TurnActivitySummary>();
+    same_type::<core_task::TurnActivitySummary, compatibility::TurnActivitySummary>();
+    same_type::<core_task::TurnCompletionError, core_lifecycle::TurnCompletionError>();
+    same_type::<core_task::TurnCompletionError, compatibility::TurnCompletionError>();
+    same_type::<core_task::TurnTransitionError, core_lifecycle::TurnTransitionError>();
+    same_type::<core_task::TurnTransitionError, compatibility::TurnTransitionError>();
+
+    let mut task: core_task::Task = core_lifecycle::Task::new("exercise task module");
+    assert_eq!(task.description(), "exercise task module");
+    assert_eq!(task.state(), core_task::TaskState::Pending);
+
+    task.transition(core_task::TaskState::Running)
+        .expect("task starts");
+    let turn_id = task.create_turn().expect("turn is created");
+    task.transition_turn(turn_id, core_task::TurnState::Running)
+        .expect("turn starts");
+    task.complete_turn(
+        turn_id,
+        core_task::TurnOutcome::Success {
+            result: "done".to_owned(),
+        },
+    )
+    .expect("turn completes");
+    task.transition(core_task::TaskState::Succeeded)
+        .expect("task completes");
+
+    let compatibility_task: &compatibility::Task = &task;
+    assert_eq!(
+        compatibility_task.state(),
+        compatibility::TaskState::Succeeded
+    );
+    let turn: &core_task::Turn = task.get_turn(turn_id).expect("turn is owned");
+    let compatibility_turn: &compatibility::Turn = turn;
+    assert_eq!(turn.id(), turn_id);
+    assert_eq!(turn.state(), core_task::TurnState::Succeeded);
+    assert_eq!(turn.events().len(), 2);
+    assert_eq!(
+        compatibility_turn.outcome(),
+        Some(&compatibility::TurnOutcome::Success {
+            result: "done".to_owned(),
+        })
+    );
+}
 
 #[test]
 fn core_lifecycle_preserves_compatibility_types_and_snapshot_behavior() {
