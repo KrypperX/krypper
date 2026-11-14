@@ -6,8 +6,34 @@ use std::fs;
 use std::io::{Cursor, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::thread::{self, JoinHandle};
 use uuid::Uuid;
+
+static PROVIDER_ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+struct RestoreEnvironmentVariable {
+    name: &'static str,
+    value: Option<OsString>,
+}
+
+impl RestoreEnvironmentVariable {
+    fn remove(name: &'static str) -> Self {
+        let value = std::env::var_os(name);
+        std::env::remove_var(name);
+        Self { name, value }
+    }
+}
+
+impl Drop for RestoreEnvironmentVariable {
+    fn drop(&mut self) {
+        if let Some(value) = self.value.take() {
+            std::env::set_var(self.name, value);
+        } else {
+            std::env::remove_var(self.name);
+        }
+    }
+}
 
 struct TempDir(PathBuf);
 
@@ -538,4 +564,139 @@ fn model_cli_reports_connection_http_and_decode_failures_as_failed_task() {
             assert_eq!(server.join().expect("join mock server").len(), 1);
         }
     }
+}
+
+#[test]
+fn explicit_ollama_provider_keeps_the_local_model_path() {
+    let (endpoint, server) = mock_server(vec![MockResponse {
+        status: 200,
+        body: tool_response("complete_task", json!({"result":"local complete"})),
+    }]);
+    let workspace = TempDir::new();
+    let mut args = task_args("1");
+    args.extend([OsString::from("--provider"), OsString::from("ollama")]);
+    let (code, output, error) = in_workspace(workspace.path(), || {
+        let mut input = Cursor::new(Vec::<u8>::new());
+        let mut output = Vec::new();
+        let mut error = Vec::new();
+        let code = run_task_with_endpoint(&args, &mut input, &mut output, &mut error, endpoint)
+            .expect("run explicit local Ollama task");
+        (code, output, error)
+    });
+
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&error));
+    assert!(String::from_utf8_lossy(&output).contains("Task outcome: succeeded"));
+    assert_eq!(server.join().expect("join local Ollama mock").len(), 1);
+}
+
+#[test]
+fn hosted_provider_credentials_are_required_before_task_lifecycle_creation() {
+    let _lock = PROVIDER_ENV_TEST_LOCK
+        .lock()
+        .expect("lock provider environment tests");
+    for (provider, key_name) in [
+        ("openai", "OPENAI_API_KEY"),
+        ("anthropic", "ANTHROPIC_API_KEY"),
+    ] {
+        let _restore = RestoreEnvironmentVariable::remove(key_name);
+        let workspace = TempDir::new();
+        let checkpoint = workspace.path().join("new checkpoint.json");
+        let mut args = [
+            "--goal",
+            "This must fail during provider preflight",
+            "--max-actions",
+            "1",
+            "--model",
+            "test-model",
+            "--provider",
+            provider,
+            "--workspace",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect::<Vec<_>>();
+        args.push(workspace.path().as_os_str().to_owned());
+        args.push(OsString::from("--checkpoint-out"));
+        args.push(checkpoint.as_os_str().to_owned());
+        let mut input = Cursor::new(Vec::<u8>::new());
+        let mut output = Vec::new();
+        let mut error = Vec::new();
+        let code = run_task_with_endpoint(
+            &args,
+            &mut input,
+            &mut output,
+            &mut error,
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+        )
+        .expect("report missing provider credentials as a CLI error");
+        let output = String::from_utf8(output).expect("UTF-8 task output");
+        let error = String::from_utf8(error).expect("UTF-8 CLI error");
+
+        assert_eq!(code, 2);
+        assert!(error.contains(key_name));
+        assert!(output.is_empty());
+        assert!(!error.contains("model decision"));
+        assert!(!checkpoint.exists());
+    }
+}
+
+#[test]
+fn provider_option_requires_a_model_and_rejects_unknown_names() {
+    for (provider, model, expected) in [
+        ("openai", None, "--model is required with --provider"),
+        ("unknown", Some("test-model"), "unsupported provider"),
+    ] {
+        let mut args = vec![
+            OsString::from("--goal"),
+            OsString::from("Check provider selection"),
+            OsString::from("--max-actions"),
+            OsString::from("1"),
+            OsString::from("--provider"),
+            OsString::from(provider),
+        ];
+        if let Some(model) = model {
+            args.extend([OsString::from("--model"), OsString::from(model)]);
+        }
+        let mut input = Cursor::new(Vec::<u8>::new());
+        let mut output = Vec::new();
+        let mut error = Vec::new();
+        let code = run_task_with_endpoint(
+            &args,
+            &mut input,
+            &mut output,
+            &mut error,
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+        )
+        .expect("report invalid provider selection");
+
+        assert_eq!(code, 2);
+        assert!(String::from_utf8_lossy(&error).contains(expected));
+        assert!(output.is_empty());
+    }
+}
+
+#[test]
+fn task_help_documents_provider_selection_and_network_disclosure() {
+    let args = [OsString::from("--help")];
+    let mut input = Cursor::new(Vec::<u8>::new());
+    let mut output = Vec::new();
+    let mut error = Vec::new();
+    let code = run_task_with_endpoint(
+        &args,
+        &mut input,
+        &mut output,
+        &mut error,
+        SocketAddr::from(([127, 0, 0, 1], 11434)),
+    )
+    .expect("print task help");
+    let help = String::from_utf8(output).expect("UTF-8 task help");
+
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&error));
+    assert!(help.contains("--provider NAME"));
+    assert!(help.contains("choose ollama, openai, or anthropic"));
+    assert!(help.contains("OPENAI_API_KEY or ANTHROPIC_API_KEY"));
+    assert!(help.contains("No custom API URL is accepted"));
+    assert!(help.contains("may incur provider charges"));
+    assert!(help.contains("Without --model or --provider, task remains caller-directed"));
+    assert!(help.contains("Ollama needs no API key"));
 }

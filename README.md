@@ -195,7 +195,8 @@ Run `ollama serve` in a terminal only when the Ollama service is not already
 running. The first pull downloads the model; the task command itself uses the
 local service at `http://127.0.0.1:11434/api/chat`.
 
-Model selection is explicitly opt in with `--model NAME`:
+Model selection is explicitly opt in with `--model NAME`. Without `--provider`,
+this keeps the existing local Ollama path:
 
 ```sh
 cargo run -- task --goal "Read the brief and create a short summary file" \
@@ -211,21 +212,46 @@ cargo run -- task --goal "Read the brief and create a short summary file" \
   --max-actions 6 --workspace "task workspace" --model qwen3
 ```
 
-Without `--model`, `task` stays caller-directed, remains offline, and does not
-contact Ollama. Model mode uses the same action budget as caller-directed mode;
-completion also uses one action. A missing local service, failed request,
-invalid response, unsupported tool call, or exhausted budget fails the task
-with visible task and turn outcomes. Krypper does not fall back to caller input
-or another model. Model names ending in `:cloud` or `-cloud` are rejected so
+To choose a hosted API, pass both `--provider` and `--model`, and supply its key
+in the environment:
+
+```sh
+OPENAI_API_KEY=... cargo run -- task --goal "Read the brief" \
+  --max-actions 6 --provider openai --model MODEL
+
+ANTHROPIC_API_KEY=... cargo run -- task --goal "Read the brief" \
+  --max-actions 6 --provider anthropic --model MODEL
+```
+
+`--provider openai` and `--provider anthropic` are explicit network opt-ins.
+They call the fixed [OpenAI Responses API](https://platform.openai.com/docs/api-reference/responses)
+or [Anthropic Messages API](https://docs.anthropic.com/en/api/messages); custom
+API URLs are not accepted. Set `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` for the
+selected provider. Krypper reads that variable only when the provider is
+selected and never writes the key to output, errors, lifecycle data, or
+checkpoints.
+
+Hosted requests include the task goal, supported action schemas, remaining
+action budget, and prior observations. Observations can include workspace file
+contents, so selecting a hosted provider sends that task data to the provider
+and may incur provider charges. Review the goal and workspace data before
+opting in. Ollama stays local at `127.0.0.1:11434` and needs no API key.
+
+Without `--model` or `--provider`, `task` stays caller-directed and makes no
+model request. `--model NAME` without `--provider` continues to select local
+Ollama. `--provider` requires `--model`. All providers use the same task action
+budget and expose only the existing bounded actions. Missing credentials,
+failed requests, invalid responses, unsupported tool calls, or an exhausted
+budget fail visibly; Krypper does not fall back to caller input or another
+provider. Ollama model names ending in `:cloud` or `-cloud` are rejected so
 workspace observations stay with local inference.
 
 Each model request includes the selected model name, task goal, supported tool
 schemas, remaining action budget, and prior workspace observations. Read
 observations can include full workspace file text; range reads include their
 excerpt. Directory listings, search locations, and action outcomes are also
-sent to the local service when model mode is enabled. Requests and accumulated
-observations have size limits. No remote endpoint or cloud-provider option is
-available.
+sent to the selected service when model mode is enabled. Requests and
+accumulated observations have size limits.
 
 The adapter exposes only the existing task workspace actions and task
 completion. Every selected action still passes through Krypper's existing
