@@ -383,7 +383,7 @@ fn task_cli_rejects_missing_and_invalid_workspace_before_lifecycle() {
 }
 
 #[test]
-fn model_cli_reports_successful_task_and_turn_outcomes() {
+fn model_cli_reports_successful_task_and_turn_states_and_outcomes() {
     let (endpoint, server) = mock_server(vec![
         MockResponse {
             status: 200,
@@ -417,7 +417,9 @@ fn model_cli_reports_successful_task_and_turn_outcomes() {
     assert_eq!(code, 0);
     assert!(output.contains("Model selected action: create_file"));
     assert!(output.contains("Model selected action: complete_task"));
+    assert!(output.contains("Task state: succeeded"));
     assert!(output.contains("Task outcome: succeeded"));
+    assert!(output.contains("Turn state: succeeded"));
     assert!(output.contains("Turn outcome: success: Created result.txt."));
     assert!(output.contains("Actions: 2/2"));
     assert!(error.contains("model decision 1/2"));
