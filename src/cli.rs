@@ -202,7 +202,7 @@ fn run_task_with_endpoint(
                         error,
                         Some("task"),
                         &format!(
-                            "unsupported provider '{value}' (choose from 'ollama', 'gemini', 'openai', 'anthropic', 'cloudflare', 'groq', 'openrouter')"
+                            "unsupported provider '{value}' (choose from 'ollama', 'gemini', 'openai', 'anthropic', 'cloudflare', 'groq', 'openrouter', 'deepseek', 'zai')"
                         ),
                     );
                 };
@@ -742,6 +742,18 @@ fn prepare_model_source(
                     api_key: hosted_api_key(
                         "OPENROUTER_API_KEY",
                         "OPENROUTER_API_KEY must be set and nonempty for --provider openrouter",
+                    )?,
+                },
+                OpenAiCompatibleProvider::DeepSeek => OpenAiCompatibleCredentials::DeepSeek {
+                    api_key: hosted_api_key(
+                        "DEEPSEEK_API_KEY",
+                        "DEEPSEEK_API_KEY must be set and nonempty for --provider deepseek",
+                    )?,
+                },
+                OpenAiCompatibleProvider::Zai => OpenAiCompatibleCredentials::Zai {
+                    api_key: hosted_api_key(
+                        "ZAI_API_KEY",
+                        "ZAI_API_KEY must be set and nonempty for --provider zai",
                     )?,
                 },
             };
@@ -1565,7 +1577,7 @@ fn write_task_help(output: &mut dyn Write) -> io::Result<()> {
             "  --max-actions N      required positive action limit for this invocation\n",
             "  --workspace PATH     use an existing directory as the captured task workspace\n",
             "  --model NAME         opt in to model-selected actions (defaults to local Ollama)\n",
-            "  --provider NAME      choose ollama, gemini, openai, anthropic, cloudflare, groq, or openrouter; requires --model\n",
+            "  --provider NAME      choose ollama, gemini, openai, anthropic, cloudflare, groq, openrouter, deepseek, or zai; requires --model\n",
             "  --checkpoint-out PATH write only when a completed turn reaches continue; file must be new\n",
             "  --resume PATH        restore one running task and start a fresh turn\n",
             "  -h, --help           show this help message and exit\n\n",
@@ -1585,6 +1597,8 @@ fn write_task_help(output: &mut dyn Write) -> io::Result<()> {
             "    https://api.cloudflare.com/client/v4/accounts/<account-id>/ai/v1/chat/completions\n",
             "  groq: GROQ_API_KEY -> https://api.groq.com/openai/v1/chat/completions\n",
             "  openrouter: OPENROUTER_API_KEY -> https://openrouter.ai/api/v1/chat/completions\n",
+            "  deepseek: DEEPSEEK_API_KEY -> https://api.deepseek.com/chat/completions\n",
+            "  zai: ZAI_API_KEY -> https://api.z.ai/api/paas/v4/chat/completions\n",
             "OpenRouter may select an upstream provider for the requested model even when fallback\n",
             "providers are disabled in the request.\n",
             "Hosted requests send the task goal and observations, which can include workspace file text,\n",

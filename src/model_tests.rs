@@ -719,10 +719,14 @@ fn request_body(request: &[u8]) -> Value {
 }
 
 fn compatible_chat_function_call(name: &str, arguments: Value) -> Value {
+    compatible_chat_function_call_with_raw_arguments(name, Value::String(arguments.to_string()))
+}
+
+fn compatible_chat_function_call_with_raw_arguments(name: &str, arguments: Value) -> Value {
     json!({
         "id":"call_test",
         "type":"function",
-        "function":{"name":name,"arguments":arguments.to_string()}
+        "function":{"name":name,"arguments":arguments}
     })
 }
 
@@ -756,7 +760,11 @@ fn run_compatible_profile(
     (action, requests.into_iter().next().expect("one request"))
 }
 
-fn assert_compatible_chat_request(request: &[u8], key: &str) -> Value {
+fn assert_compatible_chat_request_with_tool_choice(
+    request: &[u8],
+    key: &str,
+    expected_tool_choice: &str,
+) -> Value {
     let first_line = String::from_utf8_lossy(request)
         .lines()
         .next()
@@ -769,7 +777,7 @@ fn assert_compatible_chat_request(request: &[u8], key: &str) -> Value {
     );
     let body = request_body(request);
     assert_eq!(body["model"], "test-model");
-    assert_eq!(body["tool_choice"], "required");
+    assert_eq!(body["tool_choice"], expected_tool_choice);
     assert_eq!(body["parallel_tool_calls"], false);
     assert_eq!(body["n"], 1);
     assert_eq!(body["stream"], false);
@@ -796,6 +804,10 @@ fn assert_compatible_chat_request(request: &[u8], key: &str) -> Value {
     body
 }
 
+fn assert_compatible_chat_request(request: &[u8], key: &str) -> Value {
+    assert_compatible_chat_request_with_tool_choice(request, key, "required")
+}
+
 #[test]
 fn compatible_chat_profiles_have_fixed_endpoints_and_cloudflare_path_validation() {
     let account_id = CloudflareAccountId::try_from("account-123").expect("safe account ID");
@@ -816,6 +828,18 @@ fn compatible_chat_profiles_have_fixed_endpoints_and_cloudflare_path_validation(
             .endpoint(None)
             .expect("OpenRouter endpoint"),
         "https://openrouter.ai/api/v1/chat/completions"
+    );
+    assert_eq!(
+        OpenAiCompatibleProvider::DeepSeek
+            .endpoint(None)
+            .expect("DeepSeek endpoint"),
+        "https://api.deepseek.com/chat/completions"
+    );
+    assert_eq!(
+        OpenAiCompatibleProvider::Zai
+            .endpoint(None)
+            .expect("Z.AI endpoint"),
+        "https://api.z.ai/api/paas/v4/chat/completions"
     );
     for invalid in [
         "",
@@ -890,6 +914,73 @@ fn openrouter_chat_profile_disables_provider_fallback_and_normalizes_one_action(
 }
 
 #[test]
+fn deepseek_and_zai_chat_profiles_use_auto_tool_choice_and_accept_supported_calls() {
+    let deepseek_key = "local-deepseek-test-key";
+    let deepseek_response = compatible_chat_response(vec![compatible_chat_function_call(
+        "create_file",
+        json!({"path":"deepseek.txt","contents":"from DeepSeek"}),
+    )]);
+    let (deepseek_action, deepseek_request) = run_compatible_profile(
+        OpenAiCompatibleProvider::DeepSeek,
+        deepseek_key,
+        deepseek_response,
+    );
+    assert_compatible_chat_request_with_tool_choice(&deepseek_request, deepseek_key, "auto");
+    assert_eq!(
+        deepseek_action,
+        WorkspaceAction::CreateFile {
+            path: PathBuf::from("deepseek.txt"),
+            contents: "from DeepSeek".to_owned(),
+        }
+    );
+
+    let zai_key = "local-zai-test-key";
+    let zai_response =
+        compatible_chat_response(vec![compatible_chat_function_call_with_raw_arguments(
+            "read_file",
+            json!({"path":"zai.md"}),
+        )]);
+    let (zai_action, zai_request) =
+        run_compatible_profile(OpenAiCompatibleProvider::Zai, zai_key, zai_response);
+    assert_compatible_chat_request_with_tool_choice(&zai_request, zai_key, "auto");
+    assert_eq!(
+        zai_action,
+        WorkspaceAction::ReadFile {
+            path: PathBuf::from("zai.md")
+        }
+    );
+}
+
+#[test]
+fn deepseek_and_zai_parsers_accept_object_and_json_text_arguments() {
+    for provider in [
+        OpenAiCompatibleProvider::DeepSeek,
+        OpenAiCompatibleProvider::Zai,
+    ] {
+        for arguments in [
+            Value::String(json!({"result":"done"}).to_string()),
+            json!({"result":"done"}),
+        ] {
+            let response =
+                compatible_chat_response(vec![compatible_chat_function_call_with_raw_arguments(
+                    "complete_task",
+                    arguments,
+                )]);
+            assert_eq!(
+                parse_compatible_chat_response(
+                    response.as_bytes(),
+                    ModelProvider::OpenAiCompatible(provider)
+                )
+                .expect("valid provider arguments"),
+                WorkspaceAction::Complete {
+                    result: "done".to_owned()
+                }
+            );
+        }
+    }
+}
+
+#[test]
 fn compatible_chat_parser_rejects_missing_malformed_unsupported_and_multiple_calls() {
     let one_call = compatible_chat_function_call("complete_task", json!({"result":"done"}));
     let invalid_responses = [
@@ -905,59 +996,87 @@ fn compatible_chat_parser_rejects_missing_malformed_unsupported_and_multiple_cal
         json!({"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[{
             "id":"call_bad","type":"function","function":{"name":"complete_task","arguments":"{invalid"}
         }]}}]}).to_string().into_bytes(),
+        compatible_chat_response(vec![compatible_chat_function_call_with_raw_arguments(
+            "create_file",
+            json!({"path":"missing-contents.txt"}),
+        )])
+        .into_bytes(),
         json!({"choices":[{"finish_reason":"tool_calls","message":{"role":"user","tool_calls":[one_call]}}]}).to_string().into_bytes(),
     ];
 
-    for response in invalid_responses {
-        assert!(parse_compatible_chat_response(
-            &response,
-            ModelProvider::OpenAiCompatible(OpenAiCompatibleProvider::Groq)
-        )
-        .is_err());
+    for provider in [
+        OpenAiCompatibleProvider::Groq,
+        OpenAiCompatibleProvider::DeepSeek,
+        OpenAiCompatibleProvider::Zai,
+    ] {
+        for response in &invalid_responses {
+            assert!(parse_compatible_chat_response(
+                response,
+                ModelProvider::OpenAiCompatible(provider)
+            )
+            .is_err());
+        }
     }
+
+    let object_arguments =
+        compatible_chat_response(vec![compatible_chat_function_call_with_raw_arguments(
+            "complete_task",
+            json!({"result":"done"}),
+        )]);
+    assert!(parse_compatible_chat_response(
+        object_arguments.as_bytes(),
+        ModelProvider::OpenAiCompatible(OpenAiCompatibleProvider::Groq)
+    )
+    .is_err());
 }
 
 #[test]
 fn compatible_chat_multiple_calls_fail_without_executing_either_action() {
-    let response = compatible_chat_response(vec![
-        compatible_chat_function_call(
-            "create_file",
-            json!({"path":"must-not-exist.txt","contents":"blocked"}),
-        ),
-        compatible_chat_function_call("complete_task", json!({"result":"done"})),
-    ]);
-    let (address, server) = mock_server(vec![ok(response)]);
-    let workspace = TempDir::new();
-    let (result, session, task_id, turn_id) = in_workspace(workspace.path(), || {
-        let (mut session, task_id, turn_id) = running_turn();
-        let mut source = OpenAiCompatibleDecisionSource::with_endpoint(
-            "test-model",
-            OpenAiCompatibleProvider::Groq,
-            "local-test-key",
-            1,
-            format!("http://{address}/v1/chat/completions"),
+    for provider in [
+        OpenAiCompatibleProvider::Groq,
+        OpenAiCompatibleProvider::DeepSeek,
+        OpenAiCompatibleProvider::Zai,
+    ] {
+        let response = compatible_chat_response(vec![
+            compatible_chat_function_call(
+                "create_file",
+                json!({"path":"must-not-exist.txt","contents":"blocked"}),
+            ),
+            compatible_chat_function_call("complete_task", json!({"result":"done"})),
+        ]);
+        let (address, server) = mock_server(vec![ok(response)]);
+        let workspace = TempDir::new();
+        let (result, session, task_id, turn_id) = in_workspace(workspace.path(), || {
+            let (mut session, task_id, turn_id) = running_turn();
+            let mut source = OpenAiCompatibleDecisionSource::with_endpoint(
+                "test-model",
+                provider,
+                "local-test-key",
+                1,
+                format!("http://{address}/v1/chat/completions"),
+            );
+            let result = run_goal_turn_with_budget(
+                &mut session,
+                task_id,
+                turn_id,
+                "Reject multiple action calls",
+                1,
+                &mut source,
+            );
+            (result, session, task_id, turn_id)
+        });
+        let result = result.expect("invalid action response is recorded as a failed turn");
+        assert_eq!(result.stop_reason(), GoalTurnStopReason::ActionFailed);
+        assert_failed_turn(&result, &session, task_id, turn_id);
+        assert!(!workspace.path().join("must-not-exist.txt").exists());
+        assert_eq!(
+            server
+                .join()
+                .expect("join compatible multiple-call mock")
+                .len(),
+            1
         );
-        let result = run_goal_turn_with_budget(
-            &mut session,
-            task_id,
-            turn_id,
-            "Reject multiple action calls",
-            1,
-            &mut source,
-        );
-        (result, session, task_id, turn_id)
-    });
-    let result = result.expect("invalid action response is recorded as a failed turn");
-    assert_eq!(result.stop_reason(), GoalTurnStopReason::ActionFailed);
-    assert_failed_turn(&result, &session, task_id, turn_id);
-    assert!(!workspace.path().join("must-not-exist.txt").exists());
-    assert_eq!(
-        server
-            .join()
-            .expect("join compatible multiple-call mock")
-            .len(),
-        1
-    );
+    }
 }
 
 #[test]
@@ -1235,6 +1354,11 @@ fn compatible_chat_errors_never_echo_keys_or_response_bodies() {
             OpenAiCompatibleProvider::OpenRouter,
             "local-openrouter-error-key",
         ),
+        (
+            OpenAiCompatibleProvider::DeepSeek,
+            "local-deepseek-error-key",
+        ),
+        (OpenAiCompatibleProvider::Zai, "local-zai-error-key"),
     ] {
         let (address, server) = mock_server(vec![MockResponse {
             status: 401,
