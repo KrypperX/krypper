@@ -23,6 +23,15 @@ impl RestoreEnvironmentVariable {
         std::env::remove_var(name);
         Self { name, value }
     }
+
+    fn set(name: &'static str, value: &str) -> Self {
+        let previous = std::env::var_os(name);
+        std::env::set_var(name, value);
+        Self {
+            name,
+            value: previous,
+        }
+    }
 }
 
 impl Drop for RestoreEnvironmentVariable {
@@ -594,11 +603,37 @@ fn hosted_provider_credentials_are_required_before_task_lifecycle_creation() {
     let _lock = PROVIDER_ENV_TEST_LOCK
         .lock()
         .expect("lock provider environment tests");
-    for (provider, key_name) in [
-        ("openai", "OPENAI_API_KEY"),
-        ("anthropic", "ANTHROPIC_API_KEY"),
+    let provider_variables = [
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "CLOUDFLARE_ACCOUNT_ID",
+        "CLOUDFLARE_API_TOKEN",
+        "GROQ_API_KEY",
+        "OPENROUTER_API_KEY",
+    ];
+    for (provider, missing_name, supplemental) in [
+        ("openai", "OPENAI_API_KEY", None),
+        ("anthropic", "ANTHROPIC_API_KEY", None),
+        (
+            "cloudflare",
+            "CLOUDFLARE_ACCOUNT_ID",
+            Some(("CLOUDFLARE_API_TOKEN", "test-token")),
+        ),
+        (
+            "cloudflare",
+            "CLOUDFLARE_API_TOKEN",
+            Some(("CLOUDFLARE_ACCOUNT_ID", "account-123")),
+        ),
+        ("groq", "GROQ_API_KEY", None),
+        ("openrouter", "OPENROUTER_API_KEY", None),
     ] {
-        let _restore = RestoreEnvironmentVariable::remove(key_name);
+        let _restores = provider_variables
+            .iter()
+            .map(|name| RestoreEnvironmentVariable::remove(name))
+            .collect::<Vec<_>>();
+        if let Some((name, value)) = supplemental {
+            std::env::set_var(name, value);
+        }
         let workspace = TempDir::new();
         let checkpoint = workspace.path().join("new checkpoint.json");
         let mut args = [
@@ -633,17 +668,68 @@ fn hosted_provider_credentials_are_required_before_task_lifecycle_creation() {
         let error = String::from_utf8(error).expect("UTF-8 CLI error");
 
         assert_eq!(code, 2);
-        assert!(error.contains(key_name));
+        assert!(error.contains(missing_name));
         assert!(output.is_empty());
         assert!(!error.contains("model decision"));
         assert!(!checkpoint.exists());
+        assert!(!workspace.path().join("should-not-exist.txt").exists());
     }
+}
+
+#[test]
+fn cloudflare_account_id_is_validated_before_task_lifecycle_creation() {
+    let _lock = PROVIDER_ENV_TEST_LOCK
+        .lock()
+        .expect("lock provider environment tests");
+    let _restore_account = RestoreEnvironmentVariable::set("CLOUDFLARE_ACCOUNT_ID", "bad/path");
+    let _restore_token =
+        RestoreEnvironmentVariable::set("CLOUDFLARE_API_TOKEN", "local-test-token");
+    let workspace = TempDir::new();
+    let checkpoint = workspace.path().join("new checkpoint.json");
+    let mut args = [
+        "--goal",
+        "Reject an invalid Cloudflare account path",
+        "--max-actions",
+        "1",
+        "--model",
+        "test-model",
+        "--provider",
+        "cloudflare",
+        "--workspace",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect::<Vec<_>>();
+    args.push(workspace.path().as_os_str().to_owned());
+    args.push(OsString::from("--checkpoint-out"));
+    args.push(checkpoint.as_os_str().to_owned());
+    let mut input = Cursor::new(Vec::<u8>::new());
+    let mut output = Vec::new();
+    let mut error = Vec::new();
+
+    let code = run_task_with_endpoint(
+        &args,
+        &mut input,
+        &mut output,
+        &mut error,
+        SocketAddr::from(([127, 0, 0, 1], 0)),
+    )
+    .expect("report invalid Cloudflare account ID as a CLI error");
+    let error = String::from_utf8(error).expect("UTF-8 CLI error");
+
+    assert_eq!(code, 2);
+    assert!(error.contains("CLOUDFLARE_ACCOUNT_ID"));
+    assert!(output.is_empty());
+    assert!(!checkpoint.exists());
 }
 
 #[test]
 fn provider_option_requires_a_model_and_rejects_unknown_names() {
     for (provider, model, expected) in [
         ("openai", None, "--model is required with --provider"),
+        ("cloudflare", None, "--model is required with --provider"),
+        ("groq", None, "--model is required with --provider"),
+        ("openrouter", None, "--model is required with --provider"),
         ("unknown", Some("test-model"), "unsupported provider"),
     ] {
         let mut args = vec![
@@ -693,10 +779,23 @@ fn task_help_documents_provider_selection_and_network_disclosure() {
 
     assert_eq!(code, 0, "{}", String::from_utf8_lossy(&error));
     assert!(help.contains("--provider NAME"));
-    assert!(help.contains("choose ollama, openai, or anthropic"));
-    assert!(help.contains("OPENAI_API_KEY or ANTHROPIC_API_KEY"));
-    assert!(help.contains("No custom API URL is accepted"));
+    assert!(help.contains("choose ollama, openai, anthropic, cloudflare, groq, or openrouter"));
+    for credential in [
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "CLOUDFLARE_ACCOUNT_ID",
+        "CLOUDFLARE_API_TOKEN",
+        "GROQ_API_KEY",
+        "OPENROUTER_API_KEY",
+    ] {
+        assert!(
+            help.contains(credential),
+            "missing {credential} in task help"
+        );
+    }
+    assert!(help.contains("no custom API URL is accepted"));
     assert!(help.contains("may incur provider charges"));
     assert!(help.contains("Without --model or --provider, task remains caller-directed"));
     assert!(help.contains("Ollama needs no API key"));
+    assert!(help.contains("OpenRouter may select an upstream provider for the requested model"));
 }
