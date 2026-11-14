@@ -1835,6 +1835,14 @@ fn task_help_lists_checkpoint_options_and_describes_the_invocation_budget() {
     assert!(stdout(&output).contains("--workspace PATH"));
     assert!(stdout(&output).contains("--checkpoint-out PATH"));
     assert!(stdout(&output).contains("--resume PATH"));
+    assert!(stdout(&output)
+        .contains("choose ollama, openai, anthropic, cloudflare, groq, or openrouter"));
+    assert!(stdout(&output).contains("CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN"));
+    assert!(stdout(&output).contains("GROQ_API_KEY"));
+    assert!(stdout(&output).contains("OPENROUTER_API_KEY"));
+    assert!(stdout(&output).contains("api.groq.com/openai/v1/chat/completions"));
+    assert!(stdout(&output).contains("openrouter.ai/api/v1/chat/completions"));
+    assert!(stdout(&output).contains("may select an upstream provider for the requested model"));
     assert!(stdout(&output).contains("Without --workspace"));
     assert!(stdout(&output).contains("--workspace PATH works with --model NAME"));
     assert!(stdout(&output).contains("127.0.0.1:11434"));
@@ -1851,6 +1859,47 @@ fn task_help_lists_checkpoint_options_and_describes_the_invocation_budget() {
     assert!(stdout(&output)
         .contains("Inspect and reconcile the current workspace before resuming from an older"));
     assert!(stdout(&output).contains("checkpoint after such a turn."));
+}
+
+#[test]
+fn cloudflare_configuration_error_is_visible_before_lifecycle_in_process() {
+    let directory = TempDir::new();
+    let checkpoint = "new checkpoint.json";
+    let mut command = command(
+        Some(directory.path()),
+        &[
+            "task",
+            "--goal",
+            "Reject missing provider configuration",
+            "--max-actions",
+            "1",
+            "--model",
+            "test-model",
+            "--provider",
+            "cloudflare",
+            "--workspace",
+            directory.path().to_str().expect("UTF-8 test directory"),
+            "--checkpoint-out",
+            checkpoint,
+        ],
+    );
+    for name in [
+        "CLOUDFLARE_ACCOUNT_ID",
+        "CLOUDFLARE_API_TOKEN",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GROQ_API_KEY",
+        "OPENROUTER_API_KEY",
+    ] {
+        command.env_remove(name);
+    }
+    let output = command.output().expect("run Cloudflare preflight case");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stdout(&output).is_empty());
+    assert!(stderr(&output).contains("CLOUDFLARE_ACCOUNT_ID"));
+    assert!(!stderr(&output).contains("model decision"));
+    assert!(!directory.path().join(checkpoint).exists());
 }
 
 #[test]
