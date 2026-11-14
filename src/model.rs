@@ -200,7 +200,7 @@ fn build_anthropic_request(
         "system": SYSTEM_INSTRUCTIONS,
         "messages": [{ "role": "user", "content": prompt }],
         "tools": anthropic_tool_definitions(),
-        "tool_choice": {"type":"any", "disable_parallel_tool_use":true},
+        "tool_choice": {"type":"auto", "disable_parallel_tool_use":true},
         "stream": false
     });
     encode_model_request(&request)
@@ -258,11 +258,34 @@ fn anthropic_tool_definitions() -> Value {
             Some(json!({
                 "name":function.get("name")?,
                 "description":function.get("description")?,
-                "input_schema":function.get("parameters")?
+                "strict":true,
+                "input_schema":anthropic_strict_schema(function.get("parameters")?)
             }))
         })
         .collect::<Vec<_>>();
     Value::Array(tools)
+}
+
+fn anthropic_strict_schema(schema: &Value) -> Value {
+    let mut schema = schema.clone();
+    adapt_anthropic_strict_schema(&mut schema);
+    schema
+}
+
+fn adapt_anthropic_strict_schema(schema: &mut Value) {
+    match schema {
+        Value::Object(fields) => {
+            for unsupported in ["minimum", "maximum", "minLength", "maxLength"] {
+                fields.remove(unsupported);
+            }
+            if fields.get("type").and_then(Value::as_str) == Some("object") {
+                fields.insert("additionalProperties".to_owned(), Value::Bool(false));
+            }
+            fields.values_mut().for_each(adapt_anthropic_strict_schema);
+        }
+        Value::Array(values) => values.iter_mut().for_each(adapt_anthropic_strict_schema),
+        _ => {}
+    }
 }
 
 fn model_observations(observations: &[WorkspaceObservation]) -> Result<Vec<Value>, ModelError> {
