@@ -1,13 +1,14 @@
 use super::{
-    action_from_provider_call, build_anthropic_request, build_openai_request, build_task_prompt,
+    action_from_provider_call, build_anthropic_request, build_responses_request, build_task_prompt,
     consume_decision_budget, encode_model_request, model_agent, parse_anthropic_response,
-    parse_openai_response, post_hosted, tool_definitions, ModelError, OllamaDecisionSource,
+    parse_responses_response, post_hosted, tool_definitions, ModelError, OllamaDecisionSource,
 };
 use crate::agent_loop::{BoundedDecisionSource, WorkspaceAction, WorkspaceObservation};
 use serde_json::{json, Value};
 use ureq::Agent;
 
 const OPENAI_RESPONSES_URL: &str = "https://api.openai.com/v1/responses";
+const XAI_RESPONSES_URL: &str = "https://api.x.ai/v1/responses";
 const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
 pub(super) const GEMINI_GENERATE_CONTENT_URL: &str =
     "https://generativelanguage.googleapis.com/v1beta/models";
@@ -17,6 +18,28 @@ const OPENROUTER_CHAT_COMPLETIONS_URL: &str = "https://openrouter.ai/api/v1/chat
 const DEEPSEEK_CHAT_COMPLETIONS_URL: &str = "https://api.deepseek.com/chat/completions";
 const ZAI_CHAT_COMPLETIONS_URL: &str = "https://api.z.ai/api/paas/v4/chat/completions";
 const MISTRAL_CHAT_COMPLETIONS_URL: &str = "https://api.mistral.ai/v1/chat/completions";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ResponsesProvider {
+    OpenAi,
+    Xai,
+}
+
+impl ResponsesProvider {
+    fn model_provider(self) -> ModelProvider {
+        match self {
+            Self::OpenAi => ModelProvider::OpenAi,
+            Self::Xai => ModelProvider::Xai,
+        }
+    }
+
+    pub(super) fn endpoint(self) -> &'static str {
+        match self {
+            Self::OpenAi => OPENAI_RESPONSES_URL,
+            Self::Xai => XAI_RESPONSES_URL,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum OpenAiCompatibleProvider {
@@ -318,6 +341,7 @@ pub(crate) enum ModelProvider {
     Ollama,
     Gemini,
     OpenAi,
+    Xai,
     Anthropic,
     OpenAiCompatible(OpenAiCompatibleProvider),
 }
@@ -328,6 +352,7 @@ impl ModelProvider {
             "ollama" => Some(Self::Ollama),
             "gemini" => Some(Self::Gemini),
             "openai" => Some(Self::OpenAi),
+            "xai" => Some(Self::Xai),
             "anthropic" => Some(Self::Anthropic),
             "cloudflare" => Some(Self::OpenAiCompatible(OpenAiCompatibleProvider::Cloudflare)),
             "groq" => Some(Self::OpenAiCompatible(OpenAiCompatibleProvider::Groq)),
@@ -344,6 +369,7 @@ impl ModelProvider {
             Self::Ollama => "Ollama",
             Self::Gemini => "Gemini",
             Self::OpenAi => "OpenAI",
+            Self::Xai => "xAI",
             Self::Anthropic => "Anthropic",
             Self::OpenAiCompatible(provider) => provider.label(),
         }
@@ -353,7 +379,7 @@ impl ModelProvider {
 pub(crate) enum ModelDecisionSource {
     Ollama(OllamaDecisionSource),
     Gemini(GeminiDecisionSource),
-    OpenAi(OpenAiDecisionSource),
+    Responses(ResponsesDecisionSource),
     Anthropic(AnthropicDecisionSource),
     OpenAiCompatible(OpenAiCompatibleDecisionSource),
 }
@@ -367,7 +393,7 @@ impl BoundedDecisionSource for ModelDecisionSource {
         match self {
             Self::Ollama(source) => source.choose_action(goal, observations),
             Self::Gemini(source) => source.choose_action(goal, observations),
-            Self::OpenAi(source) => source.choose_action(goal, observations),
+            Self::Responses(source) => source.choose_action(goal, observations),
             Self::Anthropic(source) => source.choose_action(goal, observations),
             Self::OpenAiCompatible(source) => source.choose_action(goal, observations),
         }
@@ -450,7 +476,8 @@ impl BoundedDecisionSource for GeminiDecisionSource {
     }
 }
 
-pub(crate) struct OpenAiDecisionSource {
+pub(crate) struct ResponsesDecisionSource {
+    provider: ResponsesProvider,
     model: String,
     api_key: String,
     endpoint: String,
@@ -458,33 +485,42 @@ pub(crate) struct OpenAiDecisionSource {
     remaining_decisions: usize,
 }
 
-impl OpenAiDecisionSource {
-    pub(crate) fn new(model: impl Into<String>, api_key: String, action_budget: usize) -> Self {
+impl ResponsesDecisionSource {
+    pub(crate) fn new(
+        model: impl Into<String>,
+        provider: ResponsesProvider,
+        api_key: String,
+        action_budget: usize,
+    ) -> Self {
         Self::with_url(
             model,
+            provider,
             api_key,
             action_budget,
-            OPENAI_RESPONSES_URL.to_owned(),
+            provider.endpoint().to_owned(),
         )
     }
 
     #[cfg(test)]
     pub(super) fn with_endpoint(
         model: impl Into<String>,
+        provider: ResponsesProvider,
         api_key: impl Into<String>,
         action_budget: usize,
         endpoint: String,
     ) -> Self {
-        Self::with_url(model, api_key, action_budget, endpoint)
+        Self::with_url(model, provider, api_key, action_budget, endpoint)
     }
 
     fn with_url(
         model: impl Into<String>,
+        provider: ResponsesProvider,
         api_key: impl Into<String>,
         action_budget: usize,
         endpoint: String,
     ) -> Self {
         Self {
+            provider,
             model: model.into(),
             api_key: api_key.into(),
             endpoint,
@@ -499,20 +535,22 @@ impl OpenAiDecisionSource {
         observations: &[WorkspaceObservation],
     ) -> Result<WorkspaceAction, ModelError> {
         let remaining = consume_decision_budget(&mut self.remaining_decisions)?;
-        let request = build_openai_request(&self.model, goal, observations, remaining)?;
+        let provider = self.provider.model_provider();
+        let request =
+            build_responses_request(&self.model, provider, goal, observations, remaining)?;
         let response = post_hosted(
             &self.agent,
-            ModelProvider::OpenAi,
+            provider,
             &self.endpoint,
             &self.api_key,
             None,
             &request,
         )?;
-        parse_openai_response(&response)
+        parse_responses_response(&response, provider)
     }
 }
 
-impl BoundedDecisionSource for OpenAiDecisionSource {
+impl BoundedDecisionSource for ResponsesDecisionSource {
     fn choose_action(
         &mut self,
         goal: &str,

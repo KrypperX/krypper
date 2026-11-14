@@ -224,6 +224,9 @@ GEMINI_API_KEY=... cargo run -- task --goal "Read the brief" \
 OPENAI_API_KEY=... cargo run -- task --goal "Read the brief" \
   --max-actions 6 --provider openai --model MODEL
 
+XAI_API_KEY=... cargo run -- task --goal "Read the brief" \
+  --max-actions 6 --provider xai --model MODEL
+
 ANTHROPIC_API_KEY=... cargo run -- task --goal "Read the brief" \
   --max-actions 6 --provider anthropic --model MODEL
 
@@ -252,6 +255,7 @@ Krypper uses fixed HTTPS endpoints and does not accept custom API URLs:
 | --- | --- | --- |
 | Gemini | `GEMINI_API_KEY` | `https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent` |
 | OpenAI | `OPENAI_API_KEY` | `https://api.openai.com/v1/responses` |
+| xAI | `XAI_API_KEY` | `https://api.x.ai/v1/responses` |
 | Anthropic | `ANTHROPIC_API_KEY` | `https://api.anthropic.com/v1/messages` |
 | Cloudflare Workers AI | `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN` | `https://api.cloudflare.com/client/v4/accounts/<account-id>/ai/v1/chat/completions` |
 | Groq | `GROQ_API_KEY` | `https://api.groq.com/openai/v1/chat/completions` |
@@ -267,9 +271,16 @@ GenerateContent API and the `x-goog-api-key` header; its model name must be one
 safe path component, and no custom API URL is accepted. See Google's
 [GenerateContent API](https://ai.google.dev/api/generate-content),
 [function calling guide](https://ai.google.dev/gemini-api/docs/generate-content/function-calling),
-and [API key guide](https://ai.google.dev/gemini-api/docs/api-key). OpenAI uses
-the Responses API, Anthropic uses the Messages API, and Cloudflare Workers AI, Groq,
-OpenRouter, DeepSeek, Z.AI, and Mistral share the OpenAI Chat Completions-compatible task adapter.
+and [API key guide](https://ai.google.dev/gemini-api/docs/api-key). OpenAI and xAI
+use the Responses API; xAI is selected explicitly, reads `XAI_API_KEY` only for
+that selection, and sends bearer-authenticated requests only to the fixed endpoint
+shown above. `XAI_API_KEY` must be an Inference API key; Management API keys and
+endpoints are not used. It uses Krypper's supported function tools with one
+required call, parallel calls disabled, and response storage disabled. See the [xAI Responses API](https://docs.x.ai/developers/rest-api-reference/inference/responses),
+[function calling guide](https://docs.x.ai/developers/tools/function-calling), and
+[API authentication](https://docs.x.ai/developers/rest-api-reference/inference).
+Anthropic uses the Messages API, and Cloudflare Workers AI, Groq, OpenRouter,
+DeepSeek, Z.AI, and Mistral share the OpenAI Chat Completions-compatible task adapter.
 DeepSeek, Z.AI, and Mistral use `tool_choice: auto`; Mistral also disables parallel tool calls.
 Krypper still requires exactly one supported call and validates its arguments locally. DeepSeek
 and Z.AI accept function arguments as either JSON text or a JSON object; Mistral uses JSON text.
@@ -291,7 +302,7 @@ not choose or reroute that upstream service.
 
 Hosted requests include the task goal, supported action schemas, remaining
 action budget, and prior observations. Observations can include workspace file
-contents, so explicitly selecting Mistral or another hosted provider sends that
+contents, so explicitly selecting xAI or another hosted provider sends that
 task data to the provider and may incur provider charges. Review the goal and
 workspace data before opting in. `--model NAME` without `--provider` keeps
 inference local through Ollama at `127.0.0.1:11434`; Ollama needs no API key.

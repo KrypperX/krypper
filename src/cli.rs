@@ -7,7 +7,7 @@ use crate::model::{
     validate_model_name_for_provider, workspace_action_name, AnthropicDecisionSource,
     CloudflareAccountId, GeminiDecisionSource, ModelDecisionSource, ModelProvider,
     OllamaDecisionSource, OpenAiCompatibleCredentials, OpenAiCompatibleDecisionSource,
-    OpenAiCompatibleProvider, OpenAiDecisionSource, OLLAMA_ADDRESS,
+    OpenAiCompatibleProvider, ResponsesDecisionSource, ResponsesProvider, OLLAMA_ADDRESS,
 };
 use crate::task_lifecycle::{
     TaskSession, TaskState, TurnOutcome, TurnState, MAX_TASK_SESSION_CHECKPOINT_BYTES,
@@ -202,7 +202,7 @@ fn run_task_with_endpoint(
                         error,
                         Some("task"),
                         &format!(
-                            "unsupported provider '{value}' (choose from 'ollama', 'gemini', 'openai', 'anthropic', 'cloudflare', 'groq', 'openrouter', 'deepseek', 'zai', 'mistral')"
+                            "unsupported provider '{value}' (choose from 'ollama', 'gemini', 'openai', 'xai', 'anthropic', 'cloudflare', 'groq', 'openrouter', 'deepseek', 'zai', 'mistral')"
                         ),
                     );
                 };
@@ -700,11 +700,21 @@ fn prepare_model_source(
             )?,
             action_budget,
         )?),
-        ModelProvider::OpenAi => ModelDecisionSource::OpenAi(OpenAiDecisionSource::new(
+        ModelProvider::OpenAi => ModelDecisionSource::Responses(ResponsesDecisionSource::new(
             model,
+            ResponsesProvider::OpenAi,
             hosted_api_key(
                 "OPENAI_API_KEY",
                 "OPENAI_API_KEY must be set and nonempty for --provider openai",
+            )?,
+            action_budget,
+        )),
+        ModelProvider::Xai => ModelDecisionSource::Responses(ResponsesDecisionSource::new(
+            model,
+            ResponsesProvider::Xai,
+            hosted_api_key(
+                "XAI_API_KEY",
+                "XAI_API_KEY must be set and nonempty for --provider xai",
             )?,
             action_budget,
         )),
@@ -1583,7 +1593,7 @@ fn write_task_help(output: &mut dyn Write) -> io::Result<()> {
             "  --max-actions N      required positive action limit for this invocation\n",
             "  --workspace PATH     use an existing directory as the captured task workspace\n",
             "  --model NAME         opt in to model-selected actions (defaults to local Ollama)\n",
-            "  --provider NAME      choose ollama, gemini, openai, anthropic, cloudflare, groq, openrouter, deepseek, zai, or mistral; requires --model\n",
+            "  --provider NAME      choose ollama, gemini, openai, xai, anthropic, cloudflare, groq, openrouter, deepseek, zai, or mistral; requires --model\n",
             "  --checkpoint-out PATH write only when a completed turn reaches continue; file must be new\n",
             "  --resume PATH        restore one running task and start a fresh turn\n",
             "  -h, --help           show this help message and exit\n\n",
@@ -1598,6 +1608,7 @@ fn write_task_help(output: &mut dyn Write) -> io::Result<()> {
             "  gemini: GEMINI_API_KEY -> https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent\n",
             "  Gemini model name must be one safe path component; no custom URL is accepted.\n",
             "  openai: OPENAI_API_KEY -> https://api.openai.com/v1/responses\n",
+            "  xai: XAI_API_KEY -> https://api.x.ai/v1/responses\n",
             "  anthropic: ANTHROPIC_API_KEY -> https://api.anthropic.com/v1/messages\n",
             "  cloudflare: CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN ->\n",
             "    https://api.cloudflare.com/client/v4/accounts/<account-id>/ai/v1/chat/completions\n",
