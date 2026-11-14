@@ -3,6 +3,7 @@ pub(crate) static CURRENT_DIR_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex
 
 pub mod agent_loop;
 pub mod cli;
+pub mod core;
 mod file_safety;
 pub mod harness;
 mod model;
