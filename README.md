@@ -3,6 +3,9 @@
 Krypper is a local Rust command-line tool and in-process task runtime. Runtime
 behavior stays on the machine and works offline.
 
+See [DEVELOPMENT.md](DEVELOPMENT.md) for the current code layout, proposed
+module boundaries, observability contract, and migration rules.
+
 ## Build and run
 
 Build the binary from the repository root:
