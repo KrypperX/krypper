@@ -208,6 +208,58 @@ fn model_name_validation_rejects_cloud_models() {
 }
 
 #[test]
+fn all_request_builders_share_prompt_and_keep_existing_size_limits() {
+    let build_requests = |goal: &str, observations: &[crate::agent_loop::WorkspaceObservation]| {
+        [
+            build_chat_request("test-model", goal, observations, 3),
+            build_responses_request("test-model", ModelProvider::OpenAi, goal, observations, 3),
+            build_anthropic_request("test-model", goal, observations, 3),
+            build_gemini_request("gemini-2.5-flash", goal, observations, 3),
+            providers::build_compatible_chat_request(
+                "test-model",
+                OpenAiCompatibleProvider::Groq,
+                goal,
+                observations,
+                3,
+            ),
+        ]
+    };
+    let observations = [crate::agent_loop::WorkspaceObservation::FileRead {
+        path: PathBuf::from("note.txt"),
+        contents: "local fixture".to_owned(),
+    }];
+    let requests = build_requests("Summarize the note", &observations).map(|request| {
+        serde_json::from_slice::<Value>(&request.expect("build request"))
+            .expect("decode offline request")
+    });
+    let expected_prompt = concat!(
+        "Task goal:\nSummarize the note\n\nAction slots remaining, including this decision: 3. The task fails if the action budget runs out before completion.\n\nPrior workspace observations (JSON):\n",
+        r#"[{"contents":"local fixture","path":"note.txt","type":"file_read"}]"#
+    );
+    let prompts = [
+        requests[0]["messages"][1]["content"].as_str(),
+        requests[1]["input"].as_str(),
+        requests[2]["messages"][0]["content"].as_str(),
+        requests[3]["contents"][0]["parts"][0]["text"].as_str(),
+        requests[4]["messages"][1]["content"].as_str(),
+    ];
+    assert_eq!(prompts, [Some(expected_prompt); 5]);
+
+    let oversized_observation = [crate::agent_loop::WorkspaceObservation::FileRead {
+        path: PathBuf::from("note.txt"),
+        contents: "x".repeat(2 * 1024 * 1024 + 1),
+    }];
+    for result in build_requests("goal", &oversized_observation) {
+        assert!(matches!(result, Err(ModelError::ObservationsTooLarge)));
+    }
+
+    let oversized_goal = "g".repeat(MAX_MODEL_REQUEST_BYTES + 1);
+    for result in build_requests(&oversized_goal, &[]) {
+        assert!(matches!(result, Err(ModelError::RequestTooLarge)));
+    }
+}
+
+#[test]
 fn public_model_source_can_be_constructed_without_a_request() {
     let _source = crate::OllamaDecisionSource::new("mock-model", 1);
 }

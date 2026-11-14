@@ -1,5 +1,7 @@
+use crate::harness::context::build_task_prompt;
+
 use super::{
-    action_from_provider_call, build_anthropic_request, build_responses_request, build_task_prompt,
+    action_from_provider_call, build_anthropic_request, build_responses_request,
     consume_decision_budget, encode_model_request, model_agent, parse_anthropic_response,
     parse_responses_response, post_hosted, tool_definitions, ModelError, OllamaDecisionSource,
 };

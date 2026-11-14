@@ -48,6 +48,23 @@ pub enum WorkspaceAction {
     Unsupported { action: String },
 }
 
+pub(crate) fn workspace_action_name(action: &WorkspaceAction) -> &'static str {
+    match action {
+        WorkspaceAction::ReadFile { .. } => "read_file",
+        WorkspaceAction::ReadRange { .. } => "read_range",
+        WorkspaceAction::ListDirectory { .. } => "list_directory",
+        WorkspaceAction::CreateDirectory { .. } => "create_directory",
+        WorkspaceAction::SearchText { .. } => "search_text",
+        WorkspaceAction::SearchTreeText { .. } => "search_tree_text",
+        WorkspaceAction::CreateFile { .. } => "create_file",
+        WorkspaceAction::ReplaceText { .. } => "replace_text",
+        WorkspaceAction::Complete { .. } => "complete_task",
+        WorkspaceAction::Continue => "continue",
+        WorkspaceAction::Cancel => "cancel",
+        WorkspaceAction::Unsupported { .. } => "unsupported",
+    }
+}
+
 /// One ordered observation produced while a task-owned turn is running.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WorkspaceObservation {
