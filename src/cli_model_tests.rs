@@ -1,6 +1,6 @@
-use super::{prepare_model_source, run_task_with_endpoint};
+use super::{prepare_model_source, run_task_with_endpoint, snapshot_task_and_turn_state};
 use crate::model::{ModelDecisionSource, ModelProvider};
-use crate::task_lifecycle::{TaskSession, TaskState};
+use crate::task_lifecycle::{TaskSession, TaskState, TurnOutcome, TurnState};
 use serde_json::{json, Value};
 use std::ffi::OsString;
 use std::fs;
@@ -12,6 +12,46 @@ use std::thread::{self, JoinHandle};
 use uuid::Uuid;
 
 static PROVIDER_ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+#[test]
+fn task_result_states_use_snapshot_entries_for_matching_ids() {
+    let mut session = TaskSession::new();
+    let earlier_task_id = session.create_task("Earlier task").id();
+    let earlier_turn_id = session
+        .get_task_mut(earlier_task_id)
+        .unwrap()
+        .create_turn()
+        .unwrap();
+
+    let task_id = session.create_task("Completed task").id();
+    let task = session.get_task_mut(task_id).unwrap();
+    task.transition(TaskState::Running).unwrap();
+    let turn_id = task.create_turn().unwrap();
+    task.transition_turn(turn_id, TurnState::Running).unwrap();
+    session
+        .complete_turn(
+            task_id,
+            turn_id,
+            TurnOutcome::Success {
+                result: "saved result".to_owned(),
+            },
+        )
+        .unwrap();
+    session
+        .get_task_mut(task_id)
+        .unwrap()
+        .transition(TaskState::Succeeded)
+        .unwrap();
+
+    assert_eq!(
+        snapshot_task_and_turn_state(&session, task_id, turn_id).unwrap(),
+        (TaskState::Succeeded, TurnState::Succeeded)
+    );
+    assert_eq!(
+        snapshot_task_and_turn_state(&session, earlier_task_id, earlier_turn_id).unwrap(),
+        (TaskState::Pending, TurnState::Pending)
+    );
+}
 
 struct RestoreEnvironmentVariable {
     name: &'static str,
