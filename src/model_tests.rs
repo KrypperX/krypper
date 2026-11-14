@@ -760,6 +760,13 @@ fn run_compatible_profile(
     (action, requests.into_iter().next().expect("one request"))
 }
 
+fn mistral_provider() -> OpenAiCompatibleProvider {
+    match ModelProvider::parse("mistral") {
+        Some(ModelProvider::OpenAiCompatible(provider)) => provider,
+        _ => panic!("Mistral must select the OpenAI-compatible profile"),
+    }
+}
+
 fn assert_compatible_chat_request_with_tool_choice(
     request: &[u8],
     key: &str,
@@ -841,6 +848,10 @@ fn compatible_chat_profiles_have_fixed_endpoints_and_cloudflare_path_validation(
             .expect("Z.AI endpoint"),
         "https://api.z.ai/api/paas/v4/chat/completions"
     );
+    assert_eq!(
+        mistral_provider().endpoint(None).expect("Mistral endpoint"),
+        "https://api.mistral.ai/v1/chat/completions"
+    );
     for invalid in [
         "",
         ".",
@@ -856,6 +867,7 @@ fn compatible_chat_profiles_have_fixed_endpoints_and_cloudflare_path_validation(
         );
     }
     assert!(OpenAiCompatibleProvider::Cloudflare.endpoint(None).is_err());
+    assert!(mistral_provider().endpoint(Some(&account_id)).is_err());
 }
 
 #[test]
@@ -952,6 +964,99 @@ fn deepseek_and_zai_chat_profiles_use_auto_tool_choice_and_accept_supported_call
 }
 
 #[test]
+fn mistral_chat_profile_uses_auto_tool_choice_and_accepts_one_supported_call() {
+    let key = "local-mistral-test-key";
+    let response = compatible_chat_response(vec![compatible_chat_function_call(
+        "create_file",
+        json!({"path":"mistral.txt","contents":"from Mistral"}),
+    )]);
+    let (action, request) = run_compatible_profile(mistral_provider(), key, response);
+    assert_compatible_chat_request_with_tool_choice(&request, key, "auto");
+    assert_eq!(
+        action,
+        WorkspaceAction::CreateFile {
+            path: PathBuf::from("mistral.txt"),
+            contents: "from Mistral".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn mistral_action_uses_the_existing_workspace_and_action_budget_path() {
+    let key = "local-mistral-test-key";
+    let (address, server) = mock_server(vec![
+        ok(compatible_chat_response(vec![
+            compatible_chat_function_call(
+                "create_file",
+                json!({"path":"mistral result.txt","contents":"created through task safety"}),
+            ),
+        ])),
+        ok(compatible_chat_response(vec![
+            compatible_chat_function_call(
+                "complete_task",
+                json!({"result":"Created mistral result.txt."}),
+            ),
+        ])),
+    ]);
+    let workspace = TempDir::new();
+    let (result, session, task_id, turn_id) = in_workspace(workspace.path(), || {
+        let (mut session, task_id, turn_id) = running_turn();
+        let mut source = OpenAiCompatibleDecisionSource::with_endpoint(
+            "test-model",
+            mistral_provider(),
+            key,
+            2,
+            format!("http://{address}/v1/chat/completions"),
+        );
+        let result = run_goal_turn_with_budget(
+            &mut session,
+            task_id,
+            turn_id,
+            "Create a Mistral result file",
+            2,
+            &mut source,
+        );
+        (result, session, task_id, turn_id)
+    });
+    let result = result.expect("run Mistral actions through the bounded task loop");
+
+    assert_eq!(result.stop_reason(), GoalTurnStopReason::Completed);
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("mistral result.txt"))
+            .expect("read result created under the workspace"),
+        "created through task safety"
+    );
+    assert_eq!(
+        session
+            .get_task(task_id)
+            .expect("task exists")
+            .get_turn(turn_id)
+            .expect("turn exists")
+            .state(),
+        TurnState::Succeeded
+    );
+    let requests = server.join().expect("join Mistral task mock");
+    assert_eq!(requests.len(), 2);
+    let body = request_body(&requests[0]);
+    assert_eq!(
+        request_header(&requests[0], "authorization"),
+        Some(format!("Bearer {key}"))
+    );
+    assert_eq!(body["model"], "test-model");
+    assert_eq!(body["tool_choice"], "auto");
+    assert_eq!(body["parallel_tool_calls"], false);
+    assert_eq!(body["n"], 1);
+    assert_eq!(body["stream"], false);
+    assert!(body["messages"][1]["content"]
+        .as_str()
+        .is_some_and(|prompt| {
+            prompt.contains("Create a Mistral result file")
+                && prompt.contains("including this decision: 2")
+        }));
+    assert!(!body.to_string().contains(key));
+}
+
+#[test]
 fn deepseek_and_zai_parsers_accept_object_and_json_text_arguments() {
     for provider in [
         OpenAiCompatibleProvider::DeepSeek,
@@ -1008,6 +1113,7 @@ fn compatible_chat_parser_rejects_missing_malformed_unsupported_and_multiple_cal
         OpenAiCompatibleProvider::Groq,
         OpenAiCompatibleProvider::DeepSeek,
         OpenAiCompatibleProvider::Zai,
+        mistral_provider(),
     ] {
         for response in &invalid_responses {
             assert!(parse_compatible_chat_response(
@@ -1036,6 +1142,7 @@ fn compatible_chat_multiple_calls_fail_without_executing_either_action() {
         OpenAiCompatibleProvider::Groq,
         OpenAiCompatibleProvider::DeepSeek,
         OpenAiCompatibleProvider::Zai,
+        mistral_provider(),
     ] {
         let response = compatible_chat_response(vec![
             compatible_chat_function_call(
@@ -1359,6 +1466,7 @@ fn compatible_chat_errors_never_echo_keys_or_response_bodies() {
             "local-deepseek-error-key",
         ),
         (OpenAiCompatibleProvider::Zai, "local-zai-error-key"),
+        (mistral_provider(), "local-mistral-error-key"),
     ] {
         let (address, server) = mock_server(vec![MockResponse {
             status: 401,

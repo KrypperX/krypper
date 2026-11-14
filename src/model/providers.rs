@@ -16,6 +16,7 @@ const GROQ_CHAT_COMPLETIONS_URL: &str = "https://api.groq.com/openai/v1/chat/com
 const OPENROUTER_CHAT_COMPLETIONS_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 const DEEPSEEK_CHAT_COMPLETIONS_URL: &str = "https://api.deepseek.com/chat/completions";
 const ZAI_CHAT_COMPLETIONS_URL: &str = "https://api.z.ai/api/paas/v4/chat/completions";
+const MISTRAL_CHAT_COMPLETIONS_URL: &str = "https://api.mistral.ai/v1/chat/completions";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum OpenAiCompatibleProvider {
@@ -24,6 +25,7 @@ pub(crate) enum OpenAiCompatibleProvider {
     OpenRouter,
     DeepSeek,
     Zai,
+    Mistral,
 }
 
 impl OpenAiCompatibleProvider {
@@ -41,9 +43,11 @@ impl OpenAiCompatibleProvider {
             (Self::OpenRouter, None) => Ok(OPENROUTER_CHAT_COMPLETIONS_URL.to_owned()),
             (Self::DeepSeek, None) => Ok(DEEPSEEK_CHAT_COMPLETIONS_URL.to_owned()),
             (Self::Zai, None) => Ok(ZAI_CHAT_COMPLETIONS_URL.to_owned()),
-            (Self::Groq | Self::OpenRouter | Self::DeepSeek | Self::Zai, Some(_)) => {
-                Err("Cloudflare account ID is only valid for Cloudflare")
-            }
+            (Self::Mistral, None) => Ok(MISTRAL_CHAT_COMPLETIONS_URL.to_owned()),
+            (
+                Self::Groq | Self::OpenRouter | Self::DeepSeek | Self::Zai | Self::Mistral,
+                Some(_),
+            ) => Err("Cloudflare account ID is only valid for Cloudflare"),
         }
     }
 
@@ -54,6 +58,7 @@ impl OpenAiCompatibleProvider {
             Self::OpenRouter => "OpenRouter",
             Self::DeepSeek => "DeepSeek",
             Self::Zai => "Z.AI",
+            Self::Mistral => "Mistral",
         }
     }
 }
@@ -128,6 +133,9 @@ pub(crate) enum OpenAiCompatibleCredentials {
     Zai {
         api_key: String,
     },
+    Mistral {
+        api_key: String,
+    },
 }
 
 impl OpenAiCompatibleCredentials {
@@ -161,6 +169,11 @@ impl OpenAiCompatibleCredentials {
                 OpenAiCompatibleProvider::Zai.endpoint(None)?,
                 api_key,
             )),
+            Self::Mistral { api_key } => Ok((
+                OpenAiCompatibleProvider::Mistral,
+                OpenAiCompatibleProvider::Mistral.endpoint(None)?,
+                api_key,
+            )),
         }
     }
 }
@@ -177,7 +190,9 @@ pub(crate) fn build_compatible_chat_request(
     let prompt = build_task_prompt(goal, observations, remaining_decisions)?;
     let tool_choice = if matches!(
         provider,
-        OpenAiCompatibleProvider::DeepSeek | OpenAiCompatibleProvider::Zai
+        OpenAiCompatibleProvider::DeepSeek
+            | OpenAiCompatibleProvider::Zai
+            | OpenAiCompatibleProvider::Mistral
     ) {
         "auto"
     } else {
@@ -319,6 +334,7 @@ impl ModelProvider {
             "openrouter" => Some(Self::OpenAiCompatible(OpenAiCompatibleProvider::OpenRouter)),
             "deepseek" => Some(Self::OpenAiCompatible(OpenAiCompatibleProvider::DeepSeek)),
             "zai" => Some(Self::OpenAiCompatible(OpenAiCompatibleProvider::Zai)),
+            "mistral" => Some(Self::OpenAiCompatible(OpenAiCompatibleProvider::Mistral)),
             _ => None,
         }
     }
@@ -673,5 +689,24 @@ impl BoundedDecisionSource for OpenAiCompatibleDecisionSource {
             .unwrap_or_else(|error| WorkspaceAction::Unsupported {
                 action: error.to_string(),
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{OpenAiCompatibleCredentials, OpenAiCompatibleProvider};
+
+    #[test]
+    fn mistral_credentials_bind_to_the_fixed_endpoint() {
+        let key = "local-mistral-test-key";
+        let (provider, endpoint, api_key) = OpenAiCompatibleCredentials::Mistral {
+            api_key: key.to_owned(),
+        }
+        .into_parts()
+        .expect("Mistral credentials use a fixed endpoint");
+
+        assert_eq!(provider, OpenAiCompatibleProvider::Mistral);
+        assert_eq!(endpoint, "https://api.mistral.ai/v1/chat/completions");
+        assert_eq!(api_key, key);
     }
 }

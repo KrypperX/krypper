@@ -1,4 +1,5 @@
-use super::run_task_with_endpoint;
+use super::{prepare_model_source, run_task_with_endpoint};
+use crate::model::ModelProvider;
 use crate::task_lifecycle::{TaskSession, TaskState};
 use serde_json::{json, Value};
 use std::ffi::OsString;
@@ -603,6 +604,92 @@ fn explicit_ollama_provider_keeps_the_local_model_path() {
 }
 
 #[test]
+fn mistral_credentials_are_loaded_only_for_explicit_selection() {
+    let _lock = PROVIDER_ENV_TEST_LOCK
+        .lock()
+        .expect("lock provider environment tests");
+    let key = "local-mistral-test-key";
+    let _restore_key = RestoreEnvironmentVariable::set("MISTRAL_API_KEY", key);
+    let provider = ModelProvider::parse("mistral").expect("parse Mistral provider");
+    let source = prepare_model_source(
+        Some("test-model".to_owned()),
+        Some(provider),
+        1,
+        SocketAddr::from(([127, 0, 0, 1], 0)),
+    );
+
+    assert!(
+        source.is_ok(),
+        "explicit Mistral selection should load its key"
+    );
+}
+
+#[test]
+fn mistral_key_does_not_change_caller_directed_or_default_ollama_tasks() {
+    let _lock = PROVIDER_ENV_TEST_LOCK
+        .lock()
+        .expect("lock provider environment tests");
+    let key = "local-mistral-test-key";
+    let _restore_key = RestoreEnvironmentVariable::set("MISTRAL_API_KEY", key);
+
+    let caller_workspace = TempDir::new();
+    let caller_args = [
+        OsString::from("--goal"),
+        OsString::from("Finish a caller-directed task"),
+        OsString::from("--max-actions"),
+        OsString::from("1"),
+    ];
+    let (caller_code, caller_output, caller_error) = in_workspace(caller_workspace.path(), || {
+        let mut input = Cursor::new(b"complete caller-directed\n".to_vec());
+        let mut output = Vec::new();
+        let mut error = Vec::new();
+        let code = run_task_with_endpoint(
+            &caller_args,
+            &mut input,
+            &mut output,
+            &mut error,
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+        )
+        .expect("run caller-directed task without Mistral selection");
+        (code, output, error)
+    });
+    assert_eq!(caller_code, 0, "{}", String::from_utf8_lossy(&caller_error));
+    assert!(String::from_utf8_lossy(&caller_output).contains("Task outcome: succeeded"));
+    assert!(!String::from_utf8_lossy(&caller_output).contains(key));
+    assert!(!String::from_utf8_lossy(&caller_error).contains(key));
+
+    let (endpoint, server) = mock_server(vec![MockResponse {
+        status: 200,
+        body: tool_response("complete_task", json!({"result":"local Ollama"})),
+    }]);
+    let ollama_workspace = TempDir::new();
+    let (ollama_code, ollama_output, ollama_error) = in_workspace(ollama_workspace.path(), || {
+        let mut input = Cursor::new(Vec::<u8>::new());
+        let mut output = Vec::new();
+        let mut error = Vec::new();
+        let code = run_task_with_endpoint(
+            &task_args("1"),
+            &mut input,
+            &mut output,
+            &mut error,
+            endpoint,
+        )
+        .expect("run default local Ollama task without Mistral selection");
+        (code, output, error)
+    });
+    assert_eq!(ollama_code, 0, "{}", String::from_utf8_lossy(&ollama_error));
+    assert!(String::from_utf8_lossy(&ollama_output).contains("Task outcome: succeeded"));
+    assert!(!String::from_utf8_lossy(&ollama_output).contains(key));
+    assert!(!String::from_utf8_lossy(&ollama_error).contains(key));
+    let requests = server.join().expect("join local Ollama mock");
+    assert_eq!(requests.len(), 1);
+    let request = String::from_utf8_lossy(&requests[0]).to_ascii_lowercase();
+    assert!(request.starts_with("post /api/chat "));
+    assert!(!request.contains("authorization:"));
+    assert!(!request.contains(key));
+}
+
+#[test]
 fn hosted_provider_credentials_are_required_before_task_lifecycle_creation() {
     let _lock = PROVIDER_ENV_TEST_LOCK
         .lock()
@@ -617,6 +704,7 @@ fn hosted_provider_credentials_are_required_before_task_lifecycle_creation() {
         "OPENROUTER_API_KEY",
         "DEEPSEEK_API_KEY",
         "ZAI_API_KEY",
+        "MISTRAL_API_KEY",
     ];
     for (provider, missing_name, supplemental) in [
         ("gemini", "GEMINI_API_KEY", None),
@@ -636,6 +724,7 @@ fn hosted_provider_credentials_are_required_before_task_lifecycle_creation() {
         ("openrouter", "OPENROUTER_API_KEY", None),
         ("deepseek", "DEEPSEEK_API_KEY", None),
         ("zai", "ZAI_API_KEY", None),
+        ("mistral", "MISTRAL_API_KEY", None),
     ] {
         let _restores = provider_variables
             .iter()
@@ -792,6 +881,7 @@ fn provider_option_requires_a_model_and_rejects_unknown_names() {
         ("openrouter", None, "--model is required with --provider"),
         ("deepseek", None, "--model is required with --provider"),
         ("zai", None, "--model is required with --provider"),
+        ("mistral", None, "--model is required with --provider"),
         ("unknown", Some("test-model"), "unsupported provider"),
     ] {
         let mut args = vec![
@@ -842,7 +932,7 @@ fn task_help_documents_provider_selection_and_network_disclosure() {
     assert_eq!(code, 0, "{}", String::from_utf8_lossy(&error));
     assert!(help.contains("--provider NAME"));
     assert!(help.contains(
-        "choose ollama, gemini, openai, anthropic, cloudflare, groq, openrouter, deepseek, or zai"
+        "choose ollama, gemini, openai, anthropic, cloudflare, groq, openrouter, deepseek, zai, or mistral"
     ));
     for credential in [
         "GEMINI_API_KEY",
@@ -854,6 +944,7 @@ fn task_help_documents_provider_selection_and_network_disclosure() {
         "OPENROUTER_API_KEY",
         "DEEPSEEK_API_KEY",
         "ZAI_API_KEY",
+        "MISTRAL_API_KEY",
     ] {
         assert!(
             help.contains(credential),
@@ -871,4 +962,5 @@ fn task_help_documents_provider_selection_and_network_disclosure() {
     assert!(help.contains("OpenRouter may select an upstream provider for the requested model"));
     assert!(help.contains("https://api.deepseek.com/chat/completions"));
     assert!(help.contains("https://api.z.ai/api/paas/v4/chat/completions"));
+    assert!(help.contains("https://api.mistral.ai/v1/chat/completions"));
 }

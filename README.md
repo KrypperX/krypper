@@ -241,6 +241,9 @@ DEEPSEEK_API_KEY=... cargo run -- task --goal "Read the brief" \
 
 ZAI_API_KEY=... cargo run -- task --goal "Read the brief" \
   --max-actions 6 --provider zai --model MODEL
+
+MISTRAL_API_KEY=... cargo run -- task --goal "Read the brief" \
+  --max-actions 6 --provider mistral --model mistral-small-latest
 ```
 
 Krypper uses fixed HTTPS endpoints and does not accept custom API URLs:
@@ -255,6 +258,7 @@ Krypper uses fixed HTTPS endpoints and does not accept custom API URLs:
 | OpenRouter | `OPENROUTER_API_KEY` | `https://openrouter.ai/api/v1/chat/completions` |
 | DeepSeek | `DEEPSEEK_API_KEY` | `https://api.deepseek.com/chat/completions` |
 | Z.AI Standard API | `ZAI_API_KEY` | `https://api.z.ai/api/paas/v4/chat/completions` |
+| Mistral | `MISTRAL_API_KEY` | `https://api.mistral.ai/v1/chat/completions` |
 
 The account ID is validated as one path component before a task starts. Krypper
 reads credentials only for the selected provider and does not write keys to
@@ -265,9 +269,10 @@ safe path component, and no custom API URL is accepted. See Google's
 [function calling guide](https://ai.google.dev/gemini-api/docs/generate-content/function-calling),
 and [API key guide](https://ai.google.dev/gemini-api/docs/api-key). OpenAI uses
 the Responses API, Anthropic uses the Messages API, and Cloudflare Workers AI, Groq,
-OpenRouter, DeepSeek, and Z.AI share the OpenAI Chat Completions-compatible task adapter. DeepSeek
-and Z.AI use `tool_choice: auto`; Krypper still requires exactly one supported call and validates
-its arguments locally. Both profiles accept function arguments as either JSON text or a JSON object.
+OpenRouter, DeepSeek, Z.AI, and Mistral share the OpenAI Chat Completions-compatible task adapter.
+DeepSeek, Z.AI, and Mistral use `tool_choice: auto`; Mistral also disables parallel tool calls.
+Krypper still requires exactly one supported call and validates its arguments locally. DeepSeek
+and Z.AI accept function arguments as either JSON text or a JSON object; Mistral uses JSON text.
 Z.AI uses the Standard API endpoint shown above; Coding Plan endpoints are not supported. See the
 [Cloudflare Workers AI compatibility guide](https://developers.cloudflare.com/workers-ai/configuration/open-ai-compatibility/),
 [Groq OpenAI compatibility guide](https://console.groq.com/docs/openai), and
@@ -275,7 +280,10 @@ Z.AI uses the Standard API endpoint shown above; Coding Plan endpoints are not s
 [DeepSeek Chat Completions API](https://api-docs.deepseek.com/api/create-chat-completion/),
 [DeepSeek function calling](https://api-docs.deepseek.com/guides/function_calling),
 [Z.AI Chat Completion API](https://docs.z.ai/api-reference/llm/chat-completion), and
-[Z.AI function calling](https://docs.z.ai/guides/capabilities/function-calling) for provider request details.
+[Z.AI function calling](https://docs.z.ai/guides/capabilities/function-calling),
+[Mistral Chat Completion API](https://docs.mistral.ai/api/endpoint/chat),
+[Mistral function calling](https://docs.mistral.ai/inference/conversations/function-calling), and
+[Mistral API keys](https://docs.mistral.ai/admin/identity-access/api-keys) for provider request details.
 
 OpenRouter requests disable provider fallback where supported. OpenRouter can
 still select an upstream service that serves the requested model; Krypper does
@@ -283,10 +291,10 @@ not choose or reroute that upstream service.
 
 Hosted requests include the task goal, supported action schemas, remaining
 action budget, and prior observations. Observations can include workspace file
-contents, so selecting a hosted provider sends that task data to the provider
-and may incur provider charges. Review the goal and workspace data before
-opting in. `--model NAME` without `--provider` keeps inference local through
-Ollama at `127.0.0.1:11434`; Ollama needs no API key.
+contents, so explicitly selecting Mistral or another hosted provider sends that
+task data to the provider and may incur provider charges. Review the goal and
+workspace data before opting in. `--model NAME` without `--provider` keeps
+inference local through Ollama at `127.0.0.1:11434`; Ollama needs no API key.
 
 Without `--model` or `--provider`, `task` stays caller-directed and makes no
 model request. `--model NAME` without `--provider` continues to select local
