@@ -18,9 +18,13 @@ direction for future structural changes. `src/core/task.rs` and
   API as a compatibility facade for existing callers, including the types
   exposed by `core::task`.
 - [`src/harness/`](src/harness/) contains task-turn execution. It coordinates
-  decisions and workspace actions through the current session API.
-- [`src/model.rs`](src/model.rs) and its provider submodule turn observations
-  into proposed workspace actions through decision-source interfaces.
+  decisions and workspace actions through the current session API. Its
+  [`context.rs`](src/harness/context.rs) module formats each model prompt and
+  serializes the current workspace observations under the existing context
+  size limit; it is stateless and uses the current goal and decision budget.
+- [`src/model.rs`](src/model.rs) and its provider submodule build provider
+  request envelopes, validate model responses, and turn supported calls into
+  proposed workspace actions through decision-source interfaces.
 - [`src/file_safety.rs`](src/file_safety.rs) contains the current private
   workspace helpers that enforce path, containment, and file-operation rules.
 - [`src/cli.rs`](src/cli.rs) parses and runs the CLI, drives the current
@@ -43,8 +47,10 @@ Treat these boundaries as a revisable direction and introduce them incrementally
   modules share the existing lifecycle, history, and activity records.
 - **Brain** turns observations into proposed decisions through provider
   interfaces. It proposes actions; it does not execute workspace capabilities.
-- **Harness** coordinates context, execution, recovery, and verification. It
-  does not keep a second lifecycle store or bypass Tools to perform actions.
+- **Harness** coordinates context construction, execution, recovery, and
+  verification. Its context is rebuilt per decision from the current goal,
+  remaining decision budget, and observations; it does not keep stored model
+  context or a second lifecycle store, or bypass Tools to perform actions.
 - **Tools** registers and executes capabilities and remains the final
   enforcement boundary for workspace access and safety.
 - **CLI and future interfaces** present data and consume runtime snapshots

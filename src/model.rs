@@ -1,5 +1,5 @@
 use crate::agent_loop::{BoundedDecisionSource, WorkspaceAction, WorkspaceObservation};
-use crate::task_lifecycle::WorkspaceSearchLocation;
+use crate::harness::context::{build_task_prompt, ContextError};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::fmt;
@@ -26,7 +26,6 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_MODEL_NAME_BYTES: usize = 256;
 const MAX_MODEL_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 const MAX_MODEL_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
-const MAX_MODEL_OBSERVATION_BYTES: usize = 2 * 1024 * 1024;
 const MAX_HTTP_HEADER_BYTES: usize = 16 * 1024;
 const MAX_READ_RANGE_LINES: usize = 200;
 const MAX_SEARCH_QUERY_BYTES: usize = 4 * 1024;
@@ -300,19 +299,6 @@ fn adapt_gemini_schema(schema: &mut Value) {
     }
 }
 
-fn build_task_prompt(
-    goal: &str,
-    observations: &[WorkspaceObservation],
-    remaining_decisions: usize,
-) -> Result<String, ModelError> {
-    let observation_values = model_observations(observations)?;
-    let observation_json =
-        serde_json::to_string(&observation_values).map_err(|_| ModelError::RequestEncoding)?;
-    Ok(format!(
-        "Task goal:\n{goal}\n\nAction slots remaining, including this decision: {remaining_decisions}. The task fails if the action budget runs out before completion.\n\nPrior workspace observations (JSON):\n{observation_json}"
-    ))
-}
-
 fn encode_model_request(request: &Value) -> Result<Vec<u8>, ModelError> {
     let encoded = serde_json::to_vec(&request).map_err(|_| ModelError::RequestEncoding)?;
     if encoded.len() > MAX_MODEL_REQUEST_BYTES {
@@ -382,157 +368,6 @@ fn adapt_anthropic_strict_schema(schema: &mut Value) {
     }
 }
 
-fn model_observations(observations: &[WorkspaceObservation]) -> Result<Vec<Value>, ModelError> {
-    let mut total_bytes = 0_usize;
-    let mut values = Vec::with_capacity(observations.len());
-    for observation in observations {
-        total_bytes = total_bytes.saturating_add(observation_size(observation));
-        if total_bytes > MAX_MODEL_OBSERVATION_BYTES {
-            return Err(ModelError::ObservationsTooLarge);
-        }
-        values.push(observation_value(observation));
-    }
-    Ok(values)
-}
-
-fn observation_size(observation: &WorkspaceObservation) -> usize {
-    match observation {
-        WorkspaceObservation::FileRead { path, contents } => {
-            path.to_string_lossy().len().saturating_add(contents.len())
-        }
-        WorkspaceObservation::FileRangeRead { path, excerpt, .. } => {
-            path.to_string_lossy().len().saturating_add(excerpt.len())
-        }
-        WorkspaceObservation::DirectoryListed { path, entries } => entries
-            .iter()
-            .fold(path.to_string_lossy().len(), |total, entry| {
-                total.saturating_add(entry.to_string_lossy().len())
-            }),
-        WorkspaceObservation::DirectoryCreated { path }
-        | WorkspaceObservation::FileCreated { path, .. }
-        | WorkspaceObservation::FileCreationFailed { path, .. }
-        | WorkspaceObservation::DirectoryCreationFailed { path, .. } => {
-            path.to_string_lossy().len()
-        }
-        WorkspaceObservation::TextSearched {
-            directory,
-            locations,
-        }
-        | WorkspaceObservation::TreeTextSearched {
-            directory,
-            locations,
-        } => locations
-            .iter()
-            .fold(directory.to_string_lossy().len(), |total, location| {
-                total.saturating_add(location.path.to_string_lossy().len())
-            }),
-        WorkspaceObservation::TextReplaced { path, .. }
-        | WorkspaceObservation::TextReplacementFailed { path, .. } => path.to_string_lossy().len(),
-        WorkspaceObservation::TextSearchFailed { directory, .. }
-        | WorkspaceObservation::TreeTextSearchFailed { directory, .. } => {
-            directory.to_string_lossy().len()
-        }
-        WorkspaceObservation::ActionFailed { error, .. } => error.to_string().len(),
-    }
-}
-
-fn observation_value(observation: &WorkspaceObservation) -> Value {
-    match observation {
-        WorkspaceObservation::FileRead { path, contents } => {
-            json!({"type":"file_read", "path":path.to_string_lossy(), "contents":contents})
-        }
-        WorkspaceObservation::FileRangeRead {
-            path,
-            start_line,
-            end_line,
-            excerpt,
-        } => json!({
-            "type":"file_range_read",
-            "path":path.to_string_lossy(),
-            "start_line":start_line,
-            "end_line":end_line,
-            "excerpt":excerpt
-        }),
-        WorkspaceObservation::DirectoryListed { path, entries } => json!({
-            "type":"directory_listed",
-            "path":path.to_string_lossy(),
-            "entries":entries.iter().map(|entry| entry.to_string_lossy().into_owned()).collect::<Vec<_>>()
-        }),
-        WorkspaceObservation::DirectoryCreated { path } => {
-            json!({"type":"directory_created", "path":path.to_string_lossy()})
-        }
-        WorkspaceObservation::TextSearched {
-            directory,
-            locations,
-        } => json!({
-            "type":"text_searched",
-            "directory":directory.to_string_lossy(),
-            "locations":search_locations(locations)
-        }),
-        WorkspaceObservation::TreeTextSearched {
-            directory,
-            locations,
-        } => json!({
-            "type":"tree_text_searched",
-            "directory":directory.to_string_lossy(),
-            "locations":search_locations(locations)
-        }),
-        WorkspaceObservation::FileCreated {
-            path,
-            bytes_written,
-        } => json!({
-            "type":"file_created",
-            "path":path.to_string_lossy(),
-            "bytes_written":bytes_written
-        }),
-        WorkspaceObservation::FileCreationFailed { path, error } => json!({
-            "type":"file_creation_failed",
-            "path":path.to_string_lossy(),
-            "error":error.to_string()
-        }),
-        WorkspaceObservation::DirectoryCreationFailed { path, error } => json!({
-            "type":"directory_creation_failed",
-            "path":path.to_string_lossy(),
-            "error":error.to_string()
-        }),
-        WorkspaceObservation::TextReplaced {
-            path,
-            bytes_written,
-        } => json!({
-            "type":"text_replaced",
-            "path":path.to_string_lossy(),
-            "bytes_written":bytes_written
-        }),
-        WorkspaceObservation::TextReplacementFailed { path, error } => json!({
-            "type":"text_replacement_failed",
-            "path":path.to_string_lossy(),
-            "error":error.to_string()
-        }),
-        WorkspaceObservation::TextSearchFailed { directory, error } => json!({
-            "type":"text_search_failed",
-            "directory":directory.to_string_lossy(),
-            "error":error.to_string()
-        }),
-        WorkspaceObservation::TreeTextSearchFailed { directory, error } => json!({
-            "type":"tree_text_search_failed",
-            "directory":directory.to_string_lossy(),
-            "error":error.to_string()
-        }),
-        WorkspaceObservation::ActionFailed { action, error } => json!({
-            "type":"action_failed",
-            "action":workspace_action_name(action),
-            "error":error.to_string()
-        }),
-    }
-}
-
-fn search_locations(locations: &[WorkspaceSearchLocation]) -> Vec<Value> {
-    locations
-        .iter()
-        .map(|location| json!({"path":location.path.to_string_lossy(), "line":location.line}))
-        .collect()
-}
-
 fn tool_definitions() -> Value {
     json!([
         function_tool(
@@ -599,23 +434,6 @@ fn function_tool(name: &str, description: &str, properties: Value) -> Value {
             }
         }
     })
-}
-
-pub(crate) fn workspace_action_name(action: &WorkspaceAction) -> &'static str {
-    match action {
-        WorkspaceAction::ReadFile { .. } => "read_file",
-        WorkspaceAction::ReadRange { .. } => "read_range",
-        WorkspaceAction::ListDirectory { .. } => "list_directory",
-        WorkspaceAction::CreateDirectory { .. } => "create_directory",
-        WorkspaceAction::SearchText { .. } => "search_text",
-        WorkspaceAction::SearchTreeText { .. } => "search_tree_text",
-        WorkspaceAction::CreateFile { .. } => "create_file",
-        WorkspaceAction::ReplaceText { .. } => "replace_text",
-        WorkspaceAction::Complete { .. } => "complete_task",
-        WorkspaceAction::Continue => "continue",
-        WorkspaceAction::Cancel => "cancel",
-        WorkspaceAction::Unsupported { .. } => "unsupported",
-    }
 }
 
 fn post_chat(agent: &Agent, address: SocketAddr, body: &[u8]) -> Result<Vec<u8>, ModelError> {
@@ -1157,6 +975,15 @@ enum ModelError {
     ProviderInvalidToolCall(ModelProvider, &'static str),
     ProviderUnsupportedTool(ModelProvider),
     ProviderInvalidArguments(ModelProvider, &'static str),
+}
+
+impl From<ContextError> for ModelError {
+    fn from(error: ContextError) -> Self {
+        match error {
+            ContextError::RequestEncoding => Self::RequestEncoding,
+            ContextError::ObservationsTooLarge => Self::ObservationsTooLarge,
+        }
+    }
 }
 
 impl fmt::Display for ModelError {

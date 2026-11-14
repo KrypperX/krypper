@@ -3,11 +3,12 @@ use crate::agent_loop::{
     WorkspaceObservation,
 };
 use crate::file_safety::{create_text_file, list_directory, read_text_file};
+use crate::harness::execution::workspace_action_name;
 use crate::model::{
-    validate_model_name_for_provider, workspace_action_name, AnthropicDecisionSource,
-    CloudflareAccountId, GeminiDecisionSource, ModelDecisionSource, ModelProvider,
-    OllamaDecisionSource, OpenAiCompatibleCredentials, OpenAiCompatibleDecisionSource,
-    OpenAiCompatibleProvider, ResponsesDecisionSource, ResponsesProvider, OLLAMA_ADDRESS,
+    validate_model_name_for_provider, AnthropicDecisionSource, CloudflareAccountId,
+    GeminiDecisionSource, ModelDecisionSource, ModelProvider, OllamaDecisionSource,
+    OpenAiCompatibleCredentials, OpenAiCompatibleDecisionSource, OpenAiCompatibleProvider,
+    ResponsesDecisionSource, ResponsesProvider, OLLAMA_ADDRESS,
 };
 use crate::task_lifecycle::{
     TaskSession, TaskState, TurnOutcome, TurnState, MAX_TASK_SESSION_CHECKPOINT_BYTES,
