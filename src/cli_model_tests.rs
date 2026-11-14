@@ -485,6 +485,84 @@ fn resumed_model_cli_uses_the_stored_description_with_the_local_mock_server() {
 }
 
 #[test]
+fn resume_cli_preserves_malformed_checkpoint_message_and_exit_code() {
+    let temporary = TempDir::new();
+    let checkpoint_path = temporary.path().join("bad checkpoint.json");
+    fs::write(&checkpoint_path, b"not a checkpoint").expect("write malformed checkpoint");
+    let args = vec![
+        OsString::from("--resume"),
+        checkpoint_path.as_os_str().to_owned(),
+        OsString::from("--max-actions"),
+        OsString::from("1"),
+    ];
+    let mut input = Cursor::new(Vec::<u8>::new());
+    let mut output = Vec::new();
+    let mut error = Vec::new();
+
+    let code = run_task_with_endpoint(
+        &args,
+        &mut input,
+        &mut output,
+        &mut error,
+        SocketAddr::from(([127, 0, 0, 1], 0)),
+    )
+    .expect("report malformed checkpoint");
+
+    assert_eq!(code, 2);
+    assert!(output.is_empty());
+    assert!(String::from_utf8_lossy(&error).contains(&format!(
+        "cannot restore checkpoint '{}': invalid TaskSession checkpoint",
+        checkpoint_path.display()
+    )));
+}
+
+#[test]
+fn resume_cli_preserves_workspace_binding_error_message_and_exit_code() {
+    let temporary = TempDir::new();
+    let stored_workspace = temporary.path().join("stored workspace");
+    let requested_workspace = temporary.path().join("requested workspace");
+    fs::create_dir(&stored_workspace).expect("create stored workspace");
+    fs::create_dir(&requested_workspace).expect("create requested workspace");
+    let checkpoint_path = temporary.path().join("saved task.json");
+    let mut session = TaskSession::new_in_workspace(&stored_workspace).expect("bind workspace");
+    let task = session.create_task("resume with its original workspace");
+    task.transition(TaskState::Running).expect("start task");
+    let task_id = task.id();
+    fs::write(
+        &checkpoint_path,
+        session.export_checkpoint().expect("export checkpoint"),
+    )
+    .expect("write checkpoint");
+    let args = vec![
+        OsString::from("--resume"),
+        checkpoint_path.as_os_str().to_owned(),
+        OsString::from("--max-actions"),
+        OsString::from("1"),
+        OsString::from("--workspace"),
+        requested_workspace.as_os_str().to_owned(),
+    ];
+    let mut input = Cursor::new(Vec::<u8>::new());
+    let mut output = Vec::new();
+    let mut error = Vec::new();
+
+    let code = run_task_with_endpoint(
+        &args,
+        &mut input,
+        &mut output,
+        &mut error,
+        SocketAddr::from(([127, 0, 0, 1], 0)),
+    )
+    .expect("report workspace binding mismatch");
+
+    assert_eq!(code, 2);
+    assert!(output.is_empty());
+    assert!(String::from_utf8_lossy(&error).contains(&format!(
+        "cannot restore checkpoint '{}': workspace binding for task '{task_id}' does not match the checkpoint",
+        checkpoint_path.display()
+    )));
+}
+
+#[test]
 fn model_cli_uses_explicit_workspace_without_changing_current_directory() {
     let _lock = PROVIDER_ENV_TEST_LOCK
         .lock()

@@ -12,23 +12,28 @@ direction for future structural changes. `src/core/task.rs` and
   activity records.
 - [`src/core/lifecycle.rs`](src/core/lifecycle.rs) defines `TaskSession` and
   owns session-wide task ordering and lifecycle coordination, snapshots, and
-  checkpoint and recovery behavior. It re-exports the task domain types for
-  compatibility.
+  checkpoint serialization, validation, workspace binding, and lifecycle
+  state. It re-exports the task domain types for compatibility.
 - [`src/task_lifecycle.rs`](src/task_lifecycle.rs) re-exports that lifecycle
   API as a compatibility facade for existing callers, including the types
   exposed by `core::task`.
-- [`src/harness/`](src/harness/) contains task-turn execution. It coordinates
-  decisions and workspace actions through the current session API. Its
-  [`context.rs`](src/harness/context.rs) module formats each model prompt and
-  serializes the current workspace observations under the existing context
-  size limit; it is stateless and uses the current goal and decision budget.
+- [`src/harness/`](src/harness/) contains task-turn execution and session
+  preparation. It coordinates decisions and workspace actions through the
+  current session API. Its [`recovery.rs`](src/harness/recovery.rs) module
+  coordinates checkpoint restoration, the single-task checks, and startup of
+  the next turn through `TaskSession`; Core remains the only lifecycle and
+  checkpoint state owner. Its [`context.rs`](src/harness/context.rs) module
+  formats each model prompt and serializes the current workspace observations
+  under the existing context size limit; it is stateless and uses the current
+  goal and decision budget.
 - [`src/model.rs`](src/model.rs) and its provider submodule build provider
   request envelopes, validate model responses, and turn supported calls into
   proposed workspace actions through decision-source interfaces.
 - [`src/file_safety.rs`](src/file_safety.rs) contains the current private
   workspace helpers that enforce path, containment, and file-operation rules.
-- [`src/cli.rs`](src/cli.rs) parses and runs the CLI, drives the current
-  session and turn APIs, and presents command output.
+- [`src/cli.rs`](src/cli.rs) parses and runs the CLI, reads and writes
+  checkpoint files, presents command output, and asks Harness to prepare a
+  resumed session.
 
 Only `core::task` and `core::lifecycle` are implemented from the proposed
 module layout. The broader Core boundary, Brain, and Tools are not yet
