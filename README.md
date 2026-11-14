@@ -213,7 +213,7 @@ cargo run -- task --goal "Read the brief and create a short summary file" \
 ```
 
 To choose a hosted API, pass both `--provider` and `--model`, and supply its key
-in the environment:
+in the environment. Each explicit provider is a network opt-in:
 
 ```sh
 OPENAI_API_KEY=... cargo run -- task --goal "Read the brief" \
@@ -221,21 +221,47 @@ OPENAI_API_KEY=... cargo run -- task --goal "Read the brief" \
 
 ANTHROPIC_API_KEY=... cargo run -- task --goal "Read the brief" \
   --max-actions 6 --provider anthropic --model MODEL
+
+CLOUDFLARE_ACCOUNT_ID=... CLOUDFLARE_API_TOKEN=... cargo run -- task \
+  --goal "Read the brief" --max-actions 6 --provider cloudflare --model MODEL
+
+GROQ_API_KEY=... cargo run -- task --goal "Read the brief" \
+  --max-actions 6 --provider groq --model MODEL
+
+OPENROUTER_API_KEY=... cargo run -- task --goal "Read the brief" \
+  --max-actions 6 --provider openrouter --model MODEL
 ```
 
-`--provider openai` and `--provider anthropic` are explicit network opt-ins.
-They call the fixed [OpenAI Responses API](https://platform.openai.com/docs/api-reference/responses)
-or [Anthropic Messages API](https://docs.anthropic.com/en/api/messages); custom
-API URLs are not accepted. Set `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` for the
-selected provider. Krypper reads that variable only when the provider is
-selected and never writes the key to output, errors, lifecycle data, or
-checkpoints.
+Krypper uses fixed HTTPS endpoints and does not accept custom API URLs:
+
+| Provider | Required environment variables | Fixed endpoint |
+| --- | --- | --- |
+| OpenAI | `OPENAI_API_KEY` | `https://api.openai.com/v1/responses` |
+| Anthropic | `ANTHROPIC_API_KEY` | `https://api.anthropic.com/v1/messages` |
+| Cloudflare Workers AI | `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN` | `https://api.cloudflare.com/client/v4/accounts/<account-id>/ai/v1/chat/completions` |
+| Groq | `GROQ_API_KEY` | `https://api.groq.com/openai/v1/chat/completions` |
+| OpenRouter | `OPENROUTER_API_KEY` | `https://openrouter.ai/api/v1/chat/completions` |
+
+The account ID is validated as one path component before a task starts. Krypper
+reads credentials only for the selected provider and does not write keys to
+output, errors, logs, lifecycle data, or checkpoints. OpenAI uses the Responses
+API, Anthropic uses the Messages API, and Cloudflare Workers AI, Groq, and
+OpenRouter share the OpenAI Chat Completions-compatible task adapter. See the
+[Cloudflare Workers AI compatibility guide](https://developers.cloudflare.com/workers-ai/configuration/open-ai-compatibility/),
+[Groq OpenAI compatibility guide](https://console.groq.com/docs/openai), and
+[OpenRouter Chat Completions API](https://openrouter.ai/docs/api/api-reference/chat/create-a-chat-completion)
+for provider request details.
+
+OpenRouter requests disable provider fallback where supported. OpenRouter can
+still select an upstream service that serves the requested model; Krypper does
+not choose or reroute that upstream service.
 
 Hosted requests include the task goal, supported action schemas, remaining
 action budget, and prior observations. Observations can include workspace file
 contents, so selecting a hosted provider sends that task data to the provider
 and may incur provider charges. Review the goal and workspace data before
-opting in. Ollama stays local at `127.0.0.1:11434` and needs no API key.
+opting in. `--model NAME` without `--provider` keeps inference local through
+Ollama at `127.0.0.1:11434`; Ollama needs no API key.
 
 Without `--model` or `--provider`, `task` stays caller-directed and makes no
 model request. `--model NAME` without `--provider` continues to select local
