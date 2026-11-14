@@ -1,6 +1,6 @@
-use super::{prepare_model_source, run_task_with_endpoint};
+use super::{prepare_model_source, run_task_with_endpoint, snapshot_task_and_turn_state};
 use crate::model::{ModelDecisionSource, ModelProvider};
-use crate::task_lifecycle::{TaskSession, TaskState};
+use crate::task_lifecycle::{TaskSession, TaskState, TurnOutcome, TurnState};
 use serde_json::{json, Value};
 use std::ffi::OsString;
 use std::fs;
@@ -12,6 +12,46 @@ use std::thread::{self, JoinHandle};
 use uuid::Uuid;
 
 static PROVIDER_ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+#[test]
+fn task_result_states_use_snapshot_entries_for_matching_ids() {
+    let mut session = TaskSession::new();
+    let earlier_task_id = session.create_task("Earlier task").id();
+    let earlier_turn_id = session
+        .get_task_mut(earlier_task_id)
+        .unwrap()
+        .create_turn()
+        .unwrap();
+
+    let task_id = session.create_task("Completed task").id();
+    let task = session.get_task_mut(task_id).unwrap();
+    task.transition(TaskState::Running).unwrap();
+    let turn_id = task.create_turn().unwrap();
+    task.transition_turn(turn_id, TurnState::Running).unwrap();
+    session
+        .complete_turn(
+            task_id,
+            turn_id,
+            TurnOutcome::Success {
+                result: "saved result".to_owned(),
+            },
+        )
+        .unwrap();
+    session
+        .get_task_mut(task_id)
+        .unwrap()
+        .transition(TaskState::Succeeded)
+        .unwrap();
+
+    assert_eq!(
+        snapshot_task_and_turn_state(&session, task_id, turn_id).unwrap(),
+        (TaskState::Succeeded, TurnState::Succeeded)
+    );
+    assert_eq!(
+        snapshot_task_and_turn_state(&session, earlier_task_id, earlier_turn_id).unwrap(),
+        (TaskState::Pending, TurnState::Pending)
+    );
+}
 
 struct RestoreEnvironmentVariable {
     name: &'static str,
@@ -343,7 +383,7 @@ fn task_cli_rejects_missing_and_invalid_workspace_before_lifecycle() {
 }
 
 #[test]
-fn model_cli_reports_successful_task_and_turn_outcomes() {
+fn model_cli_reports_successful_task_and_turn_states_and_outcomes() {
     let (endpoint, server) = mock_server(vec![
         MockResponse {
             status: 200,
@@ -377,7 +417,9 @@ fn model_cli_reports_successful_task_and_turn_outcomes() {
     assert_eq!(code, 0);
     assert!(output.contains("Model selected action: create_file"));
     assert!(output.contains("Model selected action: complete_task"));
+    assert!(output.contains("Task state: succeeded"));
     assert!(output.contains("Task outcome: succeeded"));
+    assert!(output.contains("Turn state: succeeded"));
     assert!(output.contains("Turn outcome: success: Created result.txt."));
     assert!(output.contains("Actions: 2/2"));
     assert!(error.contains("model decision 1/2"));
@@ -528,7 +570,9 @@ fn model_cli_marks_an_uncompleted_budget_exhausted_task_failed() {
     });
     let output = String::from_utf8(output).expect("UTF-8 output");
     assert_eq!(code, 1);
+    assert!(output.contains("Task state: failed"));
     assert!(output.contains("Task outcome: failed"));
+    assert!(output.contains("Turn state: failed"));
     assert!(output.contains("Turn outcome: failure: action budget exhausted after 1 actions"));
     assert!(output.contains("Actions: 1/1"));
     assert!(!output.contains("Task outcome: succeeded"));
@@ -571,13 +615,51 @@ fn model_cli_reports_connection_http_and_decode_failures_as_failed_task() {
         });
         let output = String::from_utf8(output).expect("UTF-8 task output");
         assert_eq!(code, 1);
+        assert!(output.contains("Task state: failed"));
         assert!(output.contains("Task outcome: failed"));
+        assert!(output.contains("Turn state: failed"));
         assert!(output.contains("Turn outcome: failure:"));
         assert!(!output.contains("Task outcome: succeeded"));
         if let Some(server) = server {
             assert_eq!(server.join().expect("join mock server").len(), 1);
         }
     }
+}
+
+#[test]
+fn caller_directed_cli_reports_the_final_turn_state_after_multiple_turns() {
+    let workspace = TempDir::new();
+    let args = [
+        "--goal",
+        "Continue into a failed turn",
+        "--max-actions",
+        "2",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect::<Vec<_>>();
+    let (code, output) = in_workspace(workspace.path(), || {
+        let mut input = Cursor::new(b"continue\nnot-an-action\n".to_vec());
+        let mut output = Vec::new();
+        let mut error = Vec::new();
+        let code = run_task_with_endpoint(
+            &args,
+            &mut input,
+            &mut output,
+            &mut error,
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+        )
+        .expect("run caller-directed multi-turn task");
+        (code, output)
+    });
+    let output = String::from_utf8(output).expect("UTF-8 task output");
+
+    assert_eq!(code, 1);
+    assert!(output.contains("Turn results (in order):"));
+    assert!(output.contains("Turn 1 actions: 1"));
+    assert!(output.contains("Turn 2 actions: 1"));
+    assert!(output.contains("Task state: failed"));
+    assert!(output.contains("Turn state: failed"));
 }
 
 #[test]

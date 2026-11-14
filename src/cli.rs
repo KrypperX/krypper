@@ -574,8 +574,9 @@ fn run_task_with_endpoint(
     let turn = task
         .get_turn(turn_id)
         .ok_or_else(|| io::Error::other("turn was not found in its task"))?;
-    let succeeded = task.state() == TaskState::Succeeded;
-    let cancelled = task.state() == TaskState::Cancelled;
+    let (task_state, turn_state) = snapshot_task_and_turn_state(&session, task_id, turn_id)?;
+    let succeeded = task_state == TaskState::Succeeded;
+    let cancelled = task_state == TaskState::Cancelled;
 
     if turn_results.len() > 1 {
         writeln!(output, "Turn results (in order):")?;
@@ -594,11 +595,11 @@ fn run_task_with_endpoint(
         }
     }
 
-    writeln!(output, "Task state: {}", task.state())?;
+    writeln!(output, "Task state: {task_state}")?;
     let task_outcome = if paused_checkpoint.is_some() {
         "paused (still running)"
     } else {
-        match task.state() {
+        match task_state {
             TaskState::Succeeded => "succeeded",
             TaskState::Failed => "failed",
             TaskState::Cancelled => "cancelled by caller",
@@ -609,7 +610,7 @@ fn run_task_with_endpoint(
     if let Some(path) = paused_checkpoint.as_deref() {
         writeln!(output, "Checkpoint saved: {}", path.display())?;
     }
-    writeln!(output, "Turn state: {}", turn.state())?;
+    writeln!(output, "Turn state: {turn_state}")?;
     write_turn_outcome(output, "Turn outcome: ", result.outcome())?;
     writeln!(output, "Actions: {actions_taken}/{max_actions}")?;
 
@@ -669,6 +670,26 @@ fn run_task_with_endpoint(
     } else {
         1
     })
+}
+
+fn snapshot_task_and_turn_state(
+    session: &TaskSession,
+    task_id: uuid::Uuid,
+    turn_id: uuid::Uuid,
+) -> io::Result<(TaskState, TurnState)> {
+    let snapshot = session.snapshot();
+    let task = snapshot
+        .tasks()
+        .iter()
+        .find(|task| task.id() == task_id)
+        .ok_or_else(|| io::Error::other("task was not found in its snapshot"))?;
+    let turn = task
+        .turns()
+        .iter()
+        .find(|turn| turn.id() == turn_id)
+        .ok_or_else(|| io::Error::other("turn was not found in its task snapshot"))?;
+
+    Ok((task.state(), turn.state()))
 }
 
 fn prepare_model_source(
