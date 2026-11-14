@@ -1836,8 +1836,9 @@ fn task_help_lists_checkpoint_options_and_describes_the_invocation_budget() {
     assert!(stdout(&output).contains("--checkpoint-out PATH"));
     assert!(stdout(&output).contains("--resume PATH"));
     assert!(stdout(&output).contains(
-        "choose ollama, gemini, openai, anthropic, cloudflare, groq, openrouter, deepseek, zai, or mistral"
+        "choose ollama, gemini, openai, xai, anthropic, cloudflare, groq, openrouter, deepseek, zai, or mistral"
     ));
+    assert!(stdout(&output).contains("XAI_API_KEY -> https://api.x.ai/v1/responses"));
     assert!(stdout(&output).contains("CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN"));
     assert!(stdout(&output).contains("GROQ_API_KEY"));
     assert!(stdout(&output).contains("OPENROUTER_API_KEY"));

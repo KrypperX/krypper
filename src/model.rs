@@ -15,7 +15,8 @@ use providers::parse_compatible_chat_response;
 pub(crate) use providers::{
     AnthropicDecisionSource, CloudflareAccountId, GeminiDecisionSource, GeminiModelName,
     ModelDecisionSource, ModelProvider, OpenAiCompatibleCredentials,
-    OpenAiCompatibleDecisionSource, OpenAiCompatibleProvider, OpenAiDecisionSource,
+    OpenAiCompatibleDecisionSource, OpenAiCompatibleProvider, ResponsesDecisionSource,
+    ResponsesProvider,
 };
 
 pub(crate) const OLLAMA_ADDRESS: SocketAddr =
@@ -170,14 +171,14 @@ fn build_chat_request(
     encode_model_request(&request)
 }
 
-fn build_openai_request(
+fn build_responses_request(
     model: &str,
+    provider: ModelProvider,
     goal: &str,
     observations: &[WorkspaceObservation],
     remaining_decisions: usize,
 ) -> Result<Vec<u8>, ModelError> {
-    validate_model_name_for_provider(model, ModelProvider::OpenAi)
-        .map_err(ModelError::InvalidModelName)?;
+    validate_model_name_for_provider(model, provider).map_err(ModelError::InvalidModelName)?;
     let prompt = build_task_prompt(goal, observations, remaining_decisions)?;
     let request = json!({
         "model": model,
@@ -707,10 +708,18 @@ fn parse_model_response(response: &[u8]) -> Result<WorkspaceAction, ModelError> 
     action_from_call(&call.function.name, &call.function.arguments)
 }
 
-fn parse_openai_response(response: &[u8]) -> Result<WorkspaceAction, ModelError> {
-    let provider = ModelProvider::OpenAi;
+fn parse_responses_response(
+    response: &[u8],
+    provider: ModelProvider,
+) -> Result<WorkspaceAction, ModelError> {
     let response: Value =
         serde_json::from_slice(response).map_err(|_| ModelError::ProviderInvalidJson(provider))?;
+    if response.get("choices").is_some() {
+        return Err(ModelError::ProviderInvalidToolCall(
+            provider,
+            "Responses output must not contain chat completion choices",
+        ));
+    }
     if response.get("status").and_then(Value::as_str) != Some("completed") {
         return Err(ModelError::ProviderInvalidToolCall(
             provider,
@@ -720,6 +729,16 @@ fn parse_openai_response(response: &[u8]) -> Result<WorkspaceAction, ModelError>
     let output = response.get("output").and_then(Value::as_array).ok_or(
         ModelError::ProviderInvalidToolCall(provider, "missing response output"),
     )?;
+    if output.iter().any(|item| {
+        item.get("type").and_then(Value::as_str).is_none_or(|kind| {
+            !matches!(kind, "message" | "reasoning" | "function_call") && !kind.ends_with("_call")
+        })
+    }) {
+        return Err(ModelError::ProviderInvalidToolCall(
+            provider,
+            "response contains a malformed or unsupported output item",
+        ));
+    }
     let calls = output
         .iter()
         .filter(|item| {

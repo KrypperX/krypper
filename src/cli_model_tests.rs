@@ -1,5 +1,5 @@
 use super::{prepare_model_source, run_task_with_endpoint};
-use crate::model::ModelProvider;
+use crate::model::{ModelDecisionSource, ModelProvider};
 use crate::task_lifecycle::{TaskSession, TaskState};
 use serde_json::{json, Value};
 use std::ffi::OsString;
@@ -625,12 +625,14 @@ fn mistral_credentials_are_loaded_only_for_explicit_selection() {
 }
 
 #[test]
-fn mistral_key_does_not_change_caller_directed_or_default_ollama_tasks() {
+fn hosted_keys_do_not_change_caller_directed_or_default_ollama_tasks() {
     let _lock = PROVIDER_ENV_TEST_LOCK
         .lock()
         .expect("lock provider environment tests");
     let key = "local-mistral-test-key";
     let _restore_key = RestoreEnvironmentVariable::set("MISTRAL_API_KEY", key);
+    let xai_key = "local-xai-test-key";
+    let _restore_xai_key = RestoreEnvironmentVariable::set("XAI_API_KEY", xai_key);
 
     let caller_workspace = TempDir::new();
     let caller_args = [
@@ -657,6 +659,8 @@ fn mistral_key_does_not_change_caller_directed_or_default_ollama_tasks() {
     assert!(String::from_utf8_lossy(&caller_output).contains("Task outcome: succeeded"));
     assert!(!String::from_utf8_lossy(&caller_output).contains(key));
     assert!(!String::from_utf8_lossy(&caller_error).contains(key));
+    assert!(!String::from_utf8_lossy(&caller_output).contains(xai_key));
+    assert!(!String::from_utf8_lossy(&caller_error).contains(xai_key));
 
     let (endpoint, server) = mock_server(vec![MockResponse {
         status: 200,
@@ -681,12 +685,49 @@ fn mistral_key_does_not_change_caller_directed_or_default_ollama_tasks() {
     assert!(String::from_utf8_lossy(&ollama_output).contains("Task outcome: succeeded"));
     assert!(!String::from_utf8_lossy(&ollama_output).contains(key));
     assert!(!String::from_utf8_lossy(&ollama_error).contains(key));
+    assert!(!String::from_utf8_lossy(&ollama_output).contains(xai_key));
+    assert!(!String::from_utf8_lossy(&ollama_error).contains(xai_key));
     let requests = server.join().expect("join local Ollama mock");
     assert_eq!(requests.len(), 1);
     let request = String::from_utf8_lossy(&requests[0]).to_ascii_lowercase();
     assert!(request.starts_with("post /api/chat "));
     assert!(!request.contains("authorization:"));
     assert!(!request.contains(key));
+    assert!(!request.contains(xai_key));
+}
+
+#[test]
+fn xai_credentials_are_loaded_only_for_explicit_selection() {
+    let _lock = PROVIDER_ENV_TEST_LOCK
+        .lock()
+        .expect("lock provider environment tests");
+    let _restore_key = RestoreEnvironmentVariable::set("XAI_API_KEY", "local-xai-test-key");
+    let provider = ModelProvider::parse("xai").expect("parse xAI provider");
+
+    let explicit = prepare_model_source(
+        Some("grok-local-test".to_owned()),
+        Some(provider),
+        1,
+        SocketAddr::from(([127, 0, 0, 1], 0)),
+    );
+    let caller_directed =
+        prepare_model_source(None, None, 1, SocketAddr::from(([127, 0, 0, 1], 0)));
+    let implicit_ollama = prepare_model_source(
+        Some("local-model".to_owned()),
+        None,
+        1,
+        SocketAddr::from(([127, 0, 0, 1], 0)),
+    );
+
+    assert!(matches!(
+        explicit,
+        Ok(Some(ModelDecisionSource::Responses(_)))
+    ));
+    assert!(matches!(caller_directed, Ok(None)));
+    assert!(matches!(
+        implicit_ollama,
+        Ok(Some(ModelDecisionSource::Ollama(_)))
+    ));
 }
 
 #[test]
@@ -697,6 +738,7 @@ fn hosted_provider_credentials_are_required_before_task_lifecycle_creation() {
     let provider_variables = [
         "GEMINI_API_KEY",
         "OPENAI_API_KEY",
+        "XAI_API_KEY",
         "ANTHROPIC_API_KEY",
         "CLOUDFLARE_ACCOUNT_ID",
         "CLOUDFLARE_API_TOKEN",
@@ -709,6 +751,7 @@ fn hosted_provider_credentials_are_required_before_task_lifecycle_creation() {
     for (provider, missing_name, supplemental) in [
         ("gemini", "GEMINI_API_KEY", None),
         ("openai", "OPENAI_API_KEY", None),
+        ("xai", "XAI_API_KEY", None),
         ("anthropic", "ANTHROPIC_API_KEY", None),
         (
             "cloudflare",
@@ -876,6 +919,7 @@ fn provider_option_requires_a_model_and_rejects_unknown_names() {
     for (provider, model, expected) in [
         ("gemini", None, "--model is required with --provider"),
         ("openai", None, "--model is required with --provider"),
+        ("xai", None, "--model is required with --provider"),
         ("cloudflare", None, "--model is required with --provider"),
         ("groq", None, "--model is required with --provider"),
         ("openrouter", None, "--model is required with --provider"),
@@ -932,11 +976,12 @@ fn task_help_documents_provider_selection_and_network_disclosure() {
     assert_eq!(code, 0, "{}", String::from_utf8_lossy(&error));
     assert!(help.contains("--provider NAME"));
     assert!(help.contains(
-        "choose ollama, gemini, openai, anthropic, cloudflare, groq, openrouter, deepseek, zai, or mistral"
+        "choose ollama, gemini, openai, xai, anthropic, cloudflare, groq, openrouter, deepseek, zai, or mistral"
     ));
     for credential in [
         "GEMINI_API_KEY",
         "OPENAI_API_KEY",
+        "XAI_API_KEY",
         "ANTHROPIC_API_KEY",
         "CLOUDFLARE_ACCOUNT_ID",
         "CLOUDFLARE_API_TOKEN",
@@ -955,6 +1000,7 @@ fn task_help_documents_provider_selection_and_network_disclosure() {
     assert!(help.contains(
         "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
     ));
+    assert!(help.contains("https://api.x.ai/v1/responses"));
     assert!(help.contains("Gemini model name must be one safe path component"));
     assert!(help.contains("may incur provider charges"));
     assert!(help.contains("Without --model or --provider, task remains caller-directed"));
