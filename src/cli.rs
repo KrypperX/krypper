@@ -4,6 +4,7 @@ use crate::agent_loop::{
 };
 use crate::file_safety::{create_text_file, list_directory, read_text_file};
 use crate::harness::execution::workspace_action_name;
+use crate::harness::recovery::{prepare_resumed_session, ResumeError};
 use crate::model::{
     validate_model_name_for_provider, AnthropicDecisionSource, CloudflareAccountId,
     GeminiDecisionSource, ModelDecisionSource, ModelProvider, OllamaDecisionSource,
@@ -326,53 +327,37 @@ fn run_task_with_endpoint(
                 );
             }
         };
-        let restored = match workspace.as_deref() {
-            Some(workspace_path) => {
-                TaskSession::restore_checkpoint_in_workspace(&checkpoint, workspace_path)
-            }
-            None => TaskSession::restore_checkpoint(&checkpoint),
-        };
-        let mut session = match restored {
-            Ok(session) => session,
-            Err(cause) => {
+        let prepared = match prepare_resumed_session(&checkpoint, workspace.as_deref()) {
+            Ok(prepared) => prepared,
+            Err(ResumeError::Checkpoint(cause)) => {
                 return usage_error(
                     error,
                     Some("task"),
                     &format!("cannot restore checkpoint '{}': {cause}", path.display()),
                 );
             }
-        };
-        if session.list_tasks().len() != 1 {
-            return usage_error(
-                error,
-                Some("task"),
-                &format!(
-                    "checkpoint must contain exactly one task, found {}",
-                    session.list_tasks().len()
-                ),
-            );
-        }
-        let (task_id, goal) = {
-            let task = &session.list_tasks()[0];
-            if task.state() != TaskState::Running {
+            Err(ResumeError::TaskCount(count)) => {
                 return usage_error(
                     error,
                     Some("task"),
-                    &format!("checkpoint task must be running, found {}", task.state()),
+                    &format!("checkpoint must contain exactly one task, found {count}"),
                 );
             }
-            (task.id(), task.description().to_owned())
+            Err(ResumeError::TaskNotRunning(state)) => {
+                return usage_error(
+                    error,
+                    Some("task"),
+                    &format!("checkpoint task must be running, found {state}"),
+                );
+            }
+            Err(ResumeError::SessionSetup(cause)) => return Err(cause),
         };
-        let turn_id = {
-            let task = session
-                .get_task_mut(task_id)
-                .ok_or_else(|| io::Error::other("restored task was not found in its session"))?;
-            let turn_id = task.create_turn().map_err(io::Error::other)?;
-            task.transition_turn(turn_id, TurnState::Running)
-                .map_err(io::Error::other)?;
-            turn_id
-        };
-        (session, task_id, turn_id, goal)
+        (
+            prepared.session,
+            prepared.task_id,
+            prepared.turn_id,
+            prepared.goal,
+        )
     } else {
         let Some(goal) = goal else {
             return usage_error(
