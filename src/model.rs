@@ -10,8 +10,12 @@ use std::time::Duration;
 use ureq::Agent;
 
 mod providers;
+#[cfg(test)]
+use providers::parse_compatible_chat_response;
 pub(crate) use providers::{
-    AnthropicDecisionSource, ModelDecisionSource, ModelProvider, OpenAiDecisionSource,
+    AnthropicDecisionSource, CloudflareAccountId, ModelDecisionSource, ModelProvider,
+    OpenAiCompatibleCredentials, OpenAiCompatibleDecisionSource, OpenAiCompatibleProvider,
+    OpenAiDecisionSource,
 };
 
 pub(crate) const OLLAMA_ADDRESS: SocketAddr =
