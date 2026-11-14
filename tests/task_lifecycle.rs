@@ -85,6 +85,172 @@ fn explicit_workspace_session_uses_the_selected_root_without_changing_current_di
 }
 
 #[test]
+fn task_session_snapshot_is_empty_for_a_new_session() {
+    let session = TaskSession::new();
+
+    let snapshot = session.snapshot();
+
+    assert_eq!(snapshot.id(), session.id());
+    assert!(snapshot.tasks().is_empty());
+    assert_eq!(snapshot, session.snapshot());
+}
+
+#[test]
+fn task_session_snapshot_tracks_ids_states_and_independent_sequence_high_waters() {
+    let mut session = TaskSession::new();
+    let first_task = session.create_task("first task");
+    let first_task_id = first_task.id();
+    let first_turn_id = first_task.create_turn().unwrap();
+    first_task.transition(TaskState::Running).unwrap();
+    first_task
+        .transition_turn(first_turn_id, TurnState::Running)
+        .unwrap();
+    let second_turn_id = first_task.create_turn().unwrap();
+    first_task
+        .transition_turn(second_turn_id, TurnState::Running)
+        .unwrap();
+    session
+        .cancel_turn_with_activity(
+            first_task_id,
+            first_turn_id,
+            &[
+                TurnActivitySummary::FileCreated { bytes_written: 4 },
+                TurnActivitySummary::DirectoryCreated,
+            ],
+        )
+        .unwrap();
+
+    let second_task = session.create_task("second task");
+    let second_task_id = second_task.id();
+    let pending_turn_id = second_task.create_turn().unwrap();
+    let empty_task_id = session.create_task("task without turns").id();
+
+    let first_history = session.get_task(first_task_id).unwrap().history().to_vec();
+    let first_activity = session
+        .get_task(first_task_id)
+        .unwrap()
+        .activity_history()
+        .to_vec();
+    let snapshot = session.snapshot();
+
+    assert_eq!(snapshot.id(), session.id());
+    assert_eq!(snapshot.tasks().len(), 3);
+    let first = &snapshot.tasks()[0];
+    assert_eq!(first.id(), first_task_id);
+    assert_eq!(first.state(), TaskState::Cancelled);
+    assert_eq!(first.lifecycle_sequence_high_water(), 8);
+    assert_eq!(first.activity_sequence_high_water(), 2);
+    assert_eq!(first.turns().len(), 2);
+    assert_eq!(first.turns()[0].id(), first_turn_id);
+    assert_eq!(first.turns()[0].state(), TurnState::Cancelled);
+    assert_eq!(first.turns()[1].id(), second_turn_id);
+    assert_eq!(first.turns()[1].state(), TurnState::Cancelled);
+
+    let second = &snapshot.tasks()[1];
+    assert_eq!(second.id(), second_task_id);
+    assert_eq!(second.state(), TaskState::Pending);
+    assert_eq!(second.lifecycle_sequence_high_water(), 1);
+    assert_eq!(second.activity_sequence_high_water(), 0);
+    assert_eq!(second.turns().len(), 1);
+    assert_eq!(second.turns()[0].id(), pending_turn_id);
+    assert_eq!(second.turns()[0].state(), TurnState::Pending);
+
+    let empty = &snapshot.tasks()[2];
+    assert_eq!(empty.id(), empty_task_id);
+    assert_eq!(empty.lifecycle_sequence_high_water(), 0);
+    assert_eq!(empty.activity_sequence_high_water(), 0);
+    assert!(empty.turns().is_empty());
+
+    assert_eq!(
+        session.get_task(first_task_id).unwrap().history(),
+        first_history
+    );
+    assert_eq!(
+        session.get_task(first_task_id).unwrap().activity_history(),
+        first_activity
+    );
+    assert_eq!(snapshot, session.snapshot());
+}
+
+#[test]
+fn task_session_snapshot_omits_task_outcome_and_workspace_sentinels() {
+    let temporary = TempDir::new();
+    let workspace = temporary.path().join("workspace-path-secret-sentinel");
+    fs::create_dir(&workspace).unwrap();
+    fs::write(
+        workspace.join("private.txt"),
+        "workspace-content-secret-sentinel model-provider-secret-sentinel credential-secret-sentinel",
+    )
+    .unwrap();
+    let mut session = TaskSession::new_in_workspace(&workspace).unwrap();
+    let task_id = session
+        .create_task("task-description-secret-sentinel prompt-secret-sentinel")
+        .id();
+    let task = session.get_task_mut(task_id).unwrap();
+    task.transition(TaskState::Running).unwrap();
+    let successful_turn_id = task.create_turn().unwrap();
+    task.transition_turn(successful_turn_id, TurnState::Running)
+        .unwrap();
+    session
+        .complete_turn(
+            task_id,
+            successful_turn_id,
+            TurnOutcome::Success {
+                result: "successful-outcome-secret-sentinel".to_owned(),
+            },
+        )
+        .unwrap();
+    session
+        .get_task_mut(task_id)
+        .unwrap()
+        .transition(TaskState::Succeeded)
+        .unwrap();
+
+    let failed_task_id = session
+        .create_task("another-task-description-secret-sentinel")
+        .id();
+    let failed_task = session.get_task_mut(failed_task_id).unwrap();
+    failed_task.transition(TaskState::Running).unwrap();
+    let failed_turn_id = failed_task.create_turn().unwrap();
+    failed_task
+        .transition_turn(failed_turn_id, TurnState::Running)
+        .unwrap();
+    session
+        .complete_turn(
+            failed_task_id,
+            failed_turn_id,
+            TurnOutcome::Failure {
+                detail: "failure-outcome-secret-sentinel".to_owned(),
+            },
+        )
+        .unwrap();
+    session
+        .get_task_mut(failed_task_id)
+        .unwrap()
+        .transition(TaskState::Failed)
+        .unwrap();
+
+    let snapshot = session.snapshot();
+    let representation = format!("{snapshot:?}");
+    for sentinel in [
+        "task-description-secret-sentinel",
+        "another-task-description-secret-sentinel",
+        "prompt-secret-sentinel",
+        "model-provider-secret-sentinel",
+        "credential-secret-sentinel",
+        "successful-outcome-secret-sentinel",
+        "failure-outcome-secret-sentinel",
+        "workspace-path-secret-sentinel",
+        "workspace-content-secret-sentinel",
+    ] {
+        assert!(
+            !representation.contains(sentinel),
+            "snapshot exposed sensitive sentinel {sentinel}"
+        );
+    }
+}
+
+#[test]
 fn explicit_workspace_session_keeps_its_root_for_bounded_turns_after_directory_changes() {
     let _lock = CURRENT_DIR_LOCK
         .lock()

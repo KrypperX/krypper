@@ -1197,6 +1197,87 @@ pub struct TaskSession {
     tasks: Vec<Task>,
 }
 
+/// An immutable view of the current identifiers and states in a task session.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskSessionSnapshot {
+    id: Uuid,
+    tasks: Vec<TaskSnapshot>,
+}
+
+impl TaskSessionSnapshot {
+    /// Returns the stable identifier of the task session.
+    pub fn id(&self) -> Uuid {
+        self.id
+    }
+
+    /// Returns task snapshots in their session creation order.
+    pub fn tasks(&self) -> &[TaskSnapshot] {
+        &self.tasks
+    }
+}
+
+/// An immutable view of one task's state, turns, and history sequence positions.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskSnapshot {
+    id: Uuid,
+    state: TaskState,
+    lifecycle_sequence_high_water: u64,
+    activity_sequence_high_water: u64,
+    turns: Vec<TurnSnapshot>,
+}
+
+impl TaskSnapshot {
+    /// Returns the stable identifier of the task.
+    pub fn id(&self) -> Uuid {
+        self.id
+    }
+
+    /// Returns the current lifecycle state of the task.
+    pub fn state(&self) -> TaskState {
+        self.state
+    }
+
+    /// Returns the last sequence number in this task's combined lifecycle history.
+    ///
+    /// This one-based sequence is independent of the activity history sequence and is zero when
+    /// the combined lifecycle history is empty.
+    pub fn lifecycle_sequence_high_water(&self) -> u64 {
+        self.lifecycle_sequence_high_water
+    }
+
+    /// Returns the last sequence number in this task's metadata-only activity history.
+    ///
+    /// This one-based sequence is independent of the lifecycle history sequence and is zero when
+    /// the activity history is empty.
+    pub fn activity_sequence_high_water(&self) -> u64 {
+        self.activity_sequence_high_water
+    }
+
+    /// Returns turn snapshots in their task creation order.
+    pub fn turns(&self) -> &[TurnSnapshot] {
+        &self.turns
+    }
+}
+
+/// An immutable view of one task-owned turn's identifier and current state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TurnSnapshot {
+    id: Uuid,
+    state: TurnState,
+}
+
+impl TurnSnapshot {
+    /// Returns the stable identifier of the turn.
+    pub fn id(&self) -> Uuid {
+        self.id
+    }
+
+    /// Returns the current lifecycle state of the turn.
+    pub fn state(&self) -> TurnState {
+        self.state
+    }
+}
+
 /// A requested TaskSession workspace could not be captured safely.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TaskSessionWorkspaceError(String);
@@ -1262,6 +1343,55 @@ impl TaskSession {
     /// Returns the stable session identifier.
     pub fn id(&self) -> Uuid {
         self.id
+    }
+
+    /// Returns an immutable, on-demand view of the session's current task and turn state.
+    ///
+    /// The snapshot contains only the session, task, and turn identifiers and states, plus each
+    /// task's independent combined-lifecycle and metadata-only activity sequence high-water
+    /// values. A high-water value is zero when its history is empty. Creating a snapshot does not
+    /// consume history or change session state, and the snapshot exposes no task descriptions,
+    /// outcomes, prompts, provider data, workspace information, credentials, or secrets.
+    ///
+    /// ```
+    /// use krypper::task_lifecycle::{TaskSession, TaskState};
+    ///
+    /// let mut session = TaskSession::new();
+    /// let task_id = session.create_task("Summarize the selected workspace").id();
+    /// let snapshot = session.snapshot();
+    /// let task = &snapshot.tasks()[0];
+    /// assert_eq!(task.id(), task_id);
+    /// assert_eq!(task.state(), TaskState::Pending);
+    /// assert_eq!(task.lifecycle_sequence_high_water(), 0);
+    /// ```
+    pub fn snapshot(&self) -> TaskSessionSnapshot {
+        TaskSessionSnapshot {
+            id: self.id,
+            tasks: self
+                .tasks
+                .iter()
+                .map(|task| TaskSnapshot {
+                    id: task.id,
+                    state: task.state,
+                    lifecycle_sequence_high_water: task
+                        .history
+                        .last()
+                        .map_or(0, TaskHistoryEvent::sequence),
+                    activity_sequence_high_water: task
+                        .activity_history
+                        .last()
+                        .map_or(0, TaskActivityEvent::sequence),
+                    turns: task
+                        .turns
+                        .iter()
+                        .map(|turn| TurnSnapshot {
+                            id: turn.id,
+                            state: turn.state,
+                        })
+                        .collect(),
+                })
+                .collect(),
+        }
     }
 
     /// Creates and stores a pending task, returning it for immediate use.

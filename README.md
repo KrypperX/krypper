@@ -449,6 +449,13 @@ them by ID, and lists them without exposing mutable turn or event collections;
 each turn's events include its task and turn IDs. Sessions find tasks by ID and
 list them in creation order.
 
+`TaskSession::snapshot()` returns an immutable, on-demand view of the session,
+task, and turn IDs and states. Each task snapshot includes the high-water value
+for its combined lifecycle history and its metadata-only activity history.
+These one-based sequence domains are independent and each is zero when empty;
+reading a snapshot does not consume either history. Snapshots omit descriptions,
+outcomes, prompts, provider data, workspace information, credentials, and secrets.
+
 `TaskSession::export_checkpoint()` returns versioned JSON bytes for in-process
 persistence. Export is allowed only when no turn is running, all tasks share the
 same captured workspace, and the encoded checkpoint is at most 1 MiB. It retains

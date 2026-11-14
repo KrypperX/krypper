@@ -66,6 +66,51 @@ fn task_session_checkpoint_round_trip_preserves_lifecycle_and_allows_a_fresh_tur
 }
 
 #[test]
+fn task_session_snapshot_is_consistent_after_safe_checkpoint_restore() {
+    let workspace = TempDir::new();
+    let mut session = TaskSession::new_in_workspace(workspace.path()).unwrap();
+    let task = session.create_task("snapshot checkpoint task");
+    let task_id = task.id();
+    task.transition(TaskState::Running).unwrap();
+    let turn_id = task.create_turn().unwrap();
+    task.transition_turn(turn_id, TurnState::Running).unwrap();
+    session
+        .create_workspace_file(
+            task_id,
+            turn_id,
+            Path::new("checkpoint-snapshot.txt"),
+            "workspace-content-checkpoint-sentinel",
+        )
+        .unwrap();
+    session
+        .cancel_turn_with_activity(
+            task_id,
+            turn_id,
+            &[TurnActivitySummary::FileCreated {
+                bytes_written: "workspace-content-checkpoint-sentinel".len(),
+            }],
+        )
+        .unwrap();
+
+    let before_restore = session.snapshot();
+    let checkpoint = session.export_checkpoint().unwrap();
+    let restored =
+        TaskSession::restore_checkpoint_in_workspace(&checkpoint, workspace.path()).unwrap();
+
+    assert_eq!(restored.snapshot(), before_restore);
+    {
+        let restored_snapshot = restored.snapshot();
+        let task_snapshot = &restored_snapshot.tasks()[0];
+        assert_eq!(task_snapshot.id(), task_id);
+        assert_eq!(task_snapshot.state(), TaskState::Cancelled);
+        assert_eq!(task_snapshot.lifecycle_sequence_high_water(), 5);
+        assert_eq!(task_snapshot.activity_sequence_high_water(), 1);
+        assert_eq!(task_snapshot.turns()[0].id(), turn_id);
+        assert_eq!(task_snapshot.turns()[0].state(), TurnState::Cancelled);
+    }
+}
+
+#[test]
 fn task_session_checkpoint_preserves_manual_terminal_turns_without_outcomes() {
     let _lock = CURRENT_DIR_LOCK
         .lock()
