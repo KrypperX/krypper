@@ -1,14 +1,17 @@
 # Development guide
 
-This guide records the current code layout and a staged, revisable direction
-for future structural changes. The proposed names **Core**, **Brain**, and
-**Tools** are responsibilities, not Rust modules that exist today.
+This guide records implemented code separately from a staged, revisable
+direction for future structural changes. `src/core/lifecycle.rs` is the
+implemented Core slice; the broader **Core**, **Brain**, and **Tools** layout
+remains proposed.
 
 ## Current implementation
 
-- [`src/task_lifecycle.rs`](src/task_lifecycle.rs) defines `TaskSession` and
+- [`src/core/lifecycle.rs`](src/core/lifecycle.rs) defines `TaskSession` and
   owns the current in-memory session, task, turn, lifecycle history, and
   checkpoint behavior.
+- [`src/task_lifecycle.rs`](src/task_lifecycle.rs) re-exports that lifecycle
+  API as a compatibility facade for existing callers.
 - [`src/harness/`](src/harness/) contains task-turn execution. It coordinates
   decisions and workspace actions through the current session API.
 - [`src/model.rs`](src/model.rs) and its provider submodule turn observations
@@ -18,17 +21,19 @@ for future structural changes. The proposed names **Core**, **Brain**, and
 - [`src/cli.rs`](src/cli.rs) parses and runs the CLI, drives the current
   session and turn APIs, and presents command output.
 
-There is no separate Core, Brain, or Tools module yet. In particular, the
-current CLI still drives task execution, and workspace safety is implemented
-in `file_safety.rs`; the layout below describes a direction for moving those
+Only `core::lifecycle` is implemented from the proposed module layout. The
+broader Core boundary, Brain, and Tools are not yet implemented modules. The
+current CLI still drives task execution, and workspace safety remains in
+`file_safety.rs`; the layout below describes a staged direction for those
 responsibilities.
 
 ## Proposed boundaries
 
 Treat these boundaries as a revisable direction and introduce them incrementally:
 
-- **Core** owns runtime, task, session, and lifecycle state. It is the single
-  owner of that state and supplies read-only snapshots to interfaces.
+- **Core** is intended to own runtime, task, session, and lifecycle state. Its
+  implemented `core::lifecycle` slice remains the single owner of current
+  task/session state and supplies read-only snapshots to interfaces.
 - **Brain** turns observations into proposed decisions through provider
   interfaces. It proposes actions; it does not execute workspace capabilities.
 - **Harness** coordinates context, execution, recovery, and verification. It
