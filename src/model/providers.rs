@@ -14,12 +14,16 @@ pub(super) const GEMINI_GENERATE_CONTENT_URL: &str =
 const ANTHROPIC_API_VERSION: &str = "2026-10-21";
 const GROQ_CHAT_COMPLETIONS_URL: &str = "https://api.groq.com/openai/v1/chat/completions";
 const OPENROUTER_CHAT_COMPLETIONS_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
+const DEEPSEEK_CHAT_COMPLETIONS_URL: &str = "https://api.deepseek.com/chat/completions";
+const ZAI_CHAT_COMPLETIONS_URL: &str = "https://api.z.ai/api/paas/v4/chat/completions";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum OpenAiCompatibleProvider {
     Cloudflare,
     Groq,
     OpenRouter,
+    DeepSeek,
+    Zai,
 }
 
 impl OpenAiCompatibleProvider {
@@ -35,7 +39,9 @@ impl OpenAiCompatibleProvider {
             (Self::Cloudflare, None) => Err("CLOUDFLARE_ACCOUNT_ID is required for Cloudflare"),
             (Self::Groq, None) => Ok(GROQ_CHAT_COMPLETIONS_URL.to_owned()),
             (Self::OpenRouter, None) => Ok(OPENROUTER_CHAT_COMPLETIONS_URL.to_owned()),
-            (Self::Groq | Self::OpenRouter, Some(_)) => {
+            (Self::DeepSeek, None) => Ok(DEEPSEEK_CHAT_COMPLETIONS_URL.to_owned()),
+            (Self::Zai, None) => Ok(ZAI_CHAT_COMPLETIONS_URL.to_owned()),
+            (Self::Groq | Self::OpenRouter | Self::DeepSeek | Self::Zai, Some(_)) => {
                 Err("Cloudflare account ID is only valid for Cloudflare")
             }
         }
@@ -46,6 +52,8 @@ impl OpenAiCompatibleProvider {
             Self::Cloudflare => "Cloudflare Workers AI",
             Self::Groq => "Groq",
             Self::OpenRouter => "OpenRouter",
+            Self::DeepSeek => "DeepSeek",
+            Self::Zai => "Z.AI",
         }
     }
 }
@@ -114,6 +122,12 @@ pub(crate) enum OpenAiCompatibleCredentials {
     OpenRouter {
         api_key: String,
     },
+    DeepSeek {
+        api_key: String,
+    },
+    Zai {
+        api_key: String,
+    },
 }
 
 impl OpenAiCompatibleCredentials {
@@ -137,6 +151,16 @@ impl OpenAiCompatibleCredentials {
                 OpenAiCompatibleProvider::OpenRouter.endpoint(None)?,
                 api_key,
             )),
+            Self::DeepSeek { api_key } => Ok((
+                OpenAiCompatibleProvider::DeepSeek,
+                OpenAiCompatibleProvider::DeepSeek.endpoint(None)?,
+                api_key,
+            )),
+            Self::Zai { api_key } => Ok((
+                OpenAiCompatibleProvider::Zai,
+                OpenAiCompatibleProvider::Zai.endpoint(None)?,
+                api_key,
+            )),
         }
     }
 }
@@ -151,6 +175,14 @@ pub(crate) fn build_compatible_chat_request(
     super::validate_model_name_for_provider(model, ModelProvider::OpenAiCompatible(provider))
         .map_err(ModelError::InvalidModelName)?;
     let prompt = build_task_prompt(goal, observations, remaining_decisions)?;
+    let tool_choice = if matches!(
+        provider,
+        OpenAiCompatibleProvider::DeepSeek | OpenAiCompatibleProvider::Zai
+    ) {
+        "auto"
+    } else {
+        "required"
+    };
     let mut request = json!({
         "model": model,
         "messages": [
@@ -158,7 +190,7 @@ pub(crate) fn build_compatible_chat_request(
             { "role": "user", "content": prompt }
         ],
         "tools": tool_definitions(),
-        "tool_choice": "required",
+        "tool_choice": tool_choice,
         "parallel_tool_calls": false,
         "n": 1,
         "stream": false
@@ -239,12 +271,30 @@ pub(super) fn parse_compatible_chat_response(
                 provider,
                 "tool call has no function name",
             ))?;
-    let arguments = function.get("arguments").and_then(Value::as_str).ok_or(
-        ModelError::ProviderInvalidToolCall(provider, "tool call arguments are not JSON text"),
-    )?;
-    let arguments: Value = serde_json::from_str(arguments).map_err(|_| {
-        ModelError::ProviderInvalidToolCall(provider, "tool arguments are invalid JSON")
-    })?;
+    let arguments = function
+        .get("arguments")
+        .ok_or(ModelError::ProviderInvalidToolCall(
+            provider,
+            "tool call arguments are not JSON text",
+        ))?;
+    let supports_object_arguments = matches!(
+        provider,
+        ModelProvider::OpenAiCompatible(
+            OpenAiCompatibleProvider::DeepSeek | OpenAiCompatibleProvider::Zai
+        )
+    );
+    let arguments = match arguments {
+        Value::String(arguments) => serde_json::from_str(arguments).map_err(|_| {
+            ModelError::ProviderInvalidToolCall(provider, "tool arguments are invalid JSON")
+        })?,
+        Value::Object(arguments) if supports_object_arguments => Value::Object(arguments.clone()),
+        _ => {
+            return Err(ModelError::ProviderInvalidToolCall(
+                provider,
+                "tool call arguments are not JSON text",
+            ));
+        }
+    };
     action_from_provider_call(provider, name, &arguments)
 }
 
@@ -267,6 +317,8 @@ impl ModelProvider {
             "cloudflare" => Some(Self::OpenAiCompatible(OpenAiCompatibleProvider::Cloudflare)),
             "groq" => Some(Self::OpenAiCompatible(OpenAiCompatibleProvider::Groq)),
             "openrouter" => Some(Self::OpenAiCompatible(OpenAiCompatibleProvider::OpenRouter)),
+            "deepseek" => Some(Self::OpenAiCompatible(OpenAiCompatibleProvider::DeepSeek)),
+            "zai" => Some(Self::OpenAiCompatible(OpenAiCompatibleProvider::Zai)),
             _ => None,
         }
     }

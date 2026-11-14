@@ -615,6 +615,8 @@ fn hosted_provider_credentials_are_required_before_task_lifecycle_creation() {
         "CLOUDFLARE_API_TOKEN",
         "GROQ_API_KEY",
         "OPENROUTER_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "ZAI_API_KEY",
     ];
     for (provider, missing_name, supplemental) in [
         ("gemini", "GEMINI_API_KEY", None),
@@ -632,6 +634,8 @@ fn hosted_provider_credentials_are_required_before_task_lifecycle_creation() {
         ),
         ("groq", "GROQ_API_KEY", None),
         ("openrouter", "OPENROUTER_API_KEY", None),
+        ("deepseek", "DEEPSEEK_API_KEY", None),
+        ("zai", "ZAI_API_KEY", None),
     ] {
         let _restores = provider_variables
             .iter()
@@ -786,6 +790,8 @@ fn provider_option_requires_a_model_and_rejects_unknown_names() {
         ("cloudflare", None, "--model is required with --provider"),
         ("groq", None, "--model is required with --provider"),
         ("openrouter", None, "--model is required with --provider"),
+        ("deepseek", None, "--model is required with --provider"),
+        ("zai", None, "--model is required with --provider"),
         ("unknown", Some("test-model"), "unsupported provider"),
     ] {
         let mut args = vec![
@@ -835,9 +841,9 @@ fn task_help_documents_provider_selection_and_network_disclosure() {
 
     assert_eq!(code, 0, "{}", String::from_utf8_lossy(&error));
     assert!(help.contains("--provider NAME"));
-    assert!(
-        help.contains("choose ollama, gemini, openai, anthropic, cloudflare, groq, or openrouter")
-    );
+    assert!(help.contains(
+        "choose ollama, gemini, openai, anthropic, cloudflare, groq, openrouter, deepseek, or zai"
+    ));
     for credential in [
         "GEMINI_API_KEY",
         "OPENAI_API_KEY",
@@ -846,6 +852,8 @@ fn task_help_documents_provider_selection_and_network_disclosure() {
         "CLOUDFLARE_API_TOKEN",
         "GROQ_API_KEY",
         "OPENROUTER_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "ZAI_API_KEY",
     ] {
         assert!(
             help.contains(credential),
@@ -861,4 +869,6 @@ fn task_help_documents_provider_selection_and_network_disclosure() {
     assert!(help.contains("Without --model or --provider, task remains caller-directed"));
     assert!(help.contains("Ollama needs no API key"));
     assert!(help.contains("OpenRouter may select an upstream provider for the requested model"));
+    assert!(help.contains("https://api.deepseek.com/chat/completions"));
+    assert!(help.contains("https://api.z.ai/api/paas/v4/chat/completions"));
 }

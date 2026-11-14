@@ -235,6 +235,12 @@ GROQ_API_KEY=... cargo run -- task --goal "Read the brief" \
 
 OPENROUTER_API_KEY=... cargo run -- task --goal "Read the brief" \
   --max-actions 6 --provider openrouter --model MODEL
+
+DEEPSEEK_API_KEY=... cargo run -- task --goal "Read the brief" \
+  --max-actions 6 --provider deepseek --model MODEL
+
+ZAI_API_KEY=... cargo run -- task --goal "Read the brief" \
+  --max-actions 6 --provider zai --model MODEL
 ```
 
 Krypper uses fixed HTTPS endpoints and does not accept custom API URLs:
@@ -247,6 +253,8 @@ Krypper uses fixed HTTPS endpoints and does not accept custom API URLs:
 | Cloudflare Workers AI | `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN` | `https://api.cloudflare.com/client/v4/accounts/<account-id>/ai/v1/chat/completions` |
 | Groq | `GROQ_API_KEY` | `https://api.groq.com/openai/v1/chat/completions` |
 | OpenRouter | `OPENROUTER_API_KEY` | `https://openrouter.ai/api/v1/chat/completions` |
+| DeepSeek | `DEEPSEEK_API_KEY` | `https://api.deepseek.com/chat/completions` |
+| Z.AI Standard API | `ZAI_API_KEY` | `https://api.z.ai/api/paas/v4/chat/completions` |
 
 The account ID is validated as one path component before a task starts. Krypper
 reads credentials only for the selected provider and does not write keys to
@@ -257,11 +265,17 @@ safe path component, and no custom API URL is accepted. See Google's
 [function calling guide](https://ai.google.dev/gemini-api/docs/generate-content/function-calling),
 and [API key guide](https://ai.google.dev/gemini-api/docs/api-key). OpenAI uses
 the Responses API, Anthropic uses the Messages API, and Cloudflare Workers AI, Groq,
-and OpenRouter share the OpenAI Chat Completions-compatible task adapter. See the
+OpenRouter, DeepSeek, and Z.AI share the OpenAI Chat Completions-compatible task adapter. DeepSeek
+and Z.AI use `tool_choice: auto`; Krypper still requires exactly one supported call and validates
+its arguments locally. Both profiles accept function arguments as either JSON text or a JSON object.
+Z.AI uses the Standard API endpoint shown above; Coding Plan endpoints are not supported. See the
 [Cloudflare Workers AI compatibility guide](https://developers.cloudflare.com/workers-ai/configuration/open-ai-compatibility/),
 [Groq OpenAI compatibility guide](https://console.groq.com/docs/openai), and
-[OpenRouter Chat Completions API](https://openrouter.ai/docs/api/api-reference/chat/create-a-chat-completion)
-for provider request details.
+[OpenRouter Chat Completions API](https://openrouter.ai/docs/api/api-reference/chat/create-a-chat-completion),
+[DeepSeek Chat Completions API](https://api-docs.deepseek.com/api/create-chat-completion/),
+[DeepSeek function calling](https://api-docs.deepseek.com/guides/function_calling),
+[Z.AI Chat Completion API](https://docs.z.ai/api-reference/llm/chat-completion), and
+[Z.AI function calling](https://docs.z.ai/guides/capabilities/function-calling) for provider request details.
 
 OpenRouter requests disable provider fallback where supported. OpenRouter can
 still select an upstream service that serves the requested model; Krypper does
