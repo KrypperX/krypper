@@ -4,7 +4,8 @@ use crate::agent_loop::{
 };
 use crate::file_safety::{create_text_file, list_directory, read_text_file};
 use crate::model::{
-    validate_model_name, workspace_action_name, OllamaDecisionSource, OLLAMA_ADDRESS,
+    validate_model_name_for_provider, workspace_action_name, AnthropicDecisionSource,
+    ModelDecisionSource, ModelProvider, OllamaDecisionSource, OpenAiDecisionSource, OLLAMA_ADDRESS,
 };
 use crate::task_lifecycle::{
     TaskSession, TaskState, TurnOutcome, TurnState, MAX_TASK_SESSION_CHECKPOINT_BYTES,
@@ -102,6 +103,7 @@ fn run_task_with_endpoint(
     let mut goal = None;
     let mut max_actions = None;
     let mut model = None;
+    let mut provider = None;
     let mut workspace = None;
     let mut checkpoint_out = None;
     let mut resume = None;
@@ -173,6 +175,36 @@ fn run_task_with_endpoint(
                     return usage_error(error, Some("task"), "model name must be valid UTF-8");
                 };
                 model = Some(value.to_owned());
+                position += 1;
+            }
+            "--provider" => {
+                if provider.is_some() {
+                    return usage_error(
+                        error,
+                        Some("task"),
+                        "--provider may be provided only once",
+                    );
+                }
+                let Some(value) = arguments.get(position) else {
+                    return usage_error(
+                        error,
+                        Some("task"),
+                        "the following argument is required: --provider",
+                    );
+                };
+                let Some(value) = value.to_str() else {
+                    return usage_error(error, Some("task"), "provider name must be valid UTF-8");
+                };
+                let Some(selected_provider) = ModelProvider::parse(value) else {
+                    return usage_error(
+                        error,
+                        Some("task"),
+                        &format!(
+                            "unsupported provider '{value}' (choose from 'ollama', 'openai', 'anthropic')"
+                        ),
+                    );
+                };
+                provider = Some(selected_provider);
                 position += 1;
             }
             "--workspace" => {
@@ -261,11 +293,11 @@ fn run_task_with_endpoint(
             return usage_error(error, Some("task"), "goal must not be empty");
         }
     }
-    if let Some(model) = model.as_deref() {
-        if let Err(message) = validate_model_name(model) {
-            return usage_error(error, Some("task"), message);
-        }
-    }
+    let mut model_source = match prepare_model_source(model, provider, max_actions, model_endpoint)
+    {
+        Ok(source) => source,
+        Err(message) => return usage_error(error, Some("task"), message),
+    };
 
     if let Some(path) = checkpoint_out.as_deref() {
         if let Err(cause) = validate_checkpoint_output_path(path) {
@@ -373,9 +405,6 @@ fn run_task_with_endpoint(
         };
         (session, task_id, turn_id, goal)
     };
-    let mut model_source =
-        model.map(|name| OllamaDecisionSource::with_endpoint(name, max_actions, model_endpoint));
-
     let mut reader = BufReader::new(input);
     let mut line = Vec::new();
     let mut observation_number = 0;
@@ -638,6 +667,58 @@ fn run_task_with_endpoint(
     } else {
         1
     })
+}
+
+fn prepare_model_source(
+    model: Option<String>,
+    provider: Option<ModelProvider>,
+    action_budget: usize,
+    ollama_endpoint: SocketAddr,
+) -> Result<Option<ModelDecisionSource>, &'static str> {
+    let Some(model) = model else {
+        return if provider.is_some() {
+            Err("--model is required with --provider")
+        } else {
+            Ok(None)
+        };
+    };
+    let provider = provider.unwrap_or(ModelProvider::Ollama);
+    validate_model_name_for_provider(&model, provider)?;
+    let source = match provider {
+        ModelProvider::Ollama => ModelDecisionSource::Ollama(OllamaDecisionSource::with_endpoint(
+            model,
+            action_budget,
+            ollama_endpoint,
+        )),
+        ModelProvider::OpenAi => ModelDecisionSource::OpenAi(OpenAiDecisionSource::new(
+            model,
+            hosted_api_key(
+                "OPENAI_API_KEY",
+                "OPENAI_API_KEY must be set and nonempty for --provider openai",
+            )?,
+            action_budget,
+        )),
+        ModelProvider::Anthropic => ModelDecisionSource::Anthropic(AnthropicDecisionSource::new(
+            model,
+            hosted_api_key(
+                "ANTHROPIC_API_KEY",
+                "ANTHROPIC_API_KEY must be set and nonempty for --provider anthropic",
+            )?,
+            action_budget,
+        )),
+    };
+    Ok(Some(source))
+}
+
+fn hosted_api_key(
+    name: &'static str,
+    missing_message: &'static str,
+) -> Result<String, &'static str> {
+    let key = std::env::var(name).map_err(|_| missing_message)?;
+    if key.trim().is_empty() || key.trim() != key || key.chars().any(char::is_control) {
+        return Err(missing_message);
+    }
+    Ok(key)
 }
 
 fn read_task_checkpoint(path: &Path) -> io::Result<Vec<u8>> {
@@ -1414,7 +1495,7 @@ fn usage_error(error: &mut dyn Write, command: Option<&str>, message: &str) -> i
         Some("list") => "usage: krypper list [-h] [path]",
         Some("write") => "usage: krypper write [-h] [--stdin] path ...",
         Some("task") => {
-            "usage: krypper task [-h] [--goal GOAL] --max-actions N [--workspace PATH] [--model NAME] [--checkpoint-out PATH] [--resume PATH]"
+            "usage: krypper task [-h] [--goal GOAL] --max-actions N [--workspace PATH] [--model NAME] [--provider NAME] [--checkpoint-out PATH] [--resume PATH]"
         }
         _ => "usage: krypper [-h] {show,list,write,task} ...",
     };
@@ -1433,20 +1514,27 @@ fn write_root_help(output: &mut dyn Write) -> io::Result<()> {
 fn write_task_help(output: &mut dyn Write) -> io::Result<()> {
     output.write_all(
         concat!(
-            "usage: krypper task [-h] [--goal GOAL] --max-actions N [--workspace PATH] [--model NAME] [--checkpoint-out PATH] [--resume PATH]\n\n",
+            "usage: krypper task [-h] [--goal GOAL] --max-actions N [--workspace PATH] [--model NAME] [--provider NAME] [--checkpoint-out PATH] [--resume PATH]\n\n",
             "run a bounded task in the selected workspace or current directory\n\n",
             "options:\n  --goal GOAL          task goal (required unless --resume is used)\n",
             "  --max-actions N      required positive action limit for this invocation\n",
             "  --workspace PATH     use an existing directory as the captured task workspace\n",
-            "  --model NAME         opt in to local Ollama action selection\n",
+            "  --model NAME         opt in to model-selected actions (defaults to local Ollama)\n",
+            "  --provider NAME      choose ollama, openai, or anthropic; requires --model\n",
             "  --checkpoint-out PATH write only when a completed turn reaches continue; file must be new\n",
             "  --resume PATH        restore one running task and start a fresh turn\n",
             "  -h, --help           show this help message and exit\n\n",
             "Without --workspace, task captures the current directory as its workspace.\n",
             "With --workspace, the selected directory is validated before task history starts;\n",
             "the process current directory is not changed.\n",
-            "Without --model, task remains caller-directed and makes no model requests.\n",
-            "--workspace PATH works with --model NAME and uses the same captured workspace.\n",
+            "Without --model or --provider, task remains caller-directed and makes no model requests.\n",
+            "Without --model, task remains caller-directed if --provider is also omitted.\n",
+            "--model NAME without --provider uses local Ollama at 127.0.0.1:11434. Ollama needs no API key.\n",
+            "--provider openai or --provider anthropic explicitly opts into HTTPS requests and requires\n",
+            "OPENAI_API_KEY or ANTHROPIC_API_KEY respectively. No custom API URL is accepted.\n",
+            "Hosted requests send the task goal and observations, which can include workspace file text,\n",
+            "to that provider and may incur provider charges.\n",
+            "--workspace PATH works with --model NAME or --provider NAME and uses the same captured workspace.\n",
             "Without --checkpoint-out, task can continue across turns up to the action limit.\n",
             "With --checkpoint-out, a new checkpoint is written only after a completed\n",
             "turn reaches the safe continue boundary.\n",
@@ -1457,7 +1545,7 @@ fn write_task_help(output: &mut dyn Write) -> io::Result<()> {
             "checkpoint after such a turn.\n",
             "Checkpoint files retain lifecycle metadata, not prior observations or file contents.\n",
             "Resume from the newest checkpoint and use a new --checkpoint-out path for each pause.\n",
-            "Model mode sends the task description and current-turn observations to http://127.0.0.1:11434/api/chat.\n",
+            "Ollama sends the task description and current-turn observations to http://127.0.0.1:11434/api/chat.\n",
             "Read observations can include workspace file text. Ollama must be running locally\n",
             "with the named model available. Only supported task actions and completion are exposed.\n\n",
             "Enter one action per line on standard input:\n",
