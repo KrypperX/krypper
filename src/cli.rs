@@ -5,7 +5,9 @@ use crate::agent_loop::{
 use crate::file_safety::{create_text_file, list_directory, read_text_file};
 use crate::model::{
     validate_model_name_for_provider, workspace_action_name, AnthropicDecisionSource,
-    ModelDecisionSource, ModelProvider, OllamaDecisionSource, OpenAiDecisionSource, OLLAMA_ADDRESS,
+    CloudflareAccountId, ModelDecisionSource, ModelProvider, OllamaDecisionSource,
+    OpenAiCompatibleCredentials, OpenAiCompatibleDecisionSource, OpenAiCompatibleProvider,
+    OpenAiDecisionSource, OLLAMA_ADDRESS,
 };
 use crate::task_lifecycle::{
     TaskSession, TaskState, TurnOutcome, TurnState, MAX_TASK_SESSION_CHECKPOINT_BYTES,
@@ -200,7 +202,7 @@ fn run_task_with_endpoint(
                         error,
                         Some("task"),
                         &format!(
-                            "unsupported provider '{value}' (choose from 'ollama', 'openai', 'anthropic')"
+                            "unsupported provider '{value}' (choose from 'ollama', 'openai', 'anthropic', 'cloudflare', 'groq', 'openrouter')"
                         ),
                     );
                 };
@@ -706,6 +708,41 @@ fn prepare_model_source(
             )?,
             action_budget,
         )),
+        ModelProvider::OpenAiCompatible(provider) => {
+            let credentials = match provider {
+                OpenAiCompatibleProvider::Cloudflare => {
+                    let account_id = std::env::var("CLOUDFLARE_ACCOUNT_ID").map_err(|_| {
+                        "CLOUDFLARE_ACCOUNT_ID must be set for --provider cloudflare"
+                    })?;
+                    let account_id = CloudflareAccountId::try_from(account_id.as_str())?;
+                    let api_token = hosted_api_key(
+                        "CLOUDFLARE_API_TOKEN",
+                        "CLOUDFLARE_API_TOKEN must be set and nonempty for --provider cloudflare",
+                    )?;
+                    OpenAiCompatibleCredentials::Cloudflare {
+                        account_id,
+                        api_token,
+                    }
+                }
+                OpenAiCompatibleProvider::Groq => OpenAiCompatibleCredentials::Groq {
+                    api_key: hosted_api_key(
+                        "GROQ_API_KEY",
+                        "GROQ_API_KEY must be set and nonempty for --provider groq",
+                    )?,
+                },
+                OpenAiCompatibleProvider::OpenRouter => OpenAiCompatibleCredentials::OpenRouter {
+                    api_key: hosted_api_key(
+                        "OPENROUTER_API_KEY",
+                        "OPENROUTER_API_KEY must be set and nonempty for --provider openrouter",
+                    )?,
+                },
+            };
+            ModelDecisionSource::OpenAiCompatible(OpenAiCompatibleDecisionSource::new(
+                model,
+                credentials,
+                action_budget,
+            )?)
+        }
     };
     Ok(Some(source))
 }
@@ -1520,7 +1557,7 @@ fn write_task_help(output: &mut dyn Write) -> io::Result<()> {
             "  --max-actions N      required positive action limit for this invocation\n",
             "  --workspace PATH     use an existing directory as the captured task workspace\n",
             "  --model NAME         opt in to model-selected actions (defaults to local Ollama)\n",
-            "  --provider NAME      choose ollama, openai, or anthropic; requires --model\n",
+            "  --provider NAME      choose ollama, openai, anthropic, cloudflare, groq, or openrouter; requires --model\n",
             "  --checkpoint-out PATH write only when a completed turn reaches continue; file must be new\n",
             "  --resume PATH        restore one running task and start a fresh turn\n",
             "  -h, --help           show this help message and exit\n\n",
@@ -1530,8 +1567,16 @@ fn write_task_help(output: &mut dyn Write) -> io::Result<()> {
             "Without --model or --provider, task remains caller-directed and makes no model requests.\n",
             "Without --model, task remains caller-directed if --provider is also omitted.\n",
             "--model NAME without --provider uses local Ollama at 127.0.0.1:11434. Ollama needs no API key.\n",
-            "--provider openai or --provider anthropic explicitly opts into HTTPS requests and requires\n",
-            "OPENAI_API_KEY or ANTHROPIC_API_KEY respectively. No custom API URL is accepted.\n",
+            "Each hosted provider requires explicit --provider selection and sends HTTPS requests only\n",
+            "to its fixed API endpoint; no custom API URL is accepted. Required credentials:\n",
+            "  openai: OPENAI_API_KEY -> https://api.openai.com/v1/responses\n",
+            "  anthropic: ANTHROPIC_API_KEY -> https://api.anthropic.com/v1/messages\n",
+            "  cloudflare: CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN ->\n",
+            "    https://api.cloudflare.com/client/v4/accounts/<account-id>/ai/v1/chat/completions\n",
+            "  groq: GROQ_API_KEY -> https://api.groq.com/openai/v1/chat/completions\n",
+            "  openrouter: OPENROUTER_API_KEY -> https://openrouter.ai/api/v1/chat/completions\n",
+            "OpenRouter may select an upstream provider for the requested model even when fallback\n",
+            "providers are disabled in the request.\n",
             "Hosted requests send the task goal and observations, which can include workspace file text,\n",
             "to that provider and may incur provider charges.\n",
             "--workspace PATH works with --model NAME or --provider NAME and uses the same captured workspace.\n",
