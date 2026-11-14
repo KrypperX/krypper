@@ -13,9 +13,9 @@ mod providers;
 #[cfg(test)]
 use providers::parse_compatible_chat_response;
 pub(crate) use providers::{
-    AnthropicDecisionSource, CloudflareAccountId, ModelDecisionSource, ModelProvider,
-    OpenAiCompatibleCredentials, OpenAiCompatibleDecisionSource, OpenAiCompatibleProvider,
-    OpenAiDecisionSource,
+    AnthropicDecisionSource, CloudflareAccountId, GeminiDecisionSource, GeminiModelName,
+    ModelDecisionSource, ModelProvider, OpenAiCompatibleCredentials,
+    OpenAiCompatibleDecisionSource, OpenAiCompatibleProvider, OpenAiDecisionSource,
 };
 
 pub(crate) const OLLAMA_ADDRESS: SocketAddr =
@@ -137,6 +137,9 @@ pub(crate) fn validate_model_name_for_provider(
     if name.chars().any(char::is_control) {
         return Err("model name must not contain control characters");
     }
+    if provider == ModelProvider::Gemini {
+        GeminiModelName::try_from(name)?;
+    }
     let lower_name = name.to_ascii_lowercase();
     if provider == ModelProvider::Ollama
         && (lower_name.ends_with(":cloud") || lower_name.ends_with("-cloud"))
@@ -208,6 +211,92 @@ fn build_anthropic_request(
         "stream": false
     });
     encode_model_request(&request)
+}
+
+fn build_gemini_request(
+    model: &str,
+    goal: &str,
+    observations: &[WorkspaceObservation],
+    remaining_decisions: usize,
+) -> Result<Vec<u8>, ModelError> {
+    validate_model_name_for_provider(model, ModelProvider::Gemini)
+        .map_err(ModelError::InvalidModelName)?;
+    let prompt = build_task_prompt(goal, observations, remaining_decisions)?;
+    let declarations = gemini_function_declarations();
+    let allowed_function_names = declarations
+        .iter()
+        .filter_map(|declaration| declaration.get("name").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    let request = json!({
+        "systemInstruction": {"parts":[{"text":SYSTEM_INSTRUCTIONS}]},
+        "contents": [{"role":"user","parts":[{"text":prompt}] }],
+        "tools": [{"functionDeclarations":declarations}],
+        "toolConfig": {
+            "functionCallingConfig": {
+                "mode":"ANY",
+                "allowedFunctionNames":allowed_function_names
+            }
+        },
+        "generationConfig": {"candidateCount":1}
+    });
+    encode_model_request(&request)
+}
+
+fn gemini_generate_content_endpoint(model: &str) -> Result<String, &'static str> {
+    let model = GeminiModelName::try_from(model)?;
+    Ok(format!(
+        "{}/{}:generateContent",
+        providers::GEMINI_GENERATE_CONTENT_URL,
+        model.as_str()
+    ))
+}
+
+fn gemini_function_declarations() -> Vec<Value> {
+    tool_definitions()
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|tool| {
+            let function = tool.get("function")?;
+            Some(json!({
+                "name":function.get("name")?,
+                "description":function.get("description")?,
+                "parameters":gemini_supported_schema(function.get("parameters")?)
+            }))
+        })
+        .collect()
+}
+
+fn gemini_supported_schema(schema: &Value) -> Value {
+    let mut schema = schema.clone();
+    adapt_gemini_schema(&mut schema);
+    schema
+}
+
+fn adapt_gemini_schema(schema: &mut Value) {
+    match schema {
+        Value::Object(fields) => {
+            if let Some(schema_type) = fields
+                .get("type")
+                .and_then(Value::as_str)
+                .map(str::to_ascii_uppercase)
+            {
+                fields.insert("type".to_owned(), Value::String(schema_type));
+            }
+            for unsupported in [
+                "additionalProperties",
+                "minimum",
+                "maximum",
+                "minLength",
+                "maxLength",
+            ] {
+                fields.remove(unsupported);
+            }
+            fields.values_mut().for_each(adapt_gemini_schema);
+        }
+        Value::Array(values) => values.iter_mut().for_each(adapt_gemini_schema),
+        _ => {}
+    }
 }
 
 fn build_task_prompt(
@@ -565,11 +654,15 @@ fn post_hosted(
     if body.len() > MAX_MODEL_REQUEST_BYTES {
         return Err(ModelError::RequestTooLarge);
     }
-    let authorization = format!("Bearer {api_key}");
     let request = agent
         .post(endpoint)
-        .header("Content-Type", "application/json")
-        .header("Authorization", &authorization);
+        .header("Content-Type", "application/json");
+    let request = if provider == ModelProvider::Gemini {
+        request.header("x-goog-api-key", api_key)
+    } else {
+        let authorization = format!("Bearer {api_key}");
+        request.header("Authorization", &authorization)
+    };
     let request = match api_version {
         Some(version) => request.header("anthropic-version", version),
         None => request,
@@ -718,6 +811,100 @@ fn parse_anthropic_response(response: &[u8]) -> Result<WorkspaceAction, ModelErr
             provider,
             "tool use has no input",
         ))?;
+    action_from_provider_call(provider, name, arguments)
+}
+
+fn parse_gemini_response(response: &[u8]) -> Result<WorkspaceAction, ModelError> {
+    let provider = ModelProvider::Gemini;
+    let response: Value =
+        serde_json::from_slice(response).map_err(|_| ModelError::ProviderInvalidJson(provider))?;
+    let candidates = response.get("candidates").and_then(Value::as_array).ok_or(
+        ModelError::ProviderInvalidToolCall(provider, "missing response candidates"),
+    )?;
+    let mut calls = Vec::new();
+    for candidate in candidates {
+        if let Some(finish_reason) = candidate.get("finishReason") {
+            match finish_reason.as_str() {
+                Some("STOP") => {}
+                Some("MALFORMED_FUNCTION_CALL") => {
+                    return Err(ModelError::ProviderInvalidToolCall(
+                        provider,
+                        "provider reported a malformed function call",
+                    ));
+                }
+                Some(_) => {
+                    return Err(ModelError::ProviderInvalidToolCall(
+                        provider,
+                        "provider did not finish the response candidate normally",
+                    ));
+                }
+                None => {
+                    return Err(ModelError::ProviderInvalidToolCall(
+                        provider,
+                        "response candidate has a malformed finish reason",
+                    ));
+                }
+            }
+        }
+        let content = candidate.get("content").and_then(Value::as_object).ok_or(
+            ModelError::ProviderInvalidToolCall(
+                provider,
+                "response candidate has malformed content",
+            ),
+        )?;
+        if let Some(role) = content.get("role") {
+            if role.as_str() != Some("model") {
+                return Err(ModelError::ProviderInvalidToolCall(
+                    provider,
+                    "response candidate has an unsupported content role",
+                ));
+            }
+        }
+        let parts = content.get("parts").and_then(Value::as_array).ok_or(
+            ModelError::ProviderInvalidToolCall(
+                provider,
+                "response candidate has malformed content parts",
+            ),
+        )?;
+        for part in parts {
+            if !part.is_object() {
+                return Err(ModelError::ProviderInvalidToolCall(
+                    provider,
+                    "response candidate has a malformed content part",
+                ));
+            }
+            if let Some(call) = part.get("functionCall") {
+                if !call.is_object() {
+                    return Err(ModelError::ProviderInvalidToolCall(
+                        provider,
+                        "function call is malformed",
+                    ));
+                }
+                calls.push(call);
+            }
+        }
+    }
+    if calls.len() != 1 {
+        return Err(ModelError::ProviderInvalidToolCall(
+            provider,
+            "expected exactly one function call",
+        ));
+    }
+    let call = calls.first().ok_or(ModelError::ProviderInvalidToolCall(
+        provider,
+        "expected exactly one function call",
+    ))?;
+    let name =
+        call.get("name")
+            .and_then(Value::as_str)
+            .ok_or(ModelError::ProviderInvalidToolCall(
+                provider,
+                "function call has no name",
+            ))?;
+    let arguments = call.get("args").ok_or(ModelError::ProviderInvalidToolCall(
+        provider,
+        "function call has no arguments",
+    ))?;
     action_from_provider_call(provider, name, arguments)
 }
 

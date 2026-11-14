@@ -216,6 +216,11 @@ To choose a hosted API, pass both `--provider` and `--model`, and supply its key
 in the environment. Each explicit provider is a network opt-in:
 
 ```sh
+GEMINI_API_KEY=... cargo run -- task --goal "Read the brief" \
+  --max-actions 6 --provider gemini --model gemini-2.5-flash
+```
+
+```sh
 OPENAI_API_KEY=... cargo run -- task --goal "Read the brief" \
   --max-actions 6 --provider openai --model MODEL
 
@@ -236,6 +241,7 @@ Krypper uses fixed HTTPS endpoints and does not accept custom API URLs:
 
 | Provider | Required environment variables | Fixed endpoint |
 | --- | --- | --- |
+| Gemini | `GEMINI_API_KEY` | `https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent` |
 | OpenAI | `OPENAI_API_KEY` | `https://api.openai.com/v1/responses` |
 | Anthropic | `ANTHROPIC_API_KEY` | `https://api.anthropic.com/v1/messages` |
 | Cloudflare Workers AI | `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN` | `https://api.cloudflare.com/client/v4/accounts/<account-id>/ai/v1/chat/completions` |
@@ -244,9 +250,14 @@ Krypper uses fixed HTTPS endpoints and does not accept custom API URLs:
 
 The account ID is validated as one path component before a task starts. Krypper
 reads credentials only for the selected provider and does not write keys to
-output, errors, logs, lifecycle data, or checkpoints. OpenAI uses the Responses
-API, Anthropic uses the Messages API, and Cloudflare Workers AI, Groq, and
-OpenRouter share the OpenAI Chat Completions-compatible task adapter. See the
+output, errors, logs, lifecycle data, or checkpoints. Gemini uses its native
+GenerateContent API and the `x-goog-api-key` header; its model name must be one
+safe path component, and no custom API URL is accepted. See Google's
+[GenerateContent API](https://ai.google.dev/api/generate-content),
+[function calling guide](https://ai.google.dev/gemini-api/docs/generate-content/function-calling),
+and [API key guide](https://ai.google.dev/gemini-api/docs/api-key). OpenAI uses
+the Responses API, Anthropic uses the Messages API, and Cloudflare Workers AI, Groq,
+and OpenRouter share the OpenAI Chat Completions-compatible task adapter. See the
 [Cloudflare Workers AI compatibility guide](https://developers.cloudflare.com/workers-ai/configuration/open-ai-compatibility/),
 [Groq OpenAI compatibility guide](https://console.groq.com/docs/openai), and
 [OpenRouter Chat Completions API](https://openrouter.ai/docs/api/api-reference/chat/create-a-chat-completion)

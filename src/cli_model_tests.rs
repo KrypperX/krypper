@@ -443,6 +443,10 @@ fn resumed_model_cli_uses_the_stored_description_with_the_local_mock_server() {
 
 #[test]
 fn model_cli_uses_explicit_workspace_without_changing_current_directory() {
+    let _lock = PROVIDER_ENV_TEST_LOCK
+        .lock()
+        .expect("lock provider environment tests");
+    let _unused_gemini_key = RestoreEnvironmentVariable::set("GEMINI_API_KEY", "");
     let (endpoint, server) = mock_server(vec![
         MockResponse {
             status: 200,
@@ -604,6 +608,7 @@ fn hosted_provider_credentials_are_required_before_task_lifecycle_creation() {
         .lock()
         .expect("lock provider environment tests");
     let provider_variables = [
+        "GEMINI_API_KEY",
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
         "CLOUDFLARE_ACCOUNT_ID",
@@ -612,6 +617,7 @@ fn hosted_provider_credentials_are_required_before_task_lifecycle_creation() {
         "OPENROUTER_API_KEY",
     ];
     for (provider, missing_name, supplemental) in [
+        ("gemini", "GEMINI_API_KEY", None),
         ("openai", "OPENAI_API_KEY", None),
         ("anthropic", "ANTHROPIC_API_KEY", None),
         (
@@ -653,7 +659,7 @@ fn hosted_provider_credentials_are_required_before_task_lifecycle_creation() {
         args.push(workspace.path().as_os_str().to_owned());
         args.push(OsString::from("--checkpoint-out"));
         args.push(checkpoint.as_os_str().to_owned());
-        let mut input = Cursor::new(Vec::<u8>::new());
+        let mut input = Cursor::new(b"complete must not run\n".to_vec());
         let mut output = Vec::new();
         let mut error = Vec::new();
         let code = run_task_with_endpoint(
@@ -670,6 +676,7 @@ fn hosted_provider_credentials_are_required_before_task_lifecycle_creation() {
         assert_eq!(code, 2);
         assert!(error.contains(missing_name));
         assert!(output.is_empty());
+        assert_eq!(input.position(), 0);
         assert!(!error.contains("model decision"));
         assert!(!checkpoint.exists());
         assert!(!workspace.path().join("should-not-exist.txt").exists());
@@ -724,8 +731,57 @@ fn cloudflare_account_id_is_validated_before_task_lifecycle_creation() {
 }
 
 #[test]
+fn gemini_model_path_injection_is_rejected_before_task_lifecycle_creation() {
+    let _lock = PROVIDER_ENV_TEST_LOCK
+        .lock()
+        .expect("lock provider environment tests");
+    let _restore_key = RestoreEnvironmentVariable::set("GEMINI_API_KEY", "local-test-key");
+    let workspace = TempDir::new();
+    let checkpoint = workspace.path().join("new checkpoint.json");
+    let mut args = [
+        "--goal",
+        "Reject a Gemini model path injection",
+        "--max-actions",
+        "1",
+        "--model",
+        "gemini/other",
+        "--provider",
+        "gemini",
+        "--workspace",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect::<Vec<_>>();
+    args.push(workspace.path().as_os_str().to_owned());
+    args.extend([
+        OsString::from("--checkpoint-out"),
+        checkpoint.as_os_str().to_owned(),
+    ]);
+    let mut input = Cursor::new(b"complete must not run\n".to_vec());
+    let mut output = Vec::new();
+    let mut error = Vec::new();
+
+    let code = run_task_with_endpoint(
+        &args,
+        &mut input,
+        &mut output,
+        &mut error,
+        SocketAddr::from(([127, 0, 0, 1], 0)),
+    )
+    .expect("report invalid Gemini model as a CLI error");
+    let error = String::from_utf8(error).expect("UTF-8 CLI error");
+
+    assert_eq!(code, 2);
+    assert!(error.contains("safe path component"));
+    assert_eq!(input.position(), 0);
+    assert!(output.is_empty());
+    assert!(!checkpoint.exists());
+}
+
+#[test]
 fn provider_option_requires_a_model_and_rejects_unknown_names() {
     for (provider, model, expected) in [
+        ("gemini", None, "--model is required with --provider"),
         ("openai", None, "--model is required with --provider"),
         ("cloudflare", None, "--model is required with --provider"),
         ("groq", None, "--model is required with --provider"),
@@ -779,8 +835,11 @@ fn task_help_documents_provider_selection_and_network_disclosure() {
 
     assert_eq!(code, 0, "{}", String::from_utf8_lossy(&error));
     assert!(help.contains("--provider NAME"));
-    assert!(help.contains("choose ollama, openai, anthropic, cloudflare, groq, or openrouter"));
+    assert!(
+        help.contains("choose ollama, gemini, openai, anthropic, cloudflare, groq, or openrouter")
+    );
     for credential in [
+        "GEMINI_API_KEY",
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
         "CLOUDFLARE_ACCOUNT_ID",
@@ -794,6 +853,10 @@ fn task_help_documents_provider_selection_and_network_disclosure() {
         );
     }
     assert!(help.contains("no custom API URL is accepted"));
+    assert!(help.contains(
+        "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    ));
+    assert!(help.contains("Gemini model name must be one safe path component"));
     assert!(help.contains("may incur provider charges"));
     assert!(help.contains("Without --model or --provider, task remains caller-directed"));
     assert!(help.contains("Ollama needs no API key"));
