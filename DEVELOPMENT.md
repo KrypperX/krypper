@@ -45,10 +45,19 @@ decision-source boundary in `src/brain/` is implemented; broader **Core** and
   cancellation from the task-control source. The existing loop executes each
   operation through `TaskSession`, counts actions against the caller's budget,
   and stops after a rejected or failed step. Its
-  [`verification.rs`](src/harness/verification.rs)
-  module reconciles completed-turn stop reasons to terminal task states through
-  `TaskSession`'s existing transition API; the CLI invokes it before rendering
-  results. Its [`recovery.rs`](src/harness/recovery.rs) module
+  [`verification.rs`](src/harness/verification.rs) module retains the existing
+  stop-reason reconciliation used by the CLI and adds the opt-in
+  `reconcile_task_state_with_checks` and `verify_completion_checks` APIs.
+  Callers provide required checks and separate evidence from TaskSession
+  observations or deterministic local checks. A task succeeds through
+  `TaskSession` only when at least one required check has exactly one passing
+  evidence record; missing, duplicate, unknown, or truncated input cannot pass.
+  Results include at most 32 checks and 256 bytes per description or evidence
+  summary, with omitted input reported as unknown. Verification returns results
+  to the caller without invoking Tools, changing permissions, writing workspace
+  data, persisting checks, retrying, or repairing work. The CLI continues to use
+  the unchanged default reconciliation path. Its
+  [`recovery.rs`](src/harness/recovery.rs) module
   prepares checkpoint bytes at a continued-turn pause boundary, coordinates
   checkpoint restoration, validates the single-task resume conditions, and
   starts the next turn through `TaskSession`; Core remains the only lifecycle
