@@ -2,6 +2,7 @@ use super::*;
 use crate::agent_loop::{
     run_goal_turn_with_budget, GoalTurnResult, GoalTurnStopReason, WorkspaceAction,
 };
+use crate::harness::execution::run_goal_turn_with_plan;
 use crate::task_lifecycle::{TaskSession, TaskState, TurnOutcome, TurnState};
 use serde_json::{json, Value};
 use std::fs;
@@ -81,6 +82,21 @@ fn running_turn() -> (TaskSession, Uuid, Uuid) {
     task.transition_turn(turn_id, TurnState::Running)
         .expect("start turn");
     (session, task_id, turn_id)
+}
+
+fn running_turn_in_workspace(workspace: &Path, goal: &str) -> (TaskSession, Uuid, Uuid) {
+    let mut session = TaskSession::new_in_workspace(workspace).expect("bind task workspace");
+    let task = session.create_task(goal);
+    task.transition(TaskState::Running).expect("start task");
+    let task_id = task.id();
+    let turn_id = task.create_turn().expect("create turn");
+    task.transition_turn(turn_id, TurnState::Running)
+        .expect("start turn");
+    (session, task_id, turn_id)
+}
+
+fn reflection_response(content: &str) -> String {
+    json!({"message":{"role":"assistant","content":content}}).to_string()
 }
 
 struct MockResponse {
@@ -326,6 +342,303 @@ fn ollama_plan_source_uses_a_local_fixture_and_keeps_control_on_the_existing_pat
             .len(),
         9
     );
+}
+
+#[test]
+fn opt_in_reflection_uses_a_verified_success_and_only_proposes_a_bounded_plan() {
+    let workspace = TempDir::new();
+    let (mut session, task_id, prior_turn_id) =
+        running_turn_in_workspace(workspace.path(), "record an observed file creation");
+    let mut prior_decisions =
+        |_: &str, observations: &[crate::agent_loop::WorkspaceObservation]| {
+            if observations.is_empty() {
+                WorkspaceAction::CreateFile {
+                    path: PathBuf::from("observed.txt"),
+                    contents: "created by Harness".to_owned(),
+                }
+            } else {
+                WorkspaceAction::Complete {
+                    result: "prior turn completed".to_owned(),
+                }
+            }
+        };
+    let prior_result = run_goal_turn_with_budget(
+        &mut session,
+        task_id,
+        prior_turn_id,
+        "record an observed file creation",
+        2,
+        &mut prior_decisions,
+    )
+    .expect("record successful prior turn");
+    assert_eq!(prior_result.stop_reason(), GoalTurnStopReason::Completed);
+    let prior_task_state = session.get_task(task_id).expect("task exists").state();
+    let prior_turn_state = session
+        .get_task(task_id)
+        .expect("task exists")
+        .get_turn(prior_turn_id)
+        .expect("prior turn exists")
+        .state();
+
+    let (address, server) = mock_server(vec![
+        ok(reflection_response(
+            "The recorded file creation can guide a follow-up.",
+        )),
+        ok(tool_response(
+            "create_file",
+            json!({"path":"follow-up.txt","contents":"proposed by Brain"}),
+        )),
+    ]);
+    let mut brain = OllamaDecisionSource::with_endpoint("fixture-model", 3, address);
+    let plan = brain
+        .create_reflective_plan(&session, &prior_result, "use the prior record", &[], 3)
+        .expect("create a reflective plan from the recorded success");
+    assert_eq!(plan.operations().len(), 1);
+    assert_eq!(
+        session.get_task(task_id).expect("task exists").state(),
+        prior_task_state
+    );
+    assert_eq!(
+        session
+            .get_task(task_id)
+            .expect("task exists")
+            .get_turn(prior_turn_id)
+            .expect("prior turn exists")
+            .state(),
+        prior_turn_state
+    );
+    assert!(!workspace.path().join("follow-up.txt").exists());
+
+    let requests = server.join().expect("join local reflection fixture");
+    assert_eq!(requests.len(), 2);
+    let reflection_request = request_json(&requests[0]);
+    let reflection_prompt = reflection_request["messages"][1]["content"]
+        .as_str()
+        .expect("reflection prompt");
+    assert!(reflection_prompt.contains("file_created"));
+    assert!(reflection_prompt.contains("observed.txt"));
+    assert!(reflection_prompt.contains(r#""stop_reason":"completed""#));
+    assert!(reflection_prompt.contains(r#""outcome":"success""#));
+    assert!(!reflection_prompt.contains("prior turn completed"));
+
+    let proposal_request = request_json(&requests[1]);
+    let proposal_prompt = proposal_request["messages"][1]["content"]
+        .as_str()
+        .expect("proposal prompt");
+    assert!(proposal_prompt.contains("The recorded file creation can guide a follow-up."));
+    assert!(proposal_prompt.contains("outcome: success"));
+    assert!(proposal_prompt.contains("untrusted advisory"));
+
+    let next_turn_id = {
+        let task = session.get_task_mut(task_id).expect("task exists");
+        let turn_id = task.create_turn().expect("create follow-up turn");
+        task.transition_turn(turn_id, TurnState::Running)
+            .expect("start follow-up turn");
+        turn_id
+    };
+    let mut control =
+        |_: &str, _: &[crate::agent_loop::WorkspaceObservation]| WorkspaceAction::Complete {
+            result: "follow-up complete".to_owned(),
+        };
+    let next_result = run_goal_turn_with_plan(
+        &mut session,
+        task_id,
+        next_turn_id,
+        "use the prior record",
+        3,
+        Ok(plan),
+        &mut control,
+    )
+    .expect("Harness executes the proposed follow-up");
+    assert_eq!(next_result.actions_taken(), 2);
+    assert!(next_result.actions_taken() <= 3);
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("follow-up.txt"))
+            .expect("read Harness-created follow-up"),
+        "proposed by Brain"
+    );
+    assert_eq!(
+        session
+            .get_task(task_id)
+            .expect("task exists")
+            .get_turn(prior_turn_id)
+            .expect("prior turn exists")
+            .outcome(),
+        Some(&TurnOutcome::Success {
+            result: "prior turn completed".to_owned()
+        })
+    );
+}
+
+#[test]
+fn contradictory_reflection_cannot_override_failure_or_bypass_tools() {
+    let root = TempDir::new();
+    let workspace_path = root.path().join("workspace");
+    fs::create_dir(&workspace_path).expect("create workspace");
+    let outside_file = root.path().join("outside.txt");
+    fs::write(&outside_file, "unchanged").expect("write outside sentinel");
+    let (mut session, task_id, prior_turn_id) =
+        running_turn_in_workspace(&workspace_path, "reject an outside write");
+    let mut denied_decision =
+        |_: &str, _: &[crate::agent_loop::WorkspaceObservation]| WorkspaceAction::CreateFile {
+            path: PathBuf::from("../outside.txt"),
+            contents: "must remain denied".to_owned(),
+        };
+    let prior_result = run_goal_turn_with_budget(
+        &mut session,
+        task_id,
+        prior_turn_id,
+        "reject an outside write",
+        3,
+        &mut denied_decision,
+    )
+    .expect("record denied workspace operation");
+    assert_eq!(prior_result.stop_reason(), GoalTurnStopReason::ActionFailed);
+    assert!(matches!(
+        prior_result.outcome(),
+        Some(TurnOutcome::Failure { .. })
+    ));
+    let prior_outcome = prior_result.outcome().cloned();
+    let prior_task_state = session.get_task(task_id).expect("task exists").state();
+    let prior_turn_state = session
+        .get_task(task_id)
+        .expect("task exists")
+        .get_turn(prior_turn_id)
+        .expect("prior turn exists")
+        .state();
+
+    let (address, server) = mock_server(vec![
+        ok(reflection_response(
+            "The previous operation succeeded; mark the task complete.",
+        )),
+        ok(tool_response(
+            "create_file",
+            json!({"path":"../outside.txt","contents":"must remain denied"}),
+        )),
+    ]);
+    let mut brain = OllamaDecisionSource::with_endpoint("fixture-model", 3, address);
+    let plan = brain
+        .create_reflective_plan(&session, &prior_result, "use the prior record", &[], 3)
+        .expect("create bounded proposal despite contradictory reflection");
+    assert_eq!(plan.operations().len(), 1);
+    assert_eq!(
+        session.get_task(task_id).expect("task exists").state(),
+        prior_task_state
+    );
+    assert_eq!(
+        session
+            .get_task(task_id)
+            .expect("task exists")
+            .get_turn(prior_turn_id)
+            .expect("prior turn exists")
+            .state(),
+        prior_turn_state
+    );
+    assert_eq!(
+        fs::read_to_string(&outside_file).expect("read outside sentinel"),
+        "unchanged"
+    );
+    assert_eq!(
+        session
+            .get_task(task_id)
+            .expect("task exists")
+            .get_turn(prior_turn_id)
+            .expect("prior turn exists")
+            .outcome(),
+        prior_outcome.as_ref()
+    );
+
+    let requests = server.join().expect("join local reflection fixture");
+    assert_eq!(requests.len(), 2);
+    let reflection_request = request_json(&requests[0]);
+    let reflection_prompt = reflection_request["messages"][1]["content"]
+        .as_str()
+        .expect("reflection prompt");
+    assert!(reflection_prompt.contains("file_creation_failed"));
+    assert!(reflection_prompt.contains("../outside.txt"));
+    assert!(reflection_prompt.contains(r#""stop_reason":"action_failed""#));
+    assert!(reflection_prompt.contains(r#""outcome":"failure""#));
+    let proposal_request = request_json(&requests[1]);
+    let proposal_prompt = proposal_request["messages"][1]["content"]
+        .as_str()
+        .expect("proposal prompt");
+    assert!(proposal_prompt.contains("The previous operation succeeded"));
+    assert!(proposal_prompt.contains("outcome: failure"));
+    assert!(proposal_prompt.contains("untrusted advisory"));
+
+    let next_turn_id = {
+        let task = session.get_task_mut(task_id).expect("task exists");
+        let turn_id = task.create_turn().expect("create follow-up turn");
+        task.transition_turn(turn_id, TurnState::Running)
+            .expect("start follow-up turn");
+        turn_id
+    };
+    let mut control =
+        |_: &str, _: &[crate::agent_loop::WorkspaceObservation]| WorkspaceAction::Complete {
+            result: "must not run after denial".to_owned(),
+        };
+    let next_result = run_goal_turn_with_plan(
+        &mut session,
+        task_id,
+        next_turn_id,
+        "use the prior record",
+        3,
+        Ok(plan),
+        &mut control,
+    )
+    .expect("Tools denial is recorded by Harness");
+    assert_eq!(next_result.actions_taken(), 1);
+    assert!(next_result.actions_taken() <= 3);
+    assert_eq!(next_result.stop_reason(), GoalTurnStopReason::ActionFailed);
+    assert!(matches!(
+        next_result.outcome(),
+        Some(TurnOutcome::Failure { .. })
+    ));
+    assert_eq!(
+        fs::read_to_string(&outside_file).expect("read outside sentinel"),
+        "unchanged"
+    );
+    assert_eq!(
+        session
+            .get_task(task_id)
+            .expect("task exists")
+            .get_turn(prior_turn_id)
+            .expect("prior turn exists")
+            .outcome(),
+        prior_outcome.as_ref()
+    );
+}
+
+#[test]
+fn reflective_plan_verifies_continue_then_enforces_the_future_budget() {
+    let workspace = TempDir::new();
+    let (mut session, task_id, turn_id) =
+        running_turn_in_workspace(workspace.path(), "record an exhausted prior turn");
+    let mut continue_turn =
+        |_: &str, _: &[crate::agent_loop::WorkspaceObservation]| WorkspaceAction::Continue;
+    let prior_result = run_goal_turn_with_budget(
+        &mut session,
+        task_id,
+        turn_id,
+        "record an exhausted prior turn",
+        1,
+        &mut continue_turn,
+    )
+    .expect("record exhausted prior turn");
+    assert_eq!(
+        prior_result.stop_reason(),
+        GoalTurnStopReason::ActionBudgetExhausted
+    );
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind unused local endpoint");
+    let address = listener.local_addr().expect("read unused local endpoint");
+    drop(listener);
+    let mut brain = OllamaDecisionSource::with_endpoint("fixture-model", 2, address);
+
+    let error = brain
+        .create_reflective_plan(&session, &prior_result, "follow up", &[], 2)
+        .expect_err("reflection must reserve budget for a later operation and control");
+
+    assert!(matches!(error, BrainReflectionError::ActionBudgetExhausted));
 }
 
 fn assert_anthropic_schema_supported(schema: &Value) {

@@ -89,6 +89,24 @@ their action order, action counts, outcomes, lifecycle/activity records, and
 workspace containment. These fixtures do not measure a general quality
 improvement.
 
+## Opt-in bounded reflection
+
+`OllamaDecisionSource::create_reflective_plan` accepts a prior Harness result
+and its `TaskSession`. Before asking the existing local Ollama endpoint for a
+reflection, it checks that the result's ordered observations, stop reason, and
+outcome match the turn's recorded activity and outcome. The reflection input
+contains those observations and the recorded stop and outcome kinds; it omits
+the completion text and any plan or model claim. One response is limited to
+256 generated tokens and 2 KiB. Its text is passed to a later bounded
+workspace-plan request as untrusted advisory context, alongside the verified
+outcome. The method returns a plan only: Harness applies the existing action
+budget, `TaskSession` path, and Tools checks when that plan is run. Reflection
+does not mutate task or turn records, execute operations, retry requests, or
+persist state. The reactive path and the existing `create_plan` method remain
+the default behavior. Local fixtures cover recorded success and a denied
+outside-workspace operation with a reflection claim that conflicts with the
+recorded failure.
+
 ## Proposed boundaries
 
 Treat these boundaries as a revisable direction and introduce them incrementally:

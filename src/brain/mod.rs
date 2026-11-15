@@ -1,5 +1,8 @@
-use crate::agent_loop::{BoundedDecisionSource, WorkspaceAction, WorkspaceObservation};
+use crate::agent_loop::{
+    BoundedDecisionSource, GoalTurnResult, WorkspaceAction, WorkspaceObservation,
+};
 use crate::harness::context::{build_task_prompt, ContextError};
+use crate::task_lifecycle::TaskSession;
 use crate::tools::registry::workspace_operations;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -12,6 +15,7 @@ use ureq::Agent;
 
 mod plan;
 mod providers;
+mod reflection;
 use plan::MAX_PLAN_OPERATIONS;
 pub use plan::{WorkspacePlan, WorkspacePlanError};
 #[cfg(test)]
@@ -22,6 +26,7 @@ pub(crate) use providers::{
     OpenAiCompatibleDecisionSource, OpenAiCompatibleProvider, ResponsesDecisionSource,
     ResponsesProvider,
 };
+pub use reflection::BrainReflectionError;
 
 pub(crate) const OLLAMA_ADDRESS: SocketAddr =
     SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 11434));
@@ -91,6 +96,31 @@ impl OllamaDecisionSource {
             .remaining_decisions
             .saturating_sub(plan.operations().len());
         Ok(plan)
+    }
+
+    /// Uses one verified prior Harness result to inform a bounded workspace-only plan.
+    ///
+    /// Reflection is opt-in, consumes one existing decision-budget slot, and is limited to one
+    /// local model response of at most 2 KiB. The prior observations, stop reason, and outcome
+    /// must match the immutable turn outcome and ordered activity records in `session`. The
+    /// resulting reflection is advisory only; this method returns a plan and performs no
+    /// workspace operation. Pass the plan through the existing Harness executor.
+    pub fn create_reflective_plan(
+        &mut self,
+        session: &TaskSession,
+        prior_result: &GoalTurnResult,
+        goal: &str,
+        observations: &[WorkspaceObservation],
+        action_budget: usize,
+    ) -> Result<WorkspacePlan, BrainReflectionError> {
+        reflection::create_reflective_plan(
+            self,
+            session,
+            prior_result,
+            goal,
+            observations,
+            action_budget,
+        )
     }
 
     pub(crate) fn with_endpoint(
@@ -1004,6 +1034,8 @@ struct OllamaChatResponse {
 #[derive(Deserialize)]
 struct OllamaMessage {
     role: OllamaMessageRole,
+    #[serde(default)]
+    content: Option<String>,
     #[serde(default)]
     tool_calls: Vec<OllamaToolCall>,
 }
