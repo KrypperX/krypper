@@ -3,8 +3,9 @@
 This guide records implemented code separately from a staged, revisable
 direction for future structural changes. `src/core/task.rs` and
 `src/core/lifecycle.rs` are implemented Core slices. `src/tools.rs` and its
-workspace-safety modules are the implemented Tools boundary; broader **Core**
-and **Brain** layout remains proposed.
+workspace-safety modules are the implemented Tools boundary. The model-backed
+decision-source boundary in `src/brain/` is implemented; broader **Core** and
+**Brain** layout remains proposed.
 
 ## Current implementation
 
@@ -29,8 +30,9 @@ and **Brain** layout remains proposed.
   API as a compatibility facade for existing callers, including the types
   exposed by `core::task`.
 - [`src/harness/`](src/harness/) contains task-turn execution and session
-  preparation. It coordinates decisions and workspace actions through the
-  current session API. Its [`verification.rs`](src/harness/verification.rs)
+  preparation. Its `execution.rs` turn loop requests a decision, executes
+  supported workspace actions through Tools, and records turn results through
+  `TaskSession`. Its [`verification.rs`](src/harness/verification.rs)
   module reconciles completed-turn stop reasons to terminal task states through
   `TaskSession`'s existing transition API; the CLI invokes it before rendering
   results. Its [`recovery.rs`](src/harness/recovery.rs) module
@@ -41,9 +43,14 @@ and **Brain** layout remains proposed.
   formats each model prompt and serializes the current workspace observations
   under the existing context size limit; it is stateless and uses the current
   goal and decision budget.
-- [`src/model.rs`](src/model.rs) and its provider submodule build provider
-  request envelopes, validate model responses, and turn supported calls into
-  proposed workspace actions through decision-source interfaces.
+- [`src/brain/mod.rs`](src/brain/mod.rs) owns the model-backed Ollama decision
+  source, shared tool definitions, request construction, and response
+  validation. Its [`providers.rs`](src/brain/providers.rs) module implements
+  provider-specific sources, request contracts, and response validation;
+  `cli.rs` retains the existing flag and environment based provider selection.
+  Decision sources return proposed workspace actions through the existing
+  decision-source interface; they do not execute those actions. The focused
+  tests in [`tests.rs`](src/brain/tests.rs) use local fixtures.
 - [`src/cli.rs`](src/cli.rs) parses and runs the CLI, reads and writes
   checkpoint files, presents command output, and asks Harness to prepare
   checkpoint bytes and resumed sessions.
@@ -62,7 +69,8 @@ Treat these boundaries as a revisable direction and introduce them incrementally
   implementation; `core::lifecycle` remains the sole owner of session-wide
   task ordering, coordination, snapshots, and checkpoint recovery. The two
   modules share the existing lifecycle, history, and activity records.
-- **Brain** turns observations into proposed decisions through provider
+- **Brain**, implemented for model-backed decision sources in
+  `src/brain/`, turns observations into proposed decisions through provider
   interfaces. It proposes actions; it does not execute workspace capabilities.
 - **Harness** coordinates context construction, execution, recovery, and
   verification. Its context is rebuilt per decision from the current goal,
