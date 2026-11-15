@@ -316,3 +316,321 @@ fn harness_execution_rejects_workspace_escape_without_changing_outside_file() {
         }
     );
 }
+
+#[test]
+fn harness_execution_keeps_success_and_denied_cross_run_escape_isolated() {
+    const ACTION_BUDGET: usize = 3;
+    const SEED: &str = "equivalent starting contents";
+    const SENTINEL: &str = "private sentinel";
+
+    let workspace_group = TempWorkspace::new();
+    let root = workspace_group
+        .0
+        .parent()
+        .expect("temporary workspace has a group root");
+    let success_workspace = root.join("success");
+    let failed_workspace = root.join("failure");
+    fs::create_dir(&success_workspace).expect("create success workspace");
+    fs::create_dir(&failed_workspace).expect("create failure workspace");
+    for workspace in [&success_workspace, &failed_workspace] {
+        fs::write(workspace.join("seed.txt"), SEED).expect("write equivalent seed");
+        fs::write(workspace.join("outside-sentinel.txt"), SENTINEL)
+            .expect("write equivalent sentinel");
+    }
+    let outside_sentinel = success_workspace.join("outside-sentinel.txt");
+
+    let success_goal = "case success: read the seed and write a private result";
+    let mut success_session =
+        TaskSession::new_in_workspace(&success_workspace).expect("bind success workspace");
+    let (success_task_id, success_turn_id) = start_turn(&mut success_session, success_goal);
+    let success_result = "success result";
+    let mut success_decision_records = Vec::new();
+    let success = {
+        let mut success_decisions = |goal: &str, observations: &[WorkspaceObservation]| {
+            let action = match observations.len() {
+                0 => WorkspaceAction::ReadFile {
+                    path: PathBuf::from("seed.txt"),
+                },
+                1 => WorkspaceAction::CreateFile {
+                    path: PathBuf::from("success.txt"),
+                    contents: success_result.to_owned(),
+                },
+                2 => WorkspaceAction::Complete {
+                    result: success_result.to_owned(),
+                },
+                _ => panic!("success case received an unexpected decision"),
+            };
+            success_decision_records.push((goal.to_owned(), observations.to_vec(), action.clone()));
+            action
+        };
+        execution::run_goal_turn_with_budget(
+            &mut success_session,
+            success_task_id,
+            success_turn_id,
+            success_goal,
+            ACTION_BUDGET,
+            &mut success_decisions,
+        )
+        .expect("run success case")
+    };
+    assert_eq!(success.task_id(), success_task_id);
+    assert_eq!(success.turn_id(), success_turn_id);
+    assert_eq!(success.actions_taken(), ACTION_BUDGET);
+    assert_eq!(success.stop_reason(), GoalTurnStopReason::Completed);
+    assert_eq!(
+        success.outcome(),
+        Some(&TurnOutcome::Success {
+            result: success_result.to_owned(),
+        })
+    );
+    let success_observations = vec![
+        WorkspaceObservation::FileRead {
+            path: PathBuf::from("seed.txt"),
+            contents: SEED.to_owned(),
+        },
+        WorkspaceObservation::FileCreated {
+            path: PathBuf::from("success.txt"),
+            bytes_written: success_result.len(),
+        },
+    ];
+    assert_eq!(success.observations(), success_observations.as_slice());
+    assert_eq!(
+        success_decision_records,
+        vec![
+            (
+                success_goal.to_owned(),
+                vec![],
+                WorkspaceAction::ReadFile {
+                    path: PathBuf::from("seed.txt"),
+                },
+            ),
+            (
+                success_goal.to_owned(),
+                vec![success_observations[0].clone()],
+                WorkspaceAction::CreateFile {
+                    path: PathBuf::from("success.txt"),
+                    contents: success_result.to_owned(),
+                },
+            ),
+            (
+                success_goal.to_owned(),
+                success_observations.clone(),
+                WorkspaceAction::Complete {
+                    result: success_result.to_owned(),
+                },
+            ),
+        ]
+    );
+    let success_task = success_session
+        .get_task(success_task_id)
+        .expect("success task remains in its session");
+    let success_turn = success_task
+        .get_turn(success_turn_id)
+        .expect("success turn remains in its task");
+    let success_activity = [
+        TurnActivitySummary::FileRead {
+            bytes_read: SEED.len(),
+        },
+        TurnActivitySummary::FileCreated {
+            bytes_written: success_result.len(),
+        },
+        TurnActivitySummary::Completed,
+    ];
+    assert_eq!(success_turn.state(), TurnState::Succeeded);
+    assert_eq!(success_task.state(), TaskState::Running);
+    assert_eq!(success_turn.outcome(), success.outcome());
+    assert_eq!(success_turn.activity_history(), success_activity);
+    assert_eq!(
+        success_task
+            .activity_history()
+            .iter()
+            .map(|event| event.summary())
+            .collect::<Vec<_>>(),
+        success_activity
+    );
+    assert_eq!(
+        success_task
+            .history()
+            .last()
+            .expect("success lifecycle record")
+            .transition(),
+        TaskHistoryTransition::Turn {
+            turn_id: success_turn_id,
+            previous_state: TurnState::Running,
+            new_state: TurnState::Succeeded,
+        }
+    );
+
+    let failure_goal = "case denied escape: keep another run's sentinel private";
+    let mut failure_session =
+        TaskSession::new_in_workspace(&failed_workspace).expect("bind failure workspace");
+    let (failure_task_id, failure_turn_id) = start_turn(&mut failure_session, failure_goal);
+    let failure_result = "failure case result";
+    let mut failure_decision_records = Vec::new();
+    let failure = {
+        let mut failure_decisions = |goal: &str, observations: &[WorkspaceObservation]| {
+            let action = match observations.len() {
+                0 => WorkspaceAction::ReadFile {
+                    path: PathBuf::from("seed.txt"),
+                },
+                1 => WorkspaceAction::CreateFile {
+                    path: PathBuf::from("failure.txt"),
+                    contents: failure_result.to_owned(),
+                },
+                2 => WorkspaceAction::ReplaceText {
+                    path: PathBuf::from("../success/outside-sentinel.txt"),
+                    match_text: SENTINEL.to_owned(),
+                    replacement_text: "must not alter another run".to_owned(),
+                },
+                _ => panic!("failure case received an unexpected decision"),
+            };
+            failure_decision_records.push((goal.to_owned(), observations.to_vec(), action.clone()));
+            action
+        };
+        execution::run_goal_turn_with_budget(
+            &mut failure_session,
+            failure_task_id,
+            failure_turn_id,
+            failure_goal,
+            ACTION_BUDGET,
+            &mut failure_decisions,
+        )
+        .expect("record denied workspace escape as a failed turn")
+    };
+    assert_ne!(success_task_id, failure_task_id);
+    assert_eq!(failure.task_id(), failure_task_id);
+    assert_eq!(failure.turn_id(), failure_turn_id);
+    assert_eq!(failure.actions_taken(), ACTION_BUDGET);
+    assert_eq!(failure.stop_reason(), GoalTurnStopReason::ActionFailed);
+    assert!(matches!(
+        failure.outcome(),
+        Some(TurnOutcome::Failure { detail }) if !detail.is_empty()
+    ));
+    let failure_observations = vec![
+        WorkspaceObservation::FileRead {
+            path: PathBuf::from("seed.txt"),
+            contents: SEED.to_owned(),
+        },
+        WorkspaceObservation::FileCreated {
+            path: PathBuf::from("failure.txt"),
+            bytes_written: failure_result.len(),
+        },
+        WorkspaceObservation::TextReplacementFailed {
+            path: PathBuf::from("../success/outside-sentinel.txt"),
+            error: match failure.observations().last() {
+                Some(WorkspaceObservation::TextReplacementFailed { error, .. }) => error.clone(),
+                observation => {
+                    panic!("expected a denied cross-run replacement, got {observation:?}")
+                }
+            },
+        },
+    ];
+    assert_eq!(failure.observations(), failure_observations.as_slice());
+    assert!(matches!(
+        failure.observations().last(),
+        Some(WorkspaceObservation::TextReplacementFailed {
+            error: GoalTurnError::WorkspaceReplace(_),
+            ..
+        })
+    ));
+    assert_eq!(
+        failure_decision_records,
+        vec![
+            (
+                failure_goal.to_owned(),
+                vec![],
+                WorkspaceAction::ReadFile {
+                    path: PathBuf::from("seed.txt"),
+                },
+            ),
+            (
+                failure_goal.to_owned(),
+                vec![failure_observations[0].clone()],
+                WorkspaceAction::CreateFile {
+                    path: PathBuf::from("failure.txt"),
+                    contents: failure_result.to_owned(),
+                },
+            ),
+            (
+                failure_goal.to_owned(),
+                failure_observations[..2].to_vec(),
+                WorkspaceAction::ReplaceText {
+                    path: PathBuf::from("../success/outside-sentinel.txt"),
+                    match_text: SENTINEL.to_owned(),
+                    replacement_text: "must not alter another run".to_owned(),
+                },
+            ),
+        ]
+    );
+    let failure_task = failure_session
+        .get_task(failure_task_id)
+        .expect("failure task remains in its session");
+    let failure_turn = failure_task
+        .get_turn(failure_turn_id)
+        .expect("failure turn remains in its task");
+    let failure_activity = [
+        TurnActivitySummary::FileRead {
+            bytes_read: SEED.len(),
+        },
+        TurnActivitySummary::FileCreated {
+            bytes_written: failure_result.len(),
+        },
+        TurnActivitySummary::ActionFailed {
+            action: TurnActivityAction::ReplaceText,
+        },
+    ];
+    assert_eq!(failure_turn.state(), TurnState::Failed);
+    assert_eq!(failure_task.state(), TaskState::Running);
+    assert_eq!(failure_turn.outcome(), failure.outcome());
+    assert_eq!(failure_turn.activity_history(), failure_activity);
+    assert_eq!(
+        failure_task
+            .activity_history()
+            .iter()
+            .map(|event| event.summary())
+            .collect::<Vec<_>>(),
+        failure_activity
+    );
+    assert_eq!(
+        failure_task
+            .history()
+            .last()
+            .expect("failure lifecycle record")
+            .transition(),
+        TaskHistoryTransition::Turn {
+            turn_id: failure_turn_id,
+            previous_state: TurnState::Running,
+            new_state: TurnState::Failed,
+        }
+    );
+
+    assert_eq!(
+        fs::read_to_string(&outside_sentinel).expect("outside-workspace sentinel remains"),
+        SENTINEL
+    );
+    assert_eq!(
+        fs::read_to_string(success_workspace.join("success.txt"))
+            .expect("success result stays in its workspace"),
+        success_result
+    );
+    assert!(!failed_workspace.join("success.txt").exists());
+    assert_eq!(
+        fs::read_to_string(failed_workspace.join("failure.txt"))
+            .expect("failure result stays in its workspace"),
+        failure_result
+    );
+    assert!(!success_workspace.join("failure.txt").exists());
+    assert_eq!(
+        fs::read_to_string(success_workspace.join("seed.txt")).expect("success seed remains"),
+        SEED
+    );
+    assert_eq!(
+        fs::read_to_string(failed_workspace.join("seed.txt")).expect("failure seed remains"),
+        SEED
+    );
+    assert_eq!(
+        fs::read_to_string(failed_workspace.join("outside-sentinel.txt"))
+            .expect("failure workspace sentinel remains"),
+        SENTINEL
+    );
+}
