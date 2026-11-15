@@ -18,6 +18,12 @@ decision-source boundary in `src/brain/` is implemented; broader **Core** and
   state. It re-exports the task domain types for compatibility.
 - [`src/tools.rs`](src/tools.rs) exposes the existing workspace operations to
   task-turn and CLI callers through one crate-internal Tools boundary.
+  [`src/tools/registry.rs`](src/tools/registry.rs) provides a typed registry of
+  the existing workspace-operation names, descriptions, and request schemas.
+  Brain derives provider request definitions from that registry while keeping
+  task-control decisions on their existing path. Registry metadata describes
+  requests only; `TaskSession` and Tools remain responsible for lifecycle,
+  workspace binding, validation, and safety enforcement.
   [`src/tools/workspace_safety.rs`](src/tools/workspace_safety.rs) owns workspace
   root capture and the file and directory safety rules, including containment,
   symlink and file-type handling, limits, and atomic replacement.
@@ -55,10 +61,10 @@ decision-source boundary in `src/brain/` is implemented; broader **Core** and
   checkpoint files, presents command output, and asks Harness to prepare
   checkpoint bytes and resumed sessions.
 
-The current CLI still drives task execution. The Tools module currently
-provides the workspace-safety implementation used by both task-turn operations
-and CLI filesystem commands; capability registration and moving CLI orchestration
-remain part of the staged direction below.
+The current CLI still drives task execution. The Tools module provides the
+workspace-safety implementation used by both task-turn operations and CLI
+filesystem commands, with the existing operations described by the typed
+registry. Moving CLI orchestration remains part of the staged direction below.
 
 ## Proposed boundaries
 
@@ -78,8 +84,8 @@ Treat these boundaries as a revisable direction and introduce them incrementally
   context or a second lifecycle store, or bypass Tools to perform actions.
 - **Tools** is the final enforcement boundary for workspace access and safety.
   Its implemented workspace-safety operations are shared by task turns and CLI
-  filesystem commands; future capability registration can build on this
-  boundary without moving lifecycle ownership out of Core.
+  filesystem commands. The typed registry describes those operations for Brain
+  requests but does not grant permissions or replace local validation.
 - **CLI and future interfaces** present data and consume runtime snapshots
   without owning task state. Moving the current CLI to that role must preserve
   its existing syntax and defaults.
