@@ -7,6 +7,7 @@ use crate::harness::execution::workspace_action_name;
 use crate::harness::recovery::{
     prepare_checkpoint_for_pause, prepare_resumed_session, ResumeError,
 };
+use crate::harness::verification::reconcile_task_state;
 use crate::model::{
     validate_model_name_for_provider, AnthropicDecisionSource, CloudflareAccountId,
     GeminiDecisionSource, ModelDecisionSource, ModelProvider, OllamaDecisionSource,
@@ -501,21 +502,7 @@ fn run_task_with_endpoint(
         actions_taken += result.actions_taken();
         let stop_reason = result.stop_reason();
 
-        match stop_reason {
-            GoalTurnStopReason::Completed | GoalTurnStopReason::ActionCompleted => session
-                .get_task_mut(task_id)
-                .ok_or_else(|| io::Error::other("task was not found in its session"))?
-                .transition(TaskState::Succeeded)
-                .map_err(io::Error::other)?,
-            GoalTurnStopReason::Continued | GoalTurnStopReason::Cancelled => {}
-            GoalTurnStopReason::ActionBudgetExhausted | GoalTurnStopReason::ActionFailed => {
-                session
-                    .get_task_mut(task_id)
-                    .ok_or_else(|| io::Error::other("task was not found in its session"))?
-                    .transition(TaskState::Failed)
-                    .map_err(io::Error::other)?;
-            }
-        }
+        reconcile_task_state(&mut session, task_id, stop_reason)?;
 
         if let Some(cause) = stream_error.take() {
             return Err(cause);
