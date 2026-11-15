@@ -2086,3 +2086,9 @@ fn gemini_provider_errors_never_echo_api_keys_or_response_bodies() {
     assert!(!action.contains(key));
     assert!(!action.contains("error\":{\"message"));
 }
+
+#[test]
+fn brain_module_source_path_preserves_root_compatibility() {
+    let brain_source = crate::brain::OllamaDecisionSource::new("mock-model", 1);
+    let _: crate::OllamaDecisionSource = brain_source;
+}

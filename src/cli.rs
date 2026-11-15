@@ -2,17 +2,17 @@ use crate::agent_loop::{
     run_goal_turn_with_budget, BoundedDecisionSource, GoalTurnStopReason, WorkspaceAction,
     WorkspaceObservation,
 };
-use crate::harness::execution::workspace_action_name;
-use crate::harness::recovery::{
-    prepare_checkpoint_for_pause, prepare_resumed_session, ResumeError,
-};
-use crate::harness::verification::reconcile_task_state;
-use crate::model::{
+use crate::brain::{
     validate_model_name_for_provider, AnthropicDecisionSource, CloudflareAccountId,
     GeminiDecisionSource, ModelDecisionSource, ModelProvider, OllamaDecisionSource,
     OpenAiCompatibleCredentials, OpenAiCompatibleDecisionSource, OpenAiCompatibleProvider,
     ResponsesDecisionSource, ResponsesProvider, OLLAMA_ADDRESS,
 };
+use crate::harness::execution::workspace_action_name;
+use crate::harness::recovery::{
+    prepare_checkpoint_for_pause, prepare_resumed_session, ResumeError,
+};
+use crate::harness::verification::reconcile_task_state;
 use crate::task_lifecycle::{
     TaskSession, TaskState, TurnOutcome, TurnState, MAX_TASK_SESSION_CHECKPOINT_BYTES,
 };

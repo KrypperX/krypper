@@ -1,5 +1,5 @@
 use super::{prepare_model_source, run_task_with_endpoint, snapshot_task_and_turn_state};
-use crate::model::{ModelDecisionSource, ModelProvider};
+use crate::brain::{ModelDecisionSource, ModelProvider};
 use crate::task_lifecycle::{TaskSession, TaskState, TurnOutcome, TurnState};
 use serde_json::{json, Value};
 use std::ffi::OsString;
