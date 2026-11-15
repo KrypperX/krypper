@@ -4,7 +4,9 @@ use crate::agent_loop::{
 };
 use crate::file_safety::{create_text_file, list_directory, read_text_file};
 use crate::harness::execution::workspace_action_name;
-use crate::harness::recovery::{prepare_resumed_session, ResumeError};
+use crate::harness::recovery::{
+    prepare_checkpoint_for_pause, prepare_resumed_session, ResumeError,
+};
 use crate::model::{
     validate_model_name_for_provider, AnthropicDecisionSource, CloudflareAccountId,
     GeminiDecisionSource, ModelDecisionSource, ModelProvider, OllamaDecisionSource,
@@ -527,15 +529,7 @@ fn run_task_with_endpoint(
         match stop_reason {
             GoalTurnStopReason::Continued => {
                 if let Some(path) = checkpoint_out.as_deref() {
-                    let task = session
-                        .get_task(task_id)
-                        .ok_or_else(|| io::Error::other("task was not found in its session"))?;
-                    if task.state() != TaskState::Running {
-                        return Err(io::Error::other(
-                            "continued task was not running at the checkpoint boundary",
-                        ));
-                    }
-                    let checkpoint = session.export_checkpoint().map_err(io::Error::other)?;
+                    let checkpoint = prepare_checkpoint_for_pause(&session, task_id)?;
                     write_task_checkpoint(path, &checkpoint)?;
                     paused_checkpoint = Some(path.to_path_buf());
                     break;
