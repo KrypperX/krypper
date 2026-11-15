@@ -19,7 +19,10 @@ direction for future structural changes. `src/core/task.rs` and
   exposed by `core::task`.
 - [`src/harness/`](src/harness/) contains task-turn execution and session
   preparation. It coordinates decisions and workspace actions through the
-  current session API. Its [`recovery.rs`](src/harness/recovery.rs) module
+  current session API. Its [`verification.rs`](src/harness/verification.rs)
+  module reconciles completed-turn stop reasons to terminal task states through
+  `TaskSession`'s existing transition API; the CLI invokes it before rendering
+  results. Its [`recovery.rs`](src/harness/recovery.rs) module
   prepares checkpoint bytes at a continued-turn pause boundary, coordinates
   checkpoint restoration, validates the single-task resume conditions, and
   starts the next turn through `TaskSession`; Core remains the only lifecycle
