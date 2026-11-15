@@ -1,4 +1,4 @@
-use crate::file_safety::{capture_workspace_root, WorkspaceRoot};
+use crate::tools::{capture_workspace_root, WorkspaceRoot};
 use std::fmt;
 use std::sync::Arc;
 use uuid::Uuid;
