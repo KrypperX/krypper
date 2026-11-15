@@ -550,7 +550,7 @@ pub fn run_goal_turn_with_budget<D: BoundedDecisionSource + ?Sized>(
     )
 }
 
-fn summarize_observation(observation: &WorkspaceObservation) -> TurnActivitySummary {
+pub(crate) fn summarize_observation(observation: &WorkspaceObservation) -> TurnActivitySummary {
     match observation {
         WorkspaceObservation::FileRead { contents, .. } => TurnActivitySummary::FileRead {
             bytes_read: contents.len(),

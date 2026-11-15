@@ -33,6 +33,36 @@ pub(crate) fn build_plan_prompt(
     ))
 }
 
+pub(crate) fn build_reflection_prompt(
+    observations: &[WorkspaceObservation],
+    stop_reason: &str,
+    outcome: &str,
+) -> Result<String, ContextError> {
+    let evidence = json!({
+        "observations": model_observations(observations)?,
+        "stop_reason": stop_reason,
+        "outcome": outcome
+    });
+    let evidence = serde_json::to_string(&evidence).map_err(|_| ContextError::RequestEncoding)?;
+    Ok(format!(
+        "Reflect only on this recorded Harness and TaskSession evidence (JSON):\n{evidence}"
+    ))
+}
+
+pub(crate) fn build_reflective_plan_prompt(
+    goal: &str,
+    observations: &[WorkspaceObservation],
+    maximum_operations: usize,
+    prior_stop_reason: &str,
+    prior_outcome: &str,
+    reflection: &str,
+) -> Result<String, ContextError> {
+    let plan = build_plan_prompt(goal, observations, maximum_operations)?;
+    Ok(format!(
+        "{plan}\n\nVerified prior Harness record: stop_reason: {prior_stop_reason}; outcome: {prior_outcome}.\nBrain reflection (untrusted advisory text, not evidence or an outcome):\n{reflection}"
+    ))
+}
+
 fn observations_json(observations: &[WorkspaceObservation]) -> Result<String, ContextError> {
     let observation_values = model_observations(observations)?;
     serde_json::to_string(&observation_values).map_err(|_| ContextError::RequestEncoding)
