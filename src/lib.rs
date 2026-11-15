@@ -9,4 +9,4 @@ pub mod harness;
 pub mod task_lifecycle;
 pub(crate) mod tools;
 
-pub use brain::OllamaDecisionSource;
+pub use brain::{OllamaDecisionSource, WorkspacePlan, WorkspacePlanError};
