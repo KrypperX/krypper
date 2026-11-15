@@ -318,7 +318,7 @@ fn harness_execution_rejects_workspace_escape_without_changing_outside_file() {
 }
 
 #[test]
-fn harness_execution_keeps_success_and_denied_cross_run_escape_isolated() {
+fn harness_execution_keeps_success_and_denied_cross_run_read_isolated() {
     const ACTION_BUDGET: usize = 3;
     const SEED: &str = "equivalent starting contents";
     const SENTINEL: &str = "private sentinel";
@@ -461,7 +461,8 @@ fn harness_execution_keeps_success_and_denied_cross_run_escape_isolated() {
         }
     );
 
-    let failure_goal = "case denied escape: keep another run's sentinel private";
+    let failure_goal = "case denied cross-run read: keep another run's sentinel private";
+    let peer_sentinel_path = PathBuf::from("../success/outside-sentinel.txt");
     let mut failure_session =
         TaskSession::new_in_workspace(&failed_workspace).expect("bind failure workspace");
     let (failure_task_id, failure_turn_id) = start_turn(&mut failure_session, failure_goal);
@@ -477,10 +478,8 @@ fn harness_execution_keeps_success_and_denied_cross_run_escape_isolated() {
                     path: PathBuf::from("failure.txt"),
                     contents: failure_result.to_owned(),
                 },
-                2 => WorkspaceAction::ReplaceText {
-                    path: PathBuf::from("../success/outside-sentinel.txt"),
-                    match_text: SENTINEL.to_owned(),
-                    replacement_text: "must not alter another run".to_owned(),
+                2 => WorkspaceAction::ReadFile {
+                    path: peer_sentinel_path.clone(),
                 },
                 _ => panic!("failure case received an unexpected decision"),
             };
@@ -495,7 +494,7 @@ fn harness_execution_keeps_success_and_denied_cross_run_escape_isolated() {
             ACTION_BUDGET,
             &mut failure_decisions,
         )
-        .expect("record denied workspace escape as a failed turn")
+        .expect("record denied cross-run read as a failed turn")
     };
     assert_ne!(success_task_id, failure_task_id);
     assert_eq!(failure.task_id(), failure_task_id);
@@ -504,8 +503,11 @@ fn harness_execution_keeps_success_and_denied_cross_run_escape_isolated() {
     assert_eq!(failure.stop_reason(), GoalTurnStopReason::ActionFailed);
     assert!(matches!(
         failure.outcome(),
-        Some(TurnOutcome::Failure { detail }) if !detail.is_empty()
+        Some(TurnOutcome::Failure { detail })
+            if !detail.is_empty() && !detail.contains(SENTINEL)
     ));
+    assert_eq!(failure.read_result(), SEED);
+    assert!(!failure.read_result().contains(SENTINEL));
     let failure_observations = vec![
         WorkspaceObservation::FileRead {
             path: PathBuf::from("seed.txt"),
@@ -515,12 +517,14 @@ fn harness_execution_keeps_success_and_denied_cross_run_escape_isolated() {
             path: PathBuf::from("failure.txt"),
             bytes_written: failure_result.len(),
         },
-        WorkspaceObservation::TextReplacementFailed {
-            path: PathBuf::from("../success/outside-sentinel.txt"),
+        WorkspaceObservation::ActionFailed {
+            action: WorkspaceAction::ReadFile {
+                path: peer_sentinel_path.clone(),
+            },
             error: match failure.observations().last() {
-                Some(WorkspaceObservation::TextReplacementFailed { error, .. }) => error.clone(),
+                Some(WorkspaceObservation::ActionFailed { error, .. }) => error.clone(),
                 observation => {
-                    panic!("expected a denied cross-run replacement, got {observation:?}")
+                    panic!("expected a denied cross-run read, got {observation:?}")
                 }
             },
         },
@@ -528,10 +532,10 @@ fn harness_execution_keeps_success_and_denied_cross_run_escape_isolated() {
     assert_eq!(failure.observations(), failure_observations.as_slice());
     assert!(matches!(
         failure.observations().last(),
-        Some(WorkspaceObservation::TextReplacementFailed {
-            error: GoalTurnError::WorkspaceReplace(_),
-            ..
-        })
+        Some(WorkspaceObservation::ActionFailed {
+            action: WorkspaceAction::ReadFile { path },
+            error: GoalTurnError::WorkspaceRead(_),
+        }) if path == &peer_sentinel_path
     ));
     assert_eq!(
         failure_decision_records,
@@ -554,10 +558,8 @@ fn harness_execution_keeps_success_and_denied_cross_run_escape_isolated() {
             (
                 failure_goal.to_owned(),
                 failure_observations[..2].to_vec(),
-                WorkspaceAction::ReplaceText {
-                    path: PathBuf::from("../success/outside-sentinel.txt"),
-                    match_text: SENTINEL.to_owned(),
-                    replacement_text: "must not alter another run".to_owned(),
+                WorkspaceAction::ReadFile {
+                    path: peer_sentinel_path.clone(),
                 },
             ),
         ]
@@ -576,7 +578,7 @@ fn harness_execution_keeps_success_and_denied_cross_run_escape_isolated() {
             bytes_written: failure_result.len(),
         },
         TurnActivitySummary::ActionFailed {
-            action: TurnActivityAction::ReplaceText,
+            action: TurnActivityAction::ReadFile,
         },
     ];
     assert_eq!(failure_turn.state(), TurnState::Failed);
