@@ -38,7 +38,14 @@ decision-source boundary in `src/brain/` is implemented; broader **Core** and
 - [`src/harness/`](src/harness/) contains task-turn execution and session
   preparation. Its `execution.rs` turn loop requests a decision, executes
   supported workspace actions through Tools, and records turn results through
-  `TaskSession`. Its [`verification.rs`](src/harness/verification.rs)
+  `TaskSession`. Its [`execution/planned.rs`](src/harness/execution/planned.rs)
+  module provides the opt-in `run_goal_turn_with_plan` entry point. It adapts
+  typed Brain operations into the existing bounded loop, rechecks each against
+  the current Tools registry, and permits only completion, continuation, or
+  cancellation from the task-control source. The existing loop executes each
+  operation through `TaskSession`, counts actions against the caller's budget,
+  and stops after a rejected or failed step. Its
+  [`verification.rs`](src/harness/verification.rs)
   module reconciles completed-turn stop reasons to terminal task states through
   `TaskSession`'s existing transition API; the CLI invokes it before rendering
   results. Its [`recovery.rs`](src/harness/recovery.rs) module
@@ -51,9 +58,12 @@ decision-source boundary in `src/brain/` is implemented; broader **Core** and
   goal and decision budget.
 - [`src/brain/mod.rs`](src/brain/mod.rs) owns the model-backed Ollama decision
   source, shared tool definitions, request construction, and response
-  validation. Its [`providers.rs`](src/brain/providers.rs) module implements
-  provider-specific sources, request contracts, and response validation;
-  `cli.rs` retains the existing flag and environment based provider selection.
+  validation. Its [`plan.rs`](src/brain/plan.rs) module defines the bounded
+  workspace-only plan type; the opt-in Ollama plan request is built from the
+  same Tools registry and cannot include task-control operations. Its
+  [`providers.rs`](src/brain/providers.rs) module implements provider-specific
+  reactive sources, request contracts, and response validation; `cli.rs`
+  retains the existing flag and environment based provider selection.
   Decision sources return proposed workspace actions through the existing
   decision-source interface; they do not execute those actions. The focused
   tests in [`tests.rs`](src/brain/tests.rs) use local fixtures.
@@ -65,6 +75,19 @@ The current CLI still drives task execution. The Tools module provides the
 workspace-safety implementation used by both task-turn operations and CLI
 filesystem commands, with the existing operations described by the typed
 registry. Moving CLI orchestration remains part of the staged direction below.
+
+## Bounded planning prototype
+
+Call `OllamaDecisionSource::create_plan` and pass its result to
+`run_goal_turn_with_plan` to opt into one ordered plan. The plan can contain
+only registered workspace operations. Harness revalidates each operation and
+delegates it to `TaskSession`; an operation failure or denial stops the rest of
+the plan. Task-control decisions stay on the existing path, and a plan does not
+contain a success outcome. The offline fixtures compare planned and reactive
+execution for an observed successful result and a denied operation, including
+their action order, action counts, outcomes, lifecycle/activity records, and
+workspace containment. These fixtures do not measure a general quality
+improvement.
 
 ## Proposed boundaries
 

@@ -16,12 +16,26 @@ pub(crate) fn build_task_prompt(
     observations: &[WorkspaceObservation],
     remaining_decisions: usize,
 ) -> Result<String, ContextError> {
-    let observation_values = model_observations(observations)?;
-    let observation_json =
-        serde_json::to_string(&observation_values).map_err(|_| ContextError::RequestEncoding)?;
+    let observation_json = observations_json(observations)?;
     Ok(format!(
         "Task goal:\n{goal}\n\nAction slots remaining, including this decision: {remaining_decisions}. The task fails if the action budget runs out before completion.\n\nPrior workspace observations (JSON):\n{observation_json}"
     ))
+}
+
+pub(crate) fn build_plan_prompt(
+    goal: &str,
+    observations: &[WorkspaceObservation],
+    maximum_operations: usize,
+) -> Result<String, ContextError> {
+    let observation_json = observations_json(observations)?;
+    Ok(format!(
+        "Task goal:\n{goal}\n\nReturn at most {maximum_operations} ordered workspace operations. One action-budget slot is reserved for task control after the plan. Do not report task success; Harness will use the existing task-control and verification path.\n\nPrior workspace observations (JSON):\n{observation_json}"
+    ))
+}
+
+fn observations_json(observations: &[WorkspaceObservation]) -> Result<String, ContextError> {
+    let observation_values = model_observations(observations)?;
+    serde_json::to_string(&observation_values).map_err(|_| ContextError::RequestEncoding)
 }
 
 fn model_observations(observations: &[WorkspaceObservation]) -> Result<Vec<Value>, ContextError> {
