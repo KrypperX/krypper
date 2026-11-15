@@ -2,7 +2,6 @@ use crate::agent_loop::{
     run_goal_turn_with_budget, BoundedDecisionSource, GoalTurnStopReason, WorkspaceAction,
     WorkspaceObservation,
 };
-use crate::file_safety::{create_text_file, list_directory, read_text_file};
 use crate::harness::execution::workspace_action_name;
 use crate::harness::recovery::{
     prepare_checkpoint_for_pause, prepare_resumed_session, ResumeError,
@@ -17,6 +16,7 @@ use crate::model::{
 use crate::task_lifecycle::{
     TaskSession, TaskState, TurnOutcome, TurnState, MAX_TASK_SESSION_CHECKPOINT_BYTES,
 };
+use crate::tools::{create_text_file, list_directory, read_text_file};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};

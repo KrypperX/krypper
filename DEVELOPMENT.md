@@ -2,8 +2,9 @@
 
 This guide records implemented code separately from a staged, revisable
 direction for future structural changes. `src/core/task.rs` and
-`src/core/lifecycle.rs` are implemented Core slices; the broader **Core**,
-**Brain**, and **Tools** layout remains proposed.
+`src/core/lifecycle.rs` are implemented Core slices. `src/tools.rs` and its
+workspace-safety modules are the implemented Tools boundary; broader **Core**
+and **Brain** layout remains proposed.
 
 ## Current implementation
 
@@ -14,6 +15,16 @@ direction for future structural changes. `src/core/task.rs` and
   owns session-wide task ordering and lifecycle coordination, snapshots, and
   checkpoint serialization, validation, workspace binding, and lifecycle
   state. It re-exports the task domain types for compatibility.
+- [`src/tools.rs`](src/tools.rs) exposes the existing workspace operations to
+  task-turn and CLI callers through one crate-internal Tools boundary.
+  [`src/tools/workspace_safety.rs`](src/tools/workspace_safety.rs) owns workspace
+  root capture and the file and directory safety rules, including containment,
+  symlink and file-type handling, limits, and atomic replacement.
+  [`src/tools/workspace_safety/search.rs`](src/tools/workspace_safety/search.rs)
+  owns bounded text search and tree traversal. `TaskSession` keeps lifecycle,
+  identity, ownership, running-turn checks, and workspace binding in Core; its
+  workspace operations delegate to Tools after those checks. The CLI uses the
+  same Tools operations.
 - [`src/task_lifecycle.rs`](src/task_lifecycle.rs) re-exports that lifecycle
   API as a compatibility facade for existing callers, including the types
   exposed by `core::task`.
@@ -33,17 +44,14 @@ direction for future structural changes. `src/core/task.rs` and
 - [`src/model.rs`](src/model.rs) and its provider submodule build provider
   request envelopes, validate model responses, and turn supported calls into
   proposed workspace actions through decision-source interfaces.
-- [`src/file_safety.rs`](src/file_safety.rs) contains the current private
-  workspace helpers that enforce path, containment, and file-operation rules.
 - [`src/cli.rs`](src/cli.rs) parses and runs the CLI, reads and writes
   checkpoint files, presents command output, and asks Harness to prepare
   checkpoint bytes and resumed sessions.
 
-Only `core::task` and `core::lifecycle` are implemented from the proposed
-module layout. The broader Core boundary, Brain, and Tools are not yet
-implemented modules. The current CLI still drives task execution, and
-workspace safety remains in `file_safety.rs`; the layout below describes a
-staged direction for those responsibilities.
+The current CLI still drives task execution. The Tools module currently
+provides the workspace-safety implementation used by both task-turn operations
+and CLI filesystem commands; capability registration and moving CLI orchestration
+remain part of the staged direction below.
 
 ## Proposed boundaries
 
@@ -60,8 +68,10 @@ Treat these boundaries as a revisable direction and introduce them incrementally
   verification. Its context is rebuilt per decision from the current goal,
   remaining decision budget, and observations; it does not keep stored model
   context or a second lifecycle store, or bypass Tools to perform actions.
-- **Tools** registers and executes capabilities and remains the final
-  enforcement boundary for workspace access and safety.
+- **Tools** is the final enforcement boundary for workspace access and safety.
+  Its implemented workspace-safety operations are shared by task turns and CLI
+  filesystem commands; future capability registration can build on this
+  boundary without moving lifecycle ownership out of Core.
 - **CLI and future interfaces** present data and consume runtime snapshots
   without owning task state. Moving the current CLI to that role must preserve
   its existing syntax and defaults.
