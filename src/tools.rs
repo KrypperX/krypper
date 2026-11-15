@@ -1,3 +1,4 @@
+pub(crate) mod registry;
 mod workspace_safety;
 
 pub(crate) use workspace_safety::{

@@ -260,6 +260,143 @@ fn all_request_builders_share_prompt_and_keep_existing_size_limits() {
 }
 
 #[test]
+fn workspace_registry_contains_only_existing_operations_and_schemas() {
+    let actual = crate::tools::registry::workspace_operations()
+        .iter()
+        .map(|operation| {
+            json!({
+                "name": operation.name(),
+                "description": operation.description(),
+                "parameters": operation.parameters()
+            })
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        Value::Array(actual),
+        json!([
+            {
+                "name":"read_file",
+                "description":"Read one safe UTF-8 workspace file.",
+                "parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}
+            },
+            {
+                "name":"read_range",
+                "description":"Read a bounded one-based line range from one safe UTF-8 file.",
+                "parameters":{"type":"object","properties":{"path":{"type":"string"},"start_line":{"type":"integer","minimum":1},"max_lines":{"type":"integer","minimum":1,"maximum":200}},"required":["max_lines","path","start_line"],"additionalProperties":false}
+            },
+            {
+                "name":"list_directory",
+                "description":"List immediate entries in a safe workspace directory.",
+                "parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}
+            },
+            {
+                "name":"create_directory",
+                "description":"Create one directory inside the workspace.",
+                "parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}
+            },
+            {
+                "name":"search_text",
+                "description":"Find a literal query in immediate regular UTF-8 workspace files.",
+                "parameters":{"type":"object","properties":{"directory":{"type":"string"},"query":{"type":"string","minLength":1,"maxLength":4096}},"required":["directory","query"],"additionalProperties":false}
+            },
+            {
+                "name":"search_tree_text",
+                "description":"Find a literal query recursively in regular UTF-8 workspace files.",
+                "parameters":{"type":"object","properties":{"directory":{"type":"string"},"query":{"type":"string","minLength":1,"maxLength":4096}},"required":["directory","query"],"additionalProperties":false}
+            },
+            {
+                "name":"create_file",
+                "description":"Create one new UTF-8 file inside the workspace without replacing an existing path.",
+                "parameters":{"type":"object","properties":{"path":{"type":"string"},"contents":{"type":"string"}},"required":["contents","path"],"additionalProperties":false}
+            },
+            {
+                "name":"replace_text",
+                "description":"Replace one unique exact match in a safe UTF-8 workspace file.",
+                "parameters":{"type":"object","properties":{"path":{"type":"string"},"match_text":{"type":"string","minLength":1},"replacement_text":{"type":"string"}},"required":["match_text","path","replacement_text"],"additionalProperties":false}
+            }
+        ])
+    );
+}
+
+#[test]
+fn provider_request_builders_keep_their_formats_with_registry_tools() {
+    let observations = [];
+    let ollama = serde_json::from_slice::<Value>(
+        &build_chat_request("test-model", "goal", &observations, 3).expect("build Ollama request"),
+    )
+    .expect("decode Ollama request");
+    let responses = serde_json::from_slice::<Value>(
+        &build_responses_request(
+            "test-model",
+            ModelProvider::OpenAi,
+            "goal",
+            &observations,
+            3,
+        )
+        .expect("build Responses request"),
+    )
+    .expect("decode Responses request");
+    let anthropic = serde_json::from_slice::<Value>(
+        &build_anthropic_request("test-model", "goal", &observations, 3)
+            .expect("build Anthropic request"),
+    )
+    .expect("decode Anthropic request");
+    let gemini = serde_json::from_slice::<Value>(
+        &build_gemini_request("gemini-2.5-flash", "goal", &observations, 3)
+            .expect("build Gemini request"),
+    )
+    .expect("decode Gemini request");
+    let compatible = serde_json::from_slice::<Value>(
+        &providers::build_compatible_chat_request(
+            "test-model",
+            OpenAiCompatibleProvider::Groq,
+            "goal",
+            &observations,
+            3,
+        )
+        .expect("build compatible chat request"),
+    )
+    .expect("decode compatible chat request");
+
+    let function_tools = tool_definitions();
+    let names = function_tools
+        .as_array()
+        .expect("function tool array")
+        .iter()
+        .map(|tool| tool["function"]["name"].as_str().expect("tool name"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        [
+            "read_file",
+            "read_range",
+            "list_directory",
+            "create_directory",
+            "search_text",
+            "search_tree_text",
+            "create_file",
+            "replace_text",
+            "complete_task"
+        ]
+    );
+    assert_eq!(ollama["tools"], function_tools);
+    assert_eq!(responses["tools"], openai_tool_definitions());
+    assert_eq!(anthropic["tools"], anthropic_tool_definitions());
+    assert_eq!(
+        gemini["tools"][0]["functionDeclarations"],
+        Value::Array(gemini_function_declarations())
+    );
+    assert_eq!(compatible["tools"], function_tools);
+    assert_eq!(responses["tools"][0]["type"], "function");
+    assert_eq!(anthropic["tools"][0]["strict"], Value::Bool(true));
+    assert_eq!(
+        gemini["tools"][0]["functionDeclarations"][0]["name"],
+        "read_file"
+    );
+}
+
+#[test]
 fn public_model_source_can_be_constructed_without_a_request() {
     let _source = crate::OllamaDecisionSource::new("mock-model", 1);
 }

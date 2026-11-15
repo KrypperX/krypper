@@ -1,5 +1,6 @@
 use crate::agent_loop::{BoundedDecisionSource, WorkspaceAction, WorkspaceObservation};
 use crate::harness::context::{build_task_prompt, ContextError};
+use crate::tools::registry::workspace_operations;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::fmt;
@@ -369,69 +370,46 @@ fn adapt_anthropic_strict_schema(schema: &mut Value) {
 }
 
 fn tool_definitions() -> Value {
-    json!([
-        function_tool(
-            "read_file",
-            "Read one safe UTF-8 workspace file.",
-            json!({"path":{"type":"string"}})
-        ),
-        function_tool(
-            "read_range",
-            "Read a bounded one-based line range from one safe UTF-8 file.",
-            json!({"path":{"type":"string"},"start_line":{"type":"integer","minimum":1},"max_lines":{"type":"integer","minimum":1,"maximum":200}})
-        ),
-        function_tool(
-            "list_directory",
-            "List immediate entries in a safe workspace directory.",
-            json!({"path":{"type":"string"}})
-        ),
-        function_tool(
-            "create_directory",
-            "Create one directory inside the workspace.",
-            json!({"path":{"type":"string"}})
-        ),
-        function_tool(
-            "search_text",
-            "Find a literal query in immediate regular UTF-8 workspace files.",
-            json!({"directory":{"type":"string"},"query":{"type":"string","minLength":1,"maxLength":4096}})
-        ),
-        function_tool(
-            "search_tree_text",
-            "Find a literal query recursively in regular UTF-8 workspace files.",
-            json!({"directory":{"type":"string"},"query":{"type":"string","minLength":1,"maxLength":4096}})
-        ),
-        function_tool(
-            "create_file",
-            "Create one new UTF-8 file inside the workspace without replacing an existing path.",
-            json!({"path":{"type":"string"},"contents":{"type":"string"}})
-        ),
-        function_tool(
-            "replace_text",
-            "Replace one unique exact match in a safe UTF-8 workspace file.",
-            json!({"path":{"type":"string"},"match_text":{"type":"string","minLength":1},"replacement_text":{"type":"string"}})
-        ),
-        function_tool(
-            "complete_task",
-            "Finish the task with a concise result after its requested work is complete.",
-            json!({"result":{"type":"string","minLength":1}})
-        )
-    ])
+    let mut tools = workspace_operations()
+        .iter()
+        .map(|operation| {
+            function_tool_with_parameters(
+                operation.name(),
+                operation.description(),
+                operation.parameters(),
+            )
+        })
+        .collect::<Vec<_>>();
+    tools.push(function_tool(
+        "complete_task",
+        "Finish the task with a concise result after its requested work is complete.",
+        json!({"result":{"type":"string","minLength":1}}),
+    ));
+    Value::Array(tools)
 }
 
 fn function_tool(name: &str, description: &str, properties: Value) -> Value {
     let properties = properties.as_object().cloned().unwrap_or_default();
     let required = properties.keys().collect::<Vec<_>>();
+    function_tool_with_parameters(
+        name,
+        description,
+        json!({
+            "type":"object",
+            "properties":properties,
+            "required":required,
+            "additionalProperties":false
+        }),
+    )
+}
+
+fn function_tool_with_parameters(name: &str, description: &str, parameters: Value) -> Value {
     json!({
         "type":"function",
         "function": {
             "name":name,
             "description":description,
-            "parameters": {
-                "type":"object",
-                "properties":properties,
-                "required":required,
-                "additionalProperties":false
-            }
+            "parameters":parameters
         }
     })
 }
