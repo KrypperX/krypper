@@ -50,6 +50,24 @@ impl std::error::Error for ResumeError {
     }
 }
 
+/// Exports a checkpoint after a continued turn reaches its pause boundary.
+///
+/// The CLI remains responsible for deciding when to pause and for writing the bytes.
+pub(crate) fn prepare_checkpoint_for_pause(
+    session: &TaskSession,
+    task_id: Uuid,
+) -> io::Result<Vec<u8>> {
+    let task = session
+        .get_task(task_id)
+        .ok_or_else(|| io::Error::other("task was not found in its session"))?;
+    if task.state() != TaskState::Running {
+        return Err(io::Error::other(
+            "continued task was not running at the checkpoint boundary",
+        ));
+    }
+    session.export_checkpoint().map_err(io::Error::other)
+}
+
 /// Restores a checkpoint, validates its single running task, and starts that task's next turn.
 ///
 /// Core remains responsible for checkpoint parsing, workspace binding, and lifecycle changes.
@@ -101,12 +119,13 @@ pub(crate) fn prepare_resumed_session(
 
 #[cfg(test)]
 mod tests {
-    use super::{prepare_resumed_session, ResumeError};
+    use super::{prepare_checkpoint_for_pause, prepare_resumed_session, ResumeError};
     use crate::task_lifecycle::{
         TaskSession, TaskSessionCheckpointError, TaskState, TurnOutcome, TurnState,
     };
     use crate::CURRENT_DIR_TEST_LOCK;
     use std::fs;
+    use std::io;
     use std::path::{Path, PathBuf};
     use uuid::Uuid;
 
@@ -146,7 +165,7 @@ mod tests {
         }
     }
 
-    fn running_task_checkpoint(workspace: &Path) -> (Vec<u8>, Uuid, Uuid) {
+    fn running_task_session(workspace: &Path) -> (TaskSession, Uuid, Uuid) {
         let mut session = TaskSession::new_in_workspace(workspace).expect("bind workspace");
         let task = session.create_task("resume the stored task");
         task.transition(TaskState::Running).expect("start task");
@@ -163,11 +182,75 @@ mod tests {
                 },
             )
             .expect("complete original turn");
+        (session, task_id, first_turn_id)
+    }
+
+    fn running_task_checkpoint(workspace: &Path) -> (Vec<u8>, Uuid, Uuid) {
+        let (session, task_id, first_turn_id) = running_task_session(workspace);
         (
             session.export_checkpoint().expect("export checkpoint"),
             task_id,
             first_turn_id,
         )
+    }
+
+    #[test]
+    fn checkpoint_preparation_succeeds_for_a_running_task_at_pause_boundary() {
+        let workspace = TempWorkspace::new();
+        let (session, task_id, first_turn_id) = running_task_session(workspace.path());
+
+        let checkpoint = prepare_checkpoint_for_pause(&session, task_id)
+            .expect("prepare checkpoint at pause boundary");
+        let restored = TaskSession::restore_checkpoint_in_workspace(&checkpoint, workspace.path())
+            .expect("prepared checkpoint retains Core format and workspace binding");
+        let task = restored
+            .get_task(task_id)
+            .expect("prepared checkpoint retains its task");
+
+        assert_eq!(task.state(), TaskState::Running);
+        assert_eq!(task.turns().len(), 1);
+        assert_eq!(task.turns()[0].id(), first_turn_id);
+        assert_eq!(task.turns()[0].state(), TurnState::Failed);
+    }
+
+    #[test]
+    fn checkpoint_preparation_preserves_resume_compatibility() {
+        let workspace = TempWorkspace::new();
+        let (session, task_id, first_turn_id) = running_task_session(workspace.path());
+        let checkpoint = prepare_checkpoint_for_pause(&session, task_id)
+            .expect("prepare checkpoint at pause boundary");
+
+        let resumed = prepare_resumed_session(&checkpoint, Some(workspace.path()))
+            .expect("resume prepared checkpoint");
+
+        assert_eq!(resumed.task_id, task_id);
+        assert_ne!(resumed.turn_id, first_turn_id);
+        let task = resumed
+            .session
+            .get_task(task_id)
+            .expect("resumed task remains in session");
+        assert_eq!(task.state(), TaskState::Running);
+        assert_eq!(task.turns().len(), 2);
+        assert_eq!(task.turns()[0].id(), first_turn_id);
+        assert_eq!(task.turns()[0].state(), TurnState::Failed);
+        assert_eq!(task.turns()[1].id(), resumed.turn_id);
+        assert_eq!(task.turns()[1].state(), TurnState::Running);
+    }
+
+    #[test]
+    fn checkpoint_preparation_preserves_non_running_task_error() {
+        let workspace = TempWorkspace::new();
+        let mut session = TaskSession::new_in_workspace(workspace.path()).expect("bind workspace");
+        let task_id = session.create_task("pending task").id();
+
+        let error = prepare_checkpoint_for_pause(&session, task_id)
+            .expect_err("a non-running task must not be checkpointed");
+
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(
+            error.to_string(),
+            "continued task was not running at the checkpoint boundary"
+        );
     }
 
     #[test]
