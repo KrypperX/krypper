@@ -13,18 +13,20 @@ use crate::harness::recovery::{
     prepare_checkpoint_for_pause, prepare_resumed_session, ResumeError,
 };
 use crate::harness::verification::reconcile_task_state;
-use crate::task_lifecycle::{TaskSession, TaskState, TurnOutcome, TurnState};
+use crate::task_lifecycle::{TaskSession, TaskState, TurnState};
 use crate::tools::{create_text_file, list_directory, read_text_file};
 use std::ffi::{OsStr, OsString};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 mod checkpoint_files;
+mod outcome;
 mod task_args;
 use self::checkpoint_files::{
     read_task_checkpoint, validate_checkpoint_output_path, write_task_checkpoint,
 };
+use self::outcome::{write_observation, write_turn_outcome};
 use self::task_args::parse_task_action;
 
 const MAX_FILE_SIZE: usize = 1024 * 1024;
@@ -784,227 +786,6 @@ fn hosted_api_key(
         return Err(missing_message);
     }
     Ok(key)
-}
-
-fn write_turn_outcome(
-    output: &mut dyn Write,
-    prefix: &str,
-    outcome: Option<&TurnOutcome>,
-) -> io::Result<()> {
-    match outcome {
-        Some(TurnOutcome::Success { result }) => writeln!(output, "{prefix}success: {result}"),
-        Some(TurnOutcome::Failure { detail }) => writeln!(output, "{prefix}failure: {detail}"),
-        None => writeln!(output, "{prefix}cancelled by caller"),
-    }
-}
-
-fn quoted_path_token(path: &Path) -> String {
-    let mut token = String::new();
-    token.push('"');
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-
-        let mut remaining = path.as_os_str().as_bytes();
-        while !remaining.is_empty() {
-            match std::str::from_utf8(remaining) {
-                Ok(valid_path) => {
-                    append_quoted_path_text(&mut token, valid_path);
-                    break;
-                }
-                Err(error) => {
-                    let valid_length = error.valid_up_to();
-                    if let Ok(valid_path) = std::str::from_utf8(&remaining[..valid_length]) {
-                        append_quoted_path_text(&mut token, valid_path);
-                    }
-                    let invalid_length =
-                        error.error_len().unwrap_or(remaining.len() - valid_length);
-                    let invalid_end = valid_length + invalid_length;
-                    for byte in &remaining[valid_length..invalid_end] {
-                        const HEX: &[u8; 16] = b"0123456789abcdef";
-                        token.push_str("\\x");
-                        token.push(char::from(HEX[usize::from(byte >> 4)]));
-                        token.push(char::from(HEX[usize::from(byte & 0x0f)]));
-                    }
-                    remaining = &remaining[invalid_end..];
-                }
-            }
-        }
-    }
-    #[cfg(not(unix))]
-    if let Some(path) = path.to_str() {
-        append_quoted_path_text(&mut token, path);
-    } else {
-        token.push_str(&format!("{path:?}"));
-    }
-    token.push('"');
-    token
-}
-
-fn append_quoted_path_text(token: &mut String, path: &str) {
-    for character in path.chars() {
-        match character {
-            '"' => token.push_str("\\\""),
-            '\\' => token.push_str("\\\\"),
-            '\u{0008}' => token.push_str("\\b"),
-            '\u{000c}' => token.push_str("\\f"),
-            '\n' => token.push_str("\\n"),
-            '\r' => token.push_str("\\r"),
-            '\t' => token.push_str("\\t"),
-            character if character.is_control() => {
-                token.push_str(&format!("\\u{:04x}", u32::from(character)));
-            }
-            character => token.push(character),
-        }
-    }
-}
-
-fn write_observation(
-    output: &mut dyn Write,
-    number: usize,
-    observation: &WorkspaceObservation,
-) -> io::Result<()> {
-    match observation {
-        WorkspaceObservation::FileRead { path, contents } => {
-            writeln!(output, "Observation {number}: read {}", path.display())?;
-            writeln!(output, "  contents:")?;
-            output.write_all(contents.as_bytes())?;
-            if !contents.ends_with('\n') {
-                output.write_all(b"\n")?;
-            }
-        }
-        WorkspaceObservation::FileRangeRead {
-            path,
-            start_line,
-            end_line,
-            excerpt,
-        } => {
-            writeln!(
-                output,
-                "Observation {number}: read-range {} lines {start_line}-{end_line}",
-                path.display()
-            )?;
-            output.write_all(excerpt.as_bytes())?;
-            if !excerpt.ends_with('\n') {
-                output.write_all(b"\n")?;
-            }
-        }
-        WorkspaceObservation::DirectoryListed { path, entries } => {
-            writeln!(
-                output,
-                "Observation {number}: listed {} ({} entries)",
-                path.display(),
-                entries.len()
-            )?;
-            for entry in entries {
-                writeln!(output, "  {entry:?}")?;
-            }
-        }
-        WorkspaceObservation::DirectoryCreated { path } => {
-            writeln!(
-                output,
-                "Observation {number}: created directory {}",
-                path.display()
-            )?;
-        }
-        WorkspaceObservation::TextSearched {
-            directory,
-            locations,
-        } => {
-            writeln!(
-                output,
-                "Observation {number}: search in {} found {} locations",
-                directory.display(),
-                locations.len()
-            )?;
-            for location in locations {
-                writeln!(
-                    output,
-                    "  {}:{}",
-                    quoted_path_token(&location.path),
-                    location.line
-                )?;
-            }
-        }
-        WorkspaceObservation::TreeTextSearched {
-            directory,
-            locations,
-        } => {
-            writeln!(
-                output,
-                "Observation {number}: search-tree in {} found {} locations",
-                directory.display(),
-                locations.len()
-            )?;
-            for location in locations {
-                writeln!(
-                    output,
-                    "  {}:{}",
-                    quoted_path_token(&location.path),
-                    location.line
-                )?;
-            }
-        }
-        WorkspaceObservation::FileCreated {
-            path,
-            bytes_written,
-        } => {
-            writeln!(
-                output,
-                "Observation {number}: created {} ({bytes_written} bytes)",
-                path.display()
-            )?;
-        }
-        WorkspaceObservation::TextReplaced {
-            path,
-            bytes_written,
-        } => {
-            writeln!(
-                output,
-                "Observation {number}: replaced text in {} ({bytes_written} bytes)",
-                path.display()
-            )?;
-        }
-        WorkspaceObservation::FileCreationFailed { path, error } => {
-            writeln!(
-                output,
-                "Observation {number}: create {} failed: {error}",
-                path.display()
-            )?;
-        }
-        WorkspaceObservation::DirectoryCreationFailed { path, error } => {
-            writeln!(
-                output,
-                "Observation {number}: mkdir {} failed: {error}",
-                path.display()
-            )?;
-        }
-        WorkspaceObservation::TextReplacementFailed { path, error } => {
-            writeln!(
-                output,
-                "Observation {number}: replacement in {} failed: {error}",
-                path.display()
-            )?;
-        }
-        WorkspaceObservation::TextSearchFailed { directory, error } => {
-            writeln!(
-                output,
-                "Observation {number}: search in {} failed: {error}",
-                directory.display()
-            )?;
-        }
-        WorkspaceObservation::TreeTextSearchFailed { directory, error } => {
-            writeln!(
-                output,
-                "Observation {number}: search-tree in {} failed: {error}",
-                directory.display()
-            )?;
-        }
-        WorkspaceObservation::ActionFailed { error, .. } => {
-            writeln!(output, "Observation {number}: action failed: {error}")?;
-        }
-    }
-    Ok(())
 }
 
 fn run_show(

@@ -318,7 +318,7 @@ fn parse_task_read_range(arguments: Option<&str>) -> Option<WorkspaceAction> {
 mod tests {
     use super::parse_task_action;
     use crate::agent_loop::{WorkspaceAction, WorkspaceObservation};
-    use crate::cli::{quoted_path_token, write_observation};
+    use crate::cli::outcome::{quoted_path_token, write_observation};
     use crate::task_lifecycle::WorkspaceSearchLocation;
     use std::path::{Path, PathBuf};
 
