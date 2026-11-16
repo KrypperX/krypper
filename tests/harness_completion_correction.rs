@@ -113,7 +113,7 @@ fn failed_or_unknown_check_gets_one_correction_then_passes() {
         let workspace = TempWorkspace::new();
         let artifact = workspace.workspace.join("expected.txt");
         let (mut session, task_id, turn_id) = running_turn(&workspace.workspace, "fixture task");
-        let remaining_decisions = Rc::new(Cell::new(4));
+        let remaining_decisions = Rc::new(Cell::<usize>::new(4));
         let decision_counter = Rc::clone(&remaining_decisions);
         let mut decisions = move |_: &str, _: &[WorkspaceObservation]| {
             decision_counter.set(decision_counter.get().saturating_sub(1));
