@@ -6,7 +6,7 @@ use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 
@@ -63,6 +63,36 @@ fn run_with_input(cwd: &Path, args: &[&str], input: &[u8]) -> Output {
     child.wait_with_output().expect("wait for Krypper")
 }
 
+fn run_with_input_before_deadline(cwd: &Path, args: &[&str], input: &[u8]) -> Output {
+    let mut child = command(Some(cwd), args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start bounded Krypper process");
+    child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(input)
+        .expect("write test input");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if child.try_wait().expect("poll Krypper process").is_some() {
+            return child
+                .wait_with_output()
+                .expect("collect bounded Krypper output");
+        }
+        if Instant::now() >= deadline {
+            child.kill().expect("terminate timed-out Krypper process");
+            let status = child.wait().expect("reap timed-out Krypper process");
+            panic!("Krypper process exceeded its 10-second limit: {status}");
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 struct KillOnDrop(Child);
 
 impl Drop for KillOnDrop {
@@ -107,6 +137,49 @@ fn read_task_cli_until_prompt(
         .map(|number| format!("action {number}/6> "))
         .collect::<String>();
     assert_eq!(String::from_utf8_lossy(stderr), expected_prompts);
+}
+
+fn spawn_task_cli_output_readers(
+    child: &mut Child,
+) -> (Receiver<TaskCliOutput>, Vec<thread::JoinHandle<()>>) {
+    let streams: [(TaskCliStream, Box<dyn Read + Send>); 2] = [
+        (
+            TaskCliStream::Stdout,
+            Box::new(child.stdout.take().expect("piped stdout")),
+        ),
+        (
+            TaskCliStream::Stderr,
+            Box::new(child.stderr.take().expect("piped stderr")),
+        ),
+    ];
+    let (sender, receiver) = mpsc::channel();
+    let mut reader_threads = Vec::new();
+    for (stream, mut pipe) in streams {
+        let sender = sender.clone();
+        reader_threads.push(thread::spawn(move || {
+            let mut buffer = [0_u8; 512];
+            loop {
+                match pipe.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(length) => {
+                        let message = match stream {
+                            TaskCliStream::Stdout => {
+                                TaskCliOutput::Stdout(buffer[..length].to_vec())
+                            }
+                            TaskCliStream::Stderr => {
+                                TaskCliOutput::Stderr(buffer[..length].to_vec())
+                            }
+                        };
+                        if sender.send(message).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        }));
+    }
+    drop(sender);
+    (receiver, reader_threads)
 }
 
 fn stdout(output: &Output) -> &str {
@@ -762,43 +835,7 @@ fn task_composes_actions_from_the_observed_search_location_interactively() {
         .expect("start interactive Krypper task"),
     );
     let mut stdin = child.0.stdin.take().expect("piped stdin");
-    let streams: [(TaskCliStream, Box<dyn Read + Send>); 2] = [
-        (
-            TaskCliStream::Stdout,
-            Box::new(child.0.stdout.take().expect("piped stdout")),
-        ),
-        (
-            TaskCliStream::Stderr,
-            Box::new(child.0.stderr.take().expect("piped stderr")),
-        ),
-    ];
-    let (sender, receiver) = mpsc::channel();
-    let mut reader_threads = Vec::new();
-    for (stream, mut pipe) in streams {
-        let sender = sender.clone();
-        reader_threads.push(thread::spawn(move || {
-            let mut buffer = [0_u8; 512];
-            loop {
-                match pipe.read(&mut buffer) {
-                    Ok(0) | Err(_) => break,
-                    Ok(length) => {
-                        let message = match stream {
-                            TaskCliStream::Stdout => {
-                                TaskCliOutput::Stdout(buffer[..length].to_vec())
-                            }
-                            TaskCliStream::Stderr => {
-                                TaskCliOutput::Stderr(buffer[..length].to_vec())
-                            }
-                        };
-                        if sender.send(message).is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
-        }));
-    }
-    drop(sender);
+    let (receiver, reader_threads) = spawn_task_cli_output_readers(&mut child.0);
 
     let mut output = Vec::new();
     let mut error = Vec::new();
@@ -2321,6 +2358,145 @@ fn task_checkpoint_out_failure_keeps_completed_workspace_actions_without_saving_
     assert_eq!(
         fs::read_to_string(workspace.join("completed before failure.txt")).unwrap(),
         "remains in workspace"
+    );
+    assert_eq!(fs::read(&checkpoint).unwrap(), checkpoint_bytes);
+    assert!(!next_checkpoint.exists());
+}
+
+#[test]
+fn task_resume_after_interrupted_file_creation_retries_from_the_original_checkpoint() {
+    const FILE_NAME: &str = "interrupted effect.txt";
+    const FILE_CONTENTS: &str = "interrupted workspace effect bytes café λ";
+
+    let temporary = TempDir::new();
+    let workspace = temporary.path().join("task workspace");
+    fs::create_dir(&workspace).unwrap();
+    let workspace_arg = workspace.to_str().unwrap();
+    let checkpoint = temporary.path().join("original task checkpoint.json");
+    let checkpoint_arg = checkpoint.to_str().unwrap();
+    let next_checkpoint = temporary.path().join("later task checkpoint.json");
+    let next_checkpoint_arg = next_checkpoint.to_str().unwrap();
+
+    let save = run_with_input_before_deadline(
+        temporary.path(),
+        &[
+            "task",
+            "--goal",
+            "Resume after an interrupted workspace effect",
+            "--max-actions",
+            "2",
+            "--workspace",
+            workspace_arg,
+            "--checkpoint-out",
+            checkpoint_arg,
+        ],
+        b"continue\n",
+    );
+
+    assert_eq!(save.status.code(), Some(0), "{}", stderr(&save));
+    assert!(stdout(&save).contains("Task outcome: paused (still running)"));
+    assert!(!workspace.join(FILE_NAME).exists());
+    let checkpoint_bytes = fs::read(&checkpoint).unwrap();
+    assert!(!checkpoint_bytes
+        .windows(FILE_CONTENTS.len())
+        .any(|window| window == FILE_CONTENTS.as_bytes()));
+
+    let mut child = KillOnDrop(
+        command(
+            Some(temporary.path()),
+            &[
+                "task",
+                "--resume",
+                checkpoint_arg,
+                "--max-actions",
+                "6",
+                "--workspace",
+                workspace_arg,
+                "--checkpoint-out",
+                next_checkpoint_arg,
+            ],
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start interrupted checkpoint resume"),
+    );
+    let mut stdin = child.0.stdin.take().expect("piped stdin");
+    let (receiver, reader_threads) = spawn_task_cli_output_readers(&mut child.0);
+
+    let mut output = Vec::new();
+    let mut error = Vec::new();
+    read_task_cli_until_prompt(&receiver, &mut output, &mut error, 1, 0);
+    writeln!(stdin, "create \"{FILE_NAME}\" {FILE_CONTENTS}").unwrap();
+    stdin.flush().unwrap();
+
+    let creation_observation = format!(
+        "Observation 1: created {FILE_NAME} ({} bytes)\n",
+        FILE_CONTENTS.len()
+    );
+    read_task_cli_until_prompt(&receiver, &mut output, &mut error, 2, 1);
+    assert!(String::from_utf8_lossy(&output).ends_with(&creation_observation));
+    assert_eq!(
+        fs::read(workspace.join(FILE_NAME)).unwrap(),
+        FILE_CONTENTS.as_bytes()
+    );
+    assert_eq!(fs::read(&checkpoint).unwrap(), checkpoint_bytes);
+    assert!(!next_checkpoint.exists());
+
+    child
+        .0
+        .kill()
+        .expect("stop resumed process at the next action prompt");
+    drop(stdin);
+    let interrupted_status = child.0.wait().expect("reap interrupted process");
+    assert!(!interrupted_status.success());
+    for message in receiver {
+        match message {
+            TaskCliOutput::Stdout(bytes) => output.extend(bytes),
+            TaskCliOutput::Stderr(bytes) => error.extend(bytes),
+        }
+    }
+    for reader_thread in reader_threads {
+        reader_thread.join().expect("join CLI stream reader");
+    }
+
+    let interrupted_output = String::from_utf8(output).unwrap();
+    assert!(interrupted_output.contains(&creation_observation));
+    assert!(!interrupted_output.contains("Task outcome:"));
+    assert!(!interrupted_output.contains("Turn outcome:"));
+    assert!(!next_checkpoint.exists());
+    assert_eq!(fs::read(&checkpoint).unwrap(), checkpoint_bytes);
+
+    let retry_action = format!("create \"{FILE_NAME}\" {FILE_CONTENTS}\n");
+    let retry = run_with_input_before_deadline(
+        temporary.path(),
+        &[
+            "task",
+            "--resume",
+            checkpoint_arg,
+            "--max-actions",
+            "3",
+            "--workspace",
+            workspace_arg,
+        ],
+        retry_action.as_bytes(),
+    );
+
+    assert_eq!(retry.status.code(), Some(1), "{}", stderr(&retry));
+    let retry_output = stdout(&retry);
+    assert!(retry_output.contains(&format!(
+        "Observation 1: create {FILE_NAME} failed: workspace file creation failed: file already exists\n"
+    )));
+    assert!(retry_output.contains("Task state: failed"));
+    assert!(retry_output.contains("Task outcome: failed"));
+    assert!(retry_output.contains("Turn state: failed"));
+    assert!(retry_output
+        .contains("Turn outcome: failure: workspace file creation failed: file already exists"));
+    assert!(!retry_output.contains("Task outcome: succeeded"));
+    assert_eq!(
+        fs::read(workspace.join(FILE_NAME)).unwrap(),
+        FILE_CONTENTS.as_bytes()
     );
     assert_eq!(fs::read(&checkpoint).unwrap(), checkpoint_bytes);
     assert!(!next_checkpoint.exists());
