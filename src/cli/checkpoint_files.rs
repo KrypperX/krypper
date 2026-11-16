@@ -132,12 +132,15 @@ mod tests {
 
         let parent_file = fixture.path().join("parent-file");
         fs::write(&parent_file, b"file").expect("write parent fixture");
-        let invalid_parent = validate_checkpoint_output_path(&parent_file.join("checkpoint.json"))
+        let invalid_parent_path = parent_file.join("checkpoint.json");
+        let expected_parent_error = fs::symlink_metadata(&invalid_parent_path)
+            .expect_err("a regular file cannot contain a checkpoint file");
+        let invalid_parent = validate_checkpoint_output_path(&invalid_parent_path)
             .expect_err("output parent must be a directory");
-        assert_eq!(invalid_parent.kind(), io::ErrorKind::NotADirectory);
+        assert_eq!(invalid_parent.kind(), expected_parent_error.kind());
         assert_eq!(
             invalid_parent.to_string(),
-            "checkpoint output parent is not a directory"
+            expected_parent_error.to_string()
         );
 
         fs::write(&valid, b"existing").expect("create existing checkpoint fixture");
