@@ -2503,6 +2503,151 @@ fn task_resume_after_interrupted_file_creation_retries_from_the_original_checkpo
 }
 
 #[test]
+fn task_resume_after_interrupted_text_replacement_retries_from_the_original_checkpoint() {
+    const FILE_NAME: &str = "interrupted replacement.txt";
+    const MATCH_TEXT: &str = "INTERRUPTED_REPLACE_MATCH_172";
+    const REPLACEMENT_TEXT: &str = "INTERRUPTED_REPLACE_RESULT_172";
+
+    let temporary = TempDir::new();
+    let workspace = temporary.path().join("task workspace");
+    fs::create_dir(&workspace).unwrap();
+    let file_path = workspace.join(FILE_NAME);
+    let workspace_arg = workspace.to_str().unwrap();
+    let checkpoint = temporary.path().join("original task checkpoint.json");
+    let checkpoint_arg = checkpoint.to_str().unwrap();
+    let next_checkpoint = temporary.path().join("later task checkpoint.json");
+    let next_checkpoint_arg = next_checkpoint.to_str().unwrap();
+    let original_bytes = format!("before {MATCH_TEXT} after\n").into_bytes();
+    let replaced_bytes = format!("before {REPLACEMENT_TEXT} after\n").into_bytes();
+    fs::write(&file_path, &original_bytes).unwrap();
+
+    let save = run_with_input_before_deadline(
+        temporary.path(),
+        &[
+            "task",
+            "--goal",
+            "Resume after an interrupted text replacement",
+            "--max-actions",
+            "2",
+            "--workspace",
+            workspace_arg,
+            "--checkpoint-out",
+            checkpoint_arg,
+        ],
+        b"continue\n",
+    );
+
+    assert_eq!(save.status.code(), Some(0), "{}", stderr(&save));
+    assert!(stdout(&save).contains("Task state: running"));
+    assert!(stdout(&save).contains("Task outcome: paused (still running)"));
+    assert_eq!(fs::read(&file_path).unwrap(), original_bytes);
+    let checkpoint_bytes = fs::read(&checkpoint).unwrap();
+    assert!(!checkpoint_bytes
+        .windows(MATCH_TEXT.len())
+        .any(|window| window == MATCH_TEXT.as_bytes()));
+
+    let mut child = KillOnDrop(
+        command(
+            Some(temporary.path()),
+            &[
+                "task",
+                "--resume",
+                checkpoint_arg,
+                "--max-actions",
+                "6",
+                "--workspace",
+                workspace_arg,
+                "--checkpoint-out",
+                next_checkpoint_arg,
+            ],
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start interrupted checkpoint resume"),
+    );
+    let mut stdin = child.0.stdin.take().expect("piped stdin");
+    let (receiver, reader_threads) = spawn_task_cli_output_readers(&mut child.0);
+
+    let mut output = Vec::new();
+    let mut error = Vec::new();
+    read_task_cli_until_prompt(&receiver, &mut output, &mut error, 1, 0);
+    writeln!(
+        stdin,
+        "replace \"{FILE_NAME}\" {MATCH_TEXT} => {REPLACEMENT_TEXT}"
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+
+    read_task_cli_until_prompt(&receiver, &mut output, &mut error, 2, 1);
+    let replacement_observation = format!("Observation 1: replaced text in {FILE_NAME}");
+    assert!(String::from_utf8_lossy(&output).contains(&replacement_observation));
+    assert_eq!(fs::read(&file_path).unwrap(), replaced_bytes);
+    assert_eq!(fs::read(&checkpoint).unwrap(), checkpoint_bytes);
+    assert!(!next_checkpoint.exists());
+
+    child
+        .0
+        .kill()
+        .expect("stop resumed process at the next action prompt");
+    let interrupted_status = child.0.wait().expect("reap interrupted process");
+    drop(stdin);
+    assert!(!interrupted_status.success());
+    for message in receiver {
+        match message {
+            TaskCliOutput::Stdout(bytes) => output.extend(bytes),
+            TaskCliOutput::Stderr(bytes) => error.extend(bytes),
+        }
+    }
+    for reader_thread in reader_threads {
+        reader_thread.join().expect("join CLI stream reader");
+    }
+
+    let interrupted_output = String::from_utf8(output).unwrap();
+    assert!(interrupted_output.contains(&replacement_observation));
+    assert!(!interrupted_output.contains("Task outcome:"));
+    assert!(!interrupted_output.contains("Turn outcome:"));
+    assert!(!next_checkpoint.exists());
+    assert_eq!(fs::read(&checkpoint).unwrap(), checkpoint_bytes);
+    let bytes_before_retry = fs::read(&file_path).unwrap();
+    assert_eq!(bytes_before_retry, replaced_bytes);
+
+    let retry_action = format!("replace \"{FILE_NAME}\" {MATCH_TEXT} => {REPLACEMENT_TEXT}\n");
+    let retry = run_with_input_before_deadline(
+        temporary.path(),
+        &[
+            "task",
+            "--resume",
+            checkpoint_arg,
+            "--max-actions",
+            "3",
+            "--workspace",
+            workspace_arg,
+            "--checkpoint-out",
+            next_checkpoint_arg,
+        ],
+        retry_action.as_bytes(),
+    );
+
+    assert_eq!(retry.status.code(), Some(1), "{}", stderr(&retry));
+    let retry_output = stdout(&retry);
+    assert!(retry_output.contains(&format!(
+        "Observation 1: replacement in {FILE_NAME} failed: workspace text replacement failed: match text was not found"
+    )));
+    assert!(retry_output.contains("Task state: failed"));
+    assert!(retry_output.contains("Task outcome: failed"));
+    assert!(retry_output.contains("Turn state: failed"));
+    assert!(retry_output.contains(
+        "Turn outcome: failure: workspace text replacement failed: match text was not found"
+    ));
+    assert!(!retry_output.contains("Task outcome: succeeded"));
+    assert_eq!(fs::read(&file_path).unwrap(), bytes_before_retry);
+    assert_eq!(fs::read(&checkpoint).unwrap(), checkpoint_bytes);
+    assert!(!next_checkpoint.exists());
+}
+
+#[test]
 fn task_checkpoint_output_collision_is_rejected_before_workspace_actions() {
     let temporary = TempDir::new();
     let workspace = temporary.path().join("task workspace");
