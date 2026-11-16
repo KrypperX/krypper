@@ -79,9 +79,11 @@ decision-source boundary in `src/brain/` is implemented; broader **Core** and
   Decision sources return proposed workspace actions through the existing
   decision-source interface; they do not execute those actions. The focused
   tests in [`tests.rs`](src/brain/tests.rs) use local fixtures.
-- [`src/cli.rs`](src/cli.rs) parses and runs the CLI, reads and writes
-  checkpoint files, presents command output, and asks Harness to prepare
-  checkpoint bytes and resumed sessions.
+- [`src/cli/task_args.rs`](src/cli/task_args.rs) contains the pure parser for
+  task actions, paths, search arguments, and read ranges, with focused local
+  regression tests. [`src/cli.rs`](src/cli.rs) dispatches commands and runs
+  the CLI, reads and writes checkpoint files, presents command output, and
+  asks Harness to prepare checkpoint bytes and resumed sessions.
 
 The current CLI still drives task execution. The Tools module provides the
 workspace-safety implementation used by both task-turn operations and CLI
