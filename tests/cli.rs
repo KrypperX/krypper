@@ -2503,6 +2503,139 @@ fn task_resume_after_interrupted_file_creation_retries_from_the_original_checkpo
 }
 
 #[test]
+fn task_resume_after_interrupted_directory_creation_retries_from_the_original_checkpoint() {
+    const DIRECTORY_NAME: &str = "interrupted directory";
+
+    let temporary = TempDir::new();
+    let workspace = temporary.path().join("task workspace");
+    fs::create_dir(&workspace).unwrap();
+    let directory = workspace.join(DIRECTORY_NAME);
+    assert!(!directory.exists());
+
+    let workspace_arg = workspace.to_str().unwrap();
+    let checkpoint = temporary.path().join("original task checkpoint.json");
+    let checkpoint_arg = checkpoint.to_str().unwrap();
+    let next_checkpoint = temporary.path().join("later task checkpoint.json");
+    let next_checkpoint_arg = next_checkpoint.to_str().unwrap();
+
+    let save = run_with_input_before_deadline(
+        temporary.path(),
+        &[
+            "task",
+            "--goal",
+            "Resume after an interrupted workspace effect",
+            "--max-actions",
+            "2",
+            "--workspace",
+            workspace_arg,
+            "--checkpoint-out",
+            checkpoint_arg,
+        ],
+        b"continue\n",
+    );
+
+    assert_eq!(save.status.code(), Some(0), "{}", stderr(&save));
+    assert!(stdout(&save).contains("Task outcome: paused (still running)"));
+    assert!(!directory.exists());
+    let checkpoint_bytes = fs::read(&checkpoint).unwrap();
+
+    let mut child = KillOnDrop(
+        command(
+            Some(temporary.path()),
+            &[
+                "task",
+                "--resume",
+                checkpoint_arg,
+                "--max-actions",
+                "6",
+                "--workspace",
+                workspace_arg,
+                "--checkpoint-out",
+                next_checkpoint_arg,
+            ],
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start interrupted checkpoint resume"),
+    );
+    let mut stdin = child.0.stdin.take().expect("piped stdin");
+    let (receiver, reader_threads) = spawn_task_cli_output_readers(&mut child.0);
+
+    let mut output = Vec::new();
+    let mut error = Vec::new();
+    read_task_cli_until_prompt(&receiver, &mut output, &mut error, 1, 0);
+    writeln!(stdin, "mkdir \"{DIRECTORY_NAME}\"").unwrap();
+    stdin.flush().unwrap();
+
+    let creation_observation = format!("Observation 1: created directory {DIRECTORY_NAME}\n");
+    read_task_cli_until_prompt(&receiver, &mut output, &mut error, 2, 1);
+    assert!(String::from_utf8_lossy(&output).ends_with(&creation_observation));
+    assert!(directory.is_dir());
+    assert!(fs::read_dir(&directory).unwrap().next().is_none());
+    assert_eq!(fs::read(&checkpoint).unwrap(), checkpoint_bytes);
+    assert!(!next_checkpoint.exists());
+
+    child
+        .0
+        .kill()
+        .expect("stop resumed process at the next action prompt");
+    drop(stdin);
+    let interrupted_status = child.0.wait().expect("reap interrupted process");
+    assert!(!interrupted_status.success());
+    for message in receiver {
+        match message {
+            TaskCliOutput::Stdout(bytes) => output.extend(bytes),
+            TaskCliOutput::Stderr(bytes) => error.extend(bytes),
+        }
+    }
+    for reader_thread in reader_threads {
+        reader_thread.join().expect("join CLI stream reader");
+    }
+
+    let interrupted_output = String::from_utf8(output).unwrap();
+    assert!(interrupted_output.contains(&creation_observation));
+    assert!(!interrupted_output.contains("Task outcome:"));
+    assert!(!interrupted_output.contains("Turn outcome:"));
+    assert!(!next_checkpoint.exists());
+    assert_eq!(fs::read(&checkpoint).unwrap(), checkpoint_bytes);
+
+    let retry = run_with_input_before_deadline(
+        temporary.path(),
+        &[
+            "task",
+            "--resume",
+            checkpoint_arg,
+            "--max-actions",
+            "3",
+            "--workspace",
+            workspace_arg,
+            "--checkpoint-out",
+            next_checkpoint_arg,
+        ],
+        format!("mkdir \"{DIRECTORY_NAME}\"\n").as_bytes(),
+    );
+
+    assert_eq!(retry.status.code(), Some(1), "{}", stderr(&retry));
+    let retry_output = stdout(&retry);
+    assert!(retry_output.contains(&format!(
+        "Observation 1: mkdir {DIRECTORY_NAME} failed: workspace directory creation failed: path already exists"
+    )));
+    assert!(retry_output.contains("Task state: failed"));
+    assert!(retry_output.contains("Task outcome: failed"));
+    assert!(retry_output.contains("Turn state: failed"));
+    assert!(retry_output.contains(
+        "Turn outcome: failure: workspace directory creation failed: path already exists"
+    ));
+    assert!(!retry_output.contains("Task outcome: succeeded"));
+    assert!(directory.is_dir());
+    assert!(fs::read_dir(&directory).unwrap().next().is_none());
+    assert_eq!(fs::read(&checkpoint).unwrap(), checkpoint_bytes);
+    assert!(!next_checkpoint.exists());
+}
+
+#[test]
 fn task_resume_after_interrupted_text_replacement_retries_from_the_original_checkpoint() {
     const FILE_NAME: &str = "interrupted replacement.txt";
     const MATCH_TEXT: &str = "INTERRUPTED_REPLACE_MATCH_172";
