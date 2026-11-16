@@ -45,6 +45,9 @@ decision-source boundary in `src/brain/` is implemented; broader **Core** and
   cancellation from the task-control source. The existing loop executes each
   operation through `TaskSession`, counts actions against the caller's budget,
   and stops after a rejected or failed step. Its
+  `run_goal_turn_with_completion_correction` entry point optionally runs one
+  correction after independent checks fail or are unknown, using the remaining
+  slots from the original action budget. Its
   [`verification.rs`](src/harness/verification.rs) module retains the existing
   stop-reason reconciliation used by the CLI and adds the opt-in
   `reconcile_task_state_with_checks` and `verify_completion_checks` APIs.
@@ -115,6 +118,33 @@ persist state. The reactive path and the existing `create_plan` method remain
 the default behavior. Local fixtures cover recorded success and a denied
 outside-workspace operation with a reflection claim that conflicts with the
 recorded failure.
+
+## Opt-in completion correction
+
+`run_goal_turn_with_completion_correction` composes one existing bounded initial
+turn with independent completion checks and, when needed, one correction cycle.
+The initial turn may use the reactive decision source or an existing bounded
+plan. The check callback must use TaskSession observations or deterministic
+local checks outside Brain. Passing initial checks go directly through
+TaskSession reconciliation without requesting a correction. A failed or unknown
+result is supplied to `OllamaDecisionSource::create_completion_correction_plan`
+as bounded, untrusted advisory context. Harness runs that one returned plan
+through TaskSession and the existing Tools registry with only the original
+action-budget slots remaining. The same `OllamaDecisionSource` carries its
+existing decision counter across the initial turn, reflection, plan, and
+correction turn. Harness then invokes the independent check callback again.
+Invalid plans, unsupported actions, denied workspace paths, failed
+operations, and exhausted budgets stop the cycle. TaskSession records success
+only after required checks pass on a completed initial turn or the single
+correction turn;
+missing, duplicate, unknown, and truncated evidence stays non-successful. The
+reactive default, CLI, public compatibility facade, and lifecycle behavior
+outside this opt-in entry point are unchanged. Offline fixture tests cover
+initial pass, failed and unknown checks followed by a passing correction, a
+failed post-correction check, a denied correction, exhausted budget, and the
+existing reactive and workspace-safety behavior. These tests verify control
+flow and safety; they do not measure general task quality. The path adds no
+provider, persistence, dependency, CLI change, or user-visible output.
 
 ## Proposed boundaries
 

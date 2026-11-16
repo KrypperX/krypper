@@ -2,6 +2,10 @@ use crate::agent_loop::{
     BoundedDecisionSource, GoalTurnResult, WorkspaceAction, WorkspaceObservation,
 };
 use crate::harness::context::{build_task_prompt, ContextError};
+use crate::harness::execution::{CompletionCorrectionError, CompletionCorrectionResult};
+use crate::harness::verification::{
+    CompletionCheckEvidence, CompletionVerification, RequiredCompletionCheck,
+};
 use crate::task_lifecycle::TaskSession;
 use crate::tools::registry::workspace_operations;
 use serde::Deserialize;
@@ -120,6 +124,85 @@ impl OllamaDecisionSource {
             goal,
             observations,
             action_budget,
+        )
+    }
+
+    /// Uses one failed or unknown independent check result to inform one bounded correction plan.
+    ///
+    /// The check result is sent to Brain as bounded, untrusted advisory context. A passing result
+    /// yields no plan, and the returned plan contains only registered workspace operations.
+    /// Harness must execute it through `TaskSession` and re-run independent checks before success.
+    pub fn create_completion_correction_plan(
+        &mut self,
+        session: &TaskSession,
+        prior_result: &GoalTurnResult,
+        goal: &str,
+        observations: &[WorkspaceObservation],
+        verification: &CompletionVerification,
+        action_budget: usize,
+    ) -> Result<Option<WorkspacePlan>, BrainReflectionError> {
+        reflection::create_completion_correction_plan(
+            self,
+            session,
+            prior_result,
+            goal,
+            observations,
+            verification,
+            action_budget,
+        )
+    }
+
+    /// Runs one bounded initial turn, independent checks, and at most one correction cycle.
+    ///
+    /// `check_evidence` must use TaskSession observations or deterministic local checks outside
+    /// Brain. An optional initial plan must have been created by this same decision source with
+    /// the original action budget. The Harness reuses this source for both turns and only records
+    /// task success after the required checks pass.
+    pub fn run_goal_turn_with_completion_correction<E>(
+        &mut self,
+        session: &mut TaskSession,
+        task_id: uuid::Uuid,
+        turn_id: uuid::Uuid,
+        goal: &str,
+        max_actions: usize,
+        initial_plan: Option<Result<WorkspacePlan, WorkspacePlanError>>,
+        required_checks: &[RequiredCompletionCheck],
+        check_evidence: E,
+    ) -> Result<CompletionCorrectionResult, CompletionCorrectionError>
+    where
+        E: FnMut(&TaskSession, &GoalTurnResult) -> Vec<CompletionCheckEvidence>,
+    {
+        crate::harness::execution::run_goal_turn_with_completion_correction(
+            session,
+            task_id,
+            turn_id,
+            goal,
+            max_actions,
+            initial_plan,
+            required_checks,
+            check_evidence,
+            |brain: &mut OllamaDecisionSource,
+             session,
+             prior_result,
+             verification,
+             goal,
+             remaining_actions| {
+                brain
+                    .create_completion_correction_plan(
+                        session,
+                        prior_result,
+                        goal,
+                        prior_result.observations(),
+                        verification,
+                        remaining_actions,
+                    )
+                    .and_then(|plan| {
+                        plan.ok_or(BrainReflectionError::InvalidPlan(
+                            WorkspacePlanError::InvalidResponse,
+                        ))
+                    })
+            },
+            self,
         )
     }
 

@@ -471,6 +471,53 @@ fn opt_in_reflection_uses_a_verified_success_and_only_proposes_a_bounded_plan() 
 }
 
 #[test]
+fn completion_correction_is_not_requested_after_checks_pass() {
+    let (mut session, task_id, turn_id) = running_turn();
+    let mut decisions =
+        |_: &str, _: &[crate::agent_loop::WorkspaceObservation]| WorkspaceAction::Complete {
+            result: "initial work complete".to_owned(),
+        };
+    let initial_result = run_goal_turn_with_budget(
+        &mut session,
+        task_id,
+        turn_id,
+        "fixture task",
+        2,
+        &mut decisions,
+    )
+    .expect("complete initial turn");
+    let checks = [crate::harness::verification::RequiredCompletionCheck {
+        id: "fixture_check".to_owned(),
+        description: "Fixture check".to_owned(),
+    }];
+    let evidence = [crate::harness::verification::CompletionCheckEvidence {
+        check_id: "fixture_check".to_owned(),
+        status: crate::harness::verification::CompletionCheckEvidenceStatus::Passed,
+        source: crate::harness::verification::CompletionEvidenceSource::DeterministicLocalCheck,
+        summary: "fixture passed".to_owned(),
+    }];
+    let verification = crate::harness::verification::verify_completion_checks(&checks, &evidence);
+    let mut brain = OllamaDecisionSource::with_endpoint(
+        "fixture-model",
+        3,
+        "127.0.0.1:1".parse().expect("loopback address"),
+    );
+
+    let plan = brain
+        .create_completion_correction_plan(
+            &session,
+            &initial_result,
+            "fixture task",
+            initial_result.observations(),
+            &verification,
+            3,
+        )
+        .expect("passing checks do not request a correction");
+
+    assert!(plan.is_none());
+}
+
+#[test]
 fn contradictory_reflection_cannot_override_failure_or_bypass_tools() {
     let root = TempDir::new();
     let workspace_path = root.path().join("workspace");

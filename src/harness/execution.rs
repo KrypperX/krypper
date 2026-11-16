@@ -9,7 +9,10 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 mod planned;
-pub use self::planned::run_goal_turn_with_plan;
+pub use self::planned::{
+    run_goal_turn_with_completion_correction, run_goal_turn_with_plan, CompletionCorrectionError,
+    CompletionCorrectionResult,
+};
 
 const MAX_READ_RANGE_LINES: usize = 200;
 const MAX_READ_RANGE_BYTES: usize = 64 * 1024;
