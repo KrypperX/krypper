@@ -1,5 +1,33 @@
 use super::*;
+use krypper::agent_loop::{GoalTurnResult, GoalTurnStopReason};
+use krypper::harness::execution::{run_goal_turn_with_plan, GoalTurnError};
 use krypper::task_lifecycle::TaskSessionCheckpointError;
+use krypper::WorkspacePlan;
+
+fn run_registered_workspace_action(
+    session: &mut TaskSession,
+    task_id: Uuid,
+    action: WorkspaceAction,
+) -> (Uuid, Result<GoalTurnResult, GoalTurnError>) {
+    let task = session.get_task_mut(task_id).unwrap();
+    let turn_id = task.create_turn().unwrap();
+    task.transition_turn(turn_id, TurnState::Running).unwrap();
+    let plan = WorkspacePlan::try_from_actions(vec![action], 1).unwrap();
+    let mut control = |_: &str, _: &[WorkspaceObservation]| WorkspaceAction::Complete {
+        result: "checkpoint recovery operation complete".to_owned(),
+    };
+
+    let result = run_goal_turn_with_plan(
+        session,
+        task_id,
+        turn_id,
+        "retry a workspace operation after checkpoint restore",
+        2,
+        Ok(plan),
+        &mut control,
+    );
+    (turn_id, result)
+}
 
 #[test]
 fn task_session_checkpoint_round_trip_preserves_lifecycle_and_allows_a_fresh_turn() {
@@ -216,6 +244,171 @@ fn task_session_checkpoint_restore_rejects_inconsistent_history() {
     let inconsistent = serde_json::to_vec(&inconsistent).unwrap();
 
     assert!(TaskSession::restore_checkpoint(&inconsistent).is_err());
+}
+
+#[test]
+fn checkpoint_restore_does_not_overwrite_a_file_created_after_the_checkpoint() {
+    let workspace = TempDir::new();
+    let path = Path::new("created-after-checkpoint.txt");
+    let contents = "checkpoint-create-effect-sentinel";
+    let mut session = TaskSession::new_in_workspace(workspace.path()).unwrap();
+    let task = session.create_task("recover a created workspace file");
+    task.transition(TaskState::Running).unwrap();
+    let task_id = task.id();
+    let checkpoint_snapshot = session.snapshot();
+    let checkpoint = session.export_checkpoint().unwrap();
+    let operation = WorkspaceAction::CreateFile {
+        path: path.to_path_buf(),
+        contents: contents.to_owned(),
+    };
+
+    assert!(!workspace.path().join(path).exists());
+    assert!(!checkpoint
+        .windows(contents.len())
+        .any(|window| window == contents.as_bytes()));
+
+    let (interrupted_turn_id, first_result) =
+        run_registered_workspace_action(&mut session, task_id, operation.clone());
+    let first_result = first_result.unwrap();
+    assert_eq!(first_result.stop_reason(), GoalTurnStopReason::Completed);
+    assert_eq!(
+        first_result.observations(),
+        &[WorkspaceObservation::FileCreated {
+            path: path.to_path_buf(),
+            bytes_written: contents.len(),
+        }]
+    );
+    assert_eq!(
+        first_result.outcome(),
+        Some(&TurnOutcome::Success {
+            result: "checkpoint recovery operation complete".to_owned(),
+        })
+    );
+    assert_eq!(
+        fs::read(workspace.path().join(path)).unwrap(),
+        contents.as_bytes()
+    );
+    assert_eq!(
+        session
+            .get_task(task_id)
+            .unwrap()
+            .get_turn(interrupted_turn_id)
+            .unwrap()
+            .state(),
+        TurnState::Succeeded
+    );
+
+    drop(session);
+    let mut restored =
+        TaskSession::restore_checkpoint_in_workspace(&checkpoint, workspace.path()).unwrap();
+    assert_eq!(restored.snapshot(), checkpoint_snapshot);
+    assert!(restored
+        .get_task(task_id)
+        .unwrap()
+        .get_turn(interrupted_turn_id)
+        .is_none());
+
+    let (retry_turn_id, retry_result) =
+        run_registered_workspace_action(&mut restored, task_id, operation);
+    let error = retry_result.unwrap_err();
+    assert!(matches!(
+        error,
+        GoalTurnError::WorkspaceWrite(WorkspaceWriteError::File { .. })
+    ));
+    assert_eq!(
+        fs::read(workspace.path().join(path)).unwrap(),
+        contents.as_bytes()
+    );
+    let restored_task = restored.get_task(task_id).unwrap();
+    let retry_turn = restored_task.get_turn(retry_turn_id).unwrap();
+    assert_eq!(restored_task.state(), TaskState::Running);
+    assert_eq!(retry_turn.state(), TurnState::Failed);
+    assert!(matches!(
+        retry_turn.outcome(),
+        Some(TurnOutcome::Failure { .. })
+    ));
+}
+
+#[test]
+fn checkpoint_restore_does_not_repeat_an_exact_text_replacement() {
+    let workspace = TempDir::new();
+    let path = Path::new("replace-after-checkpoint.txt");
+    let original = b"prefix unique-match-sentinel suffix";
+    let replacement = "replacement-effect-sentinel";
+    fs::write(workspace.path().join(path), original).unwrap();
+    let mut session = TaskSession::new_in_workspace(workspace.path()).unwrap();
+    let task = session.create_task("recover a replaced workspace file");
+    task.transition(TaskState::Running).unwrap();
+    let task_id = task.id();
+    let checkpoint_snapshot = session.snapshot();
+    let checkpoint = session.export_checkpoint().unwrap();
+    let operation = WorkspaceAction::ReplaceText {
+        path: path.to_path_buf(),
+        match_text: "unique-match-sentinel".to_owned(),
+        replacement_text: replacement.to_owned(),
+    };
+    let replaced = b"prefix replacement-effect-sentinel suffix";
+
+    assert_eq!(fs::read(workspace.path().join(path)).unwrap(), original);
+    assert!(!checkpoint
+        .windows(replacement.len())
+        .any(|window| window == replacement.as_bytes()));
+
+    let (interrupted_turn_id, first_result) =
+        run_registered_workspace_action(&mut session, task_id, operation.clone());
+    let first_result = first_result.unwrap();
+    assert_eq!(first_result.stop_reason(), GoalTurnStopReason::Completed);
+    assert_eq!(
+        first_result.observations(),
+        &[WorkspaceObservation::TextReplaced {
+            path: path.to_path_buf(),
+            bytes_written: replaced.len(),
+        }]
+    );
+    assert_eq!(
+        first_result.outcome(),
+        Some(&TurnOutcome::Success {
+            result: "checkpoint recovery operation complete".to_owned(),
+        })
+    );
+    assert_eq!(fs::read(workspace.path().join(path)).unwrap(), replaced);
+    assert_eq!(
+        session
+            .get_task(task_id)
+            .unwrap()
+            .get_turn(interrupted_turn_id)
+            .unwrap()
+            .state(),
+        TurnState::Succeeded
+    );
+
+    drop(session);
+    let mut restored =
+        TaskSession::restore_checkpoint_in_workspace(&checkpoint, workspace.path()).unwrap();
+    assert_eq!(restored.snapshot(), checkpoint_snapshot);
+    assert!(restored
+        .get_task(task_id)
+        .unwrap()
+        .get_turn(interrupted_turn_id)
+        .is_none());
+
+    let (retry_turn_id, retry_result) =
+        run_registered_workspace_action(&mut restored, task_id, operation);
+    let error = retry_result.unwrap_err();
+    assert!(matches!(
+        error,
+        GoalTurnError::WorkspaceReplace(WorkspaceReplaceError::File { message })
+            if message == "match text was not found"
+    ));
+    assert_eq!(fs::read(workspace.path().join(path)).unwrap(), replaced);
+    let restored_task = restored.get_task(task_id).unwrap();
+    let retry_turn = restored_task.get_turn(retry_turn_id).unwrap();
+    assert_eq!(restored_task.state(), TaskState::Running);
+    assert_eq!(retry_turn.state(), TurnState::Failed);
+    assert!(matches!(
+        retry_turn.outcome(),
+        Some(TurnOutcome::Failure { .. })
+    ));
 }
 
 #[test]
