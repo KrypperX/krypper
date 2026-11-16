@@ -13,17 +13,18 @@ use crate::harness::recovery::{
     prepare_checkpoint_for_pause, prepare_resumed_session, ResumeError,
 };
 use crate::harness::verification::reconcile_task_state;
-use crate::task_lifecycle::{
-    TaskSession, TaskState, TurnOutcome, TurnState, MAX_TASK_SESSION_CHECKPOINT_BYTES,
-};
+use crate::task_lifecycle::{TaskSession, TaskState, TurnOutcome, TurnState};
 use crate::tools::{create_text_file, list_directory, read_text_file};
 use std::ffi::{OsStr, OsString};
-use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
+mod checkpoint_files;
 mod task_args;
+use self::checkpoint_files::{
+    read_task_checkpoint, validate_checkpoint_output_path, write_task_checkpoint,
+};
 use self::task_args::parse_task_action;
 
 const MAX_FILE_SIZE: usize = 1024 * 1024;
@@ -783,61 +784,6 @@ fn hosted_api_key(
         return Err(missing_message);
     }
     Ok(key)
-}
-
-fn read_task_checkpoint(path: &Path) -> io::Result<Vec<u8>> {
-    let file = File::open(path)?;
-    let mut bytes = Vec::with_capacity(MAX_TASK_SESSION_CHECKPOINT_BYTES + 1);
-    file.take((MAX_TASK_SESSION_CHECKPOINT_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() > MAX_TASK_SESSION_CHECKPOINT_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("checkpoint exceeds {MAX_TASK_SESSION_CHECKPOINT_BYTES} bytes"),
-        ));
-    }
-    Ok(bytes)
-}
-
-fn validate_checkpoint_output_path(path: &Path) -> io::Result<()> {
-    if path.file_name().is_none() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "checkpoint output must name a new file",
-        ));
-    }
-    match fs::symlink_metadata(path) {
-        Ok(_) => {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "checkpoint output already exists",
-            ));
-        }
-        Err(cause) if cause.kind() == io::ErrorKind::NotFound => {}
-        Err(cause) => return Err(cause),
-    }
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    if !fs::metadata(parent)?.is_dir() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotADirectory,
-            "checkpoint output parent is not a directory",
-        ));
-    }
-    Ok(())
-}
-
-fn write_task_checkpoint(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    if bytes.len() > MAX_TASK_SESSION_CHECKPOINT_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("checkpoint exceeds {MAX_TASK_SESSION_CHECKPOINT_BYTES} bytes"),
-        ));
-    }
-    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
-    file.write_all(bytes)
 }
 
 fn write_turn_outcome(
