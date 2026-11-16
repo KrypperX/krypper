@@ -7,6 +7,11 @@ workspace-safety modules are the implemented Tools boundary. The model-backed
 decision-source boundary in `src/brain/` is implemented; broader **Core** and
 **Brain** layout remains proposed.
 
+The proposed future boundary for process execution is documented in
+[`docs/process-execution-safety.md`](docs/process-execution-safety.md). This is
+a design proposal; the product does not currently expose a process-execution
+Tool or claim OS process sandboxing.
+
 ## Current implementation
 
 - [`src/core/task.rs`](src/core/task.rs) defines the `Task` and `Turn` domain
