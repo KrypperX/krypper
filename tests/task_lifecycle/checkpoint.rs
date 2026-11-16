@@ -310,10 +310,19 @@ fn checkpoint_restore_does_not_overwrite_a_file_created_after_the_checkpoint() {
 
     let (retry_turn_id, retry_result) =
         run_registered_workspace_action(&mut restored, task_id, operation);
-    let error = retry_result.unwrap_err();
+    let retry_result = retry_result.unwrap();
+    assert_eq!(retry_result.stop_reason(), GoalTurnStopReason::ActionFailed);
+    assert_eq!(retry_result.actions_taken(), 1);
     assert!(matches!(
-        error,
-        GoalTurnError::WorkspaceWrite(WorkspaceWriteError::File { .. })
+        retry_result.observations(),
+        [WorkspaceObservation::FileCreationFailed {
+            path: failed_path,
+            error: GoalTurnError::WorkspaceWrite(WorkspaceWriteError::File { message }),
+        }] if failed_path == path && message == "file already exists"
+    ));
+    assert!(matches!(
+        retry_result.outcome(),
+        Some(TurnOutcome::Failure { detail }) if !detail.is_empty()
     ));
     assert_eq!(
         fs::read(workspace.path().join(path)).unwrap(),
@@ -323,10 +332,7 @@ fn checkpoint_restore_does_not_overwrite_a_file_created_after_the_checkpoint() {
     let retry_turn = restored_task.get_turn(retry_turn_id).unwrap();
     assert_eq!(restored_task.state(), TaskState::Running);
     assert_eq!(retry_turn.state(), TurnState::Failed);
-    assert!(matches!(
-        retry_turn.outcome(),
-        Some(TurnOutcome::Failure { .. })
-    ));
+    assert_eq!(retry_turn.outcome(), retry_result.outcome());
 }
 
 #[test]
@@ -394,21 +400,26 @@ fn checkpoint_restore_does_not_repeat_an_exact_text_replacement() {
 
     let (retry_turn_id, retry_result) =
         run_registered_workspace_action(&mut restored, task_id, operation);
-    let error = retry_result.unwrap_err();
+    let retry_result = retry_result.unwrap();
+    assert_eq!(retry_result.stop_reason(), GoalTurnStopReason::ActionFailed);
+    assert_eq!(retry_result.actions_taken(), 1);
     assert!(matches!(
-        error,
-        GoalTurnError::WorkspaceReplace(WorkspaceReplaceError::File { message })
-            if message == "match text was not found"
+        retry_result.observations(),
+        [WorkspaceObservation::TextReplacementFailed {
+            path: failed_path,
+            error: GoalTurnError::WorkspaceReplace(WorkspaceReplaceError::File { message }),
+        }] if failed_path == path && message == "match text was not found"
+    ));
+    assert!(matches!(
+        retry_result.outcome(),
+        Some(TurnOutcome::Failure { detail }) if !detail.is_empty()
     ));
     assert_eq!(fs::read(workspace.path().join(path)).unwrap(), replaced);
     let restored_task = restored.get_task(task_id).unwrap();
     let retry_turn = restored_task.get_turn(retry_turn_id).unwrap();
     assert_eq!(restored_task.state(), TaskState::Running);
     assert_eq!(retry_turn.state(), TurnState::Failed);
-    assert!(matches!(
-        retry_turn.outcome(),
-        Some(TurnOutcome::Failure { .. })
-    ));
+    assert_eq!(retry_turn.outcome(), retry_result.outcome());
 }
 
 #[test]
