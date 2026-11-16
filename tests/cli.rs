@@ -2409,7 +2409,7 @@ fn task_resume_after_interrupted_file_creation_retries_from_the_original_checkpo
                 "--resume",
                 checkpoint_arg,
                 "--max-actions",
-                "3",
+                "6",
                 "--workspace",
                 workspace_arg,
                 "--checkpoint-out",
