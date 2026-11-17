@@ -1,6 +1,112 @@
 use super::*;
-use crate::task_lifecycle::{TaskSession, TurnState};
+use crate::brain::OllamaDecisionSource;
+use crate::task_lifecycle::{TaskSession, TaskState, TurnOutcome, TurnState};
+use serde_json::{json, Value};
 use std::ffi::OsString;
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::os::unix::fs::symlink;
+use std::thread::{self, JoinHandle};
+
+const TASK_FIXTURE_PATCH: &str = "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1,14 @@\n-pub fn fixture_value() -> usize { 1 }\n+pub fn fixture_value() -> usize { 2 }\n+\n+#[cfg(test)]\n+mod task_fixture_tests {\n+    #[test]\n+    fn task_fixture_selected_test() {\n+        assert_eq!(super::fixture_value(), 2);\n+        assert!(std::fs::read_to_string(\"escape\").is_err());\n+        assert!(std::fs::write(\"escape\", \"changed\").is_err());\n+    }\n+\n+    #[test]\n+    fn task_fixture_unrelated_test() { panic!(\"unrelated test ran\"); }\n+}\n";
+
+fn mock_model_server(responses: Vec<String>) -> (SocketAddr, JoinHandle<Vec<Vec<u8>>>) {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let handle = thread::spawn(move || {
+        responses
+            .into_iter()
+            .map(|body| {
+                let (mut stream, _) = listener.accept().unwrap();
+                let request = read_model_request(&mut stream);
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
+                request
+            })
+            .collect()
+    });
+    (address, handle)
+}
+
+fn read_model_request(stream: &mut TcpStream) -> Vec<u8> {
+    let mut request = Vec::new();
+    let mut chunk = [0; 4096];
+    loop {
+        let count = stream.read(&mut chunk).unwrap();
+        if count == 0 {
+            break;
+        }
+        request.extend_from_slice(&chunk[..count]);
+        let Some(header_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") else {
+            continue;
+        };
+        let headers = String::from_utf8_lossy(&request[..header_end]);
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap();
+        if request.len() >= header_end + 4 + content_length {
+            break;
+        }
+    }
+    request
+}
+
+fn model_tool_response(name: &str, arguments: Value) -> String {
+    json!({
+        "message": {
+            "role": "assistant",
+            "tool_calls": [{"function": {"name": name, "arguments": arguments}}]
+        }
+    })
+    .to_string()
+}
+
+fn model_request_json(request: &[u8]) -> Value {
+    let body_start = request
+        .windows(4)
+        .position(|bytes| bytes == b"\r\n\r\n")
+        .unwrap()
+        + 4;
+    serde_json::from_slice(&request[body_start..]).unwrap()
+}
+
+fn prepare_task_fixture(path: &Path) -> PathBuf {
+    fs::write(
+        path.join("src/lib.rs"),
+        "pub fn fixture_value() -> usize { 1 }\n",
+    )
+    .unwrap();
+    let outside = path.with_extension("outside-canary");
+    fs::write(&outside, "host private canary").unwrap();
+    symlink(&outside, path.join("escape")).unwrap();
+    outside
+}
+
+fn task_with_process_grant(
+    path: &Path,
+    policy: OfflineCargoPolicy,
+    goal: &str,
+) -> (TaskSession, Uuid, Uuid) {
+    let mut session = TaskSession::new_in_workspace(path).unwrap();
+    let task = session.create_task(goal).id();
+    let owner = session.get_task_mut(task).unwrap();
+    owner.transition(TaskState::Running).unwrap();
+    let turn = owner.create_turn().unwrap();
+    owner.transition_turn(turn, TurnState::Running).unwrap();
+    session.authorize_offline_cargo_tests(task, policy).unwrap();
+    (session, task, turn)
+}
 
 fn fixture() -> PathBuf {
     let path = std::env::temp_dir().join(format!("krypper-process-{}", Uuid::new_v4()));
@@ -379,6 +485,170 @@ fn process_grants_do_not_survive_a_checkpoint_restore() {
     );
     fs::remove_dir_all(path).unwrap();
     fs::remove_dir_all(runtime).unwrap();
+}
+
+#[test]
+#[ignore = "requires KRYPPER_TEST_TOOLCHAIN and KRYPPER_TEST_REGISTRY from a delegated Linux user service with verified namespaces and cgroup v2"]
+fn local_model_task_patches_then_runs_a_filtered_offline_cargo_test() {
+    use crate::agent_loop::{run_goal_turn_with_budget, GoalTurnStopReason, WorkspaceObservation};
+
+    let toolchain = std::env::var_os("KRYPPER_TEST_TOOLCHAIN").expect("toolchain required");
+    let registry = std::env::var_os("KRYPPER_TEST_REGISTRY").expect("registry required");
+    let path = fixture();
+    let outside = prepare_task_fixture(&path);
+    let goal = "Patch the fixture and verify its selected test";
+    let policy = OfflineCargoPolicy::new(Path::new(&toolchain), Path::new(&registry)).unwrap();
+    let (mut session, task, turn) = task_with_process_grant(&path, policy, goal);
+    let (address, server) = mock_model_server(vec![
+        model_tool_response(
+            "apply_patch",
+            json!({"path":"src/lib.rs","patch":TASK_FIXTURE_PATCH}),
+        ),
+        model_tool_response(
+            "offline_cargo_test",
+            json!({"test_filter":"task_fixture_selected_test"}),
+        ),
+        model_tool_response(
+            "complete_task",
+            json!({"result":"filtered offline Cargo test passed"}),
+        ),
+    ]);
+    let mut source = OllamaDecisionSource::with_endpoint("fixture-model", 3, address);
+
+    let execution =
+        run_goal_turn_with_budget(&mut session, task, turn, goal, 3, &mut source).unwrap();
+
+    assert_eq!(execution.stop_reason(), GoalTurnStopReason::Completed);
+    assert_eq!(execution.actions_taken(), 3);
+    assert!(matches!(
+        execution.outcome(),
+        Some(TurnOutcome::Success { result }) if result == "filtered offline Cargo test passed"
+    ));
+    let [WorkspaceObservation::PatchApplied {
+        path: patched_path,
+        after_diff,
+        ..
+    }, WorkspaceObservation::ProcessFinished { result }] = execution.observations()
+    else {
+        panic!("patch and process observations must precede task completion")
+    };
+    assert_eq!(patched_path, Path::new("src/lib.rs"));
+    assert!(after_diff.contains("task_fixture_selected_test"));
+    assert!(after_diff.contains("task_fixture_unrelated_test"));
+    assert_eq!(
+        result.test_filter.as_deref(),
+        Some("task_fixture_selected_test")
+    );
+    assert!(result.succeeded(), "{result:?}");
+    assert!(result.tests_ran);
+    assert_eq!(result.executed_tests, Some(1));
+    let process_output = format!("{}{}", result.stdout, result.stderr);
+    assert!(process_output.contains("task_fixture_selected_test ... ok"));
+    assert!(process_output.contains("1 filtered out"));
+    assert!(!process_output.contains("task_fixture_unrelated_test ..."));
+
+    let requests = server.join().unwrap();
+    assert_eq!(requests.len(), 3);
+    let completion_request = model_request_json(&requests[2]);
+    let completion_prompt = completion_request["messages"][1]["content"]
+        .as_str()
+        .unwrap();
+    assert!(completion_prompt.contains(r#""test_filter":"task_fixture_selected_test""#));
+    assert!(completion_prompt.contains(r#""tests_ran":true""#));
+    assert!(completion_prompt.contains(r#""executed_tests":1""#));
+    assert!(completion_prompt.contains("1 filtered out"));
+
+    let recorded_turn = session.get_task(task).unwrap().get_turn(turn).unwrap();
+    assert_eq!(recorded_turn.state(), TurnState::Succeeded);
+    assert!(recorded_turn
+        .activity_history()
+        .iter()
+        .any(|summary| matches!(
+            summary,
+            crate::task_lifecycle::TurnActivitySummary::ProcessFinished {
+                succeeded: true,
+                ..
+            }
+        )));
+    assert_eq!(fs::read_to_string(&outside).unwrap(), "host private canary");
+    fs::remove_dir_all(path).unwrap();
+    fs::remove_file(outside).unwrap();
+}
+
+#[test]
+#[ignore = "requires KRYPPER_TEST_TOOLCHAIN and KRYPPER_TEST_REGISTRY from a delegated Linux user service with verified namespaces and cgroup v2"]
+fn local_model_task_cannot_complete_after_a_zero_match_offline_cargo_test() {
+    use crate::agent_loop::{run_goal_turn_with_budget, GoalTurnStopReason, WorkspaceObservation};
+
+    let toolchain = std::env::var_os("KRYPPER_TEST_TOOLCHAIN").expect("toolchain required");
+    let registry = std::env::var_os("KRYPPER_TEST_REGISTRY").expect("registry required");
+    let path = fixture();
+    let outside = prepare_task_fixture(&path);
+    let goal = "Patch the fixture and verify a selected test";
+    let policy = OfflineCargoPolicy::new(Path::new(&toolchain), Path::new(&registry)).unwrap();
+    let (mut session, task, turn) = task_with_process_grant(&path, policy, goal);
+    let (address, server) = mock_model_server(vec![
+        model_tool_response(
+            "apply_patch",
+            json!({"path":"src/lib.rs","patch":TASK_FIXTURE_PATCH}),
+        ),
+        model_tool_response(
+            "offline_cargo_test",
+            json!({"test_filter":"task_fixture_filter_with_no_matches"}),
+        ),
+    ]);
+    let mut source = OllamaDecisionSource::with_endpoint("fixture-model", 3, address);
+
+    let execution =
+        run_goal_turn_with_budget(&mut session, task, turn, goal, 3, &mut source).unwrap();
+
+    assert_eq!(execution.stop_reason(), GoalTurnStopReason::ActionFailed);
+    assert_eq!(execution.actions_taken(), 2);
+    assert!(matches!(
+        execution.outcome(),
+        Some(TurnOutcome::Failure { .. })
+    ));
+    let [WorkspaceObservation::PatchApplied { .. }, WorkspaceObservation::ProcessFinished { result }] =
+        execution.observations()
+    else {
+        panic!("failed process result must be retained after the patch")
+    };
+    assert_eq!(result.outcome, ProcessOutcome::NoTestsMatched, "{result:?}");
+    assert_eq!(
+        result.test_filter.as_deref(),
+        Some("task_fixture_filter_with_no_matches")
+    );
+    assert!(!result.succeeded());
+    assert!(!result.tests_ran);
+    assert_eq!(result.executed_tests, Some(0));
+
+    let requests = server.join().unwrap();
+    assert_eq!(
+        requests.len(),
+        2,
+        "task control must not receive completion"
+    );
+    let task = session.get_task(task).unwrap();
+    let recorded_turn = task.get_turn(turn).unwrap();
+    assert_eq!(task.state(), TaskState::Running);
+    assert_eq!(recorded_turn.state(), TurnState::Failed);
+    assert!(matches!(
+        recorded_turn.outcome(),
+        Some(TurnOutcome::Failure { .. })
+    ));
+    assert!(recorded_turn
+        .activity_history()
+        .iter()
+        .any(|summary| matches!(
+            summary,
+            crate::task_lifecycle::TurnActivitySummary::ProcessFinished {
+                succeeded: false,
+                ..
+            }
+        )));
+    assert_eq!(fs::read_to_string(&outside).unwrap(), "host private canary");
+    fs::remove_dir_all(path).unwrap();
+    fs::remove_file(outside).unwrap();
 }
 
 #[test]
