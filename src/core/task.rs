@@ -213,6 +213,8 @@ impl TurnOutcome {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum TurnActivityAction {
+    /// The fixed offline Cargo profile failed.
+    OfflineCargoTest,
     /// A workspace file read failed.
     ReadFile,
     /// A bounded workspace file range read failed.
@@ -237,6 +239,11 @@ pub enum TurnActivityAction {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum TurnActivitySummary {
+    /// Process metadata only; raw output and workspace identity are not retained.
+    ProcessFinished {
+        succeeded: bool,
+        output_bytes: usize,
+    },
     /// A file was read; only its byte count is retained.
     FileRead { bytes_read: usize },
     /// A file range was read; only its range and excerpt byte count are retained.

@@ -329,7 +329,10 @@ accumulated observations have size limits.
 The adapter exposes only the existing task workspace actions and task
 completion. Every selected action still passes through Krypper's existing
 workspace containment, symlink, UTF-8, size, lifecycle, and action-budget
-checks; model output cannot request shell or process execution. See Ollama's
+checks; model output cannot request arbitrary shell or process execution.
+The registered `offline_cargo_test` profile is denied unless trusted embedding
+code explicitly grants it to the task; the CLI grants no such permission.
+See [the opt-in Linux profile](docs/offline-cargo-profile.md). See Ollama's
 [tool-calling API example](https://github.com/ollama/ollama/blob/main/docs/capabilities/tool-calling.mdx)
 for its local chat tool-call format.
 

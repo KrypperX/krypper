@@ -1,6 +1,6 @@
 # Proposed Process-Execution Safety Boundary
 
-> **Design proposal only.** The current product does not expose a process-execution Tool and does not enforce an OS process sandbox. Nothing in this note claims otherwise or authorizes implementation. The contracts below are requirements to resolve before a future executor is enabled.
+> **Historical design proposal (#176).** The observations below describe the inspected base revision, not current capabilities. Issue #178 implements one [opt-in Linux offline Cargo profile](offline-cargo-profile.md); that document describes its actual authorization, host requirements, confinement, limits and verification. The broader contracts here remain a requirements reference, not a claim that every proposed feature is implemented.
 
 ## Request, evidence, and acceptance
 

@@ -99,6 +99,9 @@ fn model_observations(observations: &[WorkspaceObservation]) -> Result<Vec<Value
 
 fn observation_size(observation: &WorkspaceObservation) -> usize {
     match observation {
+        WorkspaceObservation::ProcessFinished { result } => {
+            result.stdout.len() + result.stderr.len() + 256
+        }
         WorkspaceObservation::FileRead { path, contents } => {
             path.to_string_lossy().len().saturating_add(contents.len())
         }
@@ -140,6 +143,9 @@ fn observation_size(observation: &WorkspaceObservation) -> usize {
 
 fn observation_value(observation: &WorkspaceObservation) -> Value {
     match observation {
+        WorkspaceObservation::ProcessFinished { result } => {
+            json!({"type":"process_finished", "result":result})
+        }
         WorkspaceObservation::FileRead { path, contents } => {
             json!({"type":"file_read", "path":path.to_string_lossy(), "contents":contents})
         }

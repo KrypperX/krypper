@@ -20,6 +20,8 @@ const MAX_READ_RANGE_BYTES: usize = 64 * 1024;
 /// One action a task-owned turn can request from its workspace.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WorkspaceAction {
+    /// Request the fixed, explicitly authorized offline Cargo profile.
+    OfflineCargoTest,
     /// Read one UTF-8 file under the task's workspace safety policy.
     ReadFile { path: PathBuf },
     /// Read at most 200 one-based lines from a UTF-8 file under the task's workspace safety policy.
@@ -56,6 +58,7 @@ pub enum WorkspaceAction {
 
 pub(crate) fn workspace_action_name(action: &WorkspaceAction) -> &'static str {
     match action {
+        WorkspaceAction::OfflineCargoTest => "offline_cargo_test",
         WorkspaceAction::ReadFile { .. } => "read_file",
         WorkspaceAction::ReadRange { .. } => "read_range",
         WorkspaceAction::ListDirectory { .. } => "list_directory",
@@ -74,6 +77,8 @@ pub(crate) fn workspace_action_name(action: &WorkspaceAction) -> &'static str {
 /// One ordered observation produced while a task-owned turn is running.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WorkspaceObservation {
+    /// Bounded, untrusted process output and a verified typed outcome.
+    ProcessFinished { result: crate::ProcessResult },
     /// The contents read from one workspace file.
     FileRead { path: PathBuf, contents: String },
     /// A selected file excerpt and the actual one-based line range returned.
@@ -236,6 +241,8 @@ impl GoalTurnResult {
 /// An action, workspace, or lifecycle error raised while running a task-owned turn.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GoalTurnError {
+    /// The fixed process profile did not produce verified success.
+    Process(crate::ProcessOutcome),
     /// The decision source requested an unsupported action.
     UnsupportedAction { action: String },
     /// The existing workspace safety policy rejected or could not perform a file read.
@@ -257,6 +264,7 @@ pub enum GoalTurnError {
 impl fmt::Display for GoalTurnError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Process(outcome) => write!(formatter, "offline Cargo profile: {outcome:?}"),
             Self::UnsupportedAction { action } => {
                 write!(formatter, "unsupported workspace action '{action}'")
             }
@@ -274,7 +282,7 @@ impl fmt::Display for GoalTurnError {
 impl std::error::Error for GoalTurnError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::UnsupportedAction { .. } => None,
+            Self::Process(_) | Self::UnsupportedAction { .. } => None,
             Self::WorkspaceRead(error) => Some(error),
             Self::WorkspaceList(error) => Some(error),
             Self::WorkspaceDirectory(error) => Some(error),
@@ -354,6 +362,9 @@ pub fn run_goal_turn<D: DecisionSource + ?Sized>(
         }
         ActionExecution::Observation(observation) => {
             let result = match &observation {
+                WorkspaceObservation::ProcessFinished { result } => {
+                    format!("offline Cargo {:?}", result.outcome)
+                }
                 WorkspaceObservation::FileRead { contents, .. } => contents.clone(),
                 WorkspaceObservation::FileRangeRead { excerpt, .. } => excerpt.clone(),
                 WorkspaceObservation::DirectoryListed { entries, .. } => {
@@ -555,6 +566,10 @@ pub fn run_goal_turn_with_budget<D: BoundedDecisionSource + ?Sized>(
 
 pub(crate) fn summarize_observation(observation: &WorkspaceObservation) -> TurnActivitySummary {
     match observation {
+        WorkspaceObservation::ProcessFinished { result } => TurnActivitySummary::ProcessFinished {
+            succeeded: result.succeeded(),
+            output_bytes: result.stdout.len() + result.stderr.len(),
+        },
         WorkspaceObservation::FileRead { contents, .. } => TurnActivitySummary::FileRead {
             bytes_read: contents.len(),
         },
@@ -609,6 +624,7 @@ pub(crate) fn summarize_observation(observation: &WorkspaceObservation) -> TurnA
         },
         WorkspaceObservation::ActionFailed { action, .. } => {
             let action = match action {
+                WorkspaceAction::OfflineCargoTest => TurnActivityAction::OfflineCargoTest,
                 WorkspaceAction::ReadFile { .. } => TurnActivityAction::ReadFile,
                 WorkspaceAction::ReadRange { .. } => TurnActivityAction::ReadRange,
                 WorkspaceAction::ListDirectory { .. } => TurnActivityAction::ListDirectory,
@@ -634,6 +650,19 @@ fn execute_action(
     action: &WorkspaceAction,
 ) -> Result<ActionExecution, GoalTurnError> {
     match action {
+        WorkspaceAction::OfflineCargoTest => {
+            let result = session
+                .run_offline_cargo_tests(task_id, turn_id)
+                .map_err(GoalTurnError::WorkspaceRead)?;
+            let error = GoalTurnError::Process(result.outcome);
+            let succeeded = result.succeeded();
+            let observation = WorkspaceObservation::ProcessFinished { result };
+            Ok(if succeeded {
+                ActionExecution::Observation(observation)
+            } else {
+                ActionExecution::Failed { observation, error }
+            })
+        }
         WorkspaceAction::ReadFile { path } => {
             match session.read_workspace_file(task_id, turn_id, path) {
                 Ok(contents) => Ok(ActionExecution::Observation(
@@ -888,6 +917,7 @@ fn cancel_turn(
     let read_result = observations
         .iter()
         .find_map(|observation| match observation {
+            WorkspaceObservation::ProcessFinished { .. } => None,
             WorkspaceObservation::FileRead { contents, .. } => Some(contents.clone()),
             WorkspaceObservation::FileRangeRead { excerpt, .. } => Some(excerpt.clone()),
             _ => None,
@@ -922,6 +952,7 @@ fn finish_turn(
     let read_result = observations
         .iter()
         .find_map(|observation| match observation {
+            WorkspaceObservation::ProcessFinished { .. } => None,
             WorkspaceObservation::FileRead { contents, .. } => Some(contents.clone()),
             WorkspaceObservation::FileRangeRead { excerpt, .. } => Some(excerpt.clone()),
             _ => None,

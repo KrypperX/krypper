@@ -269,7 +269,7 @@ fn ollama_plan_request_exposes_only_registered_workspace_tools() {
     let request: Value = serde_json::from_slice(&request).expect("decode plan request");
     let tools = request["tools"].as_array().expect("workspace tool list");
 
-    assert_eq!(tools.len(), 8);
+    assert_eq!(tools.len(), 9);
     assert!(tools.iter().all(|tool| {
         tool["function"]["name"]
             .as_str()
@@ -325,7 +325,7 @@ fn ollama_plan_source_uses_a_local_fixture_and_keeps_control_on_the_existing_pat
     let plan_request = request_json(&requests[0]);
     assert_eq!(
         plan_request["tools"].as_array().expect("plan tools").len(),
-        8
+        9
     );
     assert!(plan_request["messages"][0]["content"]
         .as_str()
@@ -340,7 +340,7 @@ fn ollama_plan_source_uses_a_local_fixture_and_keeps_control_on_the_existing_pat
             .as_array()
             .unwrap()
             .len(),
-        9
+        10
     );
 }
 
@@ -834,6 +834,11 @@ fn workspace_registry_contains_only_existing_operations_and_schemas() {
                 "name":"replace_text",
                 "description":"Replace one unique exact match in a safe UTF-8 workspace file.",
                 "parameters":{"type":"object","properties":{"path":{"type":"string"},"match_text":{"type":"string","minLength":1},"replacement_text":{"type":"string"}},"required":["match_text","path","replacement_text"],"additionalProperties":false}
+            },
+            {
+                "name":"offline_cargo_test",
+                "description":"Run the fixed offline locked Cargo test profile, only if the task has host authorization and verified Linux confinement. No arguments.",
+                "parameters":{"type":"object","properties":{},"required":[],"additionalProperties":false}
             }
         ])
     );
@@ -897,6 +902,7 @@ fn provider_request_builders_keep_their_formats_with_registry_tools() {
             "search_tree_text",
             "create_file",
             "replace_text",
+            "offline_cargo_test",
             "complete_task"
         ]
     );
@@ -1248,6 +1254,7 @@ fn mocked_model_performs_multiple_actions_and_completes_the_task() {
             "search_tree_text",
             "create_file",
             "replace_text",
+            "offline_cargo_test",
             "complete_task"
         ]
     );
@@ -2543,6 +2550,7 @@ fn gemini_generate_content_uses_native_schema_api_key_and_one_bounded_action() {
             "search_tree_text",
             "create_file",
             "replace_text",
+            "offline_cargo_test",
             "complete_task"
         ]
     );
@@ -2748,4 +2756,21 @@ fn gemini_provider_errors_never_echo_api_keys_or_response_bodies() {
 fn brain_module_source_path_preserves_root_compatibility() {
     let brain_source = crate::brain::OllamaDecisionSource::new("mock-model", 1);
     let _: crate::OllamaDecisionSource = brain_source;
+}
+
+#[test]
+fn offline_profile_accepts_no_model_controlled_arguments() {
+    assert_eq!(
+        action_from_call("offline_cargo_test", &json!({})).unwrap(),
+        WorkspaceAction::OfflineCargoTest
+    );
+    for arguments in [
+        json!({"command":"sh"}),
+        json!({"cwd":"/"}),
+        json!({"env":{"TOKEN":"x"}}),
+        json!({"memory":0}),
+        json!([]),
+    ] {
+        assert!(action_from_call("offline_cargo_test", &arguments).is_err());
+    }
 }

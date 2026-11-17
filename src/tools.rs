@@ -1,3 +1,4 @@
+pub mod process;
 pub(crate) mod registry;
 mod workspace_safety;
 

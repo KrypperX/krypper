@@ -7,10 +7,11 @@ workspace-safety modules are the implemented Tools boundary. The model-backed
 decision-source boundary in `src/brain/` is implemented; broader **Core** and
 **Brain** layout remains proposed.
 
-The proposed future boundary for process execution is documented in
-[`docs/process-execution-safety.md`](docs/process-execution-safety.md). This is
-a design proposal; the product does not currently expose a process-execution
-Tool or claim OS process sandboxing.
+The historical process-execution design is documented in
+[`docs/process-execution-safety.md`](docs/process-execution-safety.md). One narrow,
+explicitly authorized Linux offline Cargo profile is now implemented through
+Tools and TaskSession; see [its contract](docs/offline-cargo-profile.md). The CLI
+does not grant process authority, and generic process execution remains absent.
 
 ## Current implementation
 
@@ -24,7 +25,8 @@ Tool or claim OS process sandboxing.
 - [`src/tools.rs`](src/tools.rs) exposes the existing workspace operations to
   task-turn and CLI callers through one crate-internal Tools boundary.
   [`src/tools/registry.rs`](src/tools/registry.rs) provides a typed registry of
-  the existing workspace-operation names, descriptions, and request schemas.
+  the workspace-operation names and fixed offline Cargo profile, descriptions,
+  and request schemas.
   Brain derives provider request definitions from that registry while keeping
   task-control decisions on their existing path. Registry metadata describes
   requests only; `TaskSession` and Tools remain responsible for lifecycle,
