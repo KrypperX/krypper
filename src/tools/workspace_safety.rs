@@ -7,7 +7,9 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
+mod patch;
 mod search;
+pub(crate) use patch::MAX_PATCH_BYTES;
 pub(crate) use search::{search_text_files_at, search_tree_text_files_at};
 
 const MAX_FILE_SIZE: usize = 1024 * 1024;
@@ -31,6 +33,18 @@ impl CliError {
 pub(crate) struct WorkspaceRoot {
     descriptor: OwnedFd,
     path: PathBuf,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct PatchEvidence {
+    pub(crate) bytes_written: usize,
+    pub(crate) before_diff: String,
+    pub(crate) after_diff: String,
+}
+
+struct OriginalFileState<'a> {
+    status: &'a libc::stat,
+    contents: &'a [u8],
 }
 
 impl WorkspaceRoot {
@@ -324,11 +338,122 @@ where
     replace_file_contents_atomically(
         parent_fd,
         &name,
-        &original_status,
+        OriginalFileState {
+            status: &original_status,
+            contents: contents.as_bytes(),
+        },
         replacement.as_bytes(),
         &mut writer,
+        &mut rename_file_at,
+        &mut read_file_contents_at_for_verification,
     )?;
     Ok(output_length)
+}
+
+pub(crate) fn apply_patch_file_at(
+    root: &WorkspaceRoot,
+    path: &OsStr,
+    patch_text: &str,
+) -> Result<PatchEvidence, CliError> {
+    apply_patch_file_at_with_ops(
+        root,
+        path,
+        patch_text,
+        write_to_fd,
+        rename_file_at,
+        read_file_contents_at_for_verification,
+    )
+}
+
+fn apply_patch_file_at_with_ops<W, C, R>(
+    root: &WorkspaceRoot,
+    path: &OsStr,
+    patch_text: &str,
+    mut writer: W,
+    mut committer: C,
+    mut readback: R,
+) -> Result<PatchEvidence, CliError>
+where
+    W: FnMut(RawFd, &[u8]) -> io::Result<usize>,
+    C: FnMut(RawFd, &OsStr, &OsStr) -> io::Result<()>,
+    R: FnMut(RawFd, &OsStr) -> Result<Vec<u8>, CliError>,
+{
+    let path_bytes = path.as_bytes();
+    if path_bytes.contains(&0) {
+        return Err(CliError::new("invalid file path"));
+    }
+    if Path::new(path).is_absolute() {
+        return Err(CliError::new("absolute paths are not allowed"));
+    }
+    if Path::new(path)
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(CliError::new("traversal paths are not allowed"));
+    }
+    if path_bytes.is_empty() || path_bytes.ends_with(b"/") {
+        return Err(CliError::new("invalid file path"));
+    }
+    if patch_text.len() > MAX_PATCH_BYTES {
+        return Err(CliError::new("patch exceeds 32 KiB"));
+    }
+
+    let path_text = path
+        .to_str()
+        .ok_or_else(|| CliError::new("file path is not valid UTF-8"))?;
+    let (parent, name) = open_workspace_parent(root, path)?;
+    let parent_fd = parent.as_raw_fd();
+    let original_status = stat_at(parent_fd, &name).map_err(|error| {
+        if error.raw_os_error() == Some(libc::ENOENT) {
+            CliError::new("file not found")
+        } else {
+            CliError::new("invalid path")
+        }
+    })?;
+    if is_symlink(&original_status) {
+        return Err(CliError::new("symlink paths are not allowed"));
+    }
+    if !is_regular_file(&original_status) {
+        return Err(CliError::new("not a regular file"));
+    }
+
+    let original_file = open_at(
+        parent_fd,
+        &name,
+        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        0,
+    )
+    .map_err(|_| CliError::new("unable to open file"))?;
+    let opened_status =
+        fstat(original_file.as_raw_fd()).map_err(|_| CliError::new("unable to open file"))?;
+    if !same_inode(&original_status, &opened_status) || !is_regular_file(&opened_status) {
+        return Err(CliError::new("file changed while patching it"));
+    }
+    let original = read_open_text_file(File::from(original_file))?;
+    let result =
+        patch::apply_unified_diff(path_text, &original, patch_text).map_err(CliError::new)?;
+    if result.contents.len() > MAX_FILE_SIZE {
+        return Err(CliError::new("patched file exceeds 1 MiB"));
+    }
+
+    replace_file_contents_atomically(
+        parent_fd,
+        &name,
+        OriginalFileState {
+            status: &original_status,
+            contents: original.as_bytes(),
+        },
+        result.contents.as_bytes(),
+        &mut writer,
+        &mut committer,
+        &mut readback,
+    )?;
+
+    Ok(PatchEvidence {
+        bytes_written: result.contents.len(),
+        before_diff: result.before_diff,
+        after_diff: result.after_diff,
+    })
 }
 
 fn open_workspace_parent(
@@ -411,15 +536,19 @@ fn unique_match_range(
     Ok(start..start + match_text.len())
 }
 
-fn replace_file_contents_atomically<F>(
+fn replace_file_contents_atomically<W, C, R>(
     parent_fd: RawFd,
     name: &OsStr,
-    original_status: &libc::stat,
+    original: OriginalFileState<'_>,
     contents: &[u8],
-    writer: &mut F,
+    writer: &mut W,
+    committer: &mut C,
+    readback: &mut R,
 ) -> Result<(), CliError>
 where
-    F: FnMut(RawFd, &[u8]) -> io::Result<usize>,
+    W: FnMut(RawFd, &[u8]) -> io::Result<usize>,
+    C: FnMut(RawFd, &OsStr, &OsStr) -> io::Result<()>,
+    R: FnMut(RawFd, &OsStr) -> Result<Vec<u8>, CliError>,
 {
     let (temporary_name, temporary_file) = (0..3)
         .find_map(|_| {
@@ -448,7 +577,7 @@ where
     }
     if !failed
         // SAFETY: `raw_fd` is the open temporary file descriptor transferred from `OwnedFd`.
-        && unsafe { libc::fchmod(raw_fd, original_status.st_mode & 0o777) } != 0
+        && unsafe { libc::fchmod(raw_fd, original.status.st_mode & 0o777) } != 0
     {
         failed = true;
     }
@@ -471,28 +600,95 @@ where
         unlink_created_file(parent_fd, &temporary_name, identity.as_ref());
         CliError::new("file changed while replacing it")
     })?;
-    if !same_inode(original_status, &current_status) || !is_regular_file(&current_status) {
+    if !same_inode(original.status, &current_status) || !is_regular_file(&current_status) {
         unlink_created_file(parent_fd, &temporary_name, identity.as_ref());
         return Err(CliError::new("file changed while replacing it"));
     }
 
-    let temporary_name_c =
-        c_string(&temporary_name).map_err(|_| CliError::new("unable to stage file replacement"))?;
-    let name_c = c_string(name).map_err(|_| CliError::new("invalid file path"))?;
-    // SAFETY: both names are NUL-terminated single path components and `parent_fd` is an open directory.
-    if unsafe {
-        libc::renameat(
-            parent_fd,
-            temporary_name_c.as_ptr(),
-            parent_fd,
-            name_c.as_ptr(),
-        )
-    } != 0
-    {
+    let current_contents = match read_file_contents_at_for_verification(parent_fd, name) {
+        Ok(contents) => contents,
+        Err(_) => {
+            unlink_created_file(parent_fd, &temporary_name, identity.as_ref());
+            return Err(CliError::new("unable to verify original file"));
+        }
+    };
+    if current_contents != original.contents {
+        unlink_created_file(parent_fd, &temporary_name, identity.as_ref());
+        return Err(CliError::new("file changed while replacing it"));
+    }
+
+    if committer(parent_fd, &temporary_name, name).is_err() {
         unlink_created_file(parent_fd, &temporary_name, identity.as_ref());
         return Err(CliError::new("unable to replace file"));
     }
+    let stored_contents =
+        readback(parent_fd, name).map_err(|_| CliError::new("unable to verify stored file"))?;
+    if stored_contents != contents {
+        return Err(CliError::new(
+            "stored file did not match the expected contents",
+        ));
+    }
     Ok(())
+}
+
+fn rename_file_at(parent_fd: RawFd, temporary_name: &OsStr, name: &OsStr) -> io::Result<()> {
+    let temporary_name = c_string(temporary_name)?;
+    let name = c_string(name)?;
+    // SAFETY: both names are NUL-terminated single path components and `parent_fd` is an open directory.
+    if unsafe { libc::renameat(parent_fd, temporary_name.as_ptr(), parent_fd, name.as_ptr()) } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `parent_fd` is an open directory containing the committed rename.
+    if unsafe { libc::fsync(parent_fd) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn read_file_contents_at_for_verification(
+    parent_fd: RawFd,
+    name: &OsStr,
+) -> Result<Vec<u8>, CliError> {
+    let original_status =
+        stat_at(parent_fd, name).map_err(|_| CliError::new("unable to verify stored file"))?;
+    if is_symlink(&original_status) {
+        return Err(CliError::new("symlink paths are not allowed"));
+    }
+    if !is_regular_file(&original_status) {
+        return Err(CliError::new("not a regular file"));
+    }
+    if original_status.st_size < 0 || original_status.st_size as usize > MAX_FILE_SIZE {
+        return Err(CliError::new("file exceeds 1 MiB"));
+    }
+
+    let file = open_at(
+        parent_fd,
+        name,
+        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        0,
+    )
+    .map_err(|_| CliError::new("unable to verify stored file"))?;
+    let opened_status =
+        fstat(file.as_raw_fd()).map_err(|_| CliError::new("unable to verify stored file"))?;
+    if !same_inode(&original_status, &opened_status) || !is_regular_file(&opened_status) {
+        return Err(CliError::new("file changed while verifying it"));
+    }
+
+    let mut contents = Vec::with_capacity(original_status.st_size as usize);
+    File::from(file)
+        .take(MAX_FILE_SIZE as u64 + 1)
+        .read_to_end(&mut contents)
+        .map_err(|_| CliError::new("unable to verify stored file"))?;
+    if contents.len() > MAX_FILE_SIZE {
+        return Err(CliError::new("file exceeds 1 MiB"));
+    }
+    let current_status =
+        stat_at(parent_fd, name).map_err(|_| CliError::new("file changed while verifying it"))?;
+    if !same_inode(&opened_status, &current_status) || !is_regular_file(&current_status) {
+        return Err(CliError::new("file changed while verifying it"));
+    }
+    Ok(contents)
 }
 
 fn unlink_created_file(parent_fd: RawFd, name: &OsStr, identity: Option<&libc::stat>) {

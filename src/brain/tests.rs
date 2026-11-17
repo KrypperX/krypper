@@ -1,6 +1,7 @@
 use super::*;
 use crate::agent_loop::{
     run_goal_turn_with_budget, GoalTurnResult, GoalTurnStopReason, WorkspaceAction,
+    WorkspaceObservation,
 };
 use crate::harness::execution::run_goal_turn_with_plan;
 use crate::task_lifecycle::{TaskSession, TaskState, TurnOutcome, TurnState};
@@ -269,7 +270,7 @@ fn ollama_plan_request_exposes_only_registered_workspace_tools() {
     let request: Value = serde_json::from_slice(&request).expect("decode plan request");
     let tools = request["tools"].as_array().expect("workspace tool list");
 
-    assert_eq!(tools.len(), 9);
+    assert_eq!(tools.len(), 10);
     assert!(tools.iter().all(|tool| {
         tool["function"]["name"]
             .as_str()
@@ -325,7 +326,7 @@ fn ollama_plan_source_uses_a_local_fixture_and_keeps_control_on_the_existing_pat
     let plan_request = request_json(&requests[0]);
     assert_eq!(
         plan_request["tools"].as_array().expect("plan tools").len(),
-        9
+        10
     );
     assert!(plan_request["messages"][0]["content"]
         .as_str()
@@ -340,7 +341,7 @@ fn ollama_plan_source_uses_a_local_fixture_and_keeps_control_on_the_existing_pat
             .as_array()
             .unwrap()
             .len(),
-        10
+        11
     );
 }
 
@@ -836,6 +837,11 @@ fn workspace_registry_contains_only_existing_operations_and_schemas() {
                 "parameters":{"type":"object","properties":{"path":{"type":"string"},"match_text":{"type":"string","minLength":1},"replacement_text":{"type":"string"}},"required":["match_text","path","replacement_text"],"additionalProperties":false}
             },
             {
+                "name":"apply_patch",
+                "description":"Apply one bounded single-file unified diff to an existing safe UTF-8 workspace file with exact hunk context.",
+                "parameters":{"type":"object","properties":{"path":{"type":"string"},"patch":{"type":"string","minLength":1,"maxLength":32768}},"required":["patch","path"],"additionalProperties":false}
+            },
+            {
                 "name":"offline_cargo_test",
                 "description":"Run the fixed offline locked Cargo test profile, only if the task has host authorization and verified Linux confinement. No arguments.",
                 "parameters":{"type":"object","properties":{},"required":[],"additionalProperties":false}
@@ -902,6 +908,7 @@ fn provider_request_builders_keep_their_formats_with_registry_tools() {
             "search_tree_text",
             "create_file",
             "replace_text",
+            "apply_patch",
             "offline_cargo_test",
             "complete_task"
         ]
@@ -1086,6 +1093,26 @@ fn parser_maps_only_one_supported_tool_call() {
         }
     );
 
+    let patch_action = parse_model_response(
+        br#"{"message":{"role":"assistant","tool_calls":[{"function":{"name":"apply_patch","arguments":{"path":"notes with spaces.txt","patch":"--- a/notes with spaces.txt\n+++ b/notes with spaces.txt\n@@ -1 +1 @@\n-old\n+new\n"}}}]}}"#,
+    )
+    .expect("parse registered patch action");
+    assert_eq!(
+        patch_action,
+        WorkspaceAction::ApplyPatch {
+            path: PathBuf::from("notes with spaces.txt"),
+            patch: "--- a/notes with spaces.txt\n+++ b/notes with spaces.txt\n@@ -1 +1 @@\n-old\n+new\n".to_owned()
+        }
+    );
+    assert!(parse_model_response(
+        tool_response(
+            "apply_patch",
+            json!({"path":"notes.txt", "patch":"x".repeat(32 * 1024 + 1)})
+        )
+        .as_bytes()
+    )
+    .is_err());
+
     assert!(parse_model_response(b"not json").is_err());
     assert!(parse_model_response(
             br#"{"message":{"tool_calls":[{"function":{"name":"run_shell","arguments":{"command":"touch unsafe"}}}]}}"#
@@ -1165,6 +1192,65 @@ fn mocked_model_uses_an_explicit_workspace_without_changing_current_directory() 
     assert_eq!(
         std::env::current_dir().expect("read current directory"),
         original_directory
+    );
+    assert_eq!(server.join().expect("join mock server").len(), 2);
+}
+
+#[test]
+fn registered_patch_tool_returns_verified_change_evidence_through_task_observations() {
+    let patch = "--- a/notes with spaces.txt\n+++ b/notes with spaces.txt\n@@ -1,3 +1,3 @@\n top\n-old\n+new\n bottom\n";
+    let (address, server) = mock_server(vec![
+        ok(tool_response(
+            "apply_patch",
+            json!({"path":"notes with spaces.txt", "patch":patch}),
+        )),
+        ok(tool_response(
+            "complete_task",
+            json!({"result":"patch applied and verified"}),
+        )),
+    ]);
+    let temporary = TempDir::new();
+    let workspace = temporary.path().join("selected workspace");
+    fs::create_dir(&workspace).expect("create selected workspace");
+    fs::write(
+        workspace.join("notes with spaces.txt"),
+        "top\nold\nbottom\n",
+    )
+    .expect("write patch fixture");
+    let mut session = TaskSession::new_in_workspace(&workspace).expect("capture workspace");
+    let task = session.create_task("Apply one context-checked patch");
+    task.transition(TaskState::Running).expect("start task");
+    let task_id = task.id();
+    let turn_id = task.create_turn().expect("create turn");
+    task.transition_turn(turn_id, TurnState::Running)
+        .expect("start turn");
+    let mut source = OllamaDecisionSource::with_endpoint("mock-model", 2, address);
+
+    let result = run_goal_turn_with_budget(
+        &mut session,
+        task_id,
+        turn_id,
+        "Patch the requested lines",
+        2,
+        &mut source,
+    )
+    .expect("run registered patch tool");
+
+    assert_eq!(result.stop_reason(), GoalTurnStopReason::Completed);
+    assert!(matches!(
+        result.observations().first(),
+        Some(WorkspaceObservation::PatchApplied {
+            path,
+            before_diff,
+            after_diff,
+            ..
+        }) if path == Path::new("notes with spaces.txt")
+            && before_diff == "top\nold\nbottom"
+            && after_diff == "top\nnew\nbottom"
+    ));
+    assert_eq!(
+        fs::read(workspace.join("notes with spaces.txt")).expect("read patched file"),
+        b"top\nnew\nbottom\n"
     );
     assert_eq!(server.join().expect("join mock server").len(), 2);
 }
@@ -1254,6 +1340,7 @@ fn mocked_model_performs_multiple_actions_and_completes_the_task() {
             "search_tree_text",
             "create_file",
             "replace_text",
+            "apply_patch",
             "offline_cargo_test",
             "complete_task"
         ]
@@ -2330,6 +2417,11 @@ fn anthropic_schema_drops_provider_unsupported_bounds_but_runtime_validation_rem
             "replace_text",
             json!({"path":"notes.txt", "match_text":"", "replacement_text":"next"}),
         ),
+        ("apply_patch", json!({"path":"notes.txt", "patch":""})),
+        (
+            "apply_patch",
+            json!({"path":"notes.txt", "patch":"--- a/notes.txt\n+++ b/notes.txt\n", "shell":"unsafe"}),
+        ),
     ];
 
     for (name, input) in invalid_calls {
@@ -2550,6 +2642,7 @@ fn gemini_generate_content_uses_native_schema_api_key_and_one_bounded_action() {
             "search_tree_text",
             "create_file",
             "replace_text",
+            "apply_patch",
             "offline_cargo_test",
             "complete_task"
         ]

@@ -194,6 +194,17 @@ pub(super) fn write_observation(
                 path.display()
             )?;
         }
+        WorkspaceObservation::PatchApplied {
+            path,
+            bytes_written,
+            ..
+        } => {
+            writeln!(
+                output,
+                "Observation {number}: replaced text in {} ({bytes_written} bytes)",
+                path.display()
+            )?;
+        }
         WorkspaceObservation::FileCreationFailed { path, error } => {
             writeln!(
                 output,
@@ -209,6 +220,13 @@ pub(super) fn write_observation(
             )?;
         }
         WorkspaceObservation::TextReplacementFailed { path, error } => {
+            writeln!(
+                output,
+                "Observation {number}: replacement in {} failed: {error}",
+                path.display()
+            )?;
+        }
+        WorkspaceObservation::PatchFailed { path, error } => {
             writeln!(
                 output,
                 "Observation {number}: replacement in {} failed: {error}",
@@ -340,6 +358,15 @@ mod tests {
                 "Observation 3: replaced text in replace.txt (7 bytes)\n",
             ),
             (
+                WorkspaceObservation::PatchApplied {
+                    path: PathBuf::from("patch.txt"),
+                    bytes_written: 7,
+                    before_diff: "old".to_owned(),
+                    after_diff: "new".to_owned(),
+                },
+                "Observation 3: replaced text in patch.txt (7 bytes)\n",
+            ),
+            (
                 WorkspaceObservation::FileCreationFailed {
                     path: PathBuf::from("create.txt"),
                     error: error.clone(),
@@ -359,6 +386,13 @@ mod tests {
                     error: error.clone(),
                 },
                 "Observation 3: replacement in replace.txt failed: unsupported workspace action 'fixture'\n",
+            ),
+            (
+                WorkspaceObservation::PatchFailed {
+                    path: PathBuf::from("patch.txt"),
+                    error: error.clone(),
+                },
+                "Observation 3: replacement in patch.txt failed: unsupported workspace action 'fixture'\n",
             ),
             (
                 WorkspaceObservation::TextSearchFailed {

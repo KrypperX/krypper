@@ -1,3 +1,4 @@
+use super::MAX_PATCH_BYTES;
 use serde_json::{json, Map, Value};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -11,6 +12,7 @@ enum WorkspaceOperation {
     SearchTreeText,
     CreateFile,
     ReplaceText,
+    ApplyPatch,
 }
 
 impl WorkspaceOperation {
@@ -25,6 +27,7 @@ impl WorkspaceOperation {
             Self::SearchTreeText => "search_tree_text",
             Self::CreateFile => "create_file",
             Self::ReplaceText => "replace_text",
+            Self::ApplyPatch => "apply_patch",
         }
     }
 }
@@ -128,7 +131,7 @@ const fn bounded_positive_integer(name: &'static str, maximum: usize) -> Argumen
     }
 }
 
-const WORKSPACE_OPERATIONS: [OperationDefinition; 9] = [
+const WORKSPACE_OPERATIONS: [OperationDefinition; 10] = [
     OperationDefinition {
         operation: WorkspaceOperation::ReadFile,
         description: "Read one safe UTF-8 workspace file.",
@@ -176,6 +179,14 @@ const WORKSPACE_OPERATIONS: [OperationDefinition; 9] = [
             string("path"),
             non_empty_string("match_text"),
             string("replacement_text"),
+        ],
+    },
+    OperationDefinition {
+        operation: WorkspaceOperation::ApplyPatch,
+        description: "Apply one bounded single-file unified diff to an existing safe UTF-8 workspace file with exact hunk context.",
+        arguments: &[
+            string("path"),
+            bounded_string("patch", MAX_PATCH_BYTES),
         ],
     },
     OperationDefinition {
