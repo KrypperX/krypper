@@ -130,8 +130,11 @@ and `KRYPPER_TEST_REGISTRY` pointing to preprovisioned directories. These two
 variables configure only the test harness; they are not product request fields
 and are never forwarded to workspace code. The fixture uses a dependency-free
 locked Cargo workspace, an outside canary, and the actual production sandbox
-and supervisor. It covers positive execution, absent secrets/control sockets,
-network denial, escape denial, nonzero exit, timeout, output bounds,
+and supervisor. It dispatches the registered profile through WorkspacePlan and Harness and
+asserts the process observation, successful turn outcome, lifecycle state and
+metadata record. It covers absent secrets/control sockets, denial of a live
+host-loopback listener (reachable from the host before and after the run),
+escape denial, nonzero exit, timeout, output bounds,
 cancellation, CPU/memory/process ceilings and cleanup. Lower-only private test
 bounds make timeout/output tests short; public profile limits are fixed.
 

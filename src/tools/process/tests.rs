@@ -53,6 +53,54 @@ fn profile_is_denied_without_explicit_task_authority() {
 }
 
 #[test]
+fn registered_plan_reaches_process_authorization_through_harness() {
+    use crate::agent_loop::{
+        run_goal_turn_with_plan, GoalTurnStopReason, WorkspaceAction, WorkspaceObservation,
+    };
+    let path = fixture();
+    let mut session = TaskSession::new_in_workspace(&path).unwrap();
+    let task = session.create_task("denied process profile").id();
+    let owner = session.get_task_mut(task).unwrap();
+    owner
+        .transition(crate::task_lifecycle::TaskState::Running)
+        .unwrap();
+    let turn = owner.create_turn().unwrap();
+    owner.transition_turn(turn, TurnState::Running).unwrap();
+    let plan = crate::WorkspacePlan::try_from_actions(vec![WorkspaceAction::OfflineCargoTest], 1);
+    let mut control =
+        |_: &str, _: &[WorkspaceObservation]| panic!("denied process must stop before completion");
+    let execution = run_goal_turn_with_plan(
+        &mut session,
+        task,
+        turn,
+        "denied process profile",
+        2,
+        plan,
+        &mut control,
+    )
+    .unwrap();
+    assert_eq!(execution.stop_reason(), GoalTurnStopReason::ActionFailed);
+    let [WorkspaceObservation::ProcessFinished { result }] = execution.observations() else {
+        panic!("registered process must reach authorization, not unsupported-action handling")
+    };
+    assert_eq!(result.outcome, ProcessOutcome::Denied);
+    assert!(matches!(
+        execution.outcome(),
+        Some(crate::task_lifecycle::TurnOutcome::Failure { .. })
+    ));
+    assert_eq!(
+        session
+            .get_task(task)
+            .unwrap()
+            .get_turn(turn)
+            .unwrap()
+            .state(),
+        TurnState::Failed
+    );
+    fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
 fn zero_exit_alone_is_not_success() {
     let mut result = ProcessResult::empty(ProcessOutcome::Exited(0));
     assert!(result.succeeded());
@@ -183,6 +231,12 @@ fn real_offline_profile_is_confined_and_cleans_up() {
     let outside = Path::new("/var/tmp").join(format!("krypper-canary-{}", Uuid::new_v4()));
     fs::write(&outside, "host private canary").unwrap();
     std::os::unix::fs::symlink(&outside, path.join("escape")).unwrap();
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let canary_address = listener.local_addr().unwrap();
+    assert!(
+        std::net::TcpStream::connect_timeout(&canary_address, Duration::from_millis(100)).is_ok(),
+        "host canary must be reachable before sandbox launch"
+    );
     fs::write(path.join("src/lib.rs"), r#"
 #[test] fn confinement() {
 assert!(std::fs::read_to_string("escape").is_err());
@@ -191,10 +245,10 @@ assert!(std::fs::read_dir("/home").is_err());
 assert!(std::env::var("GITHUB_TOKEN").is_err());
 assert!(std::env::var("DBUS_SESSION_BUS_ADDRESS").is_err());
 assert!(std::fs::metadata("/run/user").is_err());
-assert!(std::net::TcpStream::connect_timeout(&"192.0.2.1:443".parse().unwrap(), std::time::Duration::from_millis(100)).is_err());
+assert!(std::net::TcpStream::connect_timeout(&"__HOST_CANARY__".parse().unwrap(), std::time::Duration::from_millis(100)).is_err());
 assert_eq!(std::env::current_dir().unwrap().to_str().unwrap(), "/workspace");
 }
-"#).unwrap();
+"#.replace("__HOST_CANARY__", &canary_address.to_string())).unwrap();
     let policy = OfflineCargoPolicy::new(Path::new(&toolchain), Path::new(&registry)).unwrap();
     let mut session = TaskSession::new_in_workspace(&path).unwrap();
     let task = session.create_task("offline test").id();
@@ -205,8 +259,59 @@ assert_eq!(std::env::current_dir().unwrap().to_str().unwrap(), "/workspace");
     let turn = owner.create_turn().unwrap();
     owner.transition_turn(turn, TurnState::Running).unwrap();
     session.authorize_offline_cargo_tests(task, policy).unwrap();
-    let result = session.run_offline_cargo_tests(task, turn).unwrap();
+    use crate::agent_loop::{
+        run_goal_turn_with_plan, GoalTurnStopReason, WorkspaceAction, WorkspaceObservation,
+    };
+    let plan = crate::WorkspacePlan::try_from_actions(vec![WorkspaceAction::OfflineCargoTest], 1);
+    let mut control = |_: &str, observations: &[WorkspaceObservation]| {
+        assert!(
+            matches!(observations, [WorkspaceObservation::ProcessFinished { result }] if result.succeeded())
+        );
+        WorkspaceAction::Complete {
+            result: "offline Cargo verified".into(),
+        }
+    };
+    let execution = run_goal_turn_with_plan(
+        &mut session,
+        task,
+        turn,
+        "offline test",
+        2,
+        plan,
+        &mut control,
+    )
+    .unwrap();
+    assert_eq!(
+        execution.stop_reason(),
+        GoalTurnStopReason::Completed,
+        "{execution:?}"
+    );
+    assert_eq!(execution.actions_taken(), 2);
+    assert!(matches!(
+        execution.outcome(),
+        Some(crate::task_lifecycle::TurnOutcome::Success { .. })
+    ));
+    let [WorkspaceObservation::ProcessFinished { result }] = execution.observations() else {
+        panic!("one process observation required")
+    };
     assert!(result.succeeded(), "{result:?}");
+    let recorded_turn = session.get_task(task).unwrap().get_turn(turn).unwrap();
+    assert_eq!(recorded_turn.state(), TurnState::Succeeded);
+    assert_eq!(recorded_turn.outcome(), execution.outcome());
+    assert!(recorded_turn
+        .activity_history()
+        .iter()
+        .any(|summary| matches!(
+            summary,
+            crate::task_lifecycle::TurnActivitySummary::ProcessFinished {
+                succeeded: true,
+                ..
+            }
+        )));
+    assert!(
+        std::net::TcpStream::connect_timeout(&canary_address, Duration::from_millis(100)).is_ok(),
+        "host canary must remain reachable after sandbox launch"
+    );
     assert_eq!(fs::read_to_string(&outside).unwrap(), "host private canary");
     assert!(!result.stdout.is_empty());
     // Use the actual sandbox/supervisor for failure cases, with lower-only test bounds.
