@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 31983)
-Total output lines: 3482
-
 use super::*;
 use crate::agent_loop::{
     run_goal_turn_with_budget, BoundedDecisionSource, GoalTurnError, GoalTurnResult,
@@ -1116,7 +1113,1268 @@ fn contradictory_reflection_cannot_override_failure_or_bypass_tools() {
         fs::read_to_string(&outside_file).expect("read outside sentinel"),
         "unchanged"
     );
-    assert…11983 tokens truncated…athBuf::from("zai.md")
+    assert_eq!(
+        session
+            .get_task(task_id)
+            .expect("task exists")
+            .get_turn(prior_turn_id)
+            .expect("prior turn exists")
+            .outcome(),
+        prior_outcome.as_ref()
+    );
+
+    let requests = server.join().expect("join local reflection fixture");
+    assert_eq!(requests.len(), 2);
+    let reflection_request = request_json(&requests[0]);
+    let reflection_prompt = reflection_request["messages"][1]["content"]
+        .as_str()
+        .expect("reflection prompt");
+    assert!(reflection_prompt.contains("file_creation_failed"));
+    assert!(reflection_prompt.contains("../outside.txt"));
+    assert!(reflection_prompt.contains(r#""stop_reason":"action_failed""#));
+    assert!(reflection_prompt.contains(r#""outcome":"failure""#));
+    let proposal_request = request_json(&requests[1]);
+    let proposal_prompt = proposal_request["messages"][1]["content"]
+        .as_str()
+        .expect("proposal prompt");
+    assert!(proposal_prompt.contains("The previous operation succeeded"));
+    assert!(proposal_prompt.contains("outcome: failure"));
+    assert!(proposal_prompt.contains("untrusted advisory"));
+
+    let next_turn_id = {
+        let task = session.get_task_mut(task_id).expect("task exists");
+        let turn_id = task.create_turn().expect("create follow-up turn");
+        task.transition_turn(turn_id, TurnState::Running)
+            .expect("start follow-up turn");
+        turn_id
+    };
+    let mut control =
+        |_: &str, _: &[crate::agent_loop::WorkspaceObservation]| WorkspaceAction::Complete {
+            result: "must not run after denial".to_owned(),
+        };
+    let next_result = run_goal_turn_with_plan(
+        &mut session,
+        task_id,
+        next_turn_id,
+        "use the prior record",
+        3,
+        Ok(plan),
+        &mut control,
+    )
+    .expect("Tools denial is recorded by Harness");
+    assert_eq!(next_result.actions_taken(), 1);
+    assert!(next_result.actions_taken() <= 3);
+    assert_eq!(next_result.stop_reason(), GoalTurnStopReason::ActionFailed);
+    assert!(matches!(
+        next_result.outcome(),
+        Some(TurnOutcome::Failure { .. })
+    ));
+    assert_eq!(
+        fs::read_to_string(&outside_file).expect("read outside sentinel"),
+        "unchanged"
+    );
+    assert_eq!(
+        session
+            .get_task(task_id)
+            .expect("task exists")
+            .get_turn(prior_turn_id)
+            .expect("prior turn exists")
+            .outcome(),
+        prior_outcome.as_ref()
+    );
+}
+
+#[test]
+fn reflective_plan_verifies_continue_then_enforces_the_future_budget() {
+    let workspace = TempDir::new();
+    let (mut session, task_id, turn_id) =
+        running_turn_in_workspace(workspace.path(), "record an exhausted prior turn");
+    let mut continue_turn =
+        |_: &str, _: &[crate::agent_loop::WorkspaceObservation]| WorkspaceAction::Continue;
+    let prior_result = run_goal_turn_with_budget(
+        &mut session,
+        task_id,
+        turn_id,
+        "record an exhausted prior turn",
+        1,
+        &mut continue_turn,
+    )
+    .expect("record exhausted prior turn");
+    assert_eq!(
+        prior_result.stop_reason(),
+        GoalTurnStopReason::ActionBudgetExhausted
+    );
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind unused local endpoint");
+    let address = listener.local_addr().expect("read unused local endpoint");
+    drop(listener);
+    let mut brain = OllamaDecisionSource::with_endpoint("fixture-model", 2, address);
+
+    let error = brain
+        .create_reflective_plan(&session, &prior_result, "follow up", &[], 2)
+        .expect_err("reflection must reserve budget for a later operation and control");
+
+    assert!(matches!(error, BrainReflectionError::ActionBudgetExhausted));
+}
+
+fn assert_anthropic_schema_supported(schema: &Value) {
+    match schema {
+        Value::Object(fields) => {
+            for unsupported in ["minimum", "maximum", "minLength", "maxLength"] {
+                assert!(
+                    !fields.contains_key(unsupported),
+                    "Anthropic schema contains unsupported `{unsupported}`"
+                );
+            }
+            if fields.get("type").and_then(Value::as_str) == Some("object") {
+                assert_eq!(
+                    fields.get("additionalProperties"),
+                    Some(&Value::Bool(false))
+                );
+            }
+            fields.values().for_each(assert_anthropic_schema_supported);
+        }
+        Value::Array(values) => values.iter().for_each(assert_anthropic_schema_supported),
+        _ => {}
+    }
+}
+
+#[test]
+fn model_name_validation_rejects_cloud_models() {
+    assert!(validate_model_name_for_provider("qwen3", ModelProvider::Ollama).is_ok());
+    assert!(validate_model_name_for_provider("gemma4:cloud", ModelProvider::Ollama).is_err());
+    assert!(validate_model_name_for_provider("gemma4:cloud ", ModelProvider::Ollama).is_err());
+    assert!(
+        validate_model_name_for_provider("namespace/model:cloud", ModelProvider::Ollama).is_err()
+    );
+    assert!(
+        validate_model_name_for_provider("qwen3-coder:480b-cloud", ModelProvider::Ollama).is_err()
+    );
+    assert!(validate_model_name_for_provider("gpt-oss:20b-cloud", ModelProvider::Ollama).is_err());
+    assert!(
+        validate_model_name_for_provider("qwen3-coder:480b-Cloud", ModelProvider::Ollama).is_err()
+    );
+}
+
+#[test]
+fn all_request_builders_share_prompt_and_keep_existing_size_limits() {
+    let build_requests = |goal: &str, observations: &[crate::agent_loop::WorkspaceObservation]| {
+        [
+            build_chat_request("test-model", goal, observations, 3, None),
+            build_responses_request(
+                "test-model",
+                ModelProvider::OpenAi,
+                goal,
+                observations,
+                3,
+                None,
+            ),
+            build_anthropic_request("test-model", goal, observations, 3, None),
+            build_gemini_request("gemini-2.5-flash", goal, observations, 3, None),
+            providers::build_compatible_chat_request(
+                "test-model",
+                OpenAiCompatibleProvider::Groq,
+                goal,
+                observations,
+                3,
+                None,
+            ),
+        ]
+    };
+    let observations = [crate::agent_loop::WorkspaceObservation::FileRead {
+        path: PathBuf::from("note.txt"),
+        contents: "local fixture".to_owned(),
+    }];
+    let requests = build_requests("Summarize the note", &observations).map(|request| {
+        serde_json::from_slice::<Value>(&request.expect("build request"))
+            .expect("decode offline request")
+    });
+    let expected_prompt = concat!(
+        "Task goal:\nSummarize the note\n\nAction slots remaining, including this decision: 3. The task fails if the action budget runs out before completion.\n\nPrior workspace observations (JSON):\n",
+        r#"[{"contents":"local fixture","path":"note.txt","type":"file_read"}]"#
+    );
+    let prompts = [
+        requests[0]["messages"][1]["content"].as_str(),
+        requests[1]["input"].as_str(),
+        requests[2]["messages"][0]["content"].as_str(),
+        requests[3]["contents"][0]["parts"][0]["text"].as_str(),
+        requests[4]["messages"][1]["content"].as_str(),
+    ];
+    assert_eq!(prompts, [Some(expected_prompt); 5]);
+
+    let oversized_observation = [crate::agent_loop::WorkspaceObservation::FileRead {
+        path: PathBuf::from("note.txt"),
+        contents: "x".repeat(2 * 1024 * 1024 + 1),
+    }];
+    for result in build_requests("goal", &oversized_observation) {
+        assert!(matches!(result, Err(ModelError::ObservationsTooLarge)));
+    }
+
+    let oversized_goal = "g".repeat(MAX_MODEL_REQUEST_BYTES + 1);
+    for result in build_requests(&oversized_goal, &[]) {
+        assert!(matches!(result, Err(ModelError::RequestTooLarge)));
+    }
+}
+
+#[test]
+fn every_model_provider_keeps_root_guidance_in_the_same_separate_section() {
+    let guidance = "Use the project's existing error style.";
+    let observations = [WorkspaceObservation::FileRead {
+        path: PathBuf::from("note.txt"),
+        contents: "observed text".to_owned(),
+    }];
+    let requests = [
+        serde_json::from_slice::<Value>(
+            &build_chat_request("fixture", "Read the note", &observations, 4, Some(guidance))
+                .expect("build Ollama request"),
+        )
+        .expect("decode Ollama request"),
+        serde_json::from_slice::<Value>(
+            &build_responses_request(
+                "fixture",
+                ModelProvider::OpenAi,
+                "Read the note",
+                &observations,
+                4,
+                Some(guidance),
+            )
+            .expect("build Responses request"),
+        )
+        .expect("decode Responses request"),
+        serde_json::from_slice::<Value>(
+            &build_anthropic_request("fixture", "Read the note", &observations, 4, Some(guidance))
+                .expect("build Anthropic request"),
+        )
+        .expect("decode Anthropic request"),
+        serde_json::from_slice::<Value>(
+            &build_gemini_request(
+                "gemini-2.5-flash",
+                "Read the note",
+                &observations,
+                4,
+                Some(guidance),
+            )
+            .expect("build Gemini request"),
+        )
+        .expect("decode Gemini request"),
+        serde_json::from_slice::<Value>(
+            &providers::build_compatible_chat_request(
+                "fixture",
+                OpenAiCompatibleProvider::Groq,
+                "Read the note",
+                &observations,
+                4,
+                Some(guidance),
+            )
+            .expect("build compatible request"),
+        )
+        .expect("decode compatible request"),
+    ];
+    let prompts = [
+        requests[0]["messages"][1]["content"].as_str().unwrap(),
+        requests[1]["input"].as_str().unwrap(),
+        requests[2]["messages"][0]["content"].as_str().unwrap(),
+        requests[3]["contents"][0]["parts"][0]["text"]
+            .as_str()
+            .unwrap(),
+        requests[4]["messages"][1]["content"].as_str().unwrap(),
+    ];
+
+    for prompt in prompts {
+        assert!(prompt.contains("Task goal:\nRead the note"));
+        assert!(prompt.contains("Action slots remaining, including this decision: 4"));
+        assert!(prompt.contains("observed text"));
+        assert!(prompt.contains(
+            "Root AGENTS.md project guidance (lower priority):\nUse the project's existing error style."
+        ));
+        assert_eq!(prompt.matches(guidance).count(), 1);
+    }
+}
+
+#[test]
+fn workspace_registry_contains_only_existing_operations_and_schemas() {
+    let actual = crate::tools::registry::workspace_operations()
+        .iter()
+        .map(|operation| {
+            json!({
+                "name": operation.name(),
+                "description": operation.description(),
+                "parameters": operation.parameters()
+            })
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        Value::Array(actual),
+        json!([
+            {
+                "name":"read_file",
+                "description":"Read one safe UTF-8 workspace file.",
+                "parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}
+            },
+            {
+                "name":"read_range",
+                "description":"Read a bounded one-based line range from one safe UTF-8 file.",
+                "parameters":{"type":"object","properties":{"path":{"type":"string"},"start_line":{"type":"integer","minimum":1},"max_lines":{"type":"integer","minimum":1,"maximum":200}},"required":["max_lines","path","start_line"],"additionalProperties":false}
+            },
+            {
+                "name":"list_directory",
+                "description":"List immediate entries in a safe workspace directory.",
+                "parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}
+            },
+            {
+                "name":"create_directory",
+                "description":"Create one directory inside the workspace.",
+                "parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}
+            },
+            {
+                "name":"search_text",
+                "description":"Find a literal query in immediate regular UTF-8 workspace files, honoring applicable root and nested .gitignore glob rules and negation.",
+                "parameters":{"type":"object","properties":{"directory":{"type":"string"},"query":{"type":"string","minLength":1,"maxLength":4096}},"required":["directory","query"],"additionalProperties":false}
+            },
+            {
+                "name":"search_tree_text",
+                "description":"Find a literal query recursively in regular UTF-8 workspace files, honoring applicable root and nested .gitignore glob rules and negation, and skipping .git metadata directories.",
+                "parameters":{"type":"object","properties":{"directory":{"type":"string"},"query":{"type":"string","minLength":1,"maxLength":4096}},"required":["directory","query"],"additionalProperties":false}
+            },
+            {
+                "name":"create_file",
+                "description":"Create one new UTF-8 file inside the workspace without replacing an existing path.",
+                "parameters":{"type":"object","properties":{"path":{"type":"string"},"contents":{"type":"string"}},"required":["contents","path"],"additionalProperties":false}
+            },
+            {
+                "name":"replace_text",
+                "description":"Replace one unique exact match in a safe UTF-8 workspace file.",
+                "parameters":{"type":"object","properties":{"path":{"type":"string"},"match_text":{"type":"string","minLength":1},"replacement_text":{"type":"string"}},"required":["match_text","path","replacement_text"],"additionalProperties":false}
+            },
+            {
+                "name":"apply_patch",
+                "description":"Apply one bounded single-file unified diff to an existing safe UTF-8 workspace file with exact hunk context.",
+                "parameters":{"type":"object","properties":{"path":{"type":"string"},"patch":{"type":"string","minLength":1,"maxLength":32768}},"required":["patch","path"],"additionalProperties":false}
+            },
+            {
+                "name":"offline_cargo_test",
+                "description":"Run the fixed offline locked Cargo test profile, only if the task has host authorization and verified Linux confinement. No arguments.",
+                "parameters":{"type":"object","properties":{},"required":[],"additionalProperties":false}
+            }
+        ])
+    );
+}
+
+#[test]
+fn provider_request_builders_keep_their_formats_with_registry_tools() {
+    let observations = [];
+    let ollama = serde_json::from_slice::<Value>(
+        &build_chat_request("test-model", "goal", &observations, 3, None)
+            .expect("build Ollama request"),
+    )
+    .expect("decode Ollama request");
+    let responses = serde_json::from_slice::<Value>(
+        &build_responses_request(
+            "test-model",
+            ModelProvider::OpenAi,
+            "goal",
+            &observations,
+            3,
+            None,
+        )
+        .expect("build Responses request"),
+    )
+    .expect("decode Responses request");
+    let anthropic = serde_json::from_slice::<Value>(
+        &build_anthropic_request("test-model", "goal", &observations, 3, None)
+            .expect("build Anthropic request"),
+    )
+    .expect("decode Anthropic request");
+    let gemini = serde_json::from_slice::<Value>(
+        &build_gemini_request("gemini-2.5-flash", "goal", &observations, 3, None)
+            .expect("build Gemini request"),
+    )
+    .expect("decode Gemini request");
+    let compatible = serde_json::from_slice::<Value>(
+        &providers::build_compatible_chat_request(
+            "test-model",
+            OpenAiCompatibleProvider::Groq,
+            "goal",
+            &observations,
+            3,
+            None,
+        )
+        .expect("build compatible chat request"),
+    )
+    .expect("decode compatible chat request");
+
+    let function_tools = tool_definitions();
+    let names = function_tools
+        .as_array()
+        .expect("function tool array")
+        .iter()
+        .map(|tool| tool["function"]["name"].as_str().expect("tool name"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        [
+            "read_file",
+            "read_range",
+            "list_directory",
+            "create_directory",
+            "search_text",
+            "search_tree_text",
+            "create_file",
+            "replace_text",
+            "apply_patch",
+            "offline_cargo_test",
+            "complete_task"
+        ]
+    );
+    assert_eq!(ollama["tools"], function_tools);
+    assert_eq!(responses["tools"], openai_tool_definitions());
+    assert_eq!(anthropic["tools"], anthropic_tool_definitions());
+    assert_eq!(
+        gemini["tools"][0]["functionDeclarations"],
+        Value::Array(gemini_function_declarations())
+    );
+    assert_eq!(compatible["tools"], function_tools);
+    assert_eq!(responses["tools"][0]["type"], "function");
+    assert_eq!(anthropic["tools"][0]["strict"], Value::Bool(true));
+    assert_eq!(
+        gemini["tools"][0]["functionDeclarations"][0]["name"],
+        "read_file"
+    );
+}
+
+#[test]
+fn public_model_source_can_be_constructed_without_a_request() {
+    let _source = crate::OllamaDecisionSource::new("mock-model", 1);
+}
+
+#[test]
+fn restored_task_session_runs_a_fresh_model_turn_without_changing_directory() {
+    let (address, server) = mock_server(vec![
+        ok(tool_response(
+            "create_file",
+            json!({"path":"first-turn.txt","contents":"created before restore"}),
+        )),
+        ok(tool_response(
+            "complete_task",
+            json!({"result":"first turn complete"}),
+        )),
+        ok(tool_response("read_file", json!({"path":"first-turn.txt"}))),
+        ok(tool_response(
+            "complete_task",
+            json!({"result":"fresh turn complete"}),
+        )),
+    ]);
+    let workspace = TempDir::new();
+    let other_directory = TempDir::new();
+    let (result, session, task_id, first_turn_id, second_turn_id) =
+        in_workspace(workspace.path(), || {
+            let (mut session, task_id, first_turn_id) = running_turn();
+            let mut first_source = OllamaDecisionSource::with_endpoint("mock-model", 2, address);
+            let first_result = run_goal_turn_with_budget(
+                &mut session,
+                task_id,
+                first_turn_id,
+                "Create the first turn file",
+                2,
+                &mut first_source,
+            )
+            .expect("first mocked turn succeeds");
+            assert_eq!(first_result.stop_reason(), GoalTurnStopReason::Completed);
+
+            let checkpoint = session
+                .export_checkpoint()
+                .expect("export completed turn checkpoint");
+            std::env::set_current_dir(other_directory.path())
+                .expect("change to unrelated process directory");
+            let original_directory =
+                std::env::current_dir().expect("read unrelated process directory");
+            let mut restored =
+                TaskSession::restore_checkpoint_in_workspace(&checkpoint, workspace.path())
+                    .expect("restore the session at its explicit workspace");
+            assert_eq!(
+                std::env::current_dir().expect("read process directory after restore"),
+                original_directory
+            );
+
+            let second_turn_id = {
+                let task = restored
+                    .get_task_mut(task_id)
+                    .expect("restored task exists");
+                let turn_id = task.create_turn().expect("create fresh restored turn");
+                task.transition_turn(turn_id, TurnState::Running)
+                    .expect("start fresh restored turn");
+                turn_id
+            };
+            let mut second_source = OllamaDecisionSource::with_endpoint("mock-model", 2, address);
+            let result = run_goal_turn_with_budget(
+                &mut restored,
+                task_id,
+                second_turn_id,
+                "Read the first turn file",
+                2,
+                &mut second_source,
+            );
+            assert_eq!(
+                std::env::current_dir().expect("read process directory after fresh turn"),
+                original_directory
+            );
+            (result, restored, task_id, first_turn_id, second_turn_id)
+        });
+
+    let result = result.expect("fresh turn on restored session succeeds");
+    assert_eq!(result.actions_taken(), 2);
+    assert_eq!(result.observations().len(), 1);
+    assert!(matches!(
+        &result.observations()[0],
+        crate::agent_loop::WorkspaceObservation::FileRead { contents, .. }
+            if contents == "created before restore"
+    ));
+    let task = session.get_task(task_id).expect("restored task exists");
+    assert_eq!(task.state(), TaskState::Running);
+    assert_eq!(
+        task.get_turn(first_turn_id)
+            .expect("first turn exists")
+            .state(),
+        TurnState::Succeeded
+    );
+    assert_eq!(
+        task.get_turn(second_turn_id)
+            .expect("fresh turn exists")
+            .state(),
+        TurnState::Succeeded
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("first-turn.txt")).expect("read original file"),
+        "created before restore"
+    );
+    let requests = server.join().expect("join mock server");
+    assert_eq!(requests.len(), 4);
+    let third_request = request_json(&requests[2]);
+    let fresh_turn_prompt = third_request["messages"][1]["content"]
+        .as_str()
+        .expect("fresh turn prompt");
+    assert!(fresh_turn_prompt.contains("Read the first turn file"));
+    assert!(!fresh_turn_prompt.contains("file_created"));
+}
+
+#[test]
+fn malformed_and_unsupported_model_calls_fail_the_active_turn() {
+    for response in [
+        ok("not json".to_owned()),
+        ok(tool_response(
+            "run_shell",
+            json!({"command":"touch must-not-exist"}),
+        )),
+    ] {
+        let (address, server) = mock_server(vec![response]);
+        let workspace = TempDir::new();
+        let (result, session, task_id, turn_id) = in_workspace(workspace.path(), || {
+            let (mut session, task_id, turn_id) = running_turn();
+            let mut source = OllamaDecisionSource::with_endpoint("mock-model", 1, address);
+            let result = run_goal_turn_with_budget(
+                &mut session,
+                task_id,
+                turn_id,
+                "Reject malformed or unsupported calls",
+                1,
+                &mut source,
+            );
+            (result, session, task_id, turn_id)
+        });
+        let result = result.expect("model call failure is recorded in the turn");
+        assert_eq!(result.stop_reason(), GoalTurnStopReason::ActionFailed);
+        assert_failed_turn(&result, &session, task_id, turn_id);
+        assert!(fs::read_dir(workspace.path())
+            .expect("list workspace")
+            .next()
+            .is_none());
+        assert_eq!(server.join().expect("join mock server").len(), 1);
+    }
+}
+
+#[test]
+fn parser_maps_only_one_supported_tool_call() {
+    let action = parse_model_response(
+            br#"{"message":{"role":"assistant","tool_calls":[{"function":{"name":"create_file","arguments":{"path":"notes.txt","contents":"hello"}}}]}}"#,
+        )
+        .expect("parse supported action");
+    assert_eq!(
+        action,
+        WorkspaceAction::CreateFile {
+            path: PathBuf::from("notes.txt"),
+            contents: "hello".to_owned()
+        }
+    );
+
+    let patch_action = parse_model_response(
+        br#"{"message":{"role":"assistant","tool_calls":[{"function":{"name":"apply_patch","arguments":{"path":"notes with spaces.txt","patch":"--- a/notes with spaces.txt\n+++ b/notes with spaces.txt\n@@ -1 +1 @@\n-old\n+new\n"}}}]}}"#,
+    )
+    .expect("parse registered patch action");
+    assert_eq!(
+        patch_action,
+        WorkspaceAction::ApplyPatch {
+            path: PathBuf::from("notes with spaces.txt"),
+            patch: "--- a/notes with spaces.txt\n+++ b/notes with spaces.txt\n@@ -1 +1 @@\n-old\n+new\n".to_owned()
+        }
+    );
+    assert!(parse_model_response(
+        tool_response(
+            "apply_patch",
+            json!({"path":"notes.txt", "patch":"x".repeat(32 * 1024 + 1)})
+        )
+        .as_bytes()
+    )
+    .is_err());
+
+    assert!(parse_model_response(b"not json").is_err());
+    assert!(parse_model_response(
+            br#"{"message":{"tool_calls":[{"function":{"name":"run_shell","arguments":{"command":"touch unsafe"}}}]}}"#
+        )
+        .is_err());
+    assert!(parse_model_response(
+            br#"{"message":{"tool_calls":[{"function":{"name":"complete_task","arguments":{"result":"done"}}},{"function":{"name":"complete_task","arguments":{"result":"also done"}}}]}}"#
+        )
+        .is_err());
+    assert!(parse_model_response(
+            br#"{"message":{"tool_calls":[{"function":{"name":"create_file","arguments":{"path":"notes.txt","contents":"hello","command":"unsafe"}}}]}}"#
+        )
+        .is_err());
+}
+
+#[test]
+fn parser_rejects_tool_calls_without_an_assistant_role() {
+    assert!(parse_model_response(
+        br#"{"message":{"tool_calls":[{"function":{"name":"create_file","arguments":{"path":"unsafe.txt","contents":"must not write"}}}]}}"#
+    )
+    .is_err());
+    assert!(parse_model_response(
+        br#"{"message":{"role":"user","tool_calls":[{"function":{"name":"create_file","arguments":{"path":"unsafe.txt","contents":"must not write"}}}]}}"#
+    )
+    .is_err());
+}
+
+#[test]
+fn mocked_model_uses_an_explicit_workspace_without_changing_current_directory() {
+    let _lock = crate::CURRENT_DIR_TEST_LOCK
+        .lock()
+        .expect("lock current directory");
+    let (address, server) = mock_server(vec![
+        ok(tool_response(
+            "create_file",
+            json!({"path":"model result.txt","contents":"created in selected workspace"}),
+        )),
+        ok(tool_response(
+            "complete_task",
+            json!({"result":"created model result.txt"}),
+        )),
+    ]);
+    let temporary = TempDir::new();
+    let workspace = temporary.path().join("selected workspace");
+    fs::create_dir(&workspace).expect("create selected workspace");
+    let original_directory = std::env::current_dir().expect("read current directory");
+    assert_ne!(
+        fs::canonicalize(&workspace).expect("canonicalize workspace"),
+        original_directory
+    );
+
+    let mut session =
+        TaskSession::new_in_workspace(&workspace).expect("capture selected workspace");
+    let task = session.create_task("Create a result in the selected workspace");
+    task.transition(TaskState::Running).expect("start task");
+    let task_id = task.id();
+    let turn_id = task.create_turn().expect("create turn");
+    task.transition_turn(turn_id, TurnState::Running)
+        .expect("start turn");
+    let mut source = OllamaDecisionSource::with_endpoint("mock-model", 2, address);
+
+    let result = run_goal_turn_with_budget(
+        &mut session,
+        task_id,
+        turn_id,
+        "Create a result file",
+        2,
+        &mut source,
+    )
+    .expect("run mocked local-model turn");
+
+    assert_eq!(result.stop_reason(), GoalTurnStopReason::Completed);
+    assert_eq!(
+        fs::read_to_string(workspace.join("model result.txt")).expect("read model result"),
+        "created in selected workspace"
+    );
+    assert_eq!(
+        std::env::current_dir().expect("read current directory"),
+        original_directory
+    );
+    assert_eq!(server.join().expect("join mock server").len(), 2);
+}
+
+#[test]
+fn registered_patch_tool_returns_verified_change_evidence_through_task_observations() {
+    let patch = "--- a/notes with spaces.txt\n+++ b/notes with spaces.txt\n@@ -1,3 +1,3 @@\n top\n-old\n+new\n bottom\n";
+    let (address, server) = mock_server(vec![
+        ok(tool_response(
+            "apply_patch",
+            json!({"path":"notes with spaces.txt", "patch":patch}),
+        )),
+        ok(tool_response(
+            "complete_task",
+            json!({"result":"patch applied and verified"}),
+        )),
+    ]);
+    let temporary = TempDir::new();
+    let workspace = temporary.path().join("selected workspace");
+    fs::create_dir(&workspace).expect("create selected workspace");
+    fs::write(
+        workspace.join("notes with spaces.txt"),
+        "top\nold\nbottom\n",
+    )
+    .expect("write patch fixture");
+    let mut session = TaskSession::new_in_workspace(&workspace).expect("capture workspace");
+    let task = session.create_task("Apply one context-checked patch");
+    task.transition(TaskState::Running).expect("start task");
+    let task_id = task.id();
+    let turn_id = task.create_turn().expect("create turn");
+    task.transition_turn(turn_id, TurnState::Running)
+        .expect("start turn");
+    let mut source = OllamaDecisionSource::with_endpoint("mock-model", 2, address);
+
+    let result = run_goal_turn_with_budget(
+        &mut session,
+        task_id,
+        turn_id,
+        "Patch the requested lines",
+        2,
+        &mut source,
+    )
+    .expect("run registered patch tool");
+
+    assert_eq!(result.stop_reason(), GoalTurnStopReason::Completed);
+    assert!(matches!(
+        result.observations().first(),
+        Some(WorkspaceObservation::PatchApplied {
+            path,
+            before_diff,
+            after_diff,
+            ..
+        }) if path == Path::new("notes with spaces.txt")
+            && before_diff == "top\nold\nbottom"
+            && after_diff == "top\nnew\nbottom"
+    ));
+    assert_eq!(
+        fs::read(workspace.join("notes with spaces.txt")).expect("read patched file"),
+        b"top\nnew\nbottom\n"
+    );
+    assert_eq!(server.join().expect("join mock server").len(), 2);
+}
+
+#[test]
+fn mocked_model_performs_multiple_actions_and_completes_the_task() {
+    let (address, server) = mock_server(vec![
+        ok(tool_response("create_directory", json!({"path":"notes"}))),
+        ok(tool_response(
+            "create_file",
+            json!({"path":"notes/summary.txt","contents":"created locally"}),
+        )),
+        ok(tool_response(
+            "complete_task",
+            json!({"result":"Created notes/summary.txt."}),
+        )),
+    ]);
+    let workspace = TempDir::new();
+    let (result, mut session, task_id, turn_id) = in_workspace(workspace.path(), || {
+        let (mut session, task_id, turn_id) = running_turn();
+        let mut source = OllamaDecisionSource::with_endpoint("mock-model", 3, address);
+        let result = run_goal_turn_with_budget(
+            &mut session,
+            task_id,
+            turn_id,
+            "Create a summary file",
+            3,
+            &mut source,
+        );
+        (result, session, task_id, turn_id)
+    });
+    let result = result.expect("complete mocked model turn");
+    assert_eq!(result.stop_reason(), GoalTurnStopReason::Completed);
+    assert_eq!(result.actions_taken(), 3);
+    assert!(matches!(
+        result.outcome(),
+        Some(TurnOutcome::Success { result }) if result == "Created notes/summary.txt."
+    ));
+    session
+        .get_task_mut(task_id)
+        .expect("task exists")
+        .transition(TaskState::Succeeded)
+        .expect("finish task");
+    let task = session.get_task(task_id).expect("task exists");
+    assert_eq!(task.state(), TaskState::Succeeded);
+    assert_eq!(
+        task.get_turn(turn_id).expect("turn exists").state(),
+        TurnState::Succeeded
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("notes/summary.txt")).expect("read created file"),
+        "created locally"
+    );
+
+    let requests = server.join().expect("join mock server");
+    assert_eq!(requests.len(), 3);
+    let first = request_json(&requests[0]);
+    let second = request_json(&requests[1]);
+    let third = request_json(&requests[2]);
+    assert_eq!(first["model"], "mock-model");
+    assert_eq!(first["stream"], false);
+    assert!(first["messages"][1]["content"]
+        .as_str()
+        .expect("prompt text")
+        .contains("Create a summary file"));
+    assert!(second["messages"][1]["content"]
+        .as_str()
+        .expect("second prompt")
+        .contains("directory_created"));
+    assert!(third["messages"][1]["content"]
+        .as_str()
+        .expect("third prompt")
+        .contains("file_created"));
+    assert_eq!(
+        first["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .filter_map(|tool| tool["function"]["name"].as_str())
+            .collect::<Vec<_>>(),
+        [
+            "read_file",
+            "read_range",
+            "list_directory",
+            "create_directory",
+            "search_text",
+            "search_tree_text",
+            "create_file",
+            "replace_text",
+            "apply_patch",
+            "offline_cargo_test",
+            "complete_task"
+        ]
+    );
+}
+
+#[test]
+fn model_decisions_stop_at_the_existing_action_budget() {
+    let (address, server) = mock_server(vec![
+        ok(tool_response("create_directory", json!({"path":"one"}))),
+        ok(tool_response(
+            "create_file",
+            json!({"path":"one/two.txt","contents":"bounded"}),
+        )),
+    ]);
+    let workspace = TempDir::new();
+    let (result, session, task_id, turn_id) = in_workspace(workspace.path(), || {
+        let (mut session, task_id, turn_id) = running_turn();
+        let mut source = OllamaDecisionSource::with_endpoint("mock-model", 2, address);
+        let result = run_goal_turn_with_budget(
+            &mut session,
+            task_id,
+            turn_id,
+            "Create a file, then stop at the budget",
+            2,
+            &mut source,
+        );
+        (result, session, task_id, turn_id)
+    });
+    let result = result.expect("bounded model turn");
+    assert_eq!(
+        result.stop_reason(),
+        GoalTurnStopReason::ActionBudgetExhausted
+    );
+    assert_eq!(result.actions_taken(), 2);
+    assert!(matches!(
+        result.outcome(),
+        Some(TurnOutcome::Failure { .. })
+    ));
+    assert_failed_turn(&result, &session, task_id, turn_id);
+    let requests = server.join().expect("join mock server");
+    assert_eq!(requests.len(), 2);
+    assert!(fs::read(workspace.path().join("one/two.txt")).is_ok());
+    assert_eq!(
+        session.get_task(task_id).expect("task exists").state(),
+        TaskState::Running
+    );
+}
+
+#[test]
+fn unsafe_model_path_fails_without_writing_outside_the_workspace() {
+    let (address, server) = mock_server(vec![ok(tool_response(
+        "create_file",
+        json!({"path":"../outside.txt","contents":"must not escape"}),
+    ))]);
+    let root = TempDir::new();
+    let workspace = root.path().join("workspace");
+    fs::create_dir(&workspace).expect("create workspace");
+    let (result, session, task_id, turn_id) = in_workspace(&workspace, || {
+        let (mut session, task_id, turn_id) = running_turn();
+        let mut source = OllamaDecisionSource::with_endpoint("mock-model", 1, address);
+        let result = run_goal_turn_with_budget(
+            &mut session,
+            task_id,
+            turn_id,
+            "Create a file in the workspace",
+            1,
+            &mut source,
+        );
+        (result, session, task_id, turn_id)
+    });
+    let result = result.expect("unsafe action is a recorded failure");
+    assert_eq!(result.stop_reason(), GoalTurnStopReason::ActionFailed);
+    assert!(matches!(
+        result.outcome(),
+        Some(TurnOutcome::Failure { .. })
+    ));
+    assert_failed_turn(&result, &session, task_id, turn_id);
+    assert!(!root.path().join("outside.txt").exists());
+    assert!(fs::read_dir(&workspace)
+        .expect("list workspace")
+        .next()
+        .is_none());
+    assert_eq!(server.join().expect("join mock server").len(), 1);
+}
+
+#[test]
+fn http_and_response_decoding_failures_become_failed_actions() {
+    for response in [
+        MockResponse {
+            status: 503,
+            body: "service unavailable".to_owned(),
+        },
+        ok("{invalid json".to_owned()),
+    ] {
+        let (address, server) = mock_server(vec![response]);
+        let workspace = TempDir::new();
+        let (result, session, task_id, turn_id) = in_workspace(workspace.path(), || {
+            let (mut session, task_id, turn_id) = running_turn();
+            let mut source = OllamaDecisionSource::with_endpoint("mock-model", 1, address);
+            let result = run_goal_turn_with_budget(
+                &mut session,
+                task_id,
+                turn_id,
+                "Fail clearly",
+                1,
+                &mut source,
+            );
+            (result, session, task_id, turn_id)
+        });
+        let result = result.expect("model failure is recorded in the turn");
+        assert_eq!(result.stop_reason(), GoalTurnStopReason::ActionFailed);
+        assert_failed_turn(&result, &session, task_id, turn_id);
+        assert!(matches!(
+            result.outcome(),
+            Some(TurnOutcome::Failure { .. })
+        ));
+        assert_eq!(server.join().expect("join mock server").len(), 1);
+    }
+
+    let workspace = TempDir::new();
+    let (result, session, task_id, turn_id) = in_workspace(workspace.path(), || {
+        let (mut session, task_id, turn_id) = running_turn();
+        let mut source = OllamaDecisionSource::with_endpoint(
+            "mock-model",
+            1,
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+        );
+        let result = run_goal_turn_with_budget(
+            &mut session,
+            task_id,
+            turn_id,
+            "Fail when the service cannot be reached",
+            1,
+            &mut source,
+        );
+        (result, session, task_id, turn_id)
+    });
+    let result = result.expect("connection failure is recorded in the turn");
+    assert_eq!(result.stop_reason(), GoalTurnStopReason::ActionFailed);
+    assert_failed_turn(&result, &session, task_id, turn_id);
+    assert!(matches!(
+        result.outcome(),
+        Some(TurnOutcome::Failure { .. })
+    ));
+}
+
+fn openai_function_call(name: &str, arguments: Value) -> Value {
+    json!({
+        "type": "function_call",
+        "name": name,
+        "arguments": arguments.to_string()
+    })
+}
+
+fn anthropic_tool_use(name: &str, input: Value) -> Value {
+    json!({"type":"tool_use", "id":"toolu_test", "name":name, "input":input})
+}
+
+fn request_header(request: &[u8], wanted: &str) -> Option<String> {
+    let header_end = request.windows(4).position(|bytes| bytes == b"\r\n\r\n")?;
+    String::from_utf8_lossy(&request[..header_end])
+        .lines()
+        .skip(1)
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case(wanted)
+                .then(|| value.trim().to_owned())
+        })
+}
+
+fn request_body(request: &[u8]) -> Value {
+    let body_start = request
+        .windows(4)
+        .position(|bytes| bytes == b"\r\n\r\n")
+        .expect("request header terminator")
+        + 4;
+    serde_json::from_slice(&request[body_start..]).expect("decode provider request")
+}
+
+fn compatible_chat_function_call(name: &str, arguments: Value) -> Value {
+    compatible_chat_function_call_with_raw_arguments(name, Value::String(arguments.to_string()))
+}
+
+fn compatible_chat_function_call_with_raw_arguments(name: &str, arguments: Value) -> Value {
+    json!({
+        "id":"call_test",
+        "type":"function",
+        "function":{"name":name,"arguments":arguments}
+    })
+}
+
+fn compatible_chat_response(calls: Vec<Value>) -> String {
+    json!({
+        "choices":[{
+            "finish_reason":"tool_calls",
+            "message":{"role":"assistant","tool_calls":calls}
+        }]
+    })
+    .to_string()
+}
+
+fn run_compatible_profile(
+    provider: OpenAiCompatibleProvider,
+    key: &str,
+    response: String,
+) -> (WorkspaceAction, Vec<u8>) {
+    let (address, server) = mock_server(vec![ok(response)]);
+    let endpoint = format!("http://{address}/v1/chat/completions");
+    let mut source =
+        OpenAiCompatibleDecisionSource::with_endpoint("test-model", provider, key, 3, endpoint);
+    let action = source.choose_action(
+        "Create a result from the observation",
+        &[crate::agent_loop::WorkspaceObservation::FileRead {
+            path: PathBuf::from("fixture.txt"),
+            contents: "mock-only workspace text".to_owned(),
+        }],
+    );
+    let requests = server.join().expect("join compatible chat mock");
+    (action, requests.into_iter().next().expect("one request"))
+}
+
+fn mistral_provider() -> OpenAiCompatibleProvider {
+    match ModelProvider::parse("mistral") {
+        Some(ModelProvider::OpenAiCompatible(provider)) => provider,
+        _ => panic!("Mistral must select the OpenAI-compatible profile"),
+    }
+}
+
+fn assert_compatible_chat_request_with_tool_choice(
+    request: &[u8],
+    key: &str,
+    expected_tool_choice: &str,
+) -> Value {
+    let first_line = String::from_utf8_lossy(request)
+        .lines()
+        .next()
+        .expect("request line")
+        .to_owned();
+    assert!(first_line.starts_with("POST /v1/chat/completions "));
+    assert_eq!(
+        request_header(request, "authorization"),
+        Some(format!("Bearer {key}"))
+    );
+    let body = request_body(request);
+    assert_eq!(body["model"], "test-model");
+    assert_eq!(body["tool_choice"], expected_tool_choice);
+    assert_eq!(body["parallel_tool_calls"], false);
+    assert_eq!(body["n"], 1);
+    assert_eq!(body["stream"], false);
+    assert!(body["messages"][0]["content"]
+        .as_str()
+        .is_some_and(|text| text.contains("exactly one tool call")));
+    assert!(body["messages"][1]["content"].as_str().is_some_and(|text| {
+        text.contains("Create a result from the observation")
+            && text.contains("mock-only workspace text")
+            && text.contains("including this decision: 3")
+    }));
+    let tools = body["tools"].as_array().expect("compatible tools array");
+    assert!(tools
+        .iter()
+        .any(|tool| tool["function"]["name"] == "read_file"));
+    assert!(tools
+        .iter()
+        .any(|tool| tool["function"]["name"] == "complete_task"));
+    assert!(tools.iter().all(|tool| {
+        tool["function"]["parameters"]["additionalProperties"] == false
+            && tool["function"]["parameters"]["required"].is_array()
+    }));
+    assert!(!body.to_string().contains(key));
+    body
+}
+
+fn assert_compatible_chat_request(request: &[u8], key: &str) -> Value {
+    assert_compatible_chat_request_with_tool_choice(request, key, "required")
+}
+
+#[test]
+fn compatible_chat_profiles_have_fixed_endpoints_and_cloudflare_path_validation() {
+    let account_id = CloudflareAccountId::try_from("account-123").expect("safe account ID");
+    assert_eq!(
+        OpenAiCompatibleProvider::Cloudflare
+            .endpoint(Some(&account_id))
+            .expect("Cloudflare endpoint"),
+        "https://api.cloudflare.com/client/v4/accounts/account-123/ai/v1/chat/completions"
+    );
+    assert_eq!(
+        OpenAiCompatibleProvider::Groq
+            .endpoint(None)
+            .expect("Groq endpoint"),
+        "https://api.groq.com/openai/v1/chat/completions"
+    );
+    assert_eq!(
+        OpenAiCompatibleProvider::OpenRouter
+            .endpoint(None)
+            .expect("OpenRouter endpoint"),
+        "https://openrouter.ai/api/v1/chat/completions"
+    );
+    assert_eq!(
+        OpenAiCompatibleProvider::DeepSeek
+            .endpoint(None)
+            .expect("DeepSeek endpoint"),
+        "https://api.deepseek.com/chat/completions"
+    );
+    assert_eq!(
+        OpenAiCompatibleProvider::Zai
+            .endpoint(None)
+            .expect("Z.AI endpoint"),
+        "https://api.z.ai/api/paas/v4/chat/completions"
+    );
+    assert_eq!(
+        mistral_provider().endpoint(None).expect("Mistral endpoint"),
+        "https://api.mistral.ai/v1/chat/completions"
+    );
+    for invalid in [
+        "",
+        ".",
+        "..",
+        "account/other",
+        "account\\other",
+        "account?query",
+        "%2f",
+    ] {
+        assert!(
+            CloudflareAccountId::try_from(invalid).is_err(),
+            "{invalid:?}"
+        );
+    }
+    assert!(OpenAiCompatibleProvider::Cloudflare.endpoint(None).is_err());
+    assert!(mistral_provider().endpoint(Some(&account_id)).is_err());
+}
+
+#[test]
+fn cloudflare_chat_profile_uses_compatible_request_and_normalizes_one_action() {
+    let key = "local-cloudflare-test-token";
+    let response = compatible_chat_response(vec![compatible_chat_function_call(
+        "create_file",
+        json!({"path":"summary.txt","contents":"from Cloudflare"}),
+    )]);
+    let (action, request) =
+        run_compatible_profile(OpenAiCompatibleProvider::Cloudflare, key, response);
+    assert_compatible_chat_request(&request, key);
+    assert_eq!(
+        action,
+        WorkspaceAction::CreateFile {
+            path: PathBuf::from("summary.txt"),
+            contents: "from Cloudflare".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn groq_chat_profile_uses_compatible_request_and_normalizes_one_action() {
+    let key = "local-groq-test-key";
+    let response = compatible_chat_response(vec![compatible_chat_function_call(
+        "read_file",
+        json!({"path":"plan.md"}),
+    )]);
+    let (action, request) = run_compatible_profile(OpenAiCompatibleProvider::Groq, key, response);
+    assert_compatible_chat_request(&request, key);
+    assert_eq!(
+        action,
+        WorkspaceAction::ReadFile {
+            path: PathBuf::from("plan.md")
+        }
+    );
+}
+
+#[test]
+fn openrouter_chat_profile_disables_provider_fallback_and_normalizes_one_action() {
+    let key = "local-openrouter-test-key";
+    let response = compatible_chat_response(vec![compatible_chat_function_call(
+        "complete_task",
+        json!({"result":"done"}),
+    )]);
+    let (action, request) =
+        run_compatible_profile(OpenAiCompatibleProvider::OpenRouter, key, response);
+    let body = assert_compatible_chat_request(&request, key);
+    assert_eq!(body["provider"]["allow_fallbacks"], false);
+    assert_eq!(
+        action,
+        WorkspaceAction::Complete {
+            result: "done".to_owned()
+        }
+    );
+}
+
+#[test]
+fn deepseek_and_zai_chat_profiles_use_auto_tool_choice_and_accept_supported_calls() {
+    let deepseek_key = "local-deepseek-test-key";
+    let deepseek_response = compatible_chat_response(vec![compatible_chat_function_call(
+        "create_file",
+        json!({"path":"deepseek.txt","contents":"from DeepSeek"}),
+    )]);
+    let (deepseek_action, deepseek_request) = run_compatible_profile(
+        OpenAiCompatibleProvider::DeepSeek,
+        deepseek_key,
+        deepseek_response,
+    );
+    assert_compatible_chat_request_with_tool_choice(&deepseek_request, deepseek_key, "auto");
+    assert_eq!(
+        deepseek_action,
+        WorkspaceAction::CreateFile {
+            path: PathBuf::from("deepseek.txt"),
+            contents: "from DeepSeek".to_owned(),
+        }
+    );
+
+    let zai_key = "local-zai-test-key";
+    let zai_response =
+        compatible_chat_response(vec![compatible_chat_function_call_with_raw_arguments(
+            "read_file",
+            json!({"path":"zai.md"}),
+        )]);
+    let (zai_action, zai_request) =
+        run_compatible_profile(OpenAiCompatibleProvider::Zai, zai_key, zai_response);
+    assert_compatible_chat_request_with_tool_choice(&zai_request, zai_key, "auto");
+    assert_eq!(
+        zai_action,
+        WorkspaceAction::ReadFile {
+            path: PathBuf::from("zai.md")
         }
     );
 }
