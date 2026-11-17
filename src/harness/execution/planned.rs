@@ -296,7 +296,8 @@ impl<D: BoundedDecisionSource + ?Sized> BoundedDecisionSource for PlanDecisionSo
 fn is_registered_workspace_operation(action: &WorkspaceAction) -> bool {
     matches!(
         action,
-        WorkspaceAction::ReadFile { .. }
+        WorkspaceAction::OfflineCargoTest
+            | WorkspaceAction::ReadFile { .. }
             | WorkspaceAction::ReadRange { .. }
             | WorkspaceAction::ListDirectory { .. }
             | WorkspaceAction::CreateDirectory { .. }

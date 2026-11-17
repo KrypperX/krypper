@@ -82,6 +82,18 @@ pub(super) fn write_observation(
     observation: &WorkspaceObservation,
 ) -> io::Result<()> {
     match observation {
+        WorkspaceObservation::ProcessFinished { result } => {
+            writeln!(
+                output,
+                "Observation {number}: offline Cargo {:?}; cleanup={} truncated={}",
+                result.outcome, result.cleanup_confirmed, result.truncated
+            )?;
+            writeln!(
+                output,
+                "stdout: {:?}\nstderr: {:?}",
+                result.stdout, result.stderr
+            )?;
+        }
         WorkspaceObservation::FileRead { path, contents } => {
             writeln!(output, "Observation {number}: read {}", path.display())?;
             writeln!(output, "  contents:")?;

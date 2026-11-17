@@ -310,6 +310,7 @@ pub struct TaskSession {
     id: Uuid,
     workspace_root: Option<Arc<WorkspaceRoot>>,
     tasks: Vec<Task>,
+    process_policies: std::collections::HashMap<Uuid, Arc<crate::OfflineCargoPolicy>>,
 }
 
 /// An immutable view of the current identifiers and states in a task session.
@@ -416,6 +417,7 @@ impl TaskSession {
             id: Uuid::new_v4(),
             workspace_root: None,
             tasks: Vec::new(),
+            process_policies: Default::default(),
         }
     }
 
@@ -452,6 +454,7 @@ impl TaskSession {
             id: Uuid::new_v4(),
             workspace_root: Some(Arc::new(workspace_root)),
             tasks: Vec::new(),
+            process_policies: Default::default(),
         })
     }
 
@@ -673,6 +676,39 @@ impl TaskSession {
         turn_id: Uuid,
     ) -> Result<(), WorkspaceReadError> {
         self.running_workspace_task(task_id, turn_id).map(|_| ())
+    }
+
+    /// Grants this task the fixed offline Cargo profile. Only trusted embedding code may
+    /// grant it; model arguments and restored checkpoints never grant process authority.
+    pub fn authorize_offline_cargo_tests(
+        &mut self,
+        task_id: Uuid,
+        policy: crate::OfflineCargoPolicy,
+    ) -> Result<(), &'static str> {
+        if self.get_task(task_id).is_none() {
+            return Err("task not found");
+        }
+        self.process_policies.insert(task_id, Arc::new(policy));
+        Ok(())
+    }
+
+    /// Executes the one fixed profile after task ownership and running-turn checks.
+    pub fn run_offline_cargo_tests(
+        &self,
+        task_id: Uuid,
+        turn_id: Uuid,
+    ) -> Result<crate::ProcessResult, WorkspaceReadError> {
+        let task = self.running_workspace_task(task_id, turn_id)?;
+        let Some(policy) = self.process_policies.get(&task_id) else {
+            return Ok(crate::ProcessResult::denied());
+        };
+        let root = task
+            .workspace_root
+            .as_ref()
+            .map_err(|message| WorkspaceReadError::File {
+                message: message.clone(),
+            })?;
+        Ok(crate::tools::process::run(root, policy))
     }
 
     /// Reads one UTF-8 file for a currently running turn owned by this session.

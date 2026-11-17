@@ -2,6 +2,7 @@ use serde_json::{json, Map, Value};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WorkspaceOperation {
+    OfflineCargoTest,
     ReadFile,
     ReadRange,
     ListDirectory,
@@ -15,6 +16,7 @@ enum WorkspaceOperation {
 impl WorkspaceOperation {
     const fn name(self) -> &'static str {
         match self {
+            Self::OfflineCargoTest => "offline_cargo_test",
             Self::ReadFile => "read_file",
             Self::ReadRange => "read_range",
             Self::ListDirectory => "list_directory",
@@ -126,7 +128,7 @@ const fn bounded_positive_integer(name: &'static str, maximum: usize) -> Argumen
     }
 }
 
-const WORKSPACE_OPERATIONS: [OperationDefinition; 8] = [
+const WORKSPACE_OPERATIONS: [OperationDefinition; 9] = [
     OperationDefinition {
         operation: WorkspaceOperation::ReadFile,
         description: "Read one safe UTF-8 workspace file.",
@@ -175,6 +177,11 @@ const WORKSPACE_OPERATIONS: [OperationDefinition; 8] = [
             non_empty_string("match_text"),
             string("replacement_text"),
         ],
+    },
+    OperationDefinition {
+        operation: WorkspaceOperation::OfflineCargoTest,
+        description: "Run the fixed offline locked Cargo test profile, only if the task has host authorization and verified Linux confinement. No arguments.",
+        arguments: &[],
     },
 ];
 

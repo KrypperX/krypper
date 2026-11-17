@@ -34,6 +34,10 @@ pub(crate) struct WorkspaceRoot {
 }
 
 impl WorkspaceRoot {
+    pub(crate) fn process_descriptor(&self) -> io::Result<OwnedFd> {
+        self.descriptor.try_clone()
+    }
+
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }

@@ -9,4 +9,6 @@ pub mod harness;
 pub mod task_lifecycle;
 pub(crate) mod tools;
 
+pub use tools::process::{OfflineCargoPolicy, ProcessOutcome, ProcessResource, ProcessResult};
+
 pub use brain::{BrainReflectionError, OllamaDecisionSource, WorkspacePlan, WorkspacePlanError};

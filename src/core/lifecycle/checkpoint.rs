@@ -251,6 +251,7 @@ impl From<CheckpointTurnOutcome> for TurnOutcome {
 #[derive(Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum CheckpointActivityAction {
+    OfflineCargoTest,
     ReadFile,
     ReadRange,
     ListDirectory,
@@ -265,6 +266,7 @@ enum CheckpointActivityAction {
 impl From<TurnActivityAction> for CheckpointActivityAction {
     fn from(action: TurnActivityAction) -> Self {
         match action {
+            TurnActivityAction::OfflineCargoTest => Self::OfflineCargoTest,
             TurnActivityAction::ReadFile => Self::ReadFile,
             TurnActivityAction::ReadRange => Self::ReadRange,
             TurnActivityAction::ListDirectory => Self::ListDirectory,
@@ -281,6 +283,7 @@ impl From<TurnActivityAction> for CheckpointActivityAction {
 impl From<CheckpointActivityAction> for TurnActivityAction {
     fn from(action: CheckpointActivityAction) -> Self {
         match action {
+            CheckpointActivityAction::OfflineCargoTest => Self::OfflineCargoTest,
             CheckpointActivityAction::ReadFile => Self::ReadFile,
             CheckpointActivityAction::ReadRange => Self::ReadRange,
             CheckpointActivityAction::ListDirectory => Self::ListDirectory,
@@ -297,6 +300,10 @@ impl From<CheckpointActivityAction> for TurnActivityAction {
 #[derive(Clone, Copy, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum CheckpointActivitySummary {
+    ProcessFinished {
+        succeeded: bool,
+        output_bytes: usize,
+    },
     FileRead {
         bytes_read: usize,
     },
@@ -335,6 +342,13 @@ enum CheckpointActivitySummary {
 impl From<TurnActivitySummary> for CheckpointActivitySummary {
     fn from(summary: TurnActivitySummary) -> Self {
         match summary {
+            TurnActivitySummary::ProcessFinished {
+                succeeded,
+                output_bytes,
+            } => Self::ProcessFinished {
+                succeeded,
+                output_bytes,
+            },
             TurnActivitySummary::FileRead { bytes_read } => Self::FileRead { bytes_read },
             TurnActivitySummary::FileRangeRead {
                 start_line,
@@ -375,6 +389,13 @@ impl From<TurnActivitySummary> for CheckpointActivitySummary {
 impl From<CheckpointActivitySummary> for TurnActivitySummary {
     fn from(summary: CheckpointActivitySummary) -> Self {
         match summary {
+            CheckpointActivitySummary::ProcessFinished {
+                succeeded,
+                output_bytes,
+            } => Self::ProcessFinished {
+                succeeded,
+                output_bytes,
+            },
             CheckpointActivitySummary::FileRead { bytes_read } => Self::FileRead { bytes_read },
             CheckpointActivitySummary::FileRangeRead {
                 start_line,
@@ -553,6 +574,7 @@ impl TaskSession {
             id: session_id,
             workspace_root: None,
             tasks,
+            process_policies: Default::default(),
         })
     }
 }

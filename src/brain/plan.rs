@@ -51,7 +51,8 @@ impl WorkspacePlan {
 fn is_workspace_operation(action: &WorkspaceAction) -> bool {
     matches!(
         action,
-        WorkspaceAction::ReadFile { .. }
+        WorkspaceAction::OfflineCargoTest
+            | WorkspaceAction::ReadFile { .. }
             | WorkspaceAction::ReadRange { .. }
             | WorkspaceAction::ListDirectory { .. }
             | WorkspaceAction::CreateDirectory { .. }
