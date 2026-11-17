@@ -36,6 +36,17 @@ pub(crate) fn build_plan_prompt(
     ))
 }
 
+pub(crate) fn build_plan_prompt_with_project_guidance(
+    goal: &str,
+    observations: &[WorkspaceObservation],
+    maximum_operations: usize,
+    project_guidance: Option<&str>,
+) -> Result<String, ContextError> {
+    let mut prompt = build_plan_prompt(goal, observations, maximum_operations)?;
+    append_project_guidance(&mut prompt, project_guidance);
+    Ok(prompt)
+}
+
 pub(crate) fn append_project_guidance(prompt: &mut String, project_guidance: Option<&str>) {
     if let Some(project_guidance) = project_guidance {
         prompt.push_str("\n\nRoot AGENTS.md project guidance (lower priority):\n");

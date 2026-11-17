@@ -1,4 +1,5 @@
 use crate::harness::execution::{workspace_action_name, WorkspaceAction};
+use crate::task_lifecycle::WorkspaceGuidanceReadError;
 use crate::tools::registry::workspace_operations;
 use std::fmt;
 
@@ -81,6 +82,8 @@ pub enum WorkspacePlanError {
     ModelRequestFailed,
     /// No action-budget slot remains for a workspace operation and existing control decision.
     ActionBudgetExhausted,
+    /// Root project guidance could not be read safely from the task workspace.
+    RootGuidanceRead(WorkspaceGuidanceReadError),
 }
 
 impl fmt::Display for WorkspacePlanError {
@@ -106,6 +109,9 @@ impl fmt::Display for WorkspacePlanError {
             Self::ActionBudgetExhausted => formatter.write_str(
                 "action budget must leave room for a workspace operation and task control",
             ),
+            Self::RootGuidanceRead(error) => {
+                write!(formatter, "root project guidance read failed: {error}")
+            }
         }
     }
 }

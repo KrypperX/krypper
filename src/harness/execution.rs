@@ -11,8 +11,8 @@ use uuid::Uuid;
 
 mod planned;
 pub use self::planned::{
-    run_goal_turn_with_completion_correction, run_goal_turn_with_plan, CompletionCorrectionError,
-    CompletionCorrectionResult,
+    create_plan_with_workspace_context, run_goal_turn_with_completion_correction,
+    run_goal_turn_with_plan, CompletionCorrectionError, CompletionCorrectionResult,
 };
 
 const MAX_READ_RANGE_LINES: usize = 200;

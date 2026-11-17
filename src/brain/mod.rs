@@ -1,7 +1,9 @@
 use crate::agent_loop::{
     BoundedDecisionSource, GoalTurnResult, WorkspaceAction, WorkspaceObservation,
 };
-use crate::harness::context::{build_task_prompt_with_project_guidance, ContextError};
+use crate::harness::context::{
+    build_plan_prompt_with_project_guidance, build_task_prompt_with_project_guidance, ContextError,
+};
 use crate::harness::execution::{CompletionCorrectionError, CompletionCorrectionResult};
 use crate::harness::verification::{
     CompletionCheckEvidence, CompletionVerification, RequiredCompletionCheck,
@@ -77,12 +79,23 @@ impl OllamaDecisionSource {
     ///
     /// One action-budget slot is reserved for the existing task-control decision path. The
     /// returned plan contains only registry operations and does not declare task success. Pass
-    /// the same action budget to this method and the Harness plan runner.
+    /// the same action budget to this method and the Harness plan runner. For a task-bound plan
+    /// with root workspace guidance, use `harness::execution::create_plan_with_workspace_context`.
     pub fn create_plan(
         &mut self,
         goal: &str,
         observations: &[WorkspaceObservation],
         action_budget: usize,
+    ) -> Result<WorkspacePlan, WorkspacePlanError> {
+        self.create_plan_with_project_guidance(goal, observations, action_budget, None)
+    }
+
+    pub(crate) fn create_plan_with_project_guidance(
+        &mut self,
+        goal: &str,
+        observations: &[WorkspaceObservation],
+        action_budget: usize,
+        project_guidance: Option<&str>,
     ) -> Result<WorkspacePlan, WorkspacePlanError> {
         let maximum = action_budget
             .min(self.remaining_decisions)
@@ -92,8 +105,14 @@ impl OllamaDecisionSource {
             return Err(WorkspacePlanError::ActionBudgetExhausted);
         }
 
-        let request = build_plan_request(&self.model, goal, observations, maximum)
-            .map_err(|_| WorkspacePlanError::ModelRequestFailed)?;
+        let request = build_plan_request_with_project_guidance(
+            &self.model,
+            goal,
+            observations,
+            maximum,
+            project_guidance,
+        )
+        .map_err(|_| WorkspacePlanError::ModelRequestFailed)?;
         let response = post_chat(&self.agent, self.address, &request)
             .map_err(|_| WorkspacePlanError::ModelRequestFailed)?;
         let plan = parse_model_plan_response(&response, maximum)?;
@@ -343,16 +362,21 @@ fn build_chat_request(
     encode_model_request(&request)
 }
 
-fn build_plan_request(
+fn build_plan_request_with_project_guidance(
     model: &str,
     goal: &str,
     observations: &[WorkspaceObservation],
     maximum_operations: usize,
+    project_guidance: Option<&str>,
 ) -> Result<Vec<u8>, ModelError> {
     validate_model_name_for_provider(model, ModelProvider::Ollama)
         .map_err(ModelError::InvalidModelName)?;
-    let prompt =
-        crate::harness::context::build_plan_prompt(goal, observations, maximum_operations)?;
+    let prompt = build_plan_prompt_with_project_guidance(
+        goal,
+        observations,
+        maximum_operations,
+        project_guidance,
+    )?;
     let request = json!({
         "model": model,
         "messages": [
