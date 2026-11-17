@@ -314,7 +314,9 @@ Hosted requests include the task goal, supported action schemas, remaining
 action budget, and prior observations. Observations can include workspace file
 contents, so explicitly selecting xAI or another hosted provider sends that
 task data to the provider and may incur provider charges. Review the goal and
-workspace data before opting in. `--model NAME` without `--provider` keeps
+workspace data before opting in. Model-backed task turns also include the
+captured workspace root's `AGENTS.md` when present, so its contents are sent to
+the selected hosted provider too. `--model NAME` without `--provider` keeps
 inference local through Ollama at `127.0.0.1:11434`; Ollama needs no API key.
 
 Without `--model` or `--provider`, `task` stays caller-directed and makes no
@@ -332,6 +334,15 @@ observations can include full workspace file text; range reads include their
 excerpt. Directory listings, search locations, and action outcomes are also
 sent to the selected service when model mode is enabled. Requests and
 accumulated observations have size limits.
+
+Before a model-backed task decision, Krypper reads only a root-level
+`AGENTS.md` through the task's captured workspace and no-follow file checks.
+Valid UTF-8 guidance is limited to 16 KiB and appears in a separate lower-priority
+project-guidance section. It may guide task-relevant repository conventions but
+cannot change tool authorization, workspace confinement, process permissions,
+budgets, or completion evidence. An absent file leaves the prompt unchanged;
+nested `AGENTS.md` files are ignored. Invalid, oversized, symlinked, changed, or
+unreadable root guidance fails visibly before a model decision.
 
 The adapter exposes only the existing task workspace actions and task
 completion. Every selected action still passes through Krypper's existing

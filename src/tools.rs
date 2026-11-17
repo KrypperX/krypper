@@ -5,8 +5,9 @@ mod workspace_safety;
 pub(crate) use workspace_safety::{
     apply_patch_file_at, capture_workspace_root, capture_workspace_root_at, create_directory_at,
     create_text_file, create_text_file_at, list_directory, list_task_directory_names_at,
-    read_text_file, read_text_file_at, replace_text_file_at, search_text_files_at,
-    search_tree_text_files_at, PatchEvidence, WorkspaceRoot, MAX_PATCH_BYTES,
+    read_root_agents_md_at, read_text_file, read_text_file_at, replace_text_file_at,
+    search_text_files_at, search_tree_text_files_at, PatchEvidence, RootGuidanceReadError,
+    WorkspaceRoot, MAX_PATCH_BYTES,
 };
 
 #[cfg(test)]

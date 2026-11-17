@@ -1,4 +1,4 @@
-use crate::harness::context::build_task_prompt;
+use crate::harness::context::build_task_prompt_with_project_guidance;
 
 use super::{
     action_from_provider_call, build_anthropic_request, build_responses_request,
@@ -209,10 +209,16 @@ pub(crate) fn build_compatible_chat_request(
     goal: &str,
     observations: &[WorkspaceObservation],
     remaining_decisions: usize,
+    project_guidance: Option<&str>,
 ) -> Result<Vec<u8>, ModelError> {
     super::validate_model_name_for_provider(model, ModelProvider::OpenAiCompatible(provider))
         .map_err(ModelError::InvalidModelName)?;
-    let prompt = build_task_prompt(goal, observations, remaining_decisions)?;
+    let prompt = build_task_prompt_with_project_guidance(
+        goal,
+        observations,
+        remaining_decisions,
+        project_guidance,
+    )?;
     let tool_choice = if matches!(
         provider,
         OpenAiCompatibleProvider::DeepSeek
@@ -400,6 +406,35 @@ impl BoundedDecisionSource for ModelDecisionSource {
             Self::OpenAiCompatible(source) => source.choose_action(goal, observations),
         }
     }
+
+    fn needs_root_project_guidance(&self) -> bool {
+        true
+    }
+
+    fn choose_action_with_root_project_guidance(
+        &mut self,
+        goal: &str,
+        observations: &[WorkspaceObservation],
+        guidance: Option<&str>,
+    ) -> WorkspaceAction {
+        match self {
+            Self::Ollama(source) => {
+                source.choose_action_with_root_project_guidance(goal, observations, guidance)
+            }
+            Self::Gemini(source) => {
+                source.choose_action_with_root_project_guidance(goal, observations, guidance)
+            }
+            Self::Responses(source) => {
+                source.choose_action_with_root_project_guidance(goal, observations, guidance)
+            }
+            Self::Anthropic(source) => {
+                source.choose_action_with_root_project_guidance(goal, observations, guidance)
+            }
+            Self::OpenAiCompatible(source) => {
+                source.choose_action_with_root_project_guidance(goal, observations, guidance)
+            }
+        }
+    }
 }
 
 pub(crate) struct GeminiDecisionSource {
@@ -450,9 +485,16 @@ impl GeminiDecisionSource {
         &mut self,
         goal: &str,
         observations: &[WorkspaceObservation],
+        project_guidance: Option<&str>,
     ) -> Result<WorkspaceAction, ModelError> {
         let remaining = super::consume_decision_budget(&mut self.remaining_decisions)?;
-        let request = super::build_gemini_request(&self.model, goal, observations, remaining)?;
+        let request = super::build_gemini_request(
+            &self.model,
+            goal,
+            observations,
+            remaining,
+            project_guidance,
+        )?;
         let response = super::post_hosted(
             &self.agent,
             ModelProvider::Gemini,
@@ -471,7 +513,23 @@ impl BoundedDecisionSource for GeminiDecisionSource {
         goal: &str,
         observations: &[WorkspaceObservation],
     ) -> WorkspaceAction {
-        self.choose(goal, observations)
+        self.choose(goal, observations, None)
+            .unwrap_or_else(|error| WorkspaceAction::Unsupported {
+                action: error.to_string(),
+            })
+    }
+
+    fn needs_root_project_guidance(&self) -> bool {
+        true
+    }
+
+    fn choose_action_with_root_project_guidance(
+        &mut self,
+        goal: &str,
+        observations: &[WorkspaceObservation],
+        guidance: Option<&str>,
+    ) -> WorkspaceAction {
+        self.choose(goal, observations, guidance)
             .unwrap_or_else(|error| WorkspaceAction::Unsupported {
                 action: error.to_string(),
             })
@@ -535,11 +593,18 @@ impl ResponsesDecisionSource {
         &mut self,
         goal: &str,
         observations: &[WorkspaceObservation],
+        project_guidance: Option<&str>,
     ) -> Result<WorkspaceAction, ModelError> {
         let remaining = consume_decision_budget(&mut self.remaining_decisions)?;
         let provider = self.provider.model_provider();
-        let request =
-            build_responses_request(&self.model, provider, goal, observations, remaining)?;
+        let request = build_responses_request(
+            &self.model,
+            provider,
+            goal,
+            observations,
+            remaining,
+            project_guidance,
+        )?;
         let response = post_hosted(
             &self.agent,
             provider,
@@ -558,7 +623,23 @@ impl BoundedDecisionSource for ResponsesDecisionSource {
         goal: &str,
         observations: &[WorkspaceObservation],
     ) -> WorkspaceAction {
-        self.choose(goal, observations)
+        self.choose(goal, observations, None)
+            .unwrap_or_else(|error| WorkspaceAction::Unsupported {
+                action: error.to_string(),
+            })
+    }
+
+    fn needs_root_project_guidance(&self) -> bool {
+        true
+    }
+
+    fn choose_action_with_root_project_guidance(
+        &mut self,
+        goal: &str,
+        observations: &[WorkspaceObservation],
+        guidance: Option<&str>,
+    ) -> WorkspaceAction {
+        self.choose(goal, observations, guidance)
             .unwrap_or_else(|error| WorkspaceAction::Unsupported {
                 action: error.to_string(),
             })
@@ -612,9 +693,11 @@ impl AnthropicDecisionSource {
         &mut self,
         goal: &str,
         observations: &[WorkspaceObservation],
+        project_guidance: Option<&str>,
     ) -> Result<WorkspaceAction, ModelError> {
         let remaining = consume_decision_budget(&mut self.remaining_decisions)?;
-        let request = build_anthropic_request(&self.model, goal, observations, remaining)?;
+        let request =
+            build_anthropic_request(&self.model, goal, observations, remaining, project_guidance)?;
         let response = post_hosted(
             &self.agent,
             ModelProvider::Anthropic,
@@ -633,7 +716,23 @@ impl BoundedDecisionSource for AnthropicDecisionSource {
         goal: &str,
         observations: &[WorkspaceObservation],
     ) -> WorkspaceAction {
-        self.choose(goal, observations)
+        self.choose(goal, observations, None)
+            .unwrap_or_else(|error| WorkspaceAction::Unsupported {
+                action: error.to_string(),
+            })
+    }
+
+    fn needs_root_project_guidance(&self) -> bool {
+        true
+    }
+
+    fn choose_action_with_root_project_guidance(
+        &mut self,
+        goal: &str,
+        observations: &[WorkspaceObservation],
+        guidance: Option<&str>,
+    ) -> WorkspaceAction {
+        self.choose(goal, observations, guidance)
             .unwrap_or_else(|error| WorkspaceAction::Unsupported {
                 action: error.to_string(),
             })
@@ -697,6 +796,7 @@ impl OpenAiCompatibleDecisionSource {
         &mut self,
         goal: &str,
         observations: &[WorkspaceObservation],
+        project_guidance: Option<&str>,
     ) -> Result<WorkspaceAction, ModelError> {
         let remaining = consume_decision_budget(&mut self.remaining_decisions)?;
         let request = build_compatible_chat_request(
@@ -705,6 +805,7 @@ impl OpenAiCompatibleDecisionSource {
             goal,
             observations,
             remaining,
+            project_guidance,
         )?;
         let provider = ModelProvider::OpenAiCompatible(self.provider);
         let response = post_hosted(
@@ -725,7 +826,23 @@ impl BoundedDecisionSource for OpenAiCompatibleDecisionSource {
         goal: &str,
         observations: &[WorkspaceObservation],
     ) -> WorkspaceAction {
-        self.choose(goal, observations)
+        self.choose(goal, observations, None)
+            .unwrap_or_else(|error| WorkspaceAction::Unsupported {
+                action: error.to_string(),
+            })
+    }
+
+    fn needs_root_project_guidance(&self) -> bool {
+        true
+    }
+
+    fn choose_action_with_root_project_guidance(
+        &mut self,
+        goal: &str,
+        observations: &[WorkspaceObservation],
+        guidance: Option<&str>,
+    ) -> WorkspaceAction {
+        self.choose(goal, observations, guidance)
             .unwrap_or_else(|error| WorkspaceAction::Unsupported {
                 action: error.to_string(),
             })

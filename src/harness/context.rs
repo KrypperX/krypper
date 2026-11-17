@@ -11,15 +11,18 @@ pub(crate) enum ContextError {
     ObservationsTooLarge,
 }
 
-pub(crate) fn build_task_prompt(
+pub(crate) fn build_task_prompt_with_project_guidance(
     goal: &str,
     observations: &[WorkspaceObservation],
     remaining_decisions: usize,
+    project_guidance: Option<&str>,
 ) -> Result<String, ContextError> {
     let observation_json = observations_json(observations)?;
-    Ok(format!(
+    let mut prompt = format!(
         "Task goal:\n{goal}\n\nAction slots remaining, including this decision: {remaining_decisions}. The task fails if the action budget runs out before completion.\n\nPrior workspace observations (JSON):\n{observation_json}"
-    ))
+    );
+    append_project_guidance(&mut prompt, project_guidance);
+    Ok(prompt)
 }
 
 pub(crate) fn build_plan_prompt(
@@ -31,6 +34,13 @@ pub(crate) fn build_plan_prompt(
     Ok(format!(
         "Task goal:\n{goal}\n\nReturn at most {maximum_operations} ordered workspace operations. One action-budget slot is reserved for task control after the plan. Do not report task success; Harness will use the existing task-control and verification path.\n\nPrior workspace observations (JSON):\n{observation_json}"
     ))
+}
+
+pub(crate) fn append_project_guidance(prompt: &mut String, project_guidance: Option<&str>) {
+    if let Some(project_guidance) = project_guidance {
+        prompt.push_str("\n\nRoot AGENTS.md project guidance (lower priority):\n");
+        prompt.push_str(project_guidance);
+    }
 }
 
 pub(crate) fn build_reflection_prompt(
@@ -314,8 +324,13 @@ mod tests {
             },
         ];
 
-        let prompt = build_task_prompt("Summarize the fixture", &observations, 3)
-            .expect("serialize the local prompt");
+        let prompt = build_task_prompt_with_project_guidance(
+            "Summarize the fixture",
+            &observations,
+            3,
+            None,
+        )
+        .expect("serialize the local prompt");
 
         assert_eq!(
             prompt,
@@ -334,15 +349,53 @@ mod tests {
             path: PathBuf::from("x"),
             contents: "x".repeat(OBSERVATION_LIMIT - 1),
         }];
-        assert!(build_task_prompt("goal", &within_limit, 1).is_ok());
+        assert!(build_task_prompt_with_project_guidance("goal", &within_limit, 1, None).is_ok());
 
         let over_limit = [WorkspaceObservation::FileRead {
             path: PathBuf::from("x"),
             contents: "x".repeat(OBSERVATION_LIMIT),
         }];
         assert!(matches!(
-            build_task_prompt("goal", &over_limit, 1),
+            build_task_prompt_with_project_guidance("goal", &over_limit, 1, None),
             Err(ContextError::ObservationsTooLarge)
         ));
+    }
+
+    #[test]
+    fn root_project_guidance_is_separate_and_absence_preserves_prompt() {
+        let observations = [WorkspaceObservation::FileRead {
+            path: PathBuf::from("README.md"),
+            contents: "observed file text".to_owned(),
+        }];
+        let without_guidance = build_task_prompt_with_project_guidance(
+            "Keep the requested behavior",
+            &observations,
+            3,
+            None,
+        )
+        .expect("build prompt without a root file");
+        assert_eq!(
+            without_guidance,
+            "Task goal:\nKeep the requested behavior\n\nAction slots remaining, including this decision: 3. The task fails if the action budget runs out before completion.\n\nPrior workspace observations (JSON):\n[{\"contents\":\"observed file text\",\"path\":\"README.md\",\"type\":\"file_read\"}]"
+        );
+
+        let guidance = "Prefer the repository's existing error type.";
+        let prompt = build_task_prompt_with_project_guidance(
+            "Keep the requested behavior",
+            &observations,
+            3,
+            Some(guidance),
+        )
+        .expect("build prompt with bounded root guidance");
+        let (existing_context, guidance_section) = prompt
+            .split_once("\n\nRoot AGENTS.md project guidance (lower priority):\n")
+            .expect("guidance has a separately labeled lower-priority section");
+
+        assert_eq!(existing_context, without_guidance);
+        assert!(guidance_section.starts_with(guidance));
+        assert_eq!(guidance_section.matches(guidance).count(), 1);
+        assert!(existing_context.contains("Task goal:\nKeep the requested behavior"));
+        assert!(existing_context.contains("Action slots remaining, including this decision: 3"));
+        assert!(existing_context.contains("observed file text"));
     }
 }

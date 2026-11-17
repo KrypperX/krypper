@@ -1,6 +1,8 @@
 use super::{prepare_model_source, run_task_with_endpoint, snapshot_task_and_turn_state};
 use crate::brain::{ModelDecisionSource, ModelProvider};
-use crate::task_lifecycle::{TaskSession, TaskState, TurnOutcome, TurnState};
+use crate::task_lifecycle::{
+    TaskSession, TaskState, TurnOutcome, TurnState, WorkspaceGuidanceReadError,
+};
 use serde_json::{json, Value};
 use std::ffi::OsString;
 use std::fs;
@@ -199,6 +201,15 @@ fn read_request(stream: &mut TcpStream) -> Vec<u8> {
         }
     }
     request
+}
+
+fn request_json(request: &[u8]) -> Value {
+    let body_start = request
+        .windows(4)
+        .position(|bytes| bytes == b"\r\n\r\n")
+        .expect("request header terminator")
+        + 4;
+    serde_json::from_slice(&request[body_start..]).expect("decode model request")
 }
 
 fn task_args(max_actions: &str) -> Vec<OsString> {
@@ -428,6 +439,108 @@ fn model_cli_reports_successful_task_and_turn_states_and_outcomes() {
         "done"
     );
     assert_eq!(server.join().expect("join mock server").len(), 2);
+}
+
+#[test]
+fn model_cli_forwards_captured_root_guidance_to_each_provider_request() {
+    let workspace = TempDir::new();
+    let guidance = "Use the repository's existing file naming convention.";
+    fs::write(workspace.path().join("AGENTS.md"), guidance).expect("write root guidance");
+    let (endpoint, server) = mock_server(vec![
+        MockResponse {
+            status: 200,
+            body: tool_response(
+                "create_file",
+                json!({"path":"result.txt","contents":"done"}),
+            ),
+        },
+        MockResponse {
+            status: 200,
+            body: tool_response("complete_task", json!({"result":"Created result.txt."})),
+        },
+    ]);
+    let mut args = task_args("2");
+    args.push(OsString::from("--workspace"));
+    args.push(workspace.path().as_os_str().to_owned());
+    let mut input = Cursor::new(Vec::<u8>::new());
+    let mut output = Vec::new();
+    let mut error = Vec::new();
+
+    let code = run_task_with_endpoint(&args, &mut input, &mut output, &mut error, endpoint)
+        .expect("run the model-backed CLI task");
+    assert_eq!(code, 0);
+    assert!(String::from_utf8(output)
+        .expect("UTF-8 CLI output")
+        .contains("Task state: succeeded"));
+
+    let requests = server.join().expect("join mock model server");
+    assert_eq!(requests.len(), 2);
+    let first = request_json(&requests[0]);
+    let second = request_json(&requests[1]);
+    let section = "\n\nRoot AGENTS.md project guidance (lower priority):\n";
+    for request in [&first, &second] {
+        let prompt = request["messages"][1]["content"]
+            .as_str()
+            .expect("provider task prompt");
+        let (_, guidance_context) = prompt.split_once(section).expect("guidance section");
+        assert!(guidance_context.starts_with(guidance));
+        assert_eq!(guidance_context.matches(guidance).count(), 1);
+        assert!(prompt.contains("Task goal:\nCreate a result file"));
+    }
+    assert!(first["messages"][1]["content"]
+        .as_str()
+        .expect("first prompt")
+        .contains("Action slots remaining, including this decision: 2"));
+    assert!(second["messages"][1]["content"]
+        .as_str()
+        .expect("second prompt")
+        .contains("Action slots remaining, including this decision: 1"));
+    assert!(second["messages"][1]["content"]
+        .as_str()
+        .expect("second prompt")
+        .contains("file_created"));
+}
+
+#[test]
+fn model_cli_stops_with_a_typed_guidance_error_before_dispatch() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = TempDir::new();
+    let workspace = fixture.path().join("workspace");
+    fs::create_dir(&workspace).expect("create workspace");
+    let outside = fixture.path().join("outside.txt");
+    fs::write(&outside, "outside canary").expect("write outside canary");
+    symlink(&outside, workspace.join("AGENTS.md")).expect("create guidance symlink");
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind unused model endpoint");
+    listener
+        .set_nonblocking(true)
+        .expect("make model endpoint nonblocking");
+    let endpoint = listener.local_addr().expect("read model endpoint");
+    let mut args = task_args("1");
+    args.push(OsString::from("--workspace"));
+    args.push(workspace.as_os_str().to_owned());
+    let mut input = Cursor::new(Vec::<u8>::new());
+    let mut output = Vec::new();
+    let mut error_output = Vec::new();
+
+    let error = run_task_with_endpoint(&args, &mut input, &mut output, &mut error_output, endpoint)
+        .expect_err("reject the symlink before dispatching the model");
+
+    assert_eq!(
+        error
+            .get_ref()
+            .and_then(|cause| cause.downcast_ref::<WorkspaceGuidanceReadError>())
+            .copied(),
+        Some(WorkspaceGuidanceReadError::Symlink)
+    );
+    assert!(
+        matches!(listener.accept(), Err(ref cause) if cause.kind() == std::io::ErrorKind::WouldBlock)
+    );
+    assert!(output.is_empty());
+    assert_eq!(
+        fs::read_to_string(outside).expect("read outside canary"),
+        "outside canary"
+    );
 }
 
 #[test]

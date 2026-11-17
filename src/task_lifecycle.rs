@@ -5,7 +5,7 @@ pub use crate::core::lifecycle::{
     TaskSessionCheckpointError, TaskSessionSnapshot, TaskSessionWorkspaceError, TaskSnapshot,
     TaskState, TransitionError, Turn, TurnActivityAction, TurnActivitySummary, TurnCompletionError,
     TurnCreationError, TurnEvent, TurnOutcome, TurnSnapshot, TurnState, TurnTransitionError,
-    WorkspaceCreateDirectoryError, WorkspaceListError, WorkspaceReadError, WorkspaceReplaceError,
-    WorkspaceSearchError, WorkspaceSearchLocation, WorkspaceWriteError,
-    MAX_TASK_SESSION_CHECKPOINT_BYTES,
+    WorkspaceCreateDirectoryError, WorkspaceGuidanceReadError, WorkspaceListError,
+    WorkspaceReadError, WorkspaceReplaceError, WorkspaceSearchError, WorkspaceSearchLocation,
+    WorkspaceWriteError, MAX_TASK_SESSION_CHECKPOINT_BYTES,
 };

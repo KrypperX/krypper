@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::ffi::{CStr, CString, OsStr, OsString};
+use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
@@ -13,6 +14,7 @@ pub(crate) use patch::MAX_PATCH_BYTES;
 pub(crate) use search::{search_text_files_at, search_tree_text_files_at};
 
 const MAX_FILE_SIZE: usize = 1024 * 1024;
+const MAX_ROOT_AGENTS_BYTES: usize = 16 * 1024;
 const MAX_SYMLINKS: usize = 40;
 const MAX_TASK_DIRECTORY_ENTRIES: usize = 1024;
 
@@ -34,6 +36,33 @@ pub(crate) struct WorkspaceRoot {
     descriptor: OwnedFd,
     path: PathBuf,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RootGuidanceReadError {
+    Symlink,
+    NotRegularFile,
+    TooLarge,
+    InvalidUtf8,
+    ChangedDuringRead,
+    ReadFailed,
+}
+
+impl fmt::Display for RootGuidanceReadError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Symlink => formatter.write_str("root AGENTS.md is a symlink"),
+            Self::NotRegularFile => formatter.write_str("root AGENTS.md is not a regular file"),
+            Self::TooLarge => formatter.write_str("root AGENTS.md exceeds 16 KiB"),
+            Self::InvalidUtf8 => formatter.write_str("root AGENTS.md is not valid UTF-8"),
+            Self::ChangedDuringRead => {
+                formatter.write_str("root AGENTS.md changed during the safe read")
+            }
+            Self::ReadFailed => formatter.write_str("root AGENTS.md could not be read"),
+        }
+    }
+}
+
+impl std::error::Error for RootGuidanceReadError {}
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct PatchEvidence {
@@ -95,6 +124,91 @@ pub(crate) fn read_text_file(path: &OsStr) -> Result<String, CliError> {
 
 pub(crate) fn read_text_file_at(root: &WorkspaceRoot, path: &OsStr) -> Result<String, CliError> {
     read_open_text_file(open_workspace_relative(root, path, false)?)
+}
+
+pub(crate) fn read_root_agents_md_at(
+    root: &WorkspaceRoot,
+) -> Result<Option<String>, RootGuidanceReadError> {
+    read_root_agents_md_at_with_reader(root, |file| {
+        let mut contents = Vec::with_capacity(MAX_ROOT_AGENTS_BYTES + 1);
+        file.take((MAX_ROOT_AGENTS_BYTES + 1) as u64)
+            .read_to_end(&mut contents)?;
+        Ok(contents)
+    })
+}
+
+fn read_root_agents_md_at_with_reader(
+    root: &WorkspaceRoot,
+    read: impl FnOnce(&mut File) -> io::Result<Vec<u8>>,
+) -> Result<Option<String>, RootGuidanceReadError> {
+    let parent_fd = root.descriptor.as_raw_fd();
+    let name = OsStr::new("AGENTS.md");
+    let original_status = match stat_at(parent_fd, name) {
+        Ok(status) => status,
+        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => return Ok(None),
+        Err(_) => return Err(RootGuidanceReadError::ReadFailed),
+    };
+    if is_symlink(&original_status) {
+        return Err(RootGuidanceReadError::Symlink);
+    }
+    if !is_regular_file(&original_status) {
+        return Err(RootGuidanceReadError::NotRegularFile);
+    }
+    if original_status.st_size < 0 || original_status.st_size > MAX_ROOT_AGENTS_BYTES as i64 {
+        return Err(RootGuidanceReadError::TooLarge);
+    }
+
+    let descriptor = open_at(
+        parent_fd,
+        name,
+        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        0,
+    )
+    .map_err(|error| {
+        if error.raw_os_error() == Some(libc::ELOOP) {
+            RootGuidanceReadError::ChangedDuringRead
+        } else {
+            RootGuidanceReadError::ReadFailed
+        }
+    })?;
+    let mut file = File::from(descriptor);
+    let opened_status = fstat(file.as_raw_fd()).map_err(|_| RootGuidanceReadError::ReadFailed)?;
+    if !same_file_snapshot(&original_status, &opened_status) {
+        return Err(RootGuidanceReadError::ChangedDuringRead);
+    }
+
+    let contents = read(&mut file).map_err(|_| RootGuidanceReadError::ReadFailed)?;
+    let final_descriptor_status =
+        fstat(file.as_raw_fd()).map_err(|_| RootGuidanceReadError::ReadFailed)?;
+    let final_path_status = stat_at(parent_fd, name).map_err(|error| {
+        if error.raw_os_error() == Some(libc::ENOENT) {
+            RootGuidanceReadError::ChangedDuringRead
+        } else {
+            RootGuidanceReadError::ReadFailed
+        }
+    })?;
+    if !same_file_snapshot(&original_status, &final_descriptor_status)
+        || !same_file_snapshot(&original_status, &final_path_status)
+    {
+        return Err(RootGuidanceReadError::ChangedDuringRead);
+    }
+    if contents.len() > MAX_ROOT_AGENTS_BYTES {
+        return Err(RootGuidanceReadError::TooLarge);
+    }
+
+    String::from_utf8(contents)
+        .map(Some)
+        .map_err(|_| RootGuidanceReadError::InvalidUtf8)
+}
+
+fn same_file_snapshot(left: &libc::stat, right: &libc::stat) -> bool {
+    same_inode(left, right)
+        && left.st_mode == right.st_mode
+        && left.st_size == right.st_size
+        && left.st_mtime == right.st_mtime
+        && left.st_mtime_nsec == right.st_mtime_nsec
+        && left.st_ctime == right.st_ctime
+        && left.st_ctime_nsec == right.st_ctime_nsec
 }
 
 fn read_open_text_file(mut file: File) -> Result<String, CliError> {
@@ -1292,12 +1406,13 @@ fn quote_json(codepoints: &[u32]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        create_text_file, create_text_file_at_with_writer, replace_text_file_at,
-        replace_text_file_at_with_writer, WorkspaceRoot, MAX_FILE_SIZE,
+        capture_workspace_root_at, create_text_file, create_text_file_at_with_writer,
+        replace_text_file_at, replace_text_file_at_with_writer, WorkspaceRoot, MAX_FILE_SIZE,
     };
     use std::fs;
     use std::io;
     use std::os::fd::AsRawFd;
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
@@ -1601,5 +1716,97 @@ mod tests {
         let name = super::ListedName::new(vec![b'\xff']);
         assert_eq!(super::quote_json(&name.sort_key), "\"\\udcff\"");
         assert_eq!(name.sort_key, vec![0xdcff]);
+    }
+
+    fn guidance_workspace() -> (PathBuf, PathBuf) {
+        let base = std::env::temp_dir().join(format!(
+            "krypper-guidance-read-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        let workspace = base.join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        (base, workspace)
+    }
+
+    #[test]
+    fn root_agents_read_is_bounded_and_does_not_load_nested_files() {
+        let (base, workspace) = guidance_workspace();
+        fs::create_dir_all(workspace.join("nested")).unwrap();
+        fs::write(workspace.join("AGENTS.md"), "root guidance").unwrap();
+        fs::write(workspace.join("nested/AGENTS.md"), "nested guidance").unwrap();
+        let root = capture_workspace_root_at(&workspace).unwrap();
+
+        assert_eq!(
+            super::read_root_agents_md_at(&root).unwrap().as_deref(),
+            Some("root guidance")
+        );
+        fs::remove_file(workspace.join("AGENTS.md")).unwrap();
+        assert_eq!(super::read_root_agents_md_at(&root).unwrap(), None);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn root_agents_read_rejects_invalid_utf8_and_oversized_files() {
+        let (base, workspace) = guidance_workspace();
+        let root = capture_workspace_root_at(&workspace).unwrap();
+
+        fs::write(workspace.join("AGENTS.md"), [0xff]).unwrap();
+        assert_eq!(
+            super::read_root_agents_md_at(&root),
+            Err(super::RootGuidanceReadError::InvalidUtf8)
+        );
+
+        fs::write(workspace.join("AGENTS.md"), vec![b'x'; 16 * 1024 + 1]).unwrap();
+        assert_eq!(
+            super::read_root_agents_md_at(&root),
+            Err(super::RootGuidanceReadError::TooLarge)
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn root_agents_read_rejects_symlinks_without_reading_outside_canary() {
+        use std::os::unix::fs::symlink;
+
+        let (base, workspace) = guidance_workspace();
+        let outside = base.join("outside.txt");
+        fs::write(&outside, "outside canary").unwrap();
+        symlink(&outside, workspace.join("AGENTS.md")).unwrap();
+        let root = capture_workspace_root_at(&workspace).unwrap();
+
+        assert_eq!(
+            super::read_root_agents_md_at(&root),
+            Err(super::RootGuidanceReadError::Symlink)
+        );
+        assert_eq!(fs::read_to_string(outside).unwrap(), "outside canary");
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn root_agents_read_reports_read_failures_and_changes_during_read() {
+        use std::io::{self, Read};
+
+        let (base, workspace) = guidance_workspace();
+        let agents = workspace.join("AGENTS.md");
+        fs::write(&agents, "stable guidance").unwrap();
+        let root = capture_workspace_root_at(&workspace).unwrap();
+
+        assert_eq!(
+            super::read_root_agents_md_at_with_reader(&root, |_| {
+                Err(io::Error::other("injected read failure"))
+            }),
+            Err(super::RootGuidanceReadError::ReadFailed)
+        );
+        assert_eq!(
+            super::read_root_agents_md_at_with_reader(&root, |file| {
+                fs::write(&agents, "changed guidance")?;
+                let mut bytes = Vec::new();
+                file.read_to_end(&mut bytes)?;
+                Ok(bytes)
+            }),
+            Err(super::RootGuidanceReadError::ChangedDuringRead)
+        );
+        fs::remove_dir_all(base).unwrap();
     }
 }
