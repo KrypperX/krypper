@@ -575,6 +575,10 @@ impl TaskSession {
             workspace_root: None,
             tasks,
             process_policies: Default::default(),
+            #[cfg(test)]
+            test_process_results: Default::default(),
+            #[cfg(test)]
+            test_process_filters: Default::default(),
         })
     }
 }

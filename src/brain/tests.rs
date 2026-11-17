@@ -7,6 +7,7 @@ use crate::harness::execution::{create_plan_with_workspace_context, run_goal_tur
 use crate::task_lifecycle::{
     TaskSession, TaskState, TurnOutcome, TurnState, WorkspaceGuidanceReadError,
 };
+use crate::{OfflineCargoPolicy, ProcessOutcome, ProcessResult};
 use serde_json::{json, Value};
 use std::fs;
 use std::io::{Read, Write};
@@ -1043,6 +1044,111 @@ fn completion_correction_is_not_requested_after_checks_pass() {
         .expect("passing checks do not request a correction");
 
     assert!(plan.is_none());
+}
+
+#[test]
+fn process_failure_correction_reflection_receives_the_typed_bounded_result() {
+    let fixture = TempDir::new();
+    let workspace = fixture.path().join("workspace");
+    let toolchain = fixture.path().join("toolchain");
+    let registry = fixture.path().join("registry");
+    fs::create_dir_all(&workspace).expect("create workspace");
+    fs::create_dir_all(toolchain.join("bin")).expect("create fixture toolchain");
+    fs::create_dir_all(&registry).expect("create fixture registry");
+    for binary in ["cargo", "rustc"] {
+        fs::write(toolchain.join("bin").join(binary), b"\x7fELF")
+            .expect("write inert toolchain header");
+    }
+
+    let (mut session, task_id, turn_id) =
+        running_turn_in_workspace(&workspace, "correct focused_test");
+    session
+        .authorize_offline_cargo_tests(
+            task_id,
+            OfflineCargoPolicy::new(&toolchain, &registry).expect("fixture policy"),
+        )
+        .expect("grant offline test operation");
+    session.queue_offline_cargo_results_for_test(
+        task_id,
+        [ProcessResult {
+            run_id: Uuid::new_v4(),
+            outcome: ProcessOutcome::Exited(101),
+            stdout: "running 1 test\n".to_owned(),
+            stderr: "test focused_test ... FAILED\n".to_owned(),
+            truncated: false,
+            diagnostic: None,
+            cleanup_confirmed: true,
+            test_filter: Some("focused_test".to_owned()),
+            tests_ran: true,
+            executed_tests: Some(1),
+        }],
+    );
+    let mut decisions = |_: &str, _: &[WorkspaceObservation]| WorkspaceAction::OfflineCargoTest {
+        test_filter: Some("focused_test".to_owned()),
+    };
+    let prior_result = run_goal_turn_with_budget(
+        &mut session,
+        task_id,
+        turn_id,
+        "correct focused_test",
+        1,
+        &mut decisions,
+    )
+    .expect("record the failed test observation");
+    let WorkspaceObservation::ProcessFinished { result: failure } = &prior_result.observations()[0]
+    else {
+        panic!("the prior turn must retain its typed process result");
+    };
+
+    let (address, server) = mock_server(vec![
+        ok(reflection_response(
+            "The selected test failed with a complete result.",
+        )),
+        ok(tool_response(
+            "create_file",
+            json!({"path":"correction.txt","contents":"bounded correction"}),
+        )),
+    ]);
+    let mut brain = OllamaDecisionSource::with_endpoint("fixture-model", 4, address);
+    let plan = brain
+        .create_process_failure_correction_plan(
+            &session,
+            &prior_result,
+            failure,
+            "correct focused_test",
+            4,
+        )
+        .expect("create a correction proposal from the verified failure");
+
+    assert_eq!(plan.operations().len(), 1);
+    assert_eq!(
+        session.get_task(task_id).expect("task").state(),
+        TaskState::Running
+    );
+    assert_eq!(
+        session
+            .get_task(task_id)
+            .expect("task")
+            .get_turn(turn_id)
+            .expect("turn")
+            .state(),
+        TurnState::Failed
+    );
+    assert!(!workspace.join("correction.txt").exists());
+
+    let requests = server.join().expect("join process correction fixture");
+    assert_eq!(requests.len(), 2);
+    let reflection_request = request_json(&requests[0]);
+    let reflection_prompt = reflection_request["messages"][1]["content"]
+        .as_str()
+        .expect("reflection prompt");
+    assert!(reflection_prompt.contains("focused_test ... FAILED"));
+    assert!(reflection_prompt.contains("\"test_filter\":\"focused_test\""));
+    assert!(reflection_prompt.contains("\"truncated\":false"));
+    assert!(reflection_prompt.contains("\"cleanup_confirmed\":true"));
+    assert!(reflection_prompt.contains("\"executed_tests\":1"));
+    assert!(reflection_prompt.contains("action_failed"));
+    assert!(reflection_prompt.contains("\"outcome\":\"failure\""));
 }
 
 #[test]

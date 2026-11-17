@@ -362,6 +362,12 @@ pub struct TaskSession {
     workspace_root: Option<Arc<WorkspaceRoot>>,
     tasks: Vec<Task>,
     process_policies: std::collections::HashMap<Uuid, Arc<crate::OfflineCargoPolicy>>,
+    #[cfg(test)]
+    test_process_results: std::cell::RefCell<
+        std::collections::HashMap<Uuid, std::collections::VecDeque<crate::ProcessResult>>,
+    >,
+    #[cfg(test)]
+    test_process_filters: std::cell::RefCell<std::collections::HashMap<Uuid, Vec<Option<String>>>>,
 }
 
 /// An immutable view of the current identifiers and states in a task session.
@@ -469,6 +475,10 @@ impl TaskSession {
             workspace_root: None,
             tasks: Vec::new(),
             process_policies: Default::default(),
+            #[cfg(test)]
+            test_process_results: Default::default(),
+            #[cfg(test)]
+            test_process_filters: Default::default(),
         }
     }
 
@@ -506,6 +516,10 @@ impl TaskSession {
             workspace_root: Some(Arc::new(workspace_root)),
             tasks: Vec::new(),
             process_policies: Default::default(),
+            #[cfg(test)]
+            test_process_results: Default::default(),
+            #[cfg(test)]
+            test_process_filters: Default::default(),
         })
     }
 
@@ -776,7 +790,38 @@ impl TaskSession {
             .map_err(|message| WorkspaceReadError::File {
                 message: message.clone(),
             })?;
+        #[cfg(test)]
+        if let Some(results) = self.test_process_results.borrow_mut().get_mut(&task_id) {
+            self.test_process_filters
+                .borrow_mut()
+                .entry(task_id)
+                .or_default()
+                .push(test_filter.map(str::to_owned));
+            return Ok(results
+                .pop_front()
+                .unwrap_or_else(|| crate::ProcessResult::denied(test_filter)));
+        }
         Ok(crate::tools::process::run(root, policy, test_filter))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn queue_offline_cargo_results_for_test(
+        &mut self,
+        task_id: Uuid,
+        results: impl IntoIterator<Item = crate::ProcessResult>,
+    ) {
+        self.test_process_results
+            .borrow_mut()
+            .insert(task_id, results.into_iter().collect());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn offline_cargo_filters_for_test(&self, task_id: Uuid) -> Vec<Option<String>> {
+        self.test_process_filters
+            .borrow()
+            .get(&task_id)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Reads one UTF-8 file for a currently running turn owned by this session.
