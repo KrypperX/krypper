@@ -199,7 +199,7 @@ fn cargo_filter_is_one_literal_argument_after_the_fixed_separator() {
 fn test_harness_summaries_report_executed_tests_and_reject_zero_matches() {
     let mut result = ProcessResult::empty(ProcessOutcome::Exited(0));
     result.test_filter = Some("selected_test".into());
-    result.stdout = "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s\n".into();
+    result.stdout = "test selected_test ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s\n".into();
     record_test_evidence(&mut result);
     assert_eq!(result.executed_tests, Some(1));
     assert!(result.tests_ran);
@@ -214,14 +214,95 @@ fn test_harness_summaries_report_executed_tests_and_reject_zero_matches() {
     assert_eq!(no_matches.outcome, ProcessOutcome::NoTestsMatched);
     assert!(!no_matches.succeeded());
 
+    let mut summary_only = ProcessResult::empty(ProcessOutcome::Exited(0));
+    summary_only.test_filter = Some("absent_test".into());
+    summary_only.stdout = "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s\n".into();
+    record_test_evidence(&mut summary_only);
+    assert_eq!(summary_only.executed_tests, Some(0));
+    assert!(!summary_only.tests_ran);
+    assert_eq!(summary_only.outcome, ProcessOutcome::NoTestsMatched);
+    assert!(!summary_only.succeeded());
+
     let mut warning_only = ProcessResult::empty(ProcessOutcome::Exited(0));
     warning_only.test_filter = Some("absent_test".into());
     warning_only.stdout = "warning: workspace build script: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s\n".into();
     record_test_evidence(&mut warning_only);
-    assert_eq!(warning_only.executed_tests, None);
+    assert_eq!(warning_only.executed_tests, Some(0));
     assert!(!warning_only.tests_ran);
     assert_eq!(warning_only.outcome, ProcessOutcome::NoTestsMatched);
     assert!(!warning_only.succeeded());
+}
+
+#[test]
+fn cargo_build_script_warning_cannot_fake_a_filtered_test_result() {
+    let path = fixture();
+    fs::write(
+        path.join("Cargo.toml"),
+        "[package]\nname=\"offline_fixture\"\nversion=\"0.1.0\"\nedition=\"2021\"\nbuild=\"build.rs\"\n",
+    )
+    .unwrap();
+    fs::write(
+        path.join("build.rs"),
+        r#"fn main() {
+    println!("cargo:warning=test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s");
+}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        path.join("src/lib.rs"),
+        "#[test] fn selected_fixture_test() {}\n#[test] fn unrelated_fixture_test() {}\n",
+    )
+    .unwrap();
+    let run_filter = |filter: &str, target: &str| {
+        std::process::Command::new("cargo")
+            .args([
+                "test",
+                "--offline",
+                "--locked",
+                "--all-targets",
+                "--manifest-path",
+            ])
+            .arg(path.join("Cargo.toml"))
+            .arg("--")
+            .arg(filter)
+            .env("CARGO_TERM_COLOR", "never")
+            .env("CARGO_TARGET_DIR", path.join(target))
+            .output()
+            .unwrap()
+    };
+
+    let selected = run_filter("selected_fixture_test", "selected-target");
+    assert!(selected.status.success());
+    let mut selected_result = ProcessResult::empty(ProcessOutcome::Exited(0));
+    selected_result.test_filter = Some("selected_fixture_test".into());
+    selected_result.stdout = String::from_utf8_lossy(&selected.stdout).into_owned();
+    selected_result.stderr = String::from_utf8_lossy(&selected.stderr).into_owned();
+    let selected_output = format!("{}{}", selected_result.stdout, selected_result.stderr);
+    assert!(selected_output.contains("warning: offline_fixture@0.1.0: test result: ok. 1 passed;"));
+    assert!(selected_output.contains("test selected_fixture_test ... ok"));
+    assert!(selected_output.contains("1 filtered out"));
+    record_test_evidence(&mut selected_result);
+    assert_eq!(selected_result.executed_tests, Some(1));
+    assert!(selected_result.tests_ran);
+    assert!(selected_result.succeeded());
+
+    let absent = run_filter("absent_fixture_test", "absent-target");
+    assert!(absent.status.success());
+    let mut absent_result = ProcessResult::empty(ProcessOutcome::Exited(0));
+    absent_result.test_filter = Some("absent_fixture_test".into());
+    absent_result.stdout = String::from_utf8_lossy(&absent.stdout).into_owned();
+    absent_result.stderr = String::from_utf8_lossy(&absent.stderr).into_owned();
+    let absent_output = format!("{}{}", absent_result.stdout, absent_result.stderr);
+    assert!(absent_output.contains("warning: offline_fixture@0.1.0: test result: ok. 1 passed;"));
+    assert!(absent_output.contains("test result: ok. 0 passed;"));
+    record_test_evidence(&mut absent_result);
+    assert_eq!(absent_result.executed_tests, Some(0));
+    assert!(!absent_result.tests_ran);
+    assert_eq!(absent_result.outcome, ProcessOutcome::NoTestsMatched);
+    assert!(!absent_result.succeeded());
+
+    fs::remove_dir_all(path).unwrap();
 }
 
 #[test]
