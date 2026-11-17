@@ -154,7 +154,14 @@ actual start and end numbers. Excerpt text appears only in the action
 observation; retained activity and lifecycle summaries contain the actual range
 and excerpt byte count only.
 Search checks immediate regular UTF-8 files in the selected directory, includes
-hidden names, skips entry symlinks and non-regular files, and does not recurse.
+hidden names unless an applicable `.gitignore` rule excludes them, skips entry
+symlinks and non-regular files, and does not recurse. It applies root and nested
+`.gitignore` files with slash-aware glob patterns (including `*`, `?`, bracket
+classes, `**`, leading `/` anchors, and trailing `/` directory rules). Later
+matching lines and deeper `.gitignore` files take precedence; `!` patterns
+re-include paths. Unreadable, invalid UTF-8, or malformed applicable ignore
+files fail the whole action without partial results. Ignore files are read only
+inside the captured workspace. `.git` metadata directories are not traversed.
 Its case-sensitive literal query is limited to 4 KiB, each file to 1 MiB, total
 bytes scanned to 16 MiB, and returned file-line locations to 10,000. The
 existing 1,024-entry directory limit applies too. Results contain relative paths

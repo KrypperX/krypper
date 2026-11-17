@@ -158,12 +158,12 @@ const WORKSPACE_OPERATIONS: [OperationDefinition; 10] = [
     },
     OperationDefinition {
         operation: WorkspaceOperation::SearchText,
-        description: "Find a literal query in immediate regular UTF-8 workspace files.",
+        description: "Find a literal query in immediate regular UTF-8 workspace files, honoring applicable root and nested .gitignore glob rules and negation.",
         arguments: &[string("directory"), bounded_string("query", 4096)],
     },
     OperationDefinition {
         operation: WorkspaceOperation::SearchTreeText,
-        description: "Find a literal query recursively in regular UTF-8 workspace files.",
+        description: "Find a literal query recursively in regular UTF-8 workspace files, honoring applicable root and nested .gitignore glob rules and negation, and skipping .git metadata directories.",
         arguments: &[string("directory"), bounded_string("query", 4096)],
     },
     OperationDefinition {
