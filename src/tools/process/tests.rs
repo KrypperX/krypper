@@ -213,6 +213,15 @@ fn test_harness_summaries_report_executed_tests_and_reject_zero_matches() {
     assert!(!no_matches.tests_ran);
     assert_eq!(no_matches.outcome, ProcessOutcome::NoTestsMatched);
     assert!(!no_matches.succeeded());
+
+    let mut warning_only = ProcessResult::empty(ProcessOutcome::Exited(0));
+    warning_only.test_filter = Some("absent_test".into());
+    warning_only.stdout = "warning: workspace build script: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s\n".into();
+    record_test_evidence(&mut warning_only);
+    assert_eq!(warning_only.executed_tests, None);
+    assert!(!warning_only.tests_ran);
+    assert_eq!(warning_only.outcome, ProcessOutcome::NoTestsMatched);
+    assert!(!warning_only.succeeded());
 }
 
 #[test]
