@@ -764,34 +764,20 @@ fn cargo_command_args(test_filter: Option<&str>) -> Vec<OsString> {
     args
 }
 
-fn summary_test_count(line: &str) -> Option<usize> {
-    let summary = line.strip_prefix("test result:")?;
-    let words = summary.split_whitespace().collect::<Vec<_>>();
-    ["passed;", "failed;"]
-        .into_iter()
-        .try_fold(0usize, |total, field| {
-            let index = words.iter().position(|word| *word == field)?;
-            let count = words.get(index.checked_sub(1)?)?.parse::<usize>().ok()?;
-            Some(total.saturating_add(count))
-        })
-}
-
-fn executed_test_count(output: &str) -> Option<usize> {
-    let counts = output
+fn executed_test_count(output: &str) -> usize {
+    output
         .lines()
-        .filter_map(summary_test_count)
-        .collect::<Vec<_>>();
-    (!counts.is_empty()).then(|| counts.into_iter().fold(0usize, usize::saturating_add))
+        .filter(|line| {
+            line.strip_prefix("test ")
+                .is_some_and(|test| test.ends_with(" ... ok") || test.ends_with(" ... FAILED"))
+        })
+        .count()
 }
 
 fn record_test_evidence(result: &mut ProcessResult) {
-    let stdout_count = executed_test_count(&result.stdout);
-    let stderr_count = executed_test_count(&result.stderr);
-    result.executed_tests = match (stdout_count, stderr_count) {
-        (Some(stdout), Some(stderr)) => Some(stdout.saturating_add(stderr)),
-        (Some(count), None) | (None, Some(count)) => Some(count),
-        (None, None) => None,
-    };
+    result.executed_tests = Some(
+        executed_test_count(&result.stdout).saturating_add(executed_test_count(&result.stderr)),
+    );
     result.tests_ran = result.executed_tests.is_some_and(|count| count > 0);
     if result.test_filter.is_some()
         && result.outcome == ProcessOutcome::Exited(0)
