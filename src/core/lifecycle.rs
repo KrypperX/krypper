@@ -1,7 +1,8 @@
 use crate::tools::{
     apply_patch_file_at, capture_workspace_root, capture_workspace_root_at, create_directory_at,
-    create_text_file_at, list_task_directory_names_at, read_text_file_at, replace_text_file_at,
-    search_text_files_at, search_tree_text_files_at, PatchEvidence, WorkspaceRoot,
+    create_text_file_at, list_task_directory_names_at, read_root_agents_md_at, read_text_file_at,
+    replace_text_file_at, search_text_files_at, search_tree_text_files_at, PatchEvidence,
+    RootGuidanceReadError, WorkspaceRoot,
 };
 use std::ffi::OsString;
 use std::fmt;
@@ -65,6 +66,56 @@ impl fmt::Display for WorkspaceReadError {
 }
 
 impl std::error::Error for WorkspaceReadError {}
+
+/// A bounded root project-guidance read could not be completed safely.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkspaceGuidanceReadError {
+    /// The task has no captured workspace root.
+    WorkspaceUnavailable,
+    /// Root `AGENTS.md` is a symbolic link.
+    Symlink,
+    /// Root `AGENTS.md` is not a regular file.
+    NotRegularFile,
+    /// Root `AGENTS.md` exceeds 16 KiB.
+    TooLarge,
+    /// Root `AGENTS.md` is not valid UTF-8.
+    InvalidUtf8,
+    /// Root `AGENTS.md` changed while it was being read.
+    ChangedDuringRead,
+    /// Root `AGENTS.md` could not be read.
+    ReadFailed,
+}
+
+impl fmt::Display for WorkspaceGuidanceReadError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::WorkspaceUnavailable => formatter.write_str("task workspace is unavailable"),
+            Self::Symlink => formatter.write_str("root AGENTS.md is a symlink"),
+            Self::NotRegularFile => formatter.write_str("root AGENTS.md is not a regular file"),
+            Self::TooLarge => formatter.write_str("root AGENTS.md exceeds 16 KiB"),
+            Self::InvalidUtf8 => formatter.write_str("root AGENTS.md is not valid UTF-8"),
+            Self::ChangedDuringRead => {
+                formatter.write_str("root AGENTS.md changed during the safe read")
+            }
+            Self::ReadFailed => formatter.write_str("root AGENTS.md could not be read"),
+        }
+    }
+}
+
+impl std::error::Error for WorkspaceGuidanceReadError {}
+
+impl From<RootGuidanceReadError> for WorkspaceGuidanceReadError {
+    fn from(error: RootGuidanceReadError) -> Self {
+        match error {
+            RootGuidanceReadError::Symlink => Self::Symlink,
+            RootGuidanceReadError::NotRegularFile => Self::NotRegularFile,
+            RootGuidanceReadError::TooLarge => Self::TooLarge,
+            RootGuidanceReadError::InvalidUtf8 => Self::InvalidUtf8,
+            RootGuidanceReadError::ChangedDuringRead => Self::ChangedDuringRead,
+            RootGuidanceReadError::ReadFailed => Self::ReadFailed,
+        }
+    }
+}
 
 /// An error while listing a workspace directory for a task turn.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -533,6 +584,19 @@ impl TaskSession {
     /// Returns a mutable task in this session by identifier.
     pub fn get_task_mut(&mut self, task_id: Uuid) -> Option<&mut Task> {
         self.tasks.iter_mut().find(|task| task.id == task_id)
+    }
+
+    pub(crate) fn read_root_project_guidance(
+        &self,
+        task_id: Uuid,
+    ) -> Result<Option<String>, WorkspaceGuidanceReadError> {
+        let root = self
+            .get_task(task_id)
+            .ok_or(WorkspaceGuidanceReadError::WorkspaceUnavailable)?
+            .workspace_root
+            .as_ref()
+            .map_err(|_| WorkspaceGuidanceReadError::WorkspaceUnavailable)?;
+        read_root_agents_md_at(root).map_err(Into::into)
     }
 
     /// Completes a running turn owned by the requested task in this session.

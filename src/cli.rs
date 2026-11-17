@@ -411,6 +411,13 @@ fn run_task_with_endpoint(
     let mut turn_results = Vec::new();
     let mut paused_checkpoint = None;
     loop {
+        let project_guidance = if model_source.is_some() {
+            session
+                .read_root_project_guidance(task_id)
+                .map_err(io::Error::other)?
+        } else {
+            None
+        };
         let mut displayed_observations = 0;
         let result = {
             let mut decision_source =
@@ -447,7 +454,11 @@ fn run_task_with_endpoint(
                                 action: "unable to display model decision progress".to_owned(),
                             };
                         }
-                        let action = model_source.choose_action(decision_goal, observations);
+                        let action = model_source.choose_action_with_root_project_guidance(
+                            decision_goal,
+                            observations,
+                            project_guidance.as_deref(),
+                        );
                         if let Err(cause) = writeln!(
                             output,
                             "Model selected action: {}",

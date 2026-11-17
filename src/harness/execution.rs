@@ -1,7 +1,8 @@
 use crate::task_lifecycle::{
     TaskSession, TurnActivityAction, TurnActivitySummary, TurnCompletionError, TurnOutcome,
-    WorkspaceCreateDirectoryError, WorkspaceListError, WorkspaceReadError, WorkspaceReplaceError,
-    WorkspaceSearchError, WorkspaceSearchLocation, WorkspaceWriteError,
+    WorkspaceCreateDirectoryError, WorkspaceGuidanceReadError, WorkspaceListError,
+    WorkspaceReadError, WorkspaceReplaceError, WorkspaceSearchError, WorkspaceSearchLocation,
+    WorkspaceWriteError,
 };
 use std::ffi::OsString;
 use std::fmt;
@@ -184,6 +185,21 @@ pub trait BoundedDecisionSource {
         goal: &str,
         observations: &[WorkspaceObservation],
     ) -> WorkspaceAction;
+
+    /// Returns whether this source builds model context from the task's root project guidance.
+    fn needs_root_project_guidance(&self) -> bool {
+        false
+    }
+
+    /// Selects an action with bounded root project guidance when the source requests it.
+    fn choose_action_with_root_project_guidance(
+        &mut self,
+        goal: &str,
+        observations: &[WorkspaceObservation],
+        _guidance: Option<&str>,
+    ) -> WorkspaceAction {
+        self.choose_action(goal, observations)
+    }
 }
 
 impl<F> BoundedDecisionSource for F
@@ -259,6 +275,8 @@ pub enum GoalTurnError {
     UnsupportedAction { action: String },
     /// The existing workspace safety policy rejected or could not perform a file read.
     WorkspaceRead(WorkspaceReadError),
+    /// Root project guidance could not be read safely before a model decision.
+    RootProjectGuidance(WorkspaceGuidanceReadError),
     /// The existing workspace safety policy rejected or could not list a directory.
     WorkspaceList(WorkspaceListError),
     /// The existing workspace safety policy rejected or could not create a directory.
@@ -281,6 +299,9 @@ impl fmt::Display for GoalTurnError {
                 write!(formatter, "unsupported workspace action '{action}'")
             }
             Self::WorkspaceRead(error) => error.fmt(formatter),
+            Self::RootProjectGuidance(error) => {
+                write!(formatter, "project guidance read failed: {error}")
+            }
             Self::WorkspaceList(error) => error.fmt(formatter),
             Self::WorkspaceDirectory(error) => error.fmt(formatter),
             Self::WorkspaceWrite(error) => error.fmt(formatter),
@@ -296,6 +317,7 @@ impl std::error::Error for GoalTurnError {
         match self {
             Self::Process(_) | Self::UnsupportedAction { .. } => None,
             Self::WorkspaceRead(error) => Some(error),
+            Self::RootProjectGuidance(error) => Some(error),
             Self::WorkspaceList(error) => Some(error),
             Self::WorkspaceDirectory(error) => Some(error),
             Self::WorkspaceWrite(error) => Some(error),
@@ -470,8 +492,24 @@ pub fn run_goal_turn_with_budget<D: BoundedDecisionSource + ?Sized>(
     let mut observations = Vec::new();
     let mut activity = Vec::new();
     let mut actions_taken = 0;
+    let needs_root_project_guidance = decision_source.needs_root_project_guidance();
+    let root_project_guidance = if needs_root_project_guidance && max_actions > 0 {
+        session
+            .read_root_project_guidance(task_id)
+            .map_err(GoalTurnError::RootProjectGuidance)?
+    } else {
+        None
+    };
     while actions_taken < max_actions {
-        let action = decision_source.choose_action(goal, &observations);
+        let action = if needs_root_project_guidance {
+            decision_source.choose_action_with_root_project_guidance(
+                goal,
+                &observations,
+                root_project_guidance.as_deref(),
+            )
+        } else {
+            decision_source.choose_action(goal, &observations)
+        };
         actions_taken += 1;
         match execute_action(session, task_id, turn_id, &action)? {
             ActionExecution::Complete(result) => {
