@@ -2,7 +2,7 @@ use super::{
     run_goal_turn_with_budget, workspace_action_name, BoundedDecisionSource, GoalTurnError,
     GoalTurnResult, GoalTurnStopReason, WorkspaceAction, WorkspaceObservation,
 };
-use crate::brain::{WorkspacePlan, WorkspacePlanError};
+use crate::brain::{OllamaDecisionSource, WorkspacePlan, WorkspacePlanError};
 use crate::harness::verification::{
     reconcile_task_state_with_checks, verify_completion_checks, CompletionCheckEvidence,
     CompletionVerification, CompletionVerificationStatus, RequiredCompletionCheck,
@@ -12,6 +12,31 @@ use crate::tools::registry::workspace_operations;
 use std::fmt;
 use std::io;
 use uuid::Uuid;
+
+/// Reads the task workspace's optional root guidance before requesting a bounded Brain plan.
+///
+/// The read uses the task's captured workspace root and existing no-follow, 16 KiB UTF-8
+/// boundary. Missing guidance leaves the planner prompt unchanged. A failed or unsafe read is
+/// returned before any planner model request. Guidance remains untrusted prompt context; the
+/// resulting plan is validated and executed through the existing Harness path.
+pub fn create_plan_with_workspace_context(
+    session: &TaskSession,
+    task_id: Uuid,
+    decision_source: &mut OllamaDecisionSource,
+    goal: &str,
+    observations: &[WorkspaceObservation],
+    action_budget: usize,
+) -> Result<WorkspacePlan, WorkspacePlanError> {
+    let project_guidance = session
+        .read_root_project_guidance(task_id)
+        .map_err(WorkspacePlanError::RootGuidanceRead)?;
+    decision_source.create_plan_with_project_guidance(
+        goal,
+        observations,
+        action_budget,
+        project_guidance.as_deref(),
+    )
+}
 
 /// Feeds plan operations through the existing bounded turn executor.
 pub fn run_goal_turn_with_plan<D: BoundedDecisionSource + ?Sized>(
