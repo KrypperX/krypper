@@ -1020,8 +1020,16 @@ fn action_from_provider_call(
 fn action_from_call(name: &str, arguments: &Value) -> Result<WorkspaceAction, ModelError> {
     match name {
         "offline_cargo_test" => {
-            checked_arguments(arguments, &[], &[])?;
-            Ok(WorkspaceAction::OfflineCargoTest)
+            let arguments = checked_arguments(arguments, &["test_filter"], &[])?;
+            let test_filter = arguments
+                .get("test_filter")
+                .map(|_| string_argument(arguments, "test_filter"))
+                .transpose()?;
+            crate::tools::process::validate_test_filter(test_filter)
+                .map_err(ModelError::InvalidArguments)?;
+            Ok(WorkspaceAction::OfflineCargoTest {
+                test_filter: test_filter.map(str::to_owned),
+            })
         }
         "read_file" => {
             let arguments = checked_arguments(arguments, &["path"], &["path"])?;

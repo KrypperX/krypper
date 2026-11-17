@@ -61,6 +61,7 @@ impl ArgumentSchema {
 struct ArgumentDefinition {
     name: &'static str,
     schema: ArgumentSchema,
+    required: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -85,7 +86,13 @@ impl OperationDefinition {
             .iter()
             .map(|argument| (argument.name.to_owned(), argument.schema.as_json()))
             .collect::<Map<_, _>>();
-        let required = properties.keys().collect::<Vec<_>>();
+        let mut required = self
+            .arguments
+            .iter()
+            .filter(|argument| argument.required)
+            .map(|argument| argument.name)
+            .collect::<Vec<_>>();
+        required.sort_unstable();
 
         json!({
             "type":"object",
@@ -100,6 +107,7 @@ const fn string(name: &'static str) -> ArgumentDefinition {
     ArgumentDefinition {
         name,
         schema: ArgumentSchema::String,
+        required: true,
     }
 }
 
@@ -107,6 +115,7 @@ const fn non_empty_string(name: &'static str) -> ArgumentDefinition {
     ArgumentDefinition {
         name,
         schema: ArgumentSchema::NonEmptyString,
+        required: true,
     }
 }
 
@@ -114,6 +123,15 @@ const fn bounded_string(name: &'static str, max_length: usize) -> ArgumentDefini
     ArgumentDefinition {
         name,
         schema: ArgumentSchema::BoundedString { max_length },
+        required: true,
+    }
+}
+
+const fn optional_bounded_string(name: &'static str, max_length: usize) -> ArgumentDefinition {
+    ArgumentDefinition {
+        name,
+        schema: ArgumentSchema::BoundedString { max_length },
+        required: false,
     }
 }
 
@@ -121,6 +139,7 @@ const fn positive_integer(name: &'static str) -> ArgumentDefinition {
     ArgumentDefinition {
         name,
         schema: ArgumentSchema::PositiveInteger,
+        required: true,
     }
 }
 
@@ -128,6 +147,7 @@ const fn bounded_positive_integer(name: &'static str, maximum: usize) -> Argumen
     ArgumentDefinition {
         name,
         schema: ArgumentSchema::BoundedPositiveInteger { maximum },
+        required: true,
     }
 }
 
@@ -191,8 +211,11 @@ const WORKSPACE_OPERATIONS: [OperationDefinition; 10] = [
     },
     OperationDefinition {
         operation: WorkspaceOperation::OfflineCargoTest,
-        description: "Run the fixed offline locked Cargo test profile, only if the task has host authorization and verified Linux confinement. No arguments.",
-        arguments: &[],
+        description: "Run the fixed offline locked Cargo test profile with an optional literal test-name filter, only if the task has host authorization and verified Linux confinement.",
+        arguments: &[optional_bounded_string(
+            "test_filter",
+            crate::tools::process::MAX_TEST_FILTER_BYTES,
+        )],
     },
 ];
 

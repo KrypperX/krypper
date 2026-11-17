@@ -1453,8 +1453,8 @@ fn workspace_registry_contains_only_existing_operations_and_schemas() {
             },
             {
                 "name":"offline_cargo_test",
-                "description":"Run the fixed offline locked Cargo test profile, only if the task has host authorization and verified Linux confinement. No arguments.",
-                "parameters":{"type":"object","properties":{},"required":[],"additionalProperties":false}
+                "description":"Run the fixed offline locked Cargo test profile with an optional literal test-name filter, only if the task has host authorization and verified Linux confinement.",
+                "parameters":{"type":"object","properties":{"test_filter":{"type":"string","minLength":1,"maxLength":256}},"required":[],"additionalProperties":false}
             }
         ])
     );
@@ -3465,16 +3465,30 @@ fn brain_module_source_path_preserves_root_compatibility() {
 }
 
 #[test]
-fn offline_profile_accepts_no_model_controlled_arguments() {
+fn offline_profile_accepts_only_an_optional_literal_filter() {
     assert_eq!(
         action_from_call("offline_cargo_test", &json!({})).unwrap(),
-        WorkspaceAction::OfflineCargoTest
+        WorkspaceAction::OfflineCargoTest { test_filter: None }
+    );
+    assert_eq!(
+        action_from_call(
+            "offline_cargo_test",
+            &json!({"test_filter":"module::selected_test"})
+        )
+        .unwrap(),
+        WorkspaceAction::OfflineCargoTest {
+            test_filter: Some("module::selected_test".into())
+        }
     );
     for arguments in [
         json!({"command":"sh"}),
         json!({"cwd":"/"}),
         json!({"env":{"TOKEN":"x"}}),
         json!({"memory":0}),
+        json!({"test_filter":""}),
+        json!({"test_filter":"--list"}),
+        json!({"test_filter":"line\nbreak"}),
+        json!({"test_filter":"x".repeat(257)}),
         json!([]),
     ] {
         assert!(action_from_call("offline_cargo_test", &arguments).is_err());

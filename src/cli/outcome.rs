@@ -85,8 +85,13 @@ pub(super) fn write_observation(
         WorkspaceObservation::ProcessFinished { result } => {
             writeln!(
                 output,
-                "Observation {number}: offline Cargo {:?}; cleanup={} truncated={}",
-                result.outcome, result.cleanup_confirmed, result.truncated
+                "Observation {number}: offline Cargo {:?}; filter={:?}; tests_ran={} executed_tests={:?}; cleanup={} truncated={}",
+                result.outcome,
+                result.test_filter,
+                result.tests_ran,
+                result.executed_tests,
+                result.cleanup_confirmed,
+                result.truncated
             )?;
             writeln!(
                 output,
@@ -259,6 +264,7 @@ mod tests {
     use super::{quoted_path_token, write_observation, write_turn_outcome};
     use crate::agent_loop::{GoalTurnError, WorkspaceAction, WorkspaceObservation};
     use crate::task_lifecycle::{TurnOutcome, WorkspaceSearchLocation};
+    use crate::{ProcessOutcome, ProcessResult};
     use std::ffi::OsString;
     use std::io::{self, Write};
     use std::path::PathBuf;
@@ -294,6 +300,23 @@ mod tests {
             action: "fixture".to_owned(),
         };
         let observations = [
+            (
+                WorkspaceObservation::ProcessFinished {
+                    result: ProcessResult {
+                        run_id: uuid::Uuid::new_v4(),
+                        outcome: ProcessOutcome::NoTestsMatched,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        truncated: false,
+                        diagnostic: Some("test filter executed no tests".to_owned()),
+                        cleanup_confirmed: true,
+                        test_filter: Some("absent_test".to_owned()),
+                        tests_ran: false,
+                        executed_tests: Some(0),
+                    },
+                },
+                "Observation 3: offline Cargo NoTestsMatched; filter=Some(\"absent_test\"); tests_ran=false executed_tests=Some(0); cleanup=true truncated=false\nstdout: \"\"\nstderr: \"\"\n",
+            ),
             (
                 WorkspaceObservation::FileRead {
                     path: PathBuf::from("read file.txt"),

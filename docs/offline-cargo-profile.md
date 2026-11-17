@@ -1,11 +1,25 @@
 # Opt-in Linux offline Cargo profile
 
 Issue #178 implements one process Tool, `offline_cargo_test`, alongside the
-existing eight filesystem Tools. Its only request is `{}`. It runs exactly
-`cargo test --offline --locked --all-targets`; requests cannot supply an
-executable, arguments, cwd, environment, sandbox options, or higher limits.
-This is an embedding API capability; no CLI syntax or default CLI permission
-has been added. Registry metadata and model output do not authorize execution.
+existing eight filesystem Tools. Its request may omit `test_filter` or include
+one literal test-name filter of at most 256 UTF-8 bytes. Empty values,
+control characters, option-like values and over-limit values are rejected
+before process setup. The filter uses Rust's test harness literal substring
+matching; it is passed unchanged as one argument after Cargo's fixed `--`
+separator and cannot add Cargo or test-harness flags.
+Without a filter it runs exactly `cargo test --offline --locked --all-targets`.
+Requests cannot supply an executable, other arguments, cwd, environment,
+sandbox options, or higher limits. This is an embedding API capability; no CLI
+syntax or default CLI permission has been added. Registry metadata and model
+output do not authorize execution.
+
+The bounded process observation records the selected filter, whether any tests
+ran, and the count of Rust test-harness per-test result lines. Aggregate summary
+lines do not establish that tests ran. A filtered run is successful only when
+at least one test ran, Cargo exited zero, output was complete, and cleanup was
+confirmed. A zero-match filter has the typed `no_tests_matched` outcome even
+when Cargo itself exits zero. Incomplete output does not provide successful
+execution evidence.
 
 ## Authorization and dispatch
 
@@ -121,8 +135,12 @@ without checking the recorded unit/cgroup is unsafe.
 
 Ordinary `cargo test --all-targets --locked --offline` covers schema denial,
 missing authorization, lifecycle/ownership checks, required resource readback,
-result semantics, and existing behavior. It does not pretend to validate real
-namespaces on a runner without prerequisites.
+filter validation and fixed argument placement, per-test execution evidence
+and zero-match semantics, result semantics, and existing behavior. A disposable
+offline Cargo fixture emits summary-shaped build-script warning output for both
+matching and unmatched filters; only test-harness per-test result lines count.
+It does not
+pretend to validate real namespaces on a runner without prerequisites.
 
 The ignored `real_offline_profile_is_confined_and_cleans_up` host fixture is
 run explicitly from a delegated user service with `KRYPPER_TEST_TOOLCHAIN`
@@ -130,9 +148,12 @@ and `KRYPPER_TEST_REGISTRY` pointing to preprovisioned directories. These two
 variables configure only the test harness; they are not product request fields
 and are never forwarded to workspace code. The fixture uses a dependency-free
 locked Cargo workspace, an outside canary, and the actual production sandbox
-and supervisor. It dispatches the registered profile through WorkspacePlan and Harness and
-asserts the process observation, successful turn outcome, lifecycle state and
-metadata record. It covers absent secrets/control sockets, denial of a live
+and supervisor. It dispatches the registered profile through WorkspacePlan and
+Harness with a literal filter, verifies that the selected test ran while an
+unrelated test was filtered, checks the selected filter and execution evidence
+in the process observation, and confirms that a filter matching no tests is a
+typed failure. It also asserts the successful turn outcome, lifecycle state
+and metadata record. It covers absent secrets/control sockets, denial of a live
 host-loopback listener (reachable from the host before and after the run),
 escape denial, nonzero exit, timeout, output bounds,
 cancellation, CPU/memory/process ceilings and cleanup. Lower-only private test

@@ -22,7 +22,7 @@ const MAX_READ_RANGE_BYTES: usize = 64 * 1024;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WorkspaceAction {
     /// Request the fixed, explicitly authorized offline Cargo profile.
-    OfflineCargoTest,
+    OfflineCargoTest { test_filter: Option<String> },
     /// Read one UTF-8 file under the task's workspace safety policy.
     ReadFile { path: PathBuf },
     /// Read at most 200 one-based lines from a UTF-8 file under the task's workspace safety policy.
@@ -61,7 +61,7 @@ pub enum WorkspaceAction {
 
 pub(crate) fn workspace_action_name(action: &WorkspaceAction) -> &'static str {
     match action {
-        WorkspaceAction::OfflineCargoTest => "offline_cargo_test",
+        WorkspaceAction::OfflineCargoTest { .. } => "offline_cargo_test",
         WorkspaceAction::ReadFile { .. } => "read_file",
         WorkspaceAction::ReadRange { .. } => "read_range",
         WorkspaceAction::ListDirectory { .. } => "list_directory",
@@ -686,7 +686,7 @@ pub(crate) fn summarize_observation(observation: &WorkspaceObservation) -> TurnA
         },
         WorkspaceObservation::ActionFailed { action, .. } => {
             let action = match action {
-                WorkspaceAction::OfflineCargoTest => TurnActivityAction::OfflineCargoTest,
+                WorkspaceAction::OfflineCargoTest { .. } => TurnActivityAction::OfflineCargoTest,
                 WorkspaceAction::ReadFile { .. } => TurnActivityAction::ReadFile,
                 WorkspaceAction::ReadRange { .. } => TurnActivityAction::ReadRange,
                 WorkspaceAction::ListDirectory { .. } => TurnActivityAction::ListDirectory,
@@ -713,9 +713,9 @@ fn execute_action(
     action: &WorkspaceAction,
 ) -> Result<ActionExecution, GoalTurnError> {
     match action {
-        WorkspaceAction::OfflineCargoTest => {
+        WorkspaceAction::OfflineCargoTest { test_filter } => {
             let result = session
-                .run_offline_cargo_tests(task_id, turn_id)
+                .run_offline_cargo_tests(task_id, turn_id, test_filter.as_deref())
                 .map_err(GoalTurnError::WorkspaceRead)?;
             let error = GoalTurnError::Process(result.outcome);
             let succeeded = result.succeeded();
