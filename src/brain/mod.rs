@@ -8,6 +8,7 @@ use crate::harness::verification::{
 };
 use crate::task_lifecycle::TaskSession;
 use crate::tools::registry::workspace_operations;
+use crate::tools::MAX_PATCH_BYTES;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::fmt;
@@ -1037,6 +1038,19 @@ fn action_from_call(name: &str, arguments: &Value) -> Result<WorkspaceAction, Mo
                 path: path_argument(arguments, "path")?,
                 match_text: match_text.to_owned(),
                 replacement_text: string_argument(arguments, "replacement_text")?.to_owned(),
+            })
+        }
+        "apply_patch" => {
+            let arguments = checked_arguments(arguments, &["path", "patch"], &["path", "patch"])?;
+            let patch = string_argument(arguments, "patch")?;
+            if patch.is_empty() || patch.len() > MAX_PATCH_BYTES {
+                return Err(ModelError::InvalidArguments(
+                    "patch must be nonempty and at most 32 KiB",
+                ));
+            }
+            Ok(WorkspaceAction::ApplyPatch {
+                path: path_argument(arguments, "path")?,
+                patch: patch.to_owned(),
             })
         }
         "complete_task" => {

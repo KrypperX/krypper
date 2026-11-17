@@ -1,7 +1,7 @@
 use crate::tools::{
-    capture_workspace_root, capture_workspace_root_at, create_directory_at, create_text_file_at,
-    list_task_directory_names_at, read_text_file_at, replace_text_file_at, search_text_files_at,
-    search_tree_text_files_at, WorkspaceRoot,
+    apply_patch_file_at, capture_workspace_root, capture_workspace_root_at, create_directory_at,
+    create_text_file_at, list_task_directory_names_at, read_text_file_at, replace_text_file_at,
+    search_text_files_at, search_tree_text_files_at, PatchEvidence, WorkspaceRoot,
 };
 use std::ffi::OsString;
 use std::fmt;
@@ -942,6 +942,34 @@ impl TaskSession {
                 message: error.message().to_owned(),
             },
         )
+    }
+
+    /// Applies one context-checked unified diff to an existing UTF-8 file in a running task.
+    ///
+    /// The patch is resolved beneath the task's captured workspace. It preserves the file's line
+    /// endings and supported permission bits, and succeeds only after atomic replacement and
+    /// exact readback verification.
+    pub(crate) fn apply_workspace_patch(
+        &self,
+        task_id: Uuid,
+        turn_id: Uuid,
+        path: &Path,
+        patch: &str,
+    ) -> Result<PatchEvidence, WorkspaceReplaceError> {
+        let task = self
+            .running_workspace_task(task_id, turn_id)
+            .map_err(WorkspaceReplaceError::from)?;
+        let root = task
+            .workspace_root
+            .as_ref()
+            .map_err(|message| WorkspaceReplaceError::File {
+                message: format!("task workspace could not be resolved: {message}"),
+            })?;
+        apply_patch_file_at(root, path.as_os_str(), patch).map_err(|error| {
+            WorkspaceReplaceError::File {
+                message: error.message().to_owned(),
+            }
+        })
     }
 
     /// Returns the tasks in creation order as a read-only slice.

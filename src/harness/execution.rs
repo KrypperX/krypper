@@ -46,6 +46,8 @@ pub enum WorkspaceAction {
         match_text: String,
         replacement_text: String,
     },
+    /// Apply one bounded, exact-context unified diff to an existing UTF-8 workspace file.
+    ApplyPatch { path: PathBuf, patch: String },
     /// Finish the turn with an explicit result.
     Complete { result: String },
     /// Finish this turn and let the same task continue in a new turn.
@@ -67,6 +69,7 @@ pub(crate) fn workspace_action_name(action: &WorkspaceAction) -> &'static str {
         WorkspaceAction::SearchTreeText { .. } => "search_tree_text",
         WorkspaceAction::CreateFile { .. } => "create_file",
         WorkspaceAction::ReplaceText { .. } => "replace_text",
+        WorkspaceAction::ApplyPatch { .. } => "apply_patch",
         WorkspaceAction::Complete { .. } => "complete_task",
         WorkspaceAction::Continue => "continue",
         WorkspaceAction::Cancel => "cancel",
@@ -115,6 +118,15 @@ pub enum WorkspaceObservation {
     TextReplaced { path: PathBuf, bytes_written: usize },
     /// A replacement failed; the matched and replacement text are not retained.
     TextReplacementFailed { path: PathBuf, error: GoalTurnError },
+    /// A patch was completely applied and read back; evidence contains only bounded hunk text.
+    PatchApplied {
+        path: PathBuf,
+        bytes_written: usize,
+        before_diff: String,
+        after_diff: String,
+    },
+    /// A patch failed; its contents are not retained.
+    PatchFailed { path: PathBuf, error: GoalTurnError },
     /// A text search failed; the query and file contents are not retained.
     TextSearchFailed {
         directory: PathBuf,
@@ -383,9 +395,13 @@ pub fn run_goal_turn<D: DecisionSource + ?Sized>(
                 WorkspaceObservation::TextReplaced { bytes_written, .. } => {
                     format!("replaced text ({bytes_written} bytes)")
                 }
+                WorkspaceObservation::PatchApplied { bytes_written, .. } => {
+                    format!("replaced text ({bytes_written} bytes)")
+                }
                 WorkspaceObservation::FileCreationFailed { .. }
                 | WorkspaceObservation::DirectoryCreationFailed { .. }
                 | WorkspaceObservation::TextReplacementFailed { .. }
+                | WorkspaceObservation::PatchFailed { .. }
                 | WorkspaceObservation::TextSearchFailed { .. }
                 | WorkspaceObservation::TreeTextSearchFailed { .. }
                 | WorkspaceObservation::ActionFailed { .. } => String::new(),
@@ -607,6 +623,11 @@ pub(crate) fn summarize_observation(observation: &WorkspaceObservation) -> TurnA
                 bytes_written: *bytes_written,
             }
         }
+        WorkspaceObservation::PatchApplied { bytes_written, .. } => {
+            TurnActivitySummary::TextReplaced {
+                bytes_written: *bytes_written,
+            }
+        }
         WorkspaceObservation::FileCreationFailed { .. } => TurnActivitySummary::ActionFailed {
             action: TurnActivityAction::CreateFile,
         },
@@ -614,6 +635,9 @@ pub(crate) fn summarize_observation(observation: &WorkspaceObservation) -> TurnA
             action: TurnActivityAction::CreateDirectory,
         },
         WorkspaceObservation::TextReplacementFailed { .. } => TurnActivitySummary::ActionFailed {
+            action: TurnActivityAction::ReplaceText,
+        },
+        WorkspaceObservation::PatchFailed { .. } => TurnActivitySummary::ActionFailed {
             action: TurnActivityAction::ReplaceText,
         },
         WorkspaceObservation::TextSearchFailed { .. } => TurnActivitySummary::ActionFailed {
@@ -631,6 +655,7 @@ pub(crate) fn summarize_observation(observation: &WorkspaceObservation) -> TurnA
                 WorkspaceAction::CreateDirectory { .. } => TurnActivityAction::CreateDirectory,
                 WorkspaceAction::CreateFile { .. } => TurnActivityAction::CreateFile,
                 WorkspaceAction::ReplaceText { .. } => TurnActivityAction::ReplaceText,
+                WorkspaceAction::ApplyPatch { .. } => TurnActivityAction::ReplaceText,
                 WorkspaceAction::SearchText { .. } => TurnActivityAction::SearchText,
                 WorkspaceAction::SearchTreeText { .. } => TurnActivityAction::SearchTreeText,
                 WorkspaceAction::Complete { .. }
@@ -807,6 +832,29 @@ fn execute_action(
             }
             Err(error) => Err(GoalTurnError::WorkspaceReplace(error)),
         },
+        WorkspaceAction::ApplyPatch { path, patch } => {
+            match session.apply_workspace_patch(task_id, turn_id, path, patch) {
+                Ok(evidence) => Ok(ActionExecution::Observation(
+                    WorkspaceObservation::PatchApplied {
+                        path: path.clone(),
+                        bytes_written: evidence.bytes_written,
+                        before_diff: evidence.before_diff,
+                        after_diff: evidence.after_diff,
+                    },
+                )),
+                Err(error @ WorkspaceReplaceError::File { .. }) => {
+                    let error = GoalTurnError::WorkspaceReplace(error);
+                    Ok(ActionExecution::Failed {
+                        observation: WorkspaceObservation::PatchFailed {
+                            path: path.clone(),
+                            error: error.clone(),
+                        },
+                        error,
+                    })
+                }
+                Err(error) => Err(GoalTurnError::WorkspaceReplace(error)),
+            }
+        }
         WorkspaceAction::SearchText { directory, query } => {
             match session.search_workspace_text(task_id, turn_id, directory, query) {
                 Ok(locations) => Ok(ActionExecution::Observation(

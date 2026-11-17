@@ -132,7 +132,18 @@ fn observation_size(observation: &WorkspaceObservation) -> usize {
                 total.saturating_add(location.path.to_string_lossy().len())
             }),
         WorkspaceObservation::TextReplaced { path, .. }
-        | WorkspaceObservation::TextReplacementFailed { path, .. } => path.to_string_lossy().len(),
+        | WorkspaceObservation::TextReplacementFailed { path, .. }
+        | WorkspaceObservation::PatchFailed { path, .. } => path.to_string_lossy().len(),
+        WorkspaceObservation::PatchApplied {
+            path,
+            before_diff,
+            after_diff,
+            ..
+        } => path
+            .to_string_lossy()
+            .len()
+            .saturating_add(before_diff.len())
+            .saturating_add(after_diff.len()),
         WorkspaceObservation::TextSearchFailed { directory, .. }
         | WorkspaceObservation::TreeTextSearchFailed { directory, .. } => {
             directory.to_string_lossy().len()
@@ -216,6 +227,23 @@ fn observation_value(observation: &WorkspaceObservation) -> Value {
             "path":path.to_string_lossy(),
             "error":error.to_string()
         }),
+        WorkspaceObservation::PatchApplied {
+            path,
+            bytes_written,
+            before_diff,
+            after_diff,
+        } => json!({
+            "type":"patch_applied",
+            "path":path.to_string_lossy(),
+            "bytes_written":bytes_written,
+            "before_diff":before_diff,
+            "after_diff":after_diff
+        }),
+        WorkspaceObservation::PatchFailed { path, error } => json!({
+            "type":"patch_failed",
+            "path":path.to_string_lossy(),
+            "error":error.to_string()
+        }),
         WorkspaceObservation::TextSearchFailed { directory, error } => json!({
             "type":"text_search_failed",
             "directory":directory.to_string_lossy(),
@@ -278,6 +306,12 @@ mod tests {
                 path: PathBuf::from("new.txt"),
                 bytes_written: 12,
             },
+            WorkspaceObservation::PatchApplied {
+                path: PathBuf::from("src/main.rs"),
+                bytes_written: 10,
+                before_diff: "old".to_owned(),
+                after_diff: "new".to_owned(),
+            },
         ];
 
         let prompt = build_task_prompt("Summarize the fixture", &observations, 3)
@@ -287,7 +321,7 @@ mod tests {
             prompt,
             concat!(
                 "Task goal:\nSummarize the fixture\n\nAction slots remaining, including this decision: 3. The task fails if the action budget runs out before completion.\n\nPrior workspace observations (JSON):\n",
-                r#"[{"contents":"local fixture","path":"README.md","type":"file_read"},{"end_line":3,"excerpt":"second line","path":"src/main.rs","start_line":2,"type":"file_range_read"},{"entries":["Cargo.toml","src"],"path":".","type":"directory_listed"},{"directory":".","locations":[{"line":7,"path":"src/lib.rs"}],"type":"text_searched"},{"bytes_written":12,"path":"new.txt","type":"file_created"}]"#
+                r#"[{"contents":"local fixture","path":"README.md","type":"file_read"},{"end_line":3,"excerpt":"second line","path":"src/main.rs","start_line":2,"type":"file_range_read"},{"entries":["Cargo.toml","src"],"path":".","type":"directory_listed"},{"directory":".","locations":[{"line":7,"path":"src/lib.rs"}],"type":"text_searched"},{"bytes_written":12,"path":"new.txt","type":"file_created"},{"after_diff":"new","before_diff":"old","bytes_written":10,"path":"src/main.rs","type":"patch_applied"}]"#
             )
         );
     }

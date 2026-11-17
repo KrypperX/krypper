@@ -265,6 +265,7 @@ fn is_failed_observation(observation: &WorkspaceObservation) -> bool {
         WorkspaceObservation::FileCreationFailed { .. }
             | WorkspaceObservation::DirectoryCreationFailed { .. }
             | WorkspaceObservation::TextReplacementFailed { .. }
+            | WorkspaceObservation::PatchFailed { .. }
             | WorkspaceObservation::TextSearchFailed { .. }
             | WorkspaceObservation::TreeTextSearchFailed { .. }
             | WorkspaceObservation::ActionFailed { .. }

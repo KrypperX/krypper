@@ -60,6 +60,7 @@ fn is_workspace_operation(action: &WorkspaceAction) -> bool {
             | WorkspaceAction::SearchTreeText { .. }
             | WorkspaceAction::CreateFile { .. }
             | WorkspaceAction::ReplaceText { .. }
+            | WorkspaceAction::ApplyPatch { .. }
     )
 }
 
