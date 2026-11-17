@@ -54,7 +54,12 @@ does not grant process authority, and generic process execution remains absent.
   and stops after a rejected or failed step. Its
   `run_goal_turn_with_completion_correction` entry point optionally runs one
   correction after independent checks fail or are unknown, using the remaining
-  slots from the original action budget. Its
+  slots from the original action budget. The separate
+  `run_goal_turn_with_process_failure_correction` entry point can also run one
+  follow-up turn after a complete, cleanup-confirmed Cargo nonzero exit or
+  typed zero-match result. It preserves the typed failure for Brain and requires
+  a later complete passing test after the last workspace change, in addition to
+  the existing independent checks. Its
   [`verification.rs`](src/harness/verification.rs) module retains the existing
   stop-reason reconciliation used by the CLI and adds the opt-in
   `reconcile_task_state_with_checks` and `verify_completion_checks` APIs.
@@ -157,6 +162,26 @@ failed post-correction check, a denied correction, exhausted budget, and the
 existing reactive and workspace-safety behavior. These tests verify control
 flow and safety; they do not measure general task quality. The path adds no
 provider, persistence, dependency, CLI change, or user-visible output.
+
+## Opt-in process failure correction
+
+`run_goal_turn_with_process_failure_correction` permits one follow-up turn after
+the last initial observation is a complete `Exited(nonzero)` or a consistent
+`NoTestsMatched` result. The correction planner receives that original typed
+`ProcessResult`, including its bounded output, filter, test counts, truncation
+flag, and cleanup status. Harness starts one new turn in the same task and
+executes any correction and test rerun through the existing registered
+operations and TaskSession grant, using only the remaining action budget.
+
+Denied or invalid requests, sandbox or setup failures, spawn failures,
+signals, timeouts, cancellation, resource or output limits, truncated output,
+and uncertain cleanup are terminal. A correction attempt cannot establish
+test success: verification requires a later complete successful Cargo result
+that ran at least one test after the last workspace mutation. Existing
+independent completion checks must also pass. The process profile, tool grant,
+operation registry, workspace confinement, and default turn path remain
+unchanged. Deterministic Harness fixtures script typed process results; the
+host-specific execution fixtures remain separate.
 
 ## Proposed boundaries
 

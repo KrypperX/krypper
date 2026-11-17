@@ -50,6 +50,18 @@ that turn; it does not retry a process automatically. Activity/checkpoint
 records retain only success and output byte-count metadata, never process
 output, runtime paths, or the authorization grant.
 
+The separate opt-in `run_goal_turn_with_process_failure_correction` Harness
+path may start one same-task follow-up turn after a complete, cleanup-confirmed
+Cargo nonzero exit or a consistent `NoTestsMatched` result. Brain receives the
+original typed process observation and bounded output as untrusted context.
+Denied or invalid requests, sandbox or setup failures, spawn failures,
+signals, timeouts, cancellation, resource or output limits, truncated output,
+and uncertain cleanup remain terminal. A later test verifies only when its
+result is complete, successful, ran at least one test, and followed the last
+workspace mutation; existing independent completion checks still apply. This
+opt-in path uses the existing TaskSession grant and registered workspace tools
+and does not alter the process profile or default Harness behavior.
+
 ## Required host capabilities
 
 The initial supported deployment is a non-root Linux user service with

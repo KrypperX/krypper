@@ -15,6 +15,7 @@ use crate::harness::verification::{
 use crate::task_lifecycle::{
     TaskSession, TurnActivitySummary, TurnOutcome, TurnState, WorkspaceGuidanceReadError,
 };
+use crate::{ProcessOutcome, ProcessResult};
 use serde_json::json;
 use std::fmt;
 
@@ -122,6 +123,45 @@ pub(super) fn create_completion_correction_plan(
         action_budget,
     )
     .map(Some)
+}
+
+pub(super) fn create_process_failure_correction_plan(
+    source: &mut OllamaDecisionSource,
+    session: &TaskSession,
+    prior_result: &GoalTurnResult,
+    failure: &ProcessResult,
+    goal: &str,
+    action_budget: usize,
+) -> Result<WorkspacePlan, BrainReflectionError> {
+    let is_recorded_failure = prior_result.stop_reason() == GoalTurnStopReason::ActionFailed
+        && matches!(
+            prior_result.observations().last(),
+            Some(WorkspaceObservation::ProcessFinished { result }) if result == failure
+        );
+    let is_correctable_failure = !failure.truncated
+        && failure.cleanup_confirmed
+        && match failure.outcome {
+            ProcessOutcome::Exited(code) => code != 0,
+            ProcessOutcome::NoTestsMatched => {
+                failure.test_filter.is_some()
+                    && !failure.tests_ran
+                    && failure.executed_tests == Some(0)
+            }
+            _ => false,
+        };
+    if !is_recorded_failure || !is_correctable_failure {
+        return Err(BrainReflectionError::UnverifiedExecutionEvidence);
+    }
+
+    create_plan_with_verification(
+        source,
+        session,
+        prior_result,
+        goal,
+        prior_result.observations(),
+        None,
+        action_budget,
+    )
 }
 
 fn create_plan_with_verification(
@@ -276,6 +316,9 @@ fn verified_execution_evidence<'a>(
 
 fn is_failed_observation(observation: &WorkspaceObservation) -> bool {
     matches!(
+        observation,
+        WorkspaceObservation::ProcessFinished { result } if !result.succeeded()
+    ) || matches!(
         observation,
         WorkspaceObservation::FileCreationFailed { .. }
             | WorkspaceObservation::DirectoryCreationFailed { .. }
