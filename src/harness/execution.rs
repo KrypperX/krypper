@@ -34,9 +34,9 @@ pub enum WorkspaceAction {
     ListDirectory { path: PathBuf },
     /// Create one directory under the task's workspace safety policy.
     CreateDirectory { path: PathBuf },
-    /// Find a literal query in the immediate regular UTF-8 files of a workspace directory.
+    /// Find a literal query in immediate regular UTF-8 files, honoring applicable root and nested `.gitignore` glob rules and negation.
     SearchText { directory: PathBuf, query: String },
-    /// Find a literal query recursively in regular UTF-8 workspace files.
+    /// Find a literal query recursively in regular UTF-8 files, honoring applicable root and nested `.gitignore` glob rules and negation, and skipping `.git` metadata directories.
     SearchTreeText { directory: PathBuf, query: String },
     /// Create one UTF-8 file without replacing an existing path under the task's workspace policy.
     CreateFile { path: PathBuf, contents: String },

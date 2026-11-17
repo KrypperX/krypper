@@ -818,12 +818,12 @@ fn workspace_registry_contains_only_existing_operations_and_schemas() {
             },
             {
                 "name":"search_text",
-                "description":"Find a literal query in immediate regular UTF-8 workspace files.",
+                "description":"Find a literal query in immediate regular UTF-8 workspace files, honoring applicable root and nested .gitignore glob rules and negation.",
                 "parameters":{"type":"object","properties":{"directory":{"type":"string"},"query":{"type":"string","minLength":1,"maxLength":4096}},"required":["directory","query"],"additionalProperties":false}
             },
             {
                 "name":"search_tree_text",
-                "description":"Find a literal query recursively in regular UTF-8 workspace files.",
+                "description":"Find a literal query recursively in regular UTF-8 workspace files, honoring applicable root and nested .gitignore glob rules and negation, and skipping .git metadata directories.",
                 "parameters":{"type":"object","properties":{"directory":{"type":"string"},"query":{"type":"string","minLength":1,"maxLength":4096}},"required":["directory","query"],"additionalProperties":false}
             },
             {

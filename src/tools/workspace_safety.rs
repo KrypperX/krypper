@@ -758,12 +758,20 @@ fn open_workspace_relative(
     path: &OsStr,
     directory: bool,
 ) -> Result<File, CliError> {
+    open_workspace_relative_with_resolved_path(root, path, directory).map(|(file, _)| file)
+}
+
+pub(crate) fn open_workspace_relative_with_resolved_path(
+    root: &WorkspaceRoot,
+    path: &OsStr,
+    directory: bool,
+) -> Result<(File, PathBuf), CliError> {
     if Path::new(path).is_absolute() {
         return Err(CliError::new("absolute paths are not allowed"));
     }
     let descriptor = duplicate_fd(root.descriptor.as_raw_fd())
         .map_err(|_| CliError::new("unable to read file"))?;
-    open_root_relative(descriptor, &root.path, path, directory)
+    open_root_relative_with_resolved_path(descriptor, &root.path, path, directory)
 }
 
 fn open_root_relative(
@@ -772,7 +780,17 @@ fn open_root_relative(
     path: &OsStr,
     directory: bool,
 ) -> Result<File, CliError> {
+    open_root_relative_with_resolved_path(root, root_path, path, directory).map(|(file, _)| file)
+}
+
+fn open_root_relative_with_resolved_path(
+    root: OwnedFd,
+    root_path: &Path,
+    path: &OsStr,
+    directory: bool,
+) -> Result<(File, PathBuf), CliError> {
     let mut directories = vec![root];
+    let mut resolved_components = Vec::<OsString>::new();
     let mut pending = split_components(path.as_bytes());
     let mut symlinks = 0;
 
@@ -784,6 +802,7 @@ fn open_root_relative(
                     return Err(CliError::new("path must stay inside the current directory"));
                 }
                 directories.pop();
+                resolved_components.pop();
                 continue;
             }
             _ => {}
@@ -819,6 +838,7 @@ fn open_root_relative(
                     .strip_prefix(root_path)
                     .map_err(|_| CliError::new("invalid path"))?;
                 directories.truncate(1);
+                resolved_components.clear();
                 prepend_components(&mut pending, relative.as_os_str().as_bytes());
             } else {
                 prepend_components(&mut pending, &target);
@@ -852,15 +872,22 @@ fn open_root_relative(
         {
             return Err(CliError::new("unable to read file"));
         }
+        resolved_components.push(component.clone());
         if final_component {
-            return Ok(File::from(opened));
+            return Ok((
+                File::from(opened),
+                resolved_components.into_iter().collect(),
+            ));
         }
         directories.push(opened);
     }
 
     let descriptor = duplicate_fd(directories[0].as_raw_fd())
         .map_err(|_| CliError::new("unable to read file"))?;
-    Ok(File::from(descriptor))
+    Ok((
+        File::from(descriptor),
+        resolved_components.into_iter().collect(),
+    ))
 }
 
 fn create_text_file_at_with_writer<F>(
