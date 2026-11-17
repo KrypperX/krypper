@@ -761,10 +761,14 @@ impl TaskSession {
         &self,
         task_id: Uuid,
         turn_id: Uuid,
+        test_filter: Option<&str>,
     ) -> Result<crate::ProcessResult, WorkspaceReadError> {
         let task = self.running_workspace_task(task_id, turn_id)?;
+        if crate::tools::process::validate_test_filter(test_filter).is_err() {
+            return Ok(crate::ProcessResult::invalid_test_filter());
+        }
         let Some(policy) = self.process_policies.get(&task_id) else {
-            return Ok(crate::ProcessResult::denied());
+            return Ok(crate::ProcessResult::denied(test_filter));
         };
         let root = task
             .workspace_root
@@ -772,7 +776,7 @@ impl TaskSession {
             .map_err(|message| WorkspaceReadError::File {
                 message: message.clone(),
             })?;
-        Ok(crate::tools::process::run(root, policy))
+        Ok(crate::tools::process::run(root, policy, test_filter))
     }
 
     /// Reads one UTF-8 file for a currently running turn owned by this session.

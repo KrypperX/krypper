@@ -1,6 +1,7 @@
 //! Opt-in Linux offline test profile. Host policy is never deserialized from model input.
 use super::{capture_workspace_root_at, WorkspaceRoot};
 use serde::Serialize;
+use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -17,6 +18,7 @@ use uuid::Uuid;
 const WALL: Duration = Duration::from_secs(180);
 const CPU_BUDGET: u64 = 120_000_000;
 const OUTPUT: usize = 256 * 1024;
+pub(crate) const MAX_TEST_FILTER_BYTES: usize = 256;
 const MEMORY: u64 = 3 * 1024 * 1024 * 1024;
 const TASKS: u64 = 128;
 static ACTIVE: Mutex<()> = Mutex::new(());
@@ -65,6 +67,8 @@ impl OfflineCargoPolicy {
 #[serde(rename_all = "snake_case")]
 pub enum ProcessOutcome {
     Denied,
+    InvalidTestFilter,
+    NoTestsMatched,
     SandboxUnavailable,
     SandboxSetupFailed,
     SpawnFailed,
@@ -99,6 +103,9 @@ pub struct ProcessResult {
     pub truncated: bool,
     pub diagnostic: Option<String>,
     pub cleanup_confirmed: bool,
+    pub test_filter: Option<String>,
+    pub tests_ran: bool,
+    pub executed_tests: Option<usize>,
 }
 
 fn serialize_run_id<S: serde::Serializer>(id: &Uuid, serializer: S) -> Result<S::Ok, S::Error> {
@@ -106,10 +113,18 @@ fn serialize_run_id<S: serde::Serializer>(id: &Uuid, serializer: S) -> Result<S:
 }
 
 impl ProcessResult {
-    pub(crate) fn denied() -> Self {
-        Self::empty(ProcessOutcome::Denied)
+    pub(crate) fn denied(test_filter: Option<&str>) -> Self {
+        Self::empty_with_filter(ProcessOutcome::Denied, test_filter)
+    }
+    pub(crate) fn invalid_test_filter() -> Self {
+        let mut result = Self::empty(ProcessOutcome::InvalidTestFilter);
+        result.diagnostic = Some("test_filter is invalid".into());
+        result
     }
     fn empty(outcome: ProcessOutcome) -> Self {
+        Self::empty_with_filter(outcome, None)
+    }
+    fn empty_with_filter(outcome: ProcessOutcome, test_filter: Option<&str>) -> Self {
         Self {
             run_id: Uuid::new_v4(),
             outcome,
@@ -118,6 +133,9 @@ impl ProcessResult {
             truncated: false,
             diagnostic: None,
             cleanup_confirmed: true,
+            test_filter: test_filter.map(str::to_owned),
+            tests_ran: false,
+            executed_tests: None,
         }
     }
     pub fn succeeded(&self) -> bool {
@@ -708,22 +726,107 @@ fn sandbox(root: &WorkspaceRoot, policy: &OfflineCargoPolicy, group: &Path) -> i
     Ok(command)
 }
 
-pub(crate) fn run(root: &WorkspaceRoot, policy: &OfflineCargoPolicy) -> ProcessResult {
-    run_with_bounds(root, policy, WALL, OUTPUT, CPU_BUDGET)
+pub(crate) fn validate_test_filter(test_filter: Option<&str>) -> Result<(), &'static str> {
+    let Some(test_filter) = test_filter else {
+        return Ok(());
+    };
+    if test_filter.is_empty() {
+        return Err("test_filter must not be empty");
+    }
+    if test_filter.len() > MAX_TEST_FILTER_BYTES {
+        return Err("test_filter exceeds the byte limit");
+    }
+    if test_filter.chars().any(char::is_control) {
+        return Err("test_filter must not contain control characters");
+    }
+    if test_filter.trim_start().starts_with('-') {
+        return Err("test_filter must not look like an option");
+    }
+    Ok(())
+}
+
+fn cargo_command_args(test_filter: Option<&str>) -> Vec<OsString> {
+    let mut args = [
+        "--",
+        "/toolchain/bin/cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "--all-targets",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect::<Vec<_>>();
+    if let Some(test_filter) = test_filter {
+        args.push(OsString::from("--"));
+        args.push(OsString::from(test_filter));
+    }
+    args
+}
+
+fn summary_test_count(line: &str) -> Option<usize> {
+    let (_, summary) = line.split_once("test result:")?;
+    let words = summary.split_whitespace().collect::<Vec<_>>();
+    ["passed;", "failed;"]
+        .into_iter()
+        .try_fold(0usize, |total, field| {
+            let index = words.iter().position(|word| *word == field)?;
+            let count = words.get(index.checked_sub(1)?)?.parse::<usize>().ok()?;
+            Some(total.saturating_add(count))
+        })
+}
+
+fn executed_test_count(output: &str) -> Option<usize> {
+    let counts = output
+        .lines()
+        .filter_map(summary_test_count)
+        .collect::<Vec<_>>();
+    (!counts.is_empty()).then(|| counts.into_iter().fold(0usize, usize::saturating_add))
+}
+
+fn record_test_evidence(result: &mut ProcessResult) {
+    let stdout_count = executed_test_count(&result.stdout);
+    let stderr_count = executed_test_count(&result.stderr);
+    result.executed_tests = match (stdout_count, stderr_count) {
+        (Some(stdout), Some(stderr)) => Some(stdout.saturating_add(stderr)),
+        (Some(count), None) | (None, Some(count)) => Some(count),
+        (None, None) => None,
+    };
+    result.tests_ran = result.executed_tests.is_some_and(|count| count > 0);
+    if result.test_filter.is_some()
+        && result.outcome == ProcessOutcome::Exited(0)
+        && !result.tests_ran
+    {
+        result.outcome = ProcessOutcome::NoTestsMatched;
+        result.diagnostic = Some("test filter executed no tests".into());
+    }
+}
+
+pub(crate) fn run(
+    root: &WorkspaceRoot,
+    policy: &OfflineCargoPolicy,
+    test_filter: Option<&str>,
+) -> ProcessResult {
+    run_with_bounds(root, policy, test_filter, WALL, OUTPUT, CPU_BUDGET)
 }
 
 // Private lower-only bounds let host fixtures exercise failures without minute-long waits.
 fn run_with_bounds(
     root: &WorkspaceRoot,
     policy: &OfflineCargoPolicy,
+    test_filter: Option<&str>,
     wall: Duration,
     output: usize,
     cpu_budget: u64,
 ) -> ProcessResult {
+    if validate_test_filter(test_filter).is_err() {
+        return ProcessResult::invalid_test_filter();
+    }
     let wall = wall.min(WALL);
     let output = output.min(OUTPUT);
     let cpu_budget = cpu_budget.min(CPU_BUDGET);
-    let mut result = ProcessResult::empty(ProcessOutcome::SandboxUnavailable);
+    let mut result =
+        ProcessResult::empty_with_filter(ProcessOutcome::SandboxUnavailable, test_filter);
     if !cfg!(target_os = "linux") || unsafe { libc::geteuid() } == 0 {
         return result;
     }
@@ -732,7 +835,7 @@ fn run_with_bounds(
         return result;
     }
     let Ok(_guard) = ACTIVE.try_lock() else {
-        return ProcessResult::denied();
+        return ProcessResult::empty_with_filter(ProcessOutcome::Denied, test_filter);
     };
     if policy.cancelled.load(Ordering::SeqCst) {
         result.outcome = ProcessOutcome::Cancelled;
@@ -741,7 +844,7 @@ fn run_with_bounds(
     // A task must never be able to edit its own trusted runtime or registry mounts.
     for runtime in [&policy.toolchain, &policy.registry] {
         if runtime.path().starts_with(root.path()) || root.path().starts_with(runtime.path()) {
-            return ProcessResult::denied();
+            return ProcessResult::denied(test_filter);
         }
     }
     let mut lease = match HostLease::acquire() {
@@ -786,14 +889,7 @@ fn run_with_bounds(
             return Ok(());
         }
         let mut command = sandbox(root, policy, &supervisor.group)?;
-        command.args([
-            "--",
-            "/toolchain/bin/cargo",
-            "test",
-            "--offline",
-            "--locked",
-            "--all-targets",
-        ]);
+        command.args(cargo_command_args(test_filter));
         result.outcome = ProcessOutcome::SpawnFailed;
         let mut child = ManagedChild(Some(command.spawn()?));
         launched = true;
@@ -892,6 +988,7 @@ fn run_with_bounds(
         }
         result.stdout = String::from_utf8_lossy(&stdout).into_owned();
         result.stderr = String::from_utf8_lossy(&stderr).into_owned();
+        record_test_evidence(&mut result);
         Ok(())
     })();
     if let Err(e) = execution {

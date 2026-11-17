@@ -120,9 +120,12 @@ fn model_observations(observations: &[WorkspaceObservation]) -> Result<Vec<Value
 
 fn observation_size(observation: &WorkspaceObservation) -> usize {
     match observation {
-        WorkspaceObservation::ProcessFinished { result } => {
-            result.stdout.len() + result.stderr.len() + 256
-        }
+        WorkspaceObservation::ProcessFinished { result } => result
+            .stdout
+            .len()
+            .saturating_add(result.stderr.len())
+            .saturating_add(result.test_filter.as_ref().map_or(0, String::len))
+            .saturating_add(512),
         WorkspaceObservation::FileRead { path, contents } => {
             path.to_string_lossy().len().saturating_add(contents.len())
         }
@@ -370,6 +373,31 @@ mod tests {
             build_task_prompt_with_project_guidance("goal", &over_limit, 1, None),
             Err(ContextError::ObservationsTooLarge)
         ));
+    }
+
+    #[test]
+    fn process_observation_includes_filter_and_execution_evidence() {
+        let observation = WorkspaceObservation::ProcessFinished {
+            result: crate::ProcessResult {
+                run_id: uuid::Uuid::new_v4(),
+                outcome: crate::ProcessOutcome::NoTestsMatched,
+                stdout: String::new(),
+                stderr: String::new(),
+                truncated: false,
+                diagnostic: Some("test filter executed no tests".to_owned()),
+                cleanup_confirmed: true,
+                test_filter: Some("missing_test".to_owned()),
+                tests_ran: false,
+                executed_tests: Some(0),
+            },
+        };
+
+        let json = observations_json(&[observation]).expect("serialize process observation");
+
+        assert!(json.contains("\"test_filter\":\"missing_test\""));
+        assert!(json.contains("\"tests_ran\":false"));
+        assert!(json.contains("\"executed_tests\":0"));
+        assert!(json.contains("\"outcome\":\"no_tests_matched\""));
     }
 
     #[test]

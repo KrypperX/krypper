@@ -1,5 +1,6 @@
 use super::*;
 use crate::task_lifecycle::{TaskSession, TurnState};
+use std::ffi::OsString;
 
 fn fixture() -> PathBuf {
     let path = std::env::temp_dir().join(format!("krypper-process-{}", Uuid::new_v4()));
@@ -33,10 +34,11 @@ fn profile_is_denied_without_explicit_task_authority() {
         .unwrap();
     let turn = owner.create_turn().unwrap();
     owner.transition_turn(turn, TurnState::Running).unwrap();
-    assert_eq!(
-        session.run_offline_cargo_tests(task, turn).unwrap().outcome,
-        ProcessOutcome::Denied
-    );
+    let result = session
+        .run_offline_cargo_tests(task, turn, Some("works"))
+        .unwrap();
+    assert_eq!(result.outcome, ProcessOutcome::Denied);
+    assert_eq!(result.test_filter.as_deref(), Some("works"));
     assert_eq!(
         session
             .get_task(task)
@@ -47,7 +49,7 @@ fn profile_is_denied_without_explicit_task_authority() {
         TurnState::Running
     );
     assert!(session
-        .run_offline_cargo_tests(Uuid::new_v4(), turn)
+        .run_offline_cargo_tests(Uuid::new_v4(), turn, None)
         .is_err());
     fs::remove_dir_all(path).unwrap();
 }
@@ -66,7 +68,12 @@ fn registered_plan_reaches_process_authorization_through_harness() {
         .unwrap();
     let turn = owner.create_turn().unwrap();
     owner.transition_turn(turn, TurnState::Running).unwrap();
-    let plan = crate::WorkspacePlan::try_from_actions(vec![WorkspaceAction::OfflineCargoTest], 1);
+    let plan = crate::WorkspacePlan::try_from_actions(
+        vec![WorkspaceAction::OfflineCargoTest {
+            test_filter: Some("works".into()),
+        }],
+        1,
+    );
     let mut control =
         |_: &str, _: &[WorkspaceObservation]| panic!("denied process must stop before completion");
     let execution = run_goal_turn_with_plan(
@@ -109,6 +116,103 @@ fn zero_exit_alone_is_not_success() {
     result.cleanup_confirmed = true;
     result.truncated = true;
     assert!(!result.succeeded());
+}
+
+#[test]
+fn test_filter_validation_rejects_unbounded_or_option_like_values() {
+    assert!(validate_test_filter(None).is_ok());
+    assert!(validate_test_filter(Some("module::selected_test")).is_ok());
+    for filter in ["", "--list", "  -h", "line\nbreak", "nul\0byte"] {
+        assert!(validate_test_filter(Some(filter)).is_err(), "{filter:?}");
+    }
+    let oversized = "x".repeat(MAX_TEST_FILTER_BYTES + 1);
+    assert!(validate_test_filter(Some(&oversized)).is_err());
+    let multibyte_oversized = "é".repeat(MAX_TEST_FILTER_BYTES / 2 + 1);
+    assert!(validate_test_filter(Some(&multibyte_oversized)).is_err());
+}
+
+#[test]
+fn invalid_filter_returns_before_workspace_process_launch() {
+    let path = fixture();
+    let marker = path.with_extension("launched");
+    fs::write(
+        path.join("build.rs"),
+        format!(
+            "fn main() {{ std::fs::write({:?}, b\"launched\").unwrap(); }}",
+            marker
+        ),
+    )
+    .unwrap();
+    let runtime = path.with_extension("runtime");
+    fs::create_dir_all(runtime.join("bin")).unwrap();
+    for binary in ["cargo", "rustc"] {
+        fs::copy("/usr/bin/true", runtime.join("bin").join(binary)).unwrap();
+    }
+    let policy = OfflineCargoPolicy::new(&runtime, &runtime).unwrap();
+    let root = capture_workspace_root_at(&path).unwrap();
+
+    let result = run(&root, &policy, Some("--list"));
+
+    assert_eq!(result.outcome, ProcessOutcome::InvalidTestFilter);
+    assert!(
+        !marker.exists(),
+        "invalid filters must not launch workspace code"
+    );
+    fs::remove_dir_all(path).unwrap();
+    fs::remove_dir_all(runtime).unwrap();
+}
+
+#[test]
+fn cargo_filter_is_one_literal_argument_after_the_fixed_separator() {
+    let fixed = cargo_command_args(None);
+    assert_eq!(
+        fixed,
+        [
+            "--",
+            "/toolchain/bin/cargo",
+            "test",
+            "--offline",
+            "--locked",
+            "--all-targets"
+        ]
+        .map(OsString::from)
+    );
+
+    let filtered = cargo_command_args(Some("module::selected test"));
+    assert_eq!(
+        filtered,
+        [
+            "--",
+            "/toolchain/bin/cargo",
+            "test",
+            "--offline",
+            "--locked",
+            "--all-targets",
+            "--",
+            "module::selected test"
+        ]
+        .map(OsString::from)
+    );
+}
+
+#[test]
+fn test_harness_summaries_report_executed_tests_and_reject_zero_matches() {
+    let mut result = ProcessResult::empty(ProcessOutcome::Exited(0));
+    result.test_filter = Some("selected_test".into());
+    result.stdout = "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s\n".into();
+    record_test_evidence(&mut result);
+    assert_eq!(result.executed_tests, Some(1));
+    assert!(result.tests_ran);
+    assert!(result.succeeded());
+
+    let mut no_matches = ProcessResult::empty(ProcessOutcome::Exited(0));
+    no_matches.test_filter = Some("absent_test".into());
+    no_matches.stdout = "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s\n".into();
+    record_test_evidence(&mut no_matches);
+    assert_eq!(no_matches.executed_tests, Some(0));
+    assert!(!no_matches.tests_ran);
+    assert_eq!(no_matches.outcome, ProcessOutcome::NoTestsMatched);
+    assert!(!no_matches.succeeded());
 }
 
 #[test]
@@ -178,7 +282,7 @@ fn process_grants_do_not_survive_a_checkpoint_restore() {
     owner.transition_turn(turn, TurnState::Running).unwrap();
     assert_eq!(
         restored
-            .run_offline_cargo_tests(task, turn)
+            .run_offline_cargo_tests(task, turn, None)
             .unwrap()
             .outcome,
         ProcessOutcome::Denied
@@ -204,7 +308,7 @@ fn unavailable_host_controls_never_launch_workspace_code() {
     .unwrap();
     let policy = OfflineCargoPolicy::new(Path::new(&toolchain), Path::new(&registry)).unwrap();
     let root = capture_workspace_root_at(&path).unwrap();
-    let result = run(&root, &policy);
+    let result = run(&root, &policy, None);
     assert!(
         matches!(
             result.outcome,
@@ -238,7 +342,7 @@ fn real_offline_profile_is_confined_and_cleans_up() {
         "host canary must be reachable before sandbox launch"
     );
     fs::write(path.join("src/lib.rs"), r#"
-#[test] fn confinement() {
+#[test] fn confinement_selected_test() {
 assert!(std::fs::read_to_string("escape").is_err());
 assert!(std::fs::write("escape", "changed").is_err());
 assert!(std::fs::read_dir("/home").is_err());
@@ -248,6 +352,7 @@ assert!(std::fs::metadata("/run/user").is_err());
 assert!(std::net::TcpStream::connect_timeout(&"__HOST_CANARY__".parse().unwrap(), std::time::Duration::from_millis(100)).is_err());
 assert_eq!(std::env::current_dir().unwrap().to_str().unwrap(), "/workspace");
 }
+#[test] fn unrelated_test_is_filtered() { panic!("unrelated test ran"); }
 "#.replace("__HOST_CANARY__", &canary_address.to_string())).unwrap();
     let policy = OfflineCargoPolicy::new(Path::new(&toolchain), Path::new(&registry)).unwrap();
     let mut session = TaskSession::new_in_workspace(&path).unwrap();
@@ -262,10 +367,21 @@ assert_eq!(std::env::current_dir().unwrap().to_str().unwrap(), "/workspace");
     use crate::agent_loop::{
         run_goal_turn_with_plan, GoalTurnStopReason, WorkspaceAction, WorkspaceObservation,
     };
-    let plan = crate::WorkspacePlan::try_from_actions(vec![WorkspaceAction::OfflineCargoTest], 1);
+    let plan = crate::WorkspacePlan::try_from_actions(
+        vec![WorkspaceAction::OfflineCargoTest {
+            test_filter: Some("confinement_selected_test".into()),
+        }],
+        1,
+    );
     let mut control = |_: &str, observations: &[WorkspaceObservation]| {
         assert!(
-            matches!(observations, [WorkspaceObservation::ProcessFinished { result }] if result.succeeded())
+            matches!(observations, [WorkspaceObservation::ProcessFinished { result }]
+                if result.succeeded()
+                    && result.test_filter.as_deref() == Some("confinement_selected_test")
+                    && result.tests_ran
+                    && result.executed_tests == Some(1)
+                    && (result.stdout.contains("1 filtered out")
+                        || result.stderr.contains("1 filtered out")))
         );
         WorkspaceAction::Complete {
             result: "offline Cargo verified".into(),
@@ -295,6 +411,12 @@ assert_eq!(std::env::current_dir().unwrap().to_str().unwrap(), "/workspace");
         panic!("one process observation required")
     };
     assert!(result.succeeded(), "{result:?}");
+    assert_eq!(
+        result.test_filter.as_deref(),
+        Some("confinement_selected_test")
+    );
+    assert!(result.tests_ran);
+    assert_eq!(result.executed_tests, Some(1));
     let recorded_turn = session.get_task(task).unwrap().get_turn(turn).unwrap();
     assert_eq!(recorded_turn.state(), TurnState::Succeeded);
     assert_eq!(recorded_turn.outcome(), execution.outcome());
@@ -317,13 +439,26 @@ assert_eq!(std::env::current_dir().unwrap().to_str().unwrap(), "/workspace");
     // Use the actual sandbox/supervisor for failure cases, with lower-only test bounds.
     let policy = OfflineCargoPolicy::new(Path::new(&toolchain), Path::new(&registry)).unwrap();
     let root = capture_workspace_root_at(&path).unwrap();
+    let no_match = run(&root, &policy, Some("test_name_that_does_not_exist"));
+    assert_eq!(
+        no_match.outcome,
+        ProcessOutcome::NoTestsMatched,
+        "{no_match:?}"
+    );
+    assert_eq!(
+        no_match.test_filter.as_deref(),
+        Some("test_name_that_does_not_exist")
+    );
+    assert!(!no_match.tests_ran);
+    assert_eq!(no_match.executed_tests, Some(0));
+    assert!(!no_match.succeeded());
     for (source, wall, cap, expected) in [
         ("#[test] fn fails() { panic!(\"fixture failure\"); }", Duration::from_secs(10), OUTPUT, ProcessOutcome::Exited(101)),
         ("#[test] fn spins() { loop { std::hint::spin_loop(); } }", Duration::from_secs(2), OUTPUT, ProcessOutcome::TimedOut),
         ("#[test] fn floods() { use std::io::Write; for _ in 0..4096 { std::io::stdout().write_all(&[b'x';1024]).unwrap(); } }", Duration::from_secs(10), 8192, ProcessOutcome::OutputLimitExceeded),
     ] {
         fs::write(path.join("src/lib.rs"), source).unwrap();
-        let result = run_with_bounds(&root, &policy, wall, cap, CPU_BUDGET);
+        let result = run_with_bounds(&root, &policy, None, wall, cap, CPU_BUDGET);
         assert_eq!(result.outcome, expected, "{result:?}");
         assert!(result.cleanup_confirmed, "{result:?}");
         assert!(!result.succeeded());
@@ -335,7 +470,7 @@ assert_eq!(std::env::current_dir().unwrap().to_str().unwrap(), "/workspace");
         ("#[test] fn processes() { let mut children = Vec::new(); for _ in 0..256 { match std::process::Command::new(\"/usr/bin/sleep\").arg(\"20\").spawn() { Ok(child) => children.push(child), Err(_) => break, } } std::process::exit(0); }", ProcessResource::Processes),
     ] {
         fs::write(path.join("src/lib.rs"), source).unwrap();
-        let result = run_with_bounds(&root, &policy, WALL, OUTPUT, if resource == ProcessResource::Cpu { 10_000_000 } else { CPU_BUDGET });
+        let result = run_with_bounds(&root, &policy, None, WALL, OUTPUT, if resource == ProcessResource::Cpu { 10_000_000 } else { CPU_BUDGET });
         assert_eq!(result.outcome, ProcessOutcome::ResourceLimitExceeded { resource }, "{result:?}");
         assert!(result.cleanup_confirmed, "{result:?}");
         assert!(!result.succeeded());
@@ -350,7 +485,7 @@ assert_eq!(std::env::current_dir().unwrap().to_str().unwrap(), "/workspace");
         thread::sleep(Duration::from_secs(2));
         cancel.store(true, Ordering::SeqCst);
     });
-    let result = run(&root, &policy);
+    let result = run(&root, &policy, None);
     trigger.join().unwrap();
     assert_eq!(result.outcome, ProcessOutcome::Cancelled, "{result:?}");
     assert!(result.cleanup_confirmed);
@@ -366,7 +501,7 @@ fn real_product_workspace_runs_the_fixed_profile() {
     let workspace = std::env::var_os("KRYPPER_TEST_WORKSPACE").expect("workspace required");
     let policy = OfflineCargoPolicy::new(Path::new(&toolchain), Path::new(&registry)).unwrap();
     let root = capture_workspace_root_at(Path::new(&workspace)).unwrap();
-    let result = run(&root, &policy);
+    let result = run(&root, &policy, None);
     assert!(result.succeeded(), "{result:?}");
     println!(
         "{:?} {} stdout bytes / {} stderr bytes; cleanup={}",
