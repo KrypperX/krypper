@@ -765,7 +765,7 @@ fn cargo_command_args(test_filter: Option<&str>) -> Vec<OsString> {
 }
 
 fn summary_test_count(line: &str) -> Option<usize> {
-    let (_, summary) = line.split_once("test result:")?;
+    let summary = line.strip_prefix("test result:")?;
     let words = summary.split_whitespace().collect::<Vec<_>>();
     ["passed;", "failed;"]
         .into_iter()
