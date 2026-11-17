@@ -159,6 +159,17 @@ escape denial, nonzero exit, timeout, output bounds,
 cancellation, CPU/memory/process ceilings and cleanup. Lower-only private test
 bounds make timeout/output tests short; public profile limits are fixed.
 
+The ignored `local_model_task_patches_then_runs_a_filtered_offline_cargo_test`
+and `local_model_task_cannot_complete_after_a_zero_match_offline_cargo_test`
+fixtures use a loopback scripted model endpoint to drive the normal Harness and
+task grant through `apply_patch`, `offline_cargo_test`, and task control. The
+matching case checks that the bounded completion prompt contains the literal
+filter and one executed test before accepting `complete_task`, while the
+companion case checks the typed `no_tests_matched` failure stops before task
+control can complete. Both use a disposable dependency-free workspace and
+verify an outside-workspace canary remains unchanged. They use the same
+preprovisioned toolchain and registry settings as the host fixture above.
+
 The broader [process safety design](process-execution-safety.md) remains a
 historical proposal and requirements reference. This implementation provides
 no generic shell, interactive process session, new provider, deployment path,
