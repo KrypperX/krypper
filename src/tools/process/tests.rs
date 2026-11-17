@@ -488,7 +488,7 @@ fn process_grants_do_not_survive_a_checkpoint_restore() {
 }
 
 #[test]
-#[ignore = "requires verified Linux namespaces, delegated cgroup v2 and user systemd"]
+#[ignore = "requires KRYPPER_TEST_TOOLCHAIN and KRYPPER_TEST_REGISTRY from a delegated Linux user service with verified namespaces and cgroup v2"]
 fn local_model_task_patches_then_runs_a_filtered_offline_cargo_test() {
     use crate::agent_loop::{run_goal_turn_with_budget, GoalTurnStopReason, WorkspaceObservation};
 
@@ -576,7 +576,7 @@ fn local_model_task_patches_then_runs_a_filtered_offline_cargo_test() {
 }
 
 #[test]
-#[ignore = "requires verified Linux namespaces, delegated cgroup v2 and user systemd"]
+#[ignore = "requires KRYPPER_TEST_TOOLCHAIN and KRYPPER_TEST_REGISTRY from a delegated Linux user service with verified namespaces and cgroup v2"]
 fn local_model_task_cannot_complete_after_a_zero_match_offline_cargo_test() {
     use crate::agent_loop::{run_goal_turn_with_budget, GoalTurnStopReason, WorkspaceObservation};
 
