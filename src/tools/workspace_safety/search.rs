@@ -1,7 +1,8 @@
 use super::{
     fstat, is_directory, is_regular_file, is_symlink, list_open_directory_with_limit,
-    list_open_directory_with_limit_and_error, open_at, open_workspace_relative, same_inode,
-    stat_at, CliError, WorkspaceRoot, MAX_FILE_SIZE, MAX_TASK_DIRECTORY_ENTRIES,
+    list_open_directory_with_limit_and_error, open_at, open_workspace_relative,
+    open_workspace_relative_with_resolved_path, same_inode, stat_at, CliError, WorkspaceRoot,
+    MAX_FILE_SIZE, MAX_TASK_DIRECTORY_ENTRIES,
 };
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use std::collections::VecDeque;
@@ -60,6 +61,11 @@ fn normalize_relative_path(path: &Path) -> PathBuf {
         }
     }
     normalized
+}
+
+fn is_git_metadata_path(path: &Path) -> bool {
+    path.components()
+        .any(|component| component.as_os_str() == OsStr::new(".git"))
 }
 
 fn ignore_rules_for_directory(
@@ -255,7 +261,11 @@ pub(crate) fn search_text_files_at(
         }
     }
 
-    let directory = open_workspace_relative(root, directory_path, true)?;
+    let (directory, resolved_directory_path) =
+        open_workspace_relative_with_resolved_path(root, directory_path, true)?;
+    if is_git_metadata_path(&resolved_directory_path) {
+        return Ok(Vec::new());
+    }
     let mut bytes_scanned = 0_usize;
     let Some(ignore_rules) =
         ignore_rules_for_directory(root, directory_path, &directory, &mut bytes_scanned)?
@@ -359,7 +369,11 @@ pub(crate) fn search_tree_text_files_at(
         }
     }
 
-    let directory = open_workspace_relative(root, directory_path, true)?;
+    let (directory, resolved_directory_path) =
+        open_workspace_relative_with_resolved_path(root, directory_path, true)?;
+    if is_git_metadata_path(&resolved_directory_path) {
+        return Ok(Vec::new());
+    }
     let mut bytes_scanned = 0_usize;
     let Some(ignore_rules) =
         ignore_rules_for_directory(root, directory_path, &directory, &mut bytes_scanned)?
@@ -1259,5 +1273,29 @@ mod tests {
         );
         assert_eq!(fs::read(&outside_ignore).unwrap(), b"*.txt\n");
         fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn selected_directory_symlink_cannot_expose_git_metadata() {
+        let path = tree_temp_path();
+        fs::create_dir_all(path.join(".git/objects")).unwrap();
+        fs::write(path.join(".git/config"), "needle in git metadata\n").unwrap();
+        symlink(path.join(".git"), path.join("metadata-alias")).unwrap();
+        let root = tree_workspace_root(&path);
+
+        assert!(
+            search_text_files_at(&root, Path::new("metadata-alias").as_os_str(), "needle")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(search_tree_text_files_at(
+            &root,
+            Path::new("metadata-alias").as_os_str(),
+            "needle"
+        )
+        .unwrap()
+        .is_empty());
+
+        fs::remove_dir_all(path).unwrap();
     }
 }
