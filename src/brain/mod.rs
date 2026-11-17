@@ -682,11 +682,8 @@ fn workspace_tool_definitions() -> Vec<Value> {
     workspace_operations()
         .iter()
         .map(|operation| {
-            function_tool_with_parameters(
-                operation.name(),
-                operation.description(),
-                operation.parameters(),
-            )
+            let description = operation.provider_description();
+            function_tool_with_parameters(operation.name(), &description, operation.parameters())
         })
         .collect::<Vec<_>>()
 }
