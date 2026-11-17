@@ -14,11 +14,12 @@ syntax or default CLI permission has been added. Registry metadata and model
 output do not authorize execution.
 
 The bounded process observation records the selected filter, whether any tests
-ran, and the count reported by complete Rust test-harness summaries. A filtered
-run is successful only when at least one test ran, Cargo exited zero, output
-was complete, and cleanup was confirmed. A zero-match filter has the typed
-`no_tests_matched` outcome even when Cargo itself exits zero. Incomplete output
-does not provide successful execution evidence.
+ran, and the count of Rust test-harness per-test result lines. Aggregate summary
+lines do not establish that tests ran. A filtered run is successful only when
+at least one test ran, Cargo exited zero, output was complete, and cleanup was
+confirmed. A zero-match filter has the typed `no_tests_matched` outcome even
+when Cargo itself exits zero. Incomplete output does not provide successful
+execution evidence.
 
 ## Authorization and dispatch
 
@@ -134,8 +135,11 @@ without checking the recorded unit/cgroup is unsafe.
 
 Ordinary `cargo test --all-targets --locked --offline` covers schema denial,
 missing authorization, lifecycle/ownership checks, required resource readback,
-filter validation and fixed argument placement, test-summary evidence and
-zero-match semantics, result semantics, and existing behavior. It does not
+filter validation and fixed argument placement, per-test execution evidence
+and zero-match semantics, result semantics, and existing behavior. A disposable
+offline Cargo fixture emits summary-shaped build-script warning output for both
+matching and unmatched filters; only test-harness per-test result lines count.
+It does not
 pretend to validate real namespaces on a runner without prerequisites.
 
 The ignored `real_offline_profile_is_confined_and_cleans_up` host fixture is
