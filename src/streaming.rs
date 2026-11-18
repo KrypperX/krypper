@@ -140,20 +140,27 @@ impl SseDecoder {
     }
 
     pub fn push(&mut self, chunk: &[u8]) -> Result<Vec<SseFrame>, SseDecodeError> {
-        if self.frame_bytes.saturating_add(chunk.len()) > self.limit {
-            return Err(SseDecodeError::FrameTooLarge);
-        }
-        self.frame_bytes += chunk.len();
-        self.pending.extend_from_slice(chunk);
         let mut frames = Vec::new();
-        while let Some(end) = self.pending.iter().position(|byte| *byte == b'\n') {
-            let mut line = self.pending.drain(..=end).collect::<Vec<_>>();
+        for &byte in chunk {
+            if self.frame_bytes >= self.limit {
+                self.pending.clear();
+                self.data.clear();
+                self.event = None;
+                self.frame_bytes = 0;
+                return Err(SseDecodeError::FrameTooLarge);
+            }
+            self.frame_bytes += 1;
+            self.pending.push(byte);
+            if byte != b'\n' {
+                continue;
+            }
+            let mut line = std::mem::take(&mut self.pending);
             line.pop();
             if line.last() == Some(&b'\r') {
                 line.pop();
             }
             if line.is_empty() {
-                self.frame_bytes = self.pending.len();
+                self.frame_bytes = 0;
                 if !self.data.is_empty() {
                     frames.push(SseFrame {
                         event: self.event.take(),
@@ -167,7 +174,15 @@ impl SseDecoder {
             if line.first() == Some(&b':') {
                 continue;
             }
-            let line = std::str::from_utf8(&line).map_err(|_| SseDecodeError::InvalidUtf8)?;
+            let line = match std::str::from_utf8(&line) {
+                Ok(line) => line,
+                Err(_) => {
+                    self.data.clear();
+                    self.event = None;
+                    self.frame_bytes = 0;
+                    return Err(SseDecodeError::InvalidUtf8);
+                }
+            };
             let (field, value) = line.split_once(':').unwrap_or((line, ""));
             let value = value.strip_prefix(' ').unwrap_or(value);
             match field {
@@ -433,6 +448,24 @@ mod tests {
             data: r#"{"delta":"secret"}"#.into(),
         };
         assert_eq!(provider_text_delta(&tool_args), None);
+    }
+
+    #[test]
+    fn sse_decoder_limits_each_frame_not_the_entire_read_chunk() {
+        let mut decoder = SseDecoder::new(9);
+        let frames = decoder.push(b"data: a\n\ndata: b\n\n").unwrap();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].data, "a");
+        assert_eq!(frames[1].data, "b");
+    }
+
+    #[test]
+    fn sse_decoder_resets_after_invalid_utf8() {
+        let mut decoder = SseDecoder::new(32);
+        assert_eq!(decoder.push(b"data: \xff\n"), Err(SseDecodeError::InvalidUtf8));
+        let frames = decoder.push(b"data: ok\n\n").unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, "ok");
     }
 
     struct FailingSink;
