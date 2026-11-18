@@ -744,10 +744,10 @@ impl<W: std::io::Write> EventSink for TextSink<W> {
                 self.writer.write_all(text.as_bytes())?;
             }
             StreamEvent::TurnCompleted { status, .. } => {
-                writeln!(self.writer, "\\n[turn: {status}]")?;
+                writeln!(self.writer, "\n[turn: {status}]")?;
             }
             StreamEvent::StreamError { code } => {
-                writeln!(self.writer, "\\n[stream error: {code}]")?;
+                writeln!(self.writer, "\n[stream error: {code}]")?;
             }
             _ => {}
         }
@@ -763,7 +763,7 @@ pub fn write_activity_positions<W: std::io::Write>(
 ) -> std::io::Result<()> {
     for position in snapshot_positions(session) {
         serde_json::to_writer(&mut *writer, &position).map_err(std::io::Error::other)?;
-        writer.write_all(b"\\n")?;
+        writer.write_all(b"\n")?;
     }
     writer.flush()
 }
@@ -1406,7 +1406,7 @@ mod tests {
             .unwrap();
         let output = String::from_utf8(emitter.into_inner().into_inner()).unwrap();
         assert!(output.contains("hello"));
-        assert!(output.contains("[turn: completed]"));
+        assert!(output.contains("\n[turn: completed]\n"));
         assert!(!output.contains("private-task"));
     }
 
