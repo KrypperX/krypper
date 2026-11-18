@@ -1065,6 +1065,46 @@ mod tests {
     }
 
     #[test]
+    fn sse_reader_rejects_truncated_provider_frame_at_eof() {
+        let mut reader = std::io::Cursor::new(b"event: response.completed\ndata: {}".to_vec());
+        let mut delivered = 0;
+        let result = consume_sse(&mut reader, 1024, |_| {
+            delivered += 1;
+            Ok::<(), ()>(())
+        });
+        assert!(matches!(
+            result,
+            Err(SseReadError::Decode(SseDecodeError::TruncatedFrame))
+        ));
+        assert_eq!(delivered, 0);
+    }
+
+    #[test]
+    fn sse_reader_rejects_invalid_utf8_before_dispatch() {
+        let mut reader = std::io::Cursor::new(b"data: \xff\n\n".to_vec());
+        let mut delivered = 0;
+        let result = consume_sse(&mut reader, 1024, |_| {
+            delivered += 1;
+            Ok::<(), ()>(())
+        });
+        assert!(matches!(
+            result,
+            Err(SseReadError::Decode(SseDecodeError::InvalidUtf8))
+        ));
+        assert_eq!(delivered, 0);
+    }
+
+    #[test]
+    fn sse_decoder_accepts_frame_at_exact_byte_limit() {
+        let frame = b"data: ok\n\n";
+        let mut decoder = SseDecoder::new(frame.len());
+        let frames = decoder.push(frame).unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, "ok");
+        assert_eq!(decoder.finish(), Ok(()));
+    }
+
+    #[test]
     fn sse_reader_delivers_frames_without_waiting_for_eof() {
         let mut reader = std::io::Cursor::new(b"data: first\n\ndata: second\n\n".to_vec());
         let mut seen = Vec::new();
