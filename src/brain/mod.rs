@@ -816,6 +816,15 @@ where
     })
 }
 
+/// Preserve the decision request while enabling provider-native SSE transport.
+#[allow(dead_code)]
+fn enable_responses_streaming(request: &[u8]) -> Result<Vec<u8>, ModelError> {
+    let mut body: Value = serde_json::from_slice(request)
+        .map_err(|error| ModelError::Transport(error.to_string()))?;
+    body["stream"] = Value::Bool(true);
+    encode_model_request(&body)
+}
+
 /// Opt-in Responses streaming transport. The caller owns presentation and
 /// cancellation; this path never authorizes actions or mutates task lifecycle.
 #[allow(dead_code)]
@@ -830,10 +839,7 @@ fn post_responses_text_stream<F>(
 where
     F: FnMut(String) -> Result<(), ModelError>,
 {
-    let mut body: Value = serde_json::from_slice(request)
-        .map_err(|error| ModelError::Transport(error.to_string()))?;
-    body["stream"] = Value::Bool(true);
-    let streaming_request = encode_model_request(&body)?;
+    let streaming_request = enable_responses_streaming(request)?;
     post_hosted_text_stream(
         agent,
         provider,
