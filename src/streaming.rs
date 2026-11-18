@@ -673,6 +673,28 @@ mod tests {
     }
 
     #[test]
+    fn responses_batch_requires_done_before_exposing_completed_arguments() {
+        let mut batch = ResponsesCallBatch::new(2, 64);
+        let delta = SseFrame {
+            event: Some("response.function_call_arguments.delta".into()),
+            data: serde_json::json!({"output_index": 0, "delta": "{}"}).to_string(),
+        };
+        assert_eq!(batch.push(&delta), Ok(true));
+        assert_eq!(batch.completed_arguments(), Ok(vec![]));
+        let done = SseFrame {
+            event: Some("response.function_call_arguments.done".into()),
+            data: serde_json::json!({"output_index": 0}).to_string(),
+        };
+        assert_eq!(batch.complete(&done), Ok(true));
+        assert_eq!(
+            batch.completed_arguments(),
+            Ok(vec![(0, serde_json::json!({}))])
+        );
+        assert_eq!(batch.complete(&done), Err(ArgumentsError::InvalidEvent));
+        assert_eq!(batch.push(&delta), Err(ArgumentsError::InvalidEvent));
+    }
+
+    #[test]
     fn responses_batch_keeps_interleaved_calls_separate() {
         let mut batch = ResponsesCallBatch::new(2, 64);
         for (index, delta) in [(1, "{"), (0, "{}"), (1, "}")] {
