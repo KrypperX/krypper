@@ -128,17 +128,26 @@ where
         Ok(plan) => {
             let targets = plan_mutation_targets(&plan);
             if !targets.is_empty() {
-                let current_guidance = session
-                    .read_project_guidance_for_targets(task_id, &targets)
-                    .map_err(GoalTurnError::RootProjectGuidance)?;
-                let expected_guidance = plan.project_guidance_context();
-                if current_guidance.as_deref() != expected_guidance {
-                    return Err(GoalTurnError::RootProjectGuidance(
-                        crate::task_lifecycle::WorkspaceGuidanceReadError::GuidanceChanged,
-                    ));
+                match session.read_project_guidance_for_targets(task_id, &targets) {
+                    Ok(current_guidance) => {
+                        let expected_guidance = plan.project_guidance_context();
+                        if current_guidance.as_deref() != expected_guidance {
+                            return Err(GoalTurnError::RootProjectGuidance(
+                                crate::task_lifecycle::WorkspaceGuidanceReadError::GuidanceChanged,
+                            ));
+                        }
+                        plan.into_actions()
+                    }
+                    Err(crate::task_lifecycle::WorkspaceGuidanceReadError::InvalidTargetPath) => {
+                        vec![WorkspaceAction::Unsupported {
+                            action: "planned mutation target is unsafe".to_owned(),
+                        }]
+                    }
+                    Err(error) => return Err(GoalTurnError::RootProjectGuidance(error)),
                 }
+            } else {
+                plan.into_actions()
             }
-            plan.into_actions()
         }
         Err(error) => vec![WorkspaceAction::Unsupported {
             action: error.to_string(),
