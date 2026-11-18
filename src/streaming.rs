@@ -1107,7 +1107,10 @@ mod tests {
     #[test]
     fn sse_decoder_preserves_multiline_data_across_chunk_boundaries() {
         let mut decoder = SseDecoder::new(1024);
-        assert!(decoder.push(b"event: response.output_text.delta\r").unwrap().is_empty());
+        assert!(decoder
+            .push(b"event: response.output_text.delta\r")
+            .unwrap()
+            .is_empty());
         assert!(decoder.push(b"\ndata: first\r\n").unwrap().is_empty());
         assert!(decoder.push(b"data: second\r\n\r").unwrap().is_empty());
         let frames = decoder.push(b"\n").unwrap();
