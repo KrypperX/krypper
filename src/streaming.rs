@@ -469,6 +469,31 @@ mod tests {
     }
 
     #[test]
+    fn provider_delta_bridge_emits_only_text_and_preserves_sequence() {
+        let mut emitter = StreamEmitter::new(RecordingSink::default());
+        let tool_args = SseFrame {
+            event: Some("response.function_call_arguments.delta".into()),
+            data: r#"{"delta":"do not emit"}"#.into(),
+        };
+        assert_eq!(emit_provider_text_delta(&mut emitter, "answer", &tool_args), Ok(false));
+        let text = SseFrame {
+            event: Some("response.output_text.delta".into()),
+            data: r#"{"delta":"hello"}"#.into(),
+        };
+        assert_eq!(emit_provider_text_delta(&mut emitter, "answer", &text), Ok(true));
+        let sink = emitter.into_inner();
+        assert_eq!(sink.0.len(), 1);
+        assert_eq!(sink.0[0].sequence, 1);
+        assert_eq!(
+            sink.0[0].event,
+            StreamEvent::TextDelta {
+                item_id: "answer".into(),
+                text: "hello".into()
+            }
+        );
+    }
+
+    #[test]
     fn sse_decoder_limits_each_frame_not_the_entire_read_chunk() {
         let mut decoder = SseDecoder::new(9);
         let frames = decoder.push(b"data: a\n\ndata: b\n\n").unwrap();
