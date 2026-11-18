@@ -1231,6 +1231,8 @@ mod tests {
     #[test]
     fn anthropic_stream_assembles_and_validates_completed_tool_use() {
         use super::AnthropicDecisionSource;
+        use crate::agent_loop::WorkspaceAction;
+        use serde_json::json;
         use std::io::{Read, Write};
         use std::net::TcpListener;
         use std::time::Duration;
