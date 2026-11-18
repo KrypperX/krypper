@@ -734,8 +734,14 @@ mod tests {
             })
             .to_string(),
         };
-        assert_eq!(batch.register_call(&duplicate), Err(ArgumentsError::InvalidEvent));
-        assert_eq!(batch.register_call(&first), Err(ArgumentsError::InvalidEvent));
+        assert_eq!(
+            batch.register_call(&duplicate),
+            Err(ArgumentsError::InvalidEvent)
+        );
+        assert_eq!(
+            batch.register_call(&first),
+            Err(ArgumentsError::InvalidEvent)
+        );
     }
 
     #[test]
