@@ -1210,6 +1210,49 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_stream_assembles_and_validates_completed_tool_use() {
+        use super::AnthropicDecisionSource;
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::time::Duration;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let endpoint = format!("http://{}", listener.local_addr().expect("address"));
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept");
+            socket.set_read_timeout(Some(Duration::from_secs(5))).expect("timeout");
+            let mut request = [0_u8; 16384];
+            let count = socket.read(&mut request).expect("request");
+            let received = String::from_utf8_lossy(&request[..count]);
+            assert!(received.contains("x-api-key:") || received.contains("X-Api-Key:"));
+            let frames = [
+                ("content_block_start", json!({"index":0,"content_block":{"type":"tool_use","id":"tool_1","name":"read_file","input":{}}})),
+                ("content_block_delta", json!({"index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"path\\":"}})),
+                ("content_block_delta", json!({"index":0,"delta":{"type":"input_json_delta","partial_json":"\\"README.md\\"}"}})),
+                ("content_block_stop", json!({"index":0})),
+                ("message_delta", json!({"delta":{"stop_reason":"tool_use"}})),
+                ("message_stop", json!({})),
+            ];
+            let mut body = String::new();
+            for (kind, data) in frames {
+                body.push_str(&format!("event: {kind}\\ndata: {data}\\n\\n"));
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\\r\\nContent-Type: text/event-stream\\r\\nContent-Length: {}\\r\\nConnection: close\\r\\n\\r\\n{}",
+                body.len(), body
+            );
+            socket.write_all(response.as_bytes()).expect("response");
+        });
+        let mut source = AnthropicDecisionSource::with_endpoint(
+            "test-model", "local-test-key", 2, endpoint,
+        );
+        let action = source.choose_with_streaming("read README", &[], None, true)
+            .expect("complete tool use");
+        assert!(matches!(action, WorkspaceAction::ReadFile { .. }));
+        server.join().expect("server");
+    }
+
+    #[test]
     fn mistral_credentials_bind_to_the_fixed_endpoint() {
         let key = "local-mistral-test-key";
         let (provider, endpoint, api_key) = OpenAiCompatibleCredentials::Mistral {
