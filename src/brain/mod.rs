@@ -830,11 +830,18 @@ fn post_responses_text_stream<F>(
 where
     F: FnMut(String) -> Result<(), ModelError>,
 {
-    let mut body: Value =
-        serde_json::from_slice(request).map_err(|error| ModelError::Transport(error.to_string()))?;
+    let mut body: Value = serde_json::from_slice(request)
+        .map_err(|error| ModelError::Transport(error.to_string()))?;
     body["stream"] = Value::Bool(true);
     let streaming_request = encode_model_request(&body)?;
-    post_hosted_text_stream(agent, provider, endpoint, api_key, &streaming_request, on_text)
+    post_hosted_text_stream(
+        agent,
+        provider,
+        endpoint,
+        api_key,
+        &streaming_request,
+        on_text,
+    )
 }
 
 fn post_hosted(
