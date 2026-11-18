@@ -988,6 +988,34 @@ mod tests {
     }
 
     #[test]
+    fn sse_decoder_ignores_heartbeat_comments_without_leaking_event_state() {
+        let mut decoder = SseDecoder::new(1024);
+        let frames = decoder
+            .push(b": heartbeat\n\nevent: response.output_text.delta\ndata: one\n\n: ping\n\ndata: two\n\n")
+            .unwrap();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].event.as_deref(), Some("response.output_text.delta"));
+        assert_eq!(frames[0].data, "one");
+        assert_eq!(frames[1].event, None);
+        assert_eq!(frames[1].data, "two");
+        assert_eq!(decoder.finish(), Ok(()));
+    }
+
+    #[test]
+    fn sse_decoder_rejects_oversized_frame_across_chunks_and_resets() {
+        let mut decoder = SseDecoder::new(12);
+        assert!(decoder.push(b"data: long").unwrap().is_empty());
+        assert_eq!(
+            decoder.push(b"er-than-limit"),
+            Err(SseDecodeError::FrameTooLarge)
+        );
+        assert_eq!(decoder.finish(), Ok(()));
+        let frames = decoder.push(b"data: ok\n\n").unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, "ok");
+    }
+
+    #[test]
     fn sse_decoder_rejects_oversized_incomplete_frame() {
         let mut decoder = SseDecoder::new(4);
         assert_eq!(decoder.push(b"12345"), Err(SseDecodeError::FrameTooLarge));
