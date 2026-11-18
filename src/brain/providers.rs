@@ -1235,10 +1235,10 @@ mod tests {
             ];
             let mut body = String::new();
             for (kind, data) in frames {
-                body.push_str(&format!("event: {kind}\\ndata: {data}\\n\\n"));
+                body.push_str(&format!("event: {kind}\ndata: {data}\n\n"));
             }
             let response = format!(
-                "HTTP/1.1 200 OK\\r\\nContent-Type: text/event-stream\\r\\nContent-Length: {}\\r\\nConnection: close\\r\\n\\r\\n{}",
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(), body
             );
             socket.write_all(response.as_bytes()).expect("response");
