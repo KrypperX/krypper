@@ -176,15 +176,11 @@ fn read_project_guidance_at_with_reader_and_hook(
     mut read: impl FnMut(&mut File) -> io::Result<Vec<u8>>,
     mut after_directory_read: impl FnMut(&[OsString]) -> io::Result<()>,
 ) -> Result<Option<String>, RootGuidanceReadError> {
-    // Invalid edit targets cannot be read for guidance; the registered writer still rejects
-    // them before mutation, while valid targets in the same plan are checked.
-    let mut normalized_targets = Vec::new();
+    // Every planned edit target must be safely inspected or fail this preflight. Omitting an
+    // unsafe target could let another operation in the same plan mutate without full guidance.
+    let mut normalized_targets = Vec::with_capacity(targets.len());
     for target in targets {
-        match normalize_guidance_target(target) {
-            Ok(target) => normalized_targets.push(target),
-            Err(RootGuidanceReadError::InvalidTargetPath) => {}
-            Err(error) => return Err(error),
-        }
+        normalized_targets.push(normalize_guidance_target(target)?);
     }
 
     let mut safe_targets = Vec::new();
@@ -195,17 +191,16 @@ fn read_project_guidance_at_with_reader_and_hook(
                 safe_targets.push((parent, name));
                 continue;
             }
-            Err(RootGuidanceReadError::Symlink | RootGuidanceReadError::InvalidTargetPath) => {
-                continue;
-            }
             Err(error) => return Err(error),
         };
         match stat_at(parent_fd.as_raw_fd(), &name) {
-            Ok(status) if is_symlink(&status) => {}
+            Ok(status) if is_symlink(&status) => {
+                return Err(RootGuidanceReadError::Symlink);
+            }
             Ok(status) if is_regular_file(&status) || is_directory(&status) => {
                 safe_targets.push((parent, name));
             }
-            Ok(_) => {}
+            Ok(_) => return Err(RootGuidanceReadError::InvalidTargetPath),
             Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {
                 safe_targets.push((parent, name));
             }
@@ -2003,6 +1998,84 @@ mod tests {
             super::read_project_guidance_at(&root, &[PathBuf::from("note.txt")]).unwrap(),
             None
         );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn project_guidance_rejects_out_of_workspace_targets_in_a_mixed_plan() {
+        let (base, workspace) = guidance_workspace();
+        fs::create_dir_all(workspace.join("src")).unwrap();
+        fs::write(workspace.join("AGENTS.md"), "root guidance").unwrap();
+        let outside = base.join("outside.txt");
+        fs::write(&outside, "outside canary").unwrap();
+        let root = capture_workspace_root_at(&workspace).unwrap();
+
+        let result = super::read_project_guidance_at(
+            &root,
+            &[
+                PathBuf::from("src/generated.rs"),
+                PathBuf::from("../outside.txt"),
+            ],
+        );
+
+        assert_eq!(result, Err(super::RootGuidanceReadError::InvalidTargetPath));
+        assert_eq!(fs::read_to_string(outside).unwrap(), "outside canary");
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn project_guidance_rejects_symlinked_edit_targets_without_reading_canaries() {
+        use std::os::unix::fs::symlink;
+
+        let (base, workspace) = guidance_workspace();
+        fs::create_dir_all(workspace.join("src")).unwrap();
+        fs::write(workspace.join("AGENTS.md"), "root guidance").unwrap();
+        let outside_file = base.join("outside.txt");
+        fs::write(&outside_file, "outside file canary").unwrap();
+        symlink(&outside_file, workspace.join("src/linked.rs")).unwrap();
+        let outside_directory = base.join("outside-directory");
+        fs::create_dir(&outside_directory).unwrap();
+        let outside_canary = outside_directory.join("canary.txt");
+        fs::write(&outside_canary, "outside directory canary").unwrap();
+        symlink(&outside_directory, workspace.join("linked-directory")).unwrap();
+        let root = capture_workspace_root_at(&workspace).unwrap();
+
+        let file_target = super::read_project_guidance_at(
+            &root,
+            &[
+                PathBuf::from("src/generated.rs"),
+                PathBuf::from("src/linked.rs"),
+            ],
+        );
+        let parent_target = super::read_project_guidance_at(
+            &root,
+            &[PathBuf::from("linked-directory/generated.rs")],
+        );
+
+        assert_eq!(file_target, Err(super::RootGuidanceReadError::Symlink));
+        assert_eq!(parent_target, Err(super::RootGuidanceReadError::Symlink));
+        assert_eq!(
+            fs::read_to_string(outside_file).unwrap(),
+            "outside file canary"
+        );
+        assert_eq!(
+            fs::read_to_string(outside_canary).unwrap(),
+            "outside directory canary"
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn project_guidance_rejects_non_directory_edit_target_parents() {
+        let (base, workspace) = guidance_workspace();
+        fs::write(workspace.join("AGENTS.md"), "root guidance").unwrap();
+        fs::write(workspace.join("blocked"), "not a directory").unwrap();
+        let root = capture_workspace_root_at(&workspace).unwrap();
+
+        let result =
+            super::read_project_guidance_at(&root, &[PathBuf::from("blocked/generated.rs")]);
+
+        assert_eq!(result, Err(super::RootGuidanceReadError::InvalidTargetPath));
         fs::remove_dir_all(base).unwrap();
     }
 
