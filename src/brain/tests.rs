@@ -1559,7 +1559,7 @@ fn workspace_registry_contains_only_existing_operations_and_schemas() {
             },
             {
                 "name":"offline_cargo_test",
-                "description":"Run the fixed offline locked Cargo test profile with an optional literal test-name filter, only if the task has host authorization and verified Linux confinement.",
+                "description":"Run the fixed offline locked Cargo test profile with an optional literal test-name filter.",
                 "parameters":{"type":"object","properties":{"test_filter":{"type":"string","minLength":1,"maxLength":256}},"required":[],"additionalProperties":false}
             }
         ])
@@ -1646,6 +1646,122 @@ fn provider_request_builders_keep_their_formats_with_registry_tools() {
         gemini["tools"][0]["functionDeclarations"][0]["name"],
         "read_file"
     );
+
+    assert_provider_operation_metadata(
+        &ollama["tools"],
+        &["function", "name"],
+        &["function", "description"],
+        &["function", "parameters"],
+        clone_schema,
+    );
+    assert_provider_operation_metadata(
+        &responses["tools"],
+        &["name"],
+        &["description"],
+        &["parameters"],
+        clone_schema,
+    );
+    assert_provider_operation_metadata(
+        &anthropic["tools"],
+        &["name"],
+        &["description"],
+        &["input_schema"],
+        anthropic_strict_schema,
+    );
+    assert_provider_operation_metadata(
+        &gemini["tools"][0]["functionDeclarations"],
+        &["name"],
+        &["description"],
+        &["parameters"],
+        gemini_supported_schema,
+    );
+    assert_provider_operation_metadata(
+        &compatible["tools"],
+        &["function", "name"],
+        &["function", "description"],
+        &["function", "parameters"],
+        clone_schema,
+    );
+}
+
+fn clone_schema(schema: &Value) -> Value {
+    schema.clone()
+}
+
+fn nested_value<'a>(mut value: &'a Value, path: &[&str]) -> &'a Value {
+    for segment in path {
+        value = value
+            .get(*segment)
+            .unwrap_or_else(|| panic!("missing provider field at {segment}"));
+    }
+    value
+}
+
+fn assert_provider_operation_metadata(
+    tools: &Value,
+    name_path: &[&str],
+    description_path: &[&str],
+    schema_path: &[&str],
+    schema_adapter: fn(&Value) -> Value,
+) {
+    let tools = tools.as_array().expect("provider tool array");
+
+    for operation in crate::tools::registry::workspace_operations() {
+        let matching = tools
+            .iter()
+            .filter(|tool| nested_value(tool, name_path).as_str() == Some(operation.name()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            matching.len(),
+            1,
+            "provider tool {} must be unique",
+            operation.name()
+        );
+
+        let expected_description = operation.provider_description();
+        assert_eq!(
+            nested_value(matching[0], description_path).as_str(),
+            Some(expected_description.as_str()),
+            "provider description for {}",
+            operation.name()
+        );
+        assert_eq!(
+            nested_value(matching[0], schema_path),
+            &schema_adapter(&operation.parameters()),
+            "provider schema for {}",
+            operation.name()
+        );
+    }
+}
+
+#[test]
+fn descriptive_metadata_does_not_register_unknown_tools_or_grant_cargo_authority() {
+    let cargo_description = crate::tools::registry::workspace_operations()
+        .iter()
+        .find(|operation| operation.name() == "offline_cargo_test")
+        .expect("registered Cargo operation")
+        .provider_description();
+    assert!(cargo_description.contains("this metadata does not grant access"));
+
+    let unsupported = serde_json::to_vec(&json!({
+        "message": {
+            "role": "assistant",
+            "tool_calls": [
+                {"function":{"name":"shell_exec","arguments":{"command":"echo unsafe"}}}
+            ]
+        }
+    }))
+    .expect("encode unregistered tool fixture");
+    assert_eq!(
+        parse_model_plan_response(&unsupported, 1),
+        Err(WorkspacePlanError::UnsupportedOperation)
+    );
+
+    let (session, task_id, turn_id) = running_turn();
+    let result = session
+        .run_offline_cargo_tests(task_id, turn_id, None)
+        .expect("record denied Cargo operation");
+    assert_eq!(result.outcome, ProcessOutcome::Denied);
 }
 
 #[test]
