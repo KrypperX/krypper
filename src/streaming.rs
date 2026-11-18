@@ -630,9 +630,7 @@ impl ResponsesFinalActions {
         }
         let result = match event {
             Some("response.output_item.added") => self.batch.register_call(frame).map(|_| None),
-            Some("response.function_call_arguments.delta") => {
-                self.batch.push(frame).map(|_| None)
-            }
+            Some("response.function_call_arguments.delta") => self.batch.push(frame).map(|_| None),
             Some("response.function_call_arguments.done") => {
                 self.batch.complete(frame).map(|_| None)
             }
@@ -934,23 +932,38 @@ mod tests {
     fn final_actions_require_full_ordered_completion_and_reject_replay() {
         let mut actions = ResponsesFinalActions::new(2, 128);
         let frames = [
-            ("response.output_item.added", serde_json::json!({
-                "output_index": 0,
-                "item": {"type": "function_call", "call_id": "call_a", "name": "run"}
-            })),
-            ("response.function_call_arguments.delta", serde_json::json!({
-                "output_index": 0, "delta": r#"{"path":"src"}"#
-            })),
-            ("response.function_call_arguments.done", serde_json::json!({
-                "output_index": 0
-            })),
-            ("response.output_item.done", serde_json::json!({
-                "output_index": 0,
-                "item": {"type": "function_call", "call_id": "call_a", "name": "run"}
-            })),
-            ("response.completed", serde_json::json!({
-                "response": {"status": "completed"}
-            })),
+            (
+                "response.output_item.added",
+                serde_json::json!({
+                    "output_index": 0,
+                    "item": {"type": "function_call", "call_id": "call_a", "name": "run"}
+                }),
+            ),
+            (
+                "response.function_call_arguments.delta",
+                serde_json::json!({
+                    "output_index": 0, "delta": r#"{"path":"src"}"#
+                }),
+            ),
+            (
+                "response.function_call_arguments.done",
+                serde_json::json!({
+                    "output_index": 0
+                }),
+            ),
+            (
+                "response.output_item.done",
+                serde_json::json!({
+                    "output_index": 0,
+                    "item": {"type": "function_call", "call_id": "call_a", "name": "run"}
+                }),
+            ),
+            (
+                "response.completed",
+                serde_json::json!({
+                    "response": {"status": "completed"}
+                }),
+            ),
         ];
         for (index, (event, data)) in frames.iter().enumerate() {
             let frame = SseFrame {
