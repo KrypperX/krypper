@@ -939,7 +939,7 @@ impl AnthropicDecisionSource {
                     }
                     Some("content_block_stop") => {
                         let index = usize::try_from(event["index"].as_u64().ok_or_else(invalid)?)
-                                .map_err(|_| invalid())?;
+                            .map_err(|_| invalid())?;
                         if blocks.contains_key(&index) && !completed_blocks.insert(index) {
                             return Err(invalid());
                         }
