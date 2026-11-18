@@ -126,6 +126,7 @@ pub struct SseDecoder {
 pub enum SseDecodeError {
     FrameTooLarge,
     InvalidUtf8,
+    TruncatedFrame,
 }
 
 impl SseDecoder {
@@ -136,6 +137,16 @@ impl SseDecoder {
             data: Vec::new(),
             limit,
             frame_bytes: 0,
+        }
+    }
+
+    /// Reject an EOF in the middle of an SSE frame instead of silently
+    /// treating a partial provider event as a successful stream.
+    pub fn finish(&self) -> Result<(), SseDecodeError> {
+        if self.pending.is_empty() && self.data.is_empty() && self.event.is_none() {
+            Ok(())
+        } else {
+            Err(SseDecodeError::TruncatedFrame)
         }
     }
 
@@ -215,7 +226,7 @@ where
     loop {
         let count = reader.read(&mut buffer).map_err(SseReadError::Io)?;
         if count == 0 {
-            return Ok(());
+            return decoder.finish().map_err(SseReadError::Decode);
         }
         for frame in decoder
             .push(&buffer[..count])
@@ -1363,6 +1374,28 @@ mod tests {
                 text: "lo".into()
             }
         );
+    }
+
+    #[test]
+    fn sse_reader_rejects_truncated_frame_at_eof() {
+        let mut input = std::io::Cursor::new(b"event: content_block_delta\ndata: {\"delta\":".to_vec());
+        let result = consume_sse(&mut input, 1024, |_frame| Ok::<_, ()>(()));
+        assert!(matches!(
+            result,
+            Err(SseReadError::Decode(SseDecodeError::TruncatedFrame))
+        ));
+    }
+
+    #[test]
+    fn sse_reader_accepts_complete_frame_at_eof() {
+        let mut input = std::io::Cursor::new(b"data: ok\n\n".to_vec());
+        let mut frames = Vec::new();
+        consume_sse(&mut input, 1024, |frame| {
+            frames.push(frame);
+            Ok::<_, ()>(())
+        }).expect("complete stream");
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, "ok");
     }
 
     #[test]
