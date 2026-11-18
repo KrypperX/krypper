@@ -500,6 +500,37 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_text_delta_bridge_ignores_non_text_chunks() {
+        let mut emitter = StreamEmitter::new(RecordingSink::default());
+        let tool_chunk = SseFrame {
+            event: Some("content_block_delta".into()),
+            data: r#"{"delta":{"type":"input_json_delta","partial_json":"secret"}}"#.into(),
+        };
+        assert_eq!(
+            emit_provider_text_delta(&mut emitter, "message", &tool_chunk),
+            Ok(false)
+        );
+        let text_chunk = SseFrame {
+            event: Some("content_block_delta".into()),
+            data: r#"{"delta":{"type":"text_delta","text":"hello"}}"#.into(),
+        };
+        assert_eq!(
+            emit_provider_text_delta(&mut emitter, "message", &text_chunk),
+            Ok(true)
+        );
+        let sink = emitter.into_inner();
+        assert_eq!(sink.0.len(), 1);
+        assert_eq!(sink.0[0].sequence, 1);
+        assert_eq!(
+            sink.0[0].event,
+            StreamEvent::TextDelta {
+                item_id: "message".into(),
+                text: "hello".into()
+            }
+        );
+    }
+
+    #[test]
     fn sse_decoder_limits_each_frame_not_the_entire_read_chunk() {
         let mut decoder = SseDecoder::new(9);
         let frames = decoder.push(b"data: a\n\ndata: b\n\n").unwrap();
