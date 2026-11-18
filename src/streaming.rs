@@ -715,6 +715,30 @@ mod tests {
     }
 
     #[test]
+    fn responses_batch_correlates_call_ids_and_rejects_duplicates() {
+        let mut batch = ResponsesCallBatch::new(2, 64);
+        let first = SseFrame {
+            event: Some("response.output_item.added".into()),
+            data: serde_json::json!({
+                "output_index": 0,
+                "item": {"type": "function_call", "call_id": "call_a"}
+            })
+            .to_string(),
+        };
+        assert_eq!(batch.register_call(&first), Ok(true));
+        let duplicate = SseFrame {
+            event: Some("response.output_item.added".into()),
+            data: serde_json::json!({
+                "output_index": 1,
+                "item": {"type": "function_call", "call_id": "call_a"}
+            })
+            .to_string(),
+        };
+        assert_eq!(batch.register_call(&duplicate), Err(ArgumentsError::InvalidEvent));
+        assert_eq!(batch.register_call(&first), Err(ArgumentsError::InvalidEvent));
+    }
+
+    #[test]
     fn responses_batch_requires_done_before_exposing_completed_arguments() {
         let mut batch = ResponsesCallBatch::new(2, 64);
         let delta = SseFrame {
