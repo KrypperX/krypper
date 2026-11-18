@@ -1211,7 +1211,8 @@ mod tests {
                 "type": "content_block_delta",
                 "index": 0,
                 "delta": {"type": "text_delta", "text": "hello"}
-            }).to_string(),
+            })
+            .to_string(),
         };
         let tool = SseFrame {
             event: Some("content_block_delta".into()),
@@ -1219,7 +1220,8 @@ mod tests {
                 "type": "content_block_delta",
                 "index": 1,
                 "delta": {"type": "input_json_delta", "partial_json": "secret"}
-            }).to_string(),
+            })
+            .to_string(),
         };
         assert_eq!(provider_text_delta(&text).as_deref(), Some("hello"));
         assert_eq!(provider_text_delta(&tool), None);
