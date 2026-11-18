@@ -323,6 +323,7 @@ pub struct ResponsesCallBatch {
     calls: std::collections::BTreeMap<u64, ResponsesArguments>,
     max_calls: usize,
     max_bytes_per_call: usize,
+    completed: std::collections::BTreeSet<u64>,
 }
 
 impl ResponsesCallBatch {
@@ -331,6 +332,7 @@ impl ResponsesCallBatch {
             calls: std::collections::BTreeMap::new(),
             max_calls,
             max_bytes_per_call,
+            completed: std::collections::BTreeSet::new(),
         }
     }
 
@@ -347,10 +349,44 @@ impl ResponsesCallBatch {
         if !self.calls.contains_key(&index) && self.calls.len() >= self.max_calls {
             return Err(ArgumentsError::TooLarge);
         }
+        if self.completed.contains(&index) {
+            return Err(ArgumentsError::InvalidEvent);
+        }
         self.calls
             .entry(index)
             .or_insert_with(|| ResponsesArguments::new(self.max_bytes_per_call))
             .push(frame)
+    }
+
+    /// Mark a known output item complete only when the provider sends its
+    /// function-call arguments completion event. Does not execute the call.
+    pub fn complete(&mut self, frame: &SseFrame) -> Result<bool, ArgumentsError> {
+        if frame.event.as_deref() != Some("response.function_call_arguments.done") {
+            return Ok(false);
+        }
+        let value: serde_json::Value =
+            serde_json::from_str(&frame.data).map_err(|_| ArgumentsError::InvalidEvent)?;
+        let index = value
+            .get("output_index")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or(ArgumentsError::InvalidEvent)?;
+        let arguments = self.calls.get(&index).ok_or(ArgumentsError::UnexpectedIndex)?;
+        if self.completed.contains(&index) {
+            return Err(ArgumentsError::InvalidEvent);
+        }
+        arguments.parse_completed()?;
+        self.completed.insert(index);
+        Ok(true)
+    }
+
+    pub fn completed_arguments(&self) -> Result<Vec<(u64, serde_json::Value)>, ArgumentsError> {
+        self.completed
+            .iter()
+            .map(|index| {
+                let arguments = self.calls.get(index).ok_or(ArgumentsError::UnexpectedIndex)?;
+                Ok((*index, arguments.parse_completed()?))
+            })
+            .collect()
     }
 
     /// Parse buffered arguments; a caller must separately verify completion,
