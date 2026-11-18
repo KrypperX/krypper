@@ -218,6 +218,30 @@ pub enum SseReadError<E> {
     Consumer(E),
 }
 
+/// A provider-neutral text delta extracted from a recognized SSE event.
+/// Tool-call argument deltas are deliberately excluded: they must be
+/// assembled and validated by the provider's existing action parser.
+pub fn provider_text_delta(frame: &SseFrame) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(&frame.data).ok()?;
+    match frame.event.as_deref() {
+        Some("response.output_text.delta") => value
+            .get("delta")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        Some("content_block_delta") => {
+            let delta = value.get("delta")?;
+            if delta.get("type")?.as_str()? != "text_delta" {
+                return None;
+            }
+            delta
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        }
+        _ => None,
+    }
+}
+
 /// Read-only projection of the authoritative TaskSession snapshot.
 ///
 /// Lifecycle and activity positions are independent. This function does not
@@ -390,6 +414,25 @@ mod tests {
         let mut reader = std::io::Cursor::new(b"data: first\n\ndata: second\n\n".to_vec());
         let result = consume_sse(&mut reader, 1024, |_| Err("cancelled"));
         assert!(matches!(result, Err(SseReadError::Consumer("cancelled"))));
+    }
+
+    #[test]
+    fn provider_text_delta_accepts_only_known_text_events() {
+        let openai = SseFrame {
+            event: Some("response.output_text.delta".into()),
+            data: r#"{"delta":"hello"}"#.into(),
+        };
+        assert_eq!(provider_text_delta(&openai).as_deref(), Some("hello"));
+        let anthropic = SseFrame {
+            event: Some("content_block_delta".into()),
+            data: r#"{"delta":{"type":"text_delta","text":"world"}}"#.into(),
+        };
+        assert_eq!(provider_text_delta(&anthropic).as_deref(), Some("world"));
+        let tool_args = SseFrame {
+            event: Some("response.function_call_arguments.delta".into()),
+            data: r#"{"delta":"secret"}"#.into(),
+        };
+        assert_eq!(provider_text_delta(&tool_args), None);
     }
 
     struct FailingSink;
