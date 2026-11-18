@@ -1105,6 +1105,36 @@ mod tests {
     }
 
     #[test]
+    fn sse_decoder_preserves_multiline_data_across_chunk_boundaries() {
+        let mut decoder = SseDecoder::new(1024);
+        assert!(decoder.push(b"event: response.output_text.delta\r").unwrap().is_empty());
+        assert!(decoder.push(b"\ndata: first\r\n").unwrap().is_empty());
+        assert!(decoder.push(b"data: second\r\n\r").unwrap().is_empty());
+        let frames = decoder.push(b"\n").unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(
+            frames[0].event.as_deref(),
+            Some("response.output_text.delta")
+        );
+        assert_eq!(frames[0].data, "first\nsecond");
+        assert_eq!(decoder.finish(), Ok(()));
+    }
+
+    #[test]
+    fn sse_decoder_ignores_unknown_fields_and_resets_between_events() {
+        let mut decoder = SseDecoder::new(1024);
+        let frames = decoder
+            .push(b"id: 7\nretry: 1000\nevent: first\ndata: one\n\ndata: two\n\n")
+            .unwrap();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].event.as_deref(), Some("first"));
+        assert_eq!(frames[0].data, "one");
+        assert_eq!(frames[1].event, None);
+        assert_eq!(frames[1].data, "two");
+        assert_eq!(decoder.finish(), Ok(()));
+    }
+
+    #[test]
     fn sse_reader_delivers_frames_without_waiting_for_eof() {
         let mut reader = std::io::Cursor::new(b"data: first\n\ndata: second\n\n".to_vec());
         let mut seen = Vec::new();
