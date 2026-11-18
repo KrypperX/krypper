@@ -906,10 +906,8 @@ impl AnthropicDecisionSource {
                 }
                 match frame.event.as_deref() {
                     Some("content_block_start") => {
-                        let index = usize::try_from(
-                            event["index"].as_u64().ok_or_else(invalid)?,
-                        )
-                        .map_err(|_| invalid())?;
+                        let index = usize::try_from(event["index"].as_u64().ok_or_else(invalid)?)
+                            .map_err(|_| invalid())?;
                         let block = &event["content_block"];
                         if block["type"] == "tool_use" {
                             let name = block["name"].as_str().ok_or_else(invalid)?;
@@ -923,8 +921,9 @@ impl AnthropicDecisionSource {
                     }
                     Some("content_block_delta") => {
                         if event["delta"]["type"] == "input_json_delta" {
-                            let index = usize::try_from(event["index"].as_u64().ok_or_else(invalid)?)
-                                .map_err(|_| invalid())?;
+                            let index =
+                                usize::try_from(event["index"].as_u64().ok_or_else(invalid)?)
+                                    .map_err(|_| invalid())?;
                             let chunk = event["delta"]["partial_json"]
                                 .as_str()
                                 .ok_or_else(invalid)?;
