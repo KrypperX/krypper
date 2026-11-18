@@ -1365,6 +1365,8 @@ mod tests {
                 if truncated && kind == "message_stop" {
                     break;
                 }
+                let mut data = data;
+                data["type"] = serde_json::Value::String(kind.to_owned());
                 body.push_str(&format!("event: {kind}\ndata: {data}\n\n"));
                 if duplicate_stop && kind == "message_delta" {
                     body.push_str(&format!("event: {kind}\ndata: {data}\n\n"));
