@@ -3,8 +3,8 @@ use crate::harness::context::build_task_prompt_with_project_guidance;
 use super::{
     action_from_provider_call, build_anthropic_request, build_responses_request,
     consume_decision_budget, encode_model_request, model_agent, parse_anthropic_response,
-    parse_responses_response, post_hosted, post_responses_text_stream, tool_definitions, ModelError,
-    OllamaDecisionSource,
+    parse_responses_response, post_hosted, post_responses_text_stream, tool_definitions,
+    ModelError, OllamaDecisionSource,
 };
 use crate::agent_loop::{BoundedDecisionSource, WorkspaceAction, WorkspaceObservation};
 use serde_json::{json, Value};
