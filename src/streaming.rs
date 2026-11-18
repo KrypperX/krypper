@@ -591,6 +591,43 @@ mod tests {
     }
 
     #[test]
+    fn responses_arguments_collect_fragments_without_executing() {
+        let mut collector = ResponsesArguments::new(64);
+        for (index, delta) in [(0, "{\\\"path\\\":"), (0, "\\\"src\\\"}")] {
+            let frame = SseFrame {
+                event: Some("response.function_call_arguments.delta".into()),
+                data: serde_json::json!({"output_index": index, "delta": delta}).to_string(),
+            };
+            assert_eq!(collector.push(&frame), Ok(true));
+        }
+        assert_eq!(
+            collector.parse_completed(),
+            Ok(serde_json::json!({"path": "src"}))
+        );
+        let wrong = SseFrame {
+            event: Some("response.function_call_arguments.delta".into()),
+            data: serde_json::json!({"output_index": 1, "delta": "{}"}).to_string(),
+        };
+        assert_eq!(collector.push(&wrong), Err(ArgumentsError::UnexpectedIndex));
+    }
+
+    #[test]
+    fn responses_arguments_reject_oversize_and_incomplete_json() {
+        let mut collector = ResponsesArguments::new(4);
+        let fragment = SseFrame {
+            event: Some("response.function_call_arguments.delta".into()),
+            data: serde_json::json!({"output_index": 0, "delta": "{"}).to_string(),
+        };
+        assert_eq!(collector.push(&fragment), Ok(true));
+        assert_eq!(collector.parse_completed(), Err(ArgumentsError::InvalidJson));
+        let oversize = SseFrame {
+            event: Some("response.function_call_arguments.delta".into()),
+            data: serde_json::json!({"output_index": 0, "delta": "12345"}).to_string(),
+        };
+        assert_eq!(collector.push(&oversize), Err(ArgumentsError::TooLarge));
+    }
+
+    #[test]
     fn fragmented_provider_frames_keep_text_order_and_exclude_tool_arguments() {
         let payload = concat!(
             "event: response.output_text.delta\n",
