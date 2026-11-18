@@ -763,6 +763,36 @@ mod tests {
     }
 
     #[test]
+    fn correlated_calls_require_registered_id_and_done_event() {
+        let mut batch = ResponsesCallBatch::new(2, 64);
+        let delta = SseFrame {
+            event: Some("response.function_call_arguments.delta".into()),
+            data: serde_json::json!({"output_index": 0, "delta": "{}"}).to_string(),
+        };
+        assert_eq!(batch.push(&delta), Ok(true));
+        assert!(batch.correlated_completed_calls().is_err());
+        let added = SseFrame {
+            event: Some("response.output_item.added".into()),
+            data: serde_json::json!({
+                "output_index": 0,
+                "item": {"type": "function_call", "call_id": "call_a"}
+            })
+            .to_string(),
+        };
+        assert_eq!(batch.register_call(&added), Ok(true));
+        assert!(batch.correlated_completed_calls().is_err());
+        let done = SseFrame {
+            event: Some("response.function_call_arguments.done".into()),
+            data: serde_json::json!({"output_index": 0}).to_string(),
+        };
+        assert_eq!(batch.complete(&done), Ok(true));
+        assert_eq!(
+            batch.correlated_completed_calls(),
+            Ok(vec![("call_a".to_owned(), serde_json::json!({}))])
+        );
+    }
+
+    #[test]
     fn responses_batch_correlates_call_ids_and_rejects_duplicates() {
         let mut batch = ResponsesCallBatch::new(2, 64);
         let first = SseFrame {
