@@ -332,6 +332,7 @@ pub struct ResponsesCallBatch {
     max_bytes_per_call: usize,
     completed: std::collections::BTreeSet<u64>,
     call_ids: std::collections::BTreeMap<u64, String>,
+    function_names: std::collections::BTreeMap<u64, String>,
 }
 
 impl ResponsesCallBatch {
@@ -342,6 +343,7 @@ impl ResponsesCallBatch {
             max_bytes_per_call,
             completed: std::collections::BTreeSet::new(),
             call_ids: std::collections::BTreeMap::new(),
+            function_names: std::collections::BTreeMap::new(),
         }
     }
 
@@ -395,6 +397,11 @@ impl ResponsesCallBatch {
             .and_then(serde_json::Value::as_str)
             .filter(|id| !id.is_empty())
             .ok_or(ArgumentsError::InvalidEvent)?;
+        let function_name = item
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .filter(|name| !name.is_empty())
+            .ok_or(ArgumentsError::InvalidEvent)?;
         if self.call_ids.values().any(|existing| existing == call_id) {
             return Err(ArgumentsError::InvalidEvent);
         }
@@ -405,6 +412,7 @@ impl ResponsesCallBatch {
             return Err(ArgumentsError::TooLarge);
         }
         self.call_ids.insert(index, call_id.to_owned());
+        self.function_names.insert(index, function_name.to_owned());
         Ok(true)
     }
 
