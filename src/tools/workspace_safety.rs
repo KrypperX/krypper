@@ -165,7 +165,16 @@ pub(crate) fn read_project_guidance_at(
 fn read_project_guidance_at_with_reader(
     root: &WorkspaceRoot,
     targets: &[PathBuf],
+    read: impl FnMut(&mut File) -> io::Result<Vec<u8>>,
+) -> Result<Option<String>, RootGuidanceReadError> {
+    read_project_guidance_at_with_reader_and_hook(root, targets, read, |_| Ok(()))
+}
+
+fn read_project_guidance_at_with_reader_and_hook(
+    root: &WorkspaceRoot,
+    targets: &[PathBuf],
     mut read: impl FnMut(&mut File) -> io::Result<Vec<u8>>,
+    mut after_directory_read: impl FnMut(&[OsString]) -> io::Result<()>,
 ) -> Result<Option<String>, RootGuidanceReadError> {
     // Invalid edit targets cannot be read for guidance; the registered writer still rejects
     // them before mutation, while valid targets in the same plan are checked.
@@ -213,10 +222,14 @@ fn read_project_guidance_at_with_reader(
 
     let mut guidance = String::new();
     let mut found_guidance = false;
+    let mut directory_snapshots = Vec::new();
     for path in directories {
         let Some(directory) = open_guidance_directory(root, &path)? else {
             continue;
         };
+        let directory_snapshot =
+            fstat(directory.as_raw_fd()).map_err(|_| RootGuidanceReadError::ReadFailed)?;
+        let agents_snapshot = guidance_file_snapshot(directory.as_raw_fd())?;
         if let Some(contents) = read_agents_md_at(directory.as_raw_fd(), &mut read)? {
             found_guidance = true;
             if !path.is_empty() {
@@ -233,7 +246,15 @@ fn read_project_guidance_at_with_reader(
                 return Err(RootGuidanceReadError::TooLarge);
             }
         }
-        verify_guidance_directory(root, &path, directory.as_raw_fd())?;
+        after_directory_read(&path).map_err(|_| RootGuidanceReadError::ReadFailed)?;
+        verify_guidance_directory(root, &path, &directory_snapshot, agents_snapshot.as_ref())?;
+        directory_snapshots.push((path, directory_snapshot, agents_snapshot));
+    }
+
+    // Recheck every relevant directory after the full guidance walk. This catches a guidance
+    // entry added to an earlier directory while later target ancestors were being inspected.
+    for (path, directory_snapshot, agents_snapshot) in directory_snapshots {
+        verify_guidance_directory(root, &path, &directory_snapshot, agents_snapshot.as_ref())?;
     }
 
     if found_guidance {
@@ -311,18 +332,32 @@ fn open_guidance_directory(
 fn verify_guidance_directory(
     root: &WorkspaceRoot,
     components: &[OsString],
-    original_fd: RawFd,
+    original_directory_status: &libc::stat,
+    original_agents_status: Option<&libc::stat>,
 ) -> Result<(), RootGuidanceReadError> {
-    let original_status = fstat(original_fd).map_err(|_| RootGuidanceReadError::ReadFailed)?;
     let Some(current) = open_guidance_directory(root, components)? else {
         return Err(RootGuidanceReadError::ChangedDuringRead);
     };
     let current_status =
         fstat(current.as_raw_fd()).map_err(|_| RootGuidanceReadError::ReadFailed)?;
-    if !same_inode(&original_status, &current_status) {
+    let current_agents_status = guidance_file_snapshot(current.as_raw_fd())?;
+    let agents_match = match (original_agents_status, current_agents_status.as_ref()) {
+        (None, None) => true,
+        (Some(original), Some(current)) => same_file_snapshot(original, current),
+        _ => false,
+    };
+    if !same_file_snapshot(original_directory_status, &current_status) || !agents_match {
         return Err(RootGuidanceReadError::ChangedDuringRead);
     }
     Ok(())
+}
+
+fn guidance_file_snapshot(parent_fd: RawFd) -> Result<Option<libc::stat>, RootGuidanceReadError> {
+    match stat_at(parent_fd, OsStr::new("AGENTS.md")) {
+        Ok(status) => Ok(Some(status)),
+        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => Ok(None),
+        Err(_) => Err(RootGuidanceReadError::ReadFailed),
+    }
 }
 
 fn read_agents_md_at(
@@ -1994,6 +2029,37 @@ mod tests {
             },
         );
 
+        assert_eq!(result, Err(super::RootGuidanceReadError::ChangedDuringRead));
+        assert_eq!(fs::read_to_string(outside).unwrap(), "outside canary");
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn nested_guidance_created_after_absence_checks_is_rejected() {
+        let (base, workspace) = guidance_workspace();
+        fs::create_dir_all(workspace.join("src")).unwrap();
+        let outside = base.join("outside.txt");
+        fs::write(&outside, "outside canary").unwrap();
+        let root = capture_workspace_root_at(&workspace).unwrap();
+        let mut injected = false;
+
+        let result = super::read_project_guidance_at_with_reader_and_hook(
+            &root,
+            &[PathBuf::from("src/generated.rs")],
+            |_| Ok(Vec::new()),
+            |directory| {
+                if directory == [std::ffi::OsString::from("src")] {
+                    fs::write(workspace.join("src/AGENTS.md"), "late nested guidance")?;
+                    injected = true;
+                }
+                Ok(())
+            },
+        );
+
+        assert!(
+            injected,
+            "the guidance file must be created after the absent read"
+        );
         assert_eq!(result, Err(super::RootGuidanceReadError::ChangedDuringRead));
         assert_eq!(fs::read_to_string(outside).unwrap(), "outside canary");
         fs::remove_dir_all(base).unwrap();
