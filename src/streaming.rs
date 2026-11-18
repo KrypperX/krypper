@@ -538,6 +538,9 @@ impl ResponsesCallBatch {
         if response.get("status").and_then(serde_json::Value::as_str) != Some("completed") {
             return Err(ArgumentsError::InvalidEvent);
         }
+        if self.calls.len() != self.output_items_done.len() {
+            return Err(ArgumentsError::InvalidEvent);
+        }
         self.correlated_named_calls()
     }
 
