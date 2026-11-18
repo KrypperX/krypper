@@ -451,6 +451,34 @@ impl ResponsesCallBatch {
             .collect()
     }
 
+    /// Return call IDs paired with completed argument JSON.
+    ///
+    /// Every buffered call must have both a registered provider call ID and an
+    /// argument-done event. This is a correlation check, not action validation:
+    /// the caller must still verify response completion and authorize tools.
+    pub fn correlated_completed_calls(
+        &self,
+    ) -> Result<Vec<(String, serde_json::Value)>, ArgumentsError> {
+        if self.calls.len() != self.completed.len()
+            || self.calls.len() != self.call_ids.len()
+        {
+            return Err(ArgumentsError::InvalidEvent);
+        }
+        self.calls
+            .iter()
+            .map(|(index, arguments)| {
+                if !self.completed.contains(index) {
+                    return Err(ArgumentsError::InvalidEvent);
+                }
+                let call_id = self
+                    .call_ids
+                    .get(index)
+                    .ok_or(ArgumentsError::UnexpectedIndex)?;
+                Ok((call_id.clone(), arguments.parse_completed()?))
+            })
+            .collect()
+    }
+
     /// Parse buffered arguments; a caller must separately verify completion,
     /// correlate call IDs and authorize the resulting action.
     pub fn parsed(&self) -> Result<Vec<(u64, serde_json::Value)>, ArgumentsError> {
