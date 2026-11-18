@@ -788,8 +788,11 @@ where
     crate::streaming::consume_sse(&mut reader, MAX_MODEL_RESPONSE_BYTES, on_frame).map_err(
         |error| match error {
             crate::streaming::SseReadError::Io(_) => ModelError::ProviderTransport(provider),
+            crate::streaming::SseReadError::Decode(
+                crate::streaming::SseDecodeError::FrameTooLarge,
+            ) => ModelError::ProviderResponseTooLarge(provider),
             crate::streaming::SseReadError::Decode(_) => {
-                ModelError::ProviderResponseTooLarge(provider)
+                ModelError::ProviderInvalidJson(provider)
             }
             crate::streaming::SseReadError::Consumer(error) => error,
         },
