@@ -778,7 +778,8 @@ where
             ureq::Error::StatusCode(status) => ModelError::ProviderHttpStatus(provider, status),
             _ => ModelError::ProviderTransport(provider),
         })?;
-    let mut reader = response.into_body().as_reader();
+    let mut response_body = response.into_body();
+    let mut reader = response_body.as_reader();
     crate::streaming::consume_sse(&mut reader, MAX_MODEL_RESPONSE_BYTES, on_frame).map_err(
         |error| match error {
             crate::streaming::SseReadError::Io(_) => ModelError::ProviderTransport(provider),
