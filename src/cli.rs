@@ -21,11 +21,13 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 mod checkpoint_files;
+mod config;
 mod outcome;
 mod task_args;
 use self::checkpoint_files::{
     read_task_checkpoint, validate_checkpoint_output_path, write_task_checkpoint,
 };
+use self::config::{config_path, load_model_defaults};
 use self::outcome::{write_observation, write_turn_outcome};
 use self::task_args::parse_task_action;
 
@@ -98,15 +100,29 @@ fn run_task(
     output: &mut dyn Write,
     error: &mut dyn Write,
 ) -> io::Result<i32> {
-    run_task_with_endpoint(arguments, input, output, error, OLLAMA_ADDRESS)
+    run_task_with_options(arguments, input, output, error, OLLAMA_ADDRESS, true)
 }
 
+/// Runs a task without reading the user configuration file, so unit tests stay
+/// independent of the machine they run on.
+#[cfg(test)]
 fn run_task_with_endpoint(
     arguments: &[OsString],
     input: &mut dyn Read,
     output: &mut dyn Write,
     error: &mut dyn Write,
     model_endpoint: SocketAddr,
+) -> io::Result<i32> {
+    run_task_with_options(arguments, input, output, error, model_endpoint, false)
+}
+
+fn run_task_with_options(
+    arguments: &[OsString],
+    input: &mut dyn Read,
+    output: &mut dyn Write,
+    error: &mut dyn Write,
+    model_endpoint: SocketAddr,
+    use_config: bool,
 ) -> io::Result<i32> {
     if contains_help_before_terminator(arguments) {
         write_task_help(output)?;
@@ -120,6 +136,7 @@ fn run_task_with_endpoint(
     let mut workspace = None;
     let mut checkpoint_out = None;
     let mut resume = None;
+    let mut no_config = false;
     let mut position = 0;
     while let Some(argument) = arguments.get(position) {
         let Some(option) = argument.to_str() else {
@@ -270,6 +287,16 @@ fn run_task_with_endpoint(
                 resume = Some(PathBuf::from(value.as_os_str()));
                 position += 1;
             }
+            "--no-config" => {
+                if no_config {
+                    return usage_error(
+                        error,
+                        Some("task"),
+                        "--no-config may be provided only once",
+                    );
+                }
+                no_config = true;
+            }
             _ => {
                 return usage_error(
                     error,
@@ -304,6 +331,19 @@ fn run_task_with_endpoint(
         };
         if goal.trim().is_empty() {
             return usage_error(error, Some("task"), "goal must not be empty");
+        }
+    }
+    // Command-line selection always wins: --model or --provider (alone or
+    // together) disables the configured defaults entirely, so a flag never mixes
+    // with a configured provider.
+    if use_config && !no_config && model.is_none() && provider.is_none() {
+        match configured_model_selection(error) {
+            Ok(Some((configured_model, configured_provider))) => {
+                model = Some(configured_model);
+                provider = configured_provider;
+            }
+            Ok(None) => {}
+            Err(message) => return usage_error(error, Some("task"), &message),
         }
     }
     let mut model_source = match prepare_model_source(model, provider, max_actions, model_endpoint)
@@ -676,6 +716,43 @@ fn snapshot_task_and_turn_state(
     Ok((task.state(), turn.state()))
 }
 
+/// Looks up the user-level model defaults and announces any that apply.
+///
+/// The notice goes to standard error so a configured default can never start
+/// model requests without the person seeing which model and file selected it.
+fn configured_model_selection(
+    error: &mut dyn Write,
+) -> Result<Option<(String, Option<ModelProvider>)>, String> {
+    let Some(path) = config_path(
+        std::env::var_os("KRYPPER_CONFIG"),
+        std::env::var_os("XDG_CONFIG_HOME"),
+        std::env::var_os("HOME"),
+    )?
+    else {
+        return Ok(None);
+    };
+    let Some(defaults) = load_model_defaults(&path)? else {
+        return Ok(None);
+    };
+    let provider = match defaults.provider.as_deref() {
+        Some(name) => Some(ModelProvider::parse(name).ok_or_else(|| {
+            format!(
+                "invalid config file '{}': unsupported provider '{name}'",
+                defaults.path.display()
+            )
+        })?),
+        None => None,
+    };
+    let _ = writeln!(
+        error,
+        "krypper: using model '{}' (provider: {}) from {}; pass --no-config to ignore it",
+        defaults.model,
+        defaults.provider.as_deref().unwrap_or("ollama"),
+        defaults.path.display()
+    );
+    Ok(Some((defaults.model, provider)))
+}
+
 fn prepare_model_source(
     model: Option<String>,
     provider: Option<ModelProvider>,
@@ -984,7 +1061,7 @@ fn usage_error(error: &mut dyn Write, command: Option<&str>, message: &str) -> i
         Some("list") => "usage: krypper list [-h] [path]",
         Some("write") => "usage: krypper write [-h] [--stdin] path ...",
         Some("task") => {
-            "usage: krypper task [-h] [--goal GOAL] --max-actions N [--workspace PATH] [--model NAME] [--provider NAME] [--checkpoint-out PATH] [--resume PATH]"
+            "usage: krypper task [-h] [--goal GOAL] --max-actions N [--workspace PATH] [--model NAME] [--provider NAME] [--no-config] [--checkpoint-out PATH] [--resume PATH]"
         }
         _ => "usage: krypper [-h] {show,list,write,task} ...",
     };
@@ -1003,20 +1080,22 @@ fn write_root_help(output: &mut dyn Write) -> io::Result<()> {
 fn write_task_help(output: &mut dyn Write) -> io::Result<()> {
     output.write_all(
         concat!(
-            "usage: krypper task [-h] [--goal GOAL] --max-actions N [--workspace PATH] [--model NAME] [--provider NAME] [--checkpoint-out PATH] [--resume PATH]\n\n",
+            "usage: krypper task [-h] [--goal GOAL] --max-actions N [--workspace PATH] [--model NAME] [--provider NAME] [--no-config] [--checkpoint-out PATH] [--resume PATH]\n\n",
             "run a bounded task in the selected workspace or current directory\n\n",
             "options:\n  --goal GOAL          task goal (required unless --resume is used)\n",
             "  --max-actions N      required positive action limit for this invocation\n",
             "  --workspace PATH     use an existing directory as the captured task workspace\n",
             "  --model NAME         opt in to model-selected actions (defaults to local Ollama)\n",
             "  --provider NAME      choose ollama, gemini, openai, xai, anthropic, cloudflare, groq, openrouter, deepseek, zai, or mistral; requires --model\n",
+            "  --no-config          ignore the user configuration file for this run\n",
             "  --checkpoint-out PATH write only when a completed turn reaches continue; file must be new\n",
             "  --resume PATH        restore one running task and start a fresh turn\n",
             "  -h, --help           show this help message and exit\n\n",
             "Without --workspace, task captures the current directory as its workspace.\n",
             "With --workspace, the selected directory is validated before task history starts;\n",
             "the process current directory is not changed.\n",
-            "Without --model or --provider, task remains caller-directed and makes no model requests.\n",
+            "Without --model or --provider, task remains caller-directed and makes no model requests,\n",
+            "unless the user configuration file (see README) sets a default model; --no-config ignores it.\n",
             "Without --model, task remains caller-directed if --provider is also omitted.\n",
             "--model NAME without --provider uses local Ollama at 127.0.0.1:11434. Ollama needs no API key.\n",
             "Each hosted provider requires explicit --provider selection and sends HTTPS requests only\n",
