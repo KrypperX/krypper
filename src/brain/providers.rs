@@ -979,23 +979,38 @@ mod tests {
             let received = String::from_utf8_lossy(&request[..count]);
             assert!(received.contains("POST "));
             let frames = [
-                ("response.output_item.added", serde_json::json!({
-                    "output_index": 0,
-                    "item": {"type": "function_call", "call_id": "call_a", "name": "read_file"}
-                })),
-                ("response.function_call_arguments.delta", serde_json::json!({
-                    "output_index": 0, "delta": r#"{"path":"README.md"}"#
-                })),
-                ("response.function_call_arguments.done", serde_json::json!({
-                    "output_index": 0
-                })),
-                ("response.output_item.done", serde_json::json!({
-                    "output_index": 0,
-                    "item": {"type": "function_call", "call_id": "call_a", "name": "read_file"}
-                })),
-                ("response.completed", serde_json::json!({
-                    "response": {"status": "completed"}
-                })),
+                (
+                    "response.output_item.added",
+                    serde_json::json!({
+                        "output_index": 0,
+                        "item": {"type": "function_call", "call_id": "call_a", "name": "read_file"}
+                    }),
+                ),
+                (
+                    "response.function_call_arguments.delta",
+                    serde_json::json!({
+                        "output_index": 0, "delta": r#"{"path":"README.md"}"#
+                    }),
+                ),
+                (
+                    "response.function_call_arguments.done",
+                    serde_json::json!({
+                        "output_index": 0
+                    }),
+                ),
+                (
+                    "response.output_item.done",
+                    serde_json::json!({
+                        "output_index": 0,
+                        "item": {"type": "function_call", "call_id": "call_a", "name": "read_file"}
+                    }),
+                ),
+                (
+                    "response.completed",
+                    serde_json::json!({
+                        "response": {"status": "completed"}
+                    }),
+                ),
             ];
             let mut body = String::new();
             for (event, data) in frames {
