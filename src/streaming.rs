@@ -257,6 +257,66 @@ pub fn provider_text_delta(frame: &SseFrame) -> Option<String> {
     }
 }
 
+/// Bounded, provider-native argument fragments. This is data only: callers must
+/// validate the completed JSON and authorize any resulting action separately.
+pub struct ResponsesArguments {
+    output_index: Option<u64>,
+    bytes: String,
+    max_bytes: usize,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ArgumentsError {
+    InvalidEvent,
+    UnexpectedIndex,
+    TooLarge,
+    InvalidJson,
+}
+
+impl ResponsesArguments {
+    pub fn new(max_bytes: usize) -> Self {
+        Self {
+            output_index: None,
+            bytes: String::new(),
+            max_bytes,
+        }
+    }
+
+    /// Accept only Responses function-call argument deltas for one output item.
+    pub fn push(&mut self, frame: &SseFrame) -> Result<bool, ArgumentsError> {
+        if frame.event.as_deref() != Some("response.function_call_arguments.delta") {
+            return Ok(false);
+        }
+        let value: serde_json::Value =
+            serde_json::from_str(&frame.data).map_err(|_| ArgumentsError::InvalidEvent)?;
+        let index = value
+            .get("output_index")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or(ArgumentsError::InvalidEvent)?;
+        let delta = value
+            .get("delta")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(ArgumentsError::InvalidEvent)?;
+        if self.output_index.is_some_and(|existing| existing != index) {
+            return Err(ArgumentsError::UnexpectedIndex);
+        }
+        if delta.len() > self.max_bytes.saturating_sub(self.bytes.len()) {
+            return Err(ArgumentsError::TooLarge);
+        }
+        self.output_index = Some(index);
+        self.bytes.push_str(delta);
+        Ok(true)
+    }
+
+    /// Parse only after a provider completion event; parsing never executes tools.
+    pub fn parse_completed(&self) -> Result<serde_json::Value, ArgumentsError> {
+        if self.output_index.is_none() {
+            return Err(ArgumentsError::InvalidEvent);
+        }
+        serde_json::from_str(&self.bytes).map_err(|_| ArgumentsError::InvalidJson)
+    }
+}
+
 /// Project a recognized provider SSE text delta into the caller's event stream.
 /// Unknown events (including tool argument deltas) are ignored. Sink failures
 /// propagate to the caller so it can stop reading instead of buffering forever.
