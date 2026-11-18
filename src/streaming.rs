@@ -73,6 +73,46 @@ impl<S: EventSink> StreamEmitter<S> {
     pub fn into_inner(self) -> S { self.sink }
 }
 
+
+/// A newline-delimited JSON transport for a caller-owned writer.
+///
+/// The writer is not shared with the runtime. A failed write is surfaced to
+/// the caller and does not advance the emitter's sequence counter.
+pub struct JsonlSink<W: std::io::Write> {
+    writer: W,
+}
+
+impl<W: std::io::Write> JsonlSink<W> {
+    pub fn new(writer: W) -> Self { Self { writer } }
+    pub fn into_inner(self) -> W { self.writer }
+}
+
+impl<W: std::io::Write> EventSink for JsonlSink<W> {
+    type Error = std::io::Error;
+
+    fn send(&mut self, event: &StreamEnvelope) -> Result<(), Self::Error> {
+        serde_json::to_writer(&mut self.writer, event)
+            .map_err(std::io::Error::other)?;
+        self.writer.write_all(b"\\n")?;
+        self.writer.flush()
+    }
+}
+
+/// A metadata-only projection from an already-authoritative runtime record.
+/// Deliberately excludes any user text, tool arguments and workspace data.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivityPosition {
+    pub task_id: String,
+    pub lifecycle_position: u64,
+    pub activity_position: u64,
+}
+
+impl ActivityPosition {
+    pub fn new(task_id: String, lifecycle_position: u64, activity_position: u64) -> Self {
+        Self { task_id, lifecycle_position, activity_position }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -100,6 +140,26 @@ mod tests {
         assert_eq!(sink.0.len(), 2);
         let json = serde_json::to_string(&sink.0[1]).unwrap();
         assert_eq!(serde_json::from_str::<StreamEnvelope>(&json).unwrap(), sink.0[1]);
+    }
+
+    #[test]
+    fn jsonl_sink_emits_one_parseable_line_per_event() {
+        let mut emitter = StreamEmitter::new(JsonlSink::new(Vec::<u8>::new()));
+        emitter.emit(StreamEvent::ItemStarted {
+            item_id: "message".into(), kind: ItemKind::Message,
+        }).unwrap();
+        emitter.emit(StreamEvent::ItemCompleted {
+            item_id: "message".into(),
+        }).unwrap();
+        let bytes = emitter.into_inner().into_inner();
+        let lines: Vec<_> = bytes.split(|byte| *byte == b'\\n')
+            .filter(|line| !line.is_empty())
+            .collect();
+        assert_eq!(lines.len(), 2);
+        let first: StreamEnvelope = serde_json::from_slice(lines[0]).unwrap();
+        let second: StreamEnvelope = serde_json::from_slice(lines[1]).unwrap();
+        assert_eq!(first.sequence, 1);
+        assert_eq!(second.sequence, 2);
     }
 
     struct FailingSink;
