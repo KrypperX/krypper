@@ -579,6 +579,67 @@ impl ResponsesDecisionSource {
         )
     }
 
+    /// Opt-in native SSE decision. Provider calls are assembled before the
+    /// existing schema validator selects an action; no tool is executed here.
+    /// This does not replace the default bounded decision path.
+    #[allow(dead_code)]
+    pub(crate) fn stream_validated_action<F>(
+        &mut self,
+        goal: &str,
+        observations: &[WorkspaceObservation],
+        project_guidance: Option<&str>,
+        mut on_text: F,
+    ) -> Result<WorkspaceAction, ModelError>
+    where
+        F: FnMut(String) -> Result<(), ModelError>,
+    {
+        let remaining = consume_decision_budget(&mut self.remaining_decisions)?;
+        let provider = self.provider.model_provider();
+        let request = build_responses_request(
+            &self.model,
+            provider,
+            goal,
+            observations,
+            remaining,
+            project_guidance,
+        )?;
+        let request = super::enable_responses_streaming(&request)?;
+        let mut assembly = crate::streaming::ResponsesFinalActions::new(1, 256 * 1024);
+        let mut final_calls = None;
+        super::post_hosted_sse(
+            &self.agent,
+            provider,
+            &self.endpoint,
+            &self.api_key,
+            &request,
+            |frame| {
+                if let Some(text) = crate::streaming::provider_text_delta(&frame) {
+                    on_text(text)?;
+                }
+                if let Some(calls) = assembly.consume(&frame).map_err(|_| {
+                    ModelError::ProviderInvalidToolCall(provider, "invalid streaming tool call")
+                })? {
+                    final_calls = Some(calls);
+                }
+                Ok(())
+            },
+        )?;
+        let calls = final_calls.ok_or(ModelError::ProviderInvalidToolCall(
+            provider,
+            "stream ended before response completion",
+        ))?;
+        if calls.len() != 1 {
+            return Err(ModelError::ProviderInvalidToolCall(
+                provider,
+                "expected exactly one tool call",
+            ));
+        }
+        let (_, name, arguments) = calls.into_iter().next().ok_or(
+            ModelError::ProviderInvalidToolCall(provider, "missing tool call"),
+        )?;
+        action_from_provider_call(provider, &name, &arguments)
+    }
+
     pub(crate) fn new(
         model: impl Into<String>,
         provider: ResponsesProvider,
