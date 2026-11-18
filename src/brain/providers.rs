@@ -1324,7 +1324,11 @@ mod tests {
         server.join().expect("server completed");
     }
 
-    fn assert_anthropic_stream_decision(truncated: bool, duplicate_stop: bool) {
+    fn assert_anthropic_stream_decision(
+        truncated: bool,
+        duplicate_stop: bool,
+        mismatched_type: bool,
+    ) {
         use super::AnthropicDecisionSource;
         use crate::agent_loop::WorkspaceAction;
         use serde_json::json;
@@ -1366,7 +1370,14 @@ mod tests {
                     break;
                 }
                 let mut data = data;
-                data["type"] = serde_json::Value::String(kind.to_owned());
+                data["type"] = serde_json::Value::String(
+                    if mismatched_type && kind == "content_block_delta" {
+                        "message_delta"
+                    } else {
+                        kind
+                    }
+                    .to_owned(),
+                );
                 body.push_str(&format!("event: {kind}\ndata: {data}\n\n"));
                 if duplicate_stop && kind == "message_delta" {
                     body.push_str(&format!("event: {kind}\ndata: {data}\n\n"));
@@ -1381,7 +1392,7 @@ mod tests {
         let mut source =
             AnthropicDecisionSource::with_endpoint("test-model", "local-test-key", 2, endpoint);
         let result = source.choose_with_streaming("read README", &[], None, true);
-        if truncated || duplicate_stop {
+        if truncated || duplicate_stop || mismatched_type {
             assert!(result.is_err(), "invalid stream must not yield an action");
         } else {
             assert!(matches!(result, Ok(WorkspaceAction::ReadFile { .. })));
@@ -1391,17 +1402,22 @@ mod tests {
 
     #[test]
     fn anthropic_stream_assembles_and_validates_completed_tool_use() {
-        assert_anthropic_stream_decision(false, false);
+        assert_anthropic_stream_decision(false, false, false);
     }
 
     #[test]
     fn anthropic_truncated_stream_never_yields_an_action() {
-        assert_anthropic_stream_decision(true, false);
+        assert_anthropic_stream_decision(true, false, false);
     }
 
     #[test]
     fn anthropic_duplicate_stop_reason_never_yields_an_action() {
-        assert_anthropic_stream_decision(false, true);
+        assert_anthropic_stream_decision(false, true, false);
+    }
+
+    #[test]
+    fn anthropic_mismatched_event_type_never_yields_an_action() {
+        assert_anthropic_stream_decision(false, false, true);
     }
 
     #[test]
