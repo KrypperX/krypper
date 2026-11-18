@@ -531,6 +531,44 @@ mod tests {
     }
 
     #[test]
+    fn fragmented_provider_frames_keep_text_order_and_exclude_tool_arguments() {
+        let payload = concat!(
+            "event: response.output_text.delta\n",
+            "data: {\"delta\":\"hel\"}\n\n",
+            "event: response.function_call_arguments.delta\n",
+            "data: {\"delta\":\"private args\"}\n\n",
+            "event: response.output_text.delta\n",
+            "data: {\"delta\":\"lo\"}\n\n"
+        );
+        let mut decoder = SseDecoder::new(1024);
+        let mut emitter = StreamEmitter::new(RecordingSink::default());
+        for chunk in payload.as_bytes().chunks(3) {
+            for frame in decoder.push(chunk).expect("decode fragmented SSE") {
+                emit_provider_text_delta(&mut emitter, "message", &frame)
+                    .expect("emit recognized text");
+            }
+        }
+        let events = emitter.into_inner().0;
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].sequence, 1);
+        assert_eq!(events[1].sequence, 2);
+        assert_eq!(
+            events[0].event,
+            StreamEvent::TextDelta {
+                item_id: "message".into(),
+                text: "hel".into()
+            }
+        );
+        assert_eq!(
+            events[1].event,
+            StreamEvent::TextDelta {
+                item_id: "message".into(),
+                text: "lo".into()
+            }
+        );
+    }
+
+    #[test]
     fn sse_decoder_limits_each_frame_not_the_entire_read_chunk() {
         let mut decoder = SseDecoder::new(9);
         let frames = decoder.push(b"data: a\n\ndata: b\n\n").unwrap();
