@@ -370,7 +370,10 @@ impl ResponsesCallBatch {
             .get("output_index")
             .and_then(serde_json::Value::as_u64)
             .ok_or(ArgumentsError::InvalidEvent)?;
-        let arguments = self.calls.get(&index).ok_or(ArgumentsError::UnexpectedIndex)?;
+        let arguments = self
+            .calls
+            .get(&index)
+            .ok_or(ArgumentsError::UnexpectedIndex)?;
         if self.completed.contains(&index) {
             return Err(ArgumentsError::InvalidEvent);
         }
@@ -383,7 +386,10 @@ impl ResponsesCallBatch {
         self.completed
             .iter()
             .map(|index| {
-                let arguments = self.calls.get(index).ok_or(ArgumentsError::UnexpectedIndex)?;
+                let arguments = self
+                    .calls
+                    .get(index)
+                    .ok_or(ArgumentsError::UnexpectedIndex)?;
                 Ok((*index, arguments.parse_completed()?))
             })
             .collect()
