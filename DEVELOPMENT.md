@@ -238,3 +238,27 @@ Defer event subscriptions, TUI or Web UI, remote transport, and durable event
 storage until a concrete consumer and approved scope require them. This guide
 does not introduce runtime behavior, dependencies, or a new state or event
 system.
+
+## Structured streaming foundation (draft, opt-in)
+
+The `src/streaming.rs` module defines a versioned presentation envelope,
+fallible synchronous event sink, stream-local sequence counter, and JSONL
+writer adapter. It does **not** subscribe to the runtime or expose a CLI flag.
+No provider currently emits model deltas through this module. It must not be
+advertised as end-to-end streaming until those integrations are implemented
+and tested.
+
+Stream sequence numbers are scoped to a single emitter, not to the persisted
+TaskSession lifecycle or activity histories. The independent lifecycle and
+activity high-water marks remain authoritative for read-only observability.
+A failed delivery does not advance the emitter's sequence, but a partially
+written JSONL record may have reached a failed writer; consumers must not
+assume that a failed write is atomic. No replay, resumption, transport
+reconnection, or automatic cancellation is provided by this foundation.
+
+The streaming module is transport-only and never grants tool authority,
+mutates task state, or persists event payloads. Future runtime integration
+must preserve the existing TaskSession owner, workspace safety, checkpoints,
+CLI defaults, and the metadata-only observability contract. In particular,
+model deltas and raw tool output must not be projected into metadata-only
+snapshots or durable activity records.
