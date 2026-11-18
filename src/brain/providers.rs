@@ -1227,8 +1227,8 @@ mod tests {
             assert!(received.contains("x-api-key:") || received.contains("X-Api-Key:"));
             let frames = [
                 ("content_block_start", json!({"index":0,"content_block":{"type":"tool_use","id":"tool_1","name":"read_file","input":{}}})),
-                ("content_block_delta", json!({"index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"path\\":"}})),
-                ("content_block_delta", json!({"index":0,"delta":{"type":"input_json_delta","partial_json":"\\"README.md\\"}"}})),
+                ("content_block_delta", json!({"index":0,"delta":{"type":"input_json_delta","partial_json":r#"{"path":"#}})),
+                ("content_block_delta", json!({"index":0,"delta":{"type":"input_json_delta","partial_json":r#""README.md"}"#}})),
                 ("content_block_stop", json!({"index":0})),
                 ("message_delta", json!({"delta":{"stop_reason":"tool_use"}})),
                 ("message_stop", json!({})),
