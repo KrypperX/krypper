@@ -831,11 +831,10 @@ impl AnthropicDecisionSource {
         project_guidance: Option<&str>,
     ) -> Result<WorkspaceAction, ModelError> {
         let remaining = consume_decision_budget(&mut self.remaining_decisions)?;
-        let request = build_anthropic_request(
-            &self.model, goal, observations, remaining, project_guidance,
-        )?;
-        let mut body: Value = serde_json::from_slice(&request)
-            .map_err(|_| ModelError::RequestEncoding)?;
+        let request =
+            build_anthropic_request(&self.model, goal, observations, remaining, project_guidance)?;
+        let mut body: Value =
+            serde_json::from_slice(&request).map_err(|_| ModelError::RequestEncoding)?;
         body["stream"] = Value::Bool(true);
         let request = encode_model_request(&body)?;
         let mut blocks = std::collections::BTreeMap::<usize, (String, String)>::new();
@@ -849,7 +848,12 @@ impl AnthropicDecisionSource {
             &request,
             |frame| {
                 let provider = ModelProvider::Anthropic;
-                let invalid = || ModelError::ProviderInvalidToolCall(provider, "invalid Anthropic streaming tool call");
+                let invalid = || {
+                    ModelError::ProviderInvalidToolCall(
+                        provider,
+                        "invalid Anthropic streaming tool call",
+                    )
+                };
                 let event: Value = serde_json::from_str(&frame.data)
                     .map_err(|_| ModelError::ProviderInvalidJson(provider))?;
                 match frame.event.as_deref() {
@@ -858,7 +862,10 @@ impl AnthropicDecisionSource {
                         let block = &event["content_block"];
                         if block["type"] == "tool_use" {
                             let name = block["name"].as_str().ok_or_else(invalid)?;
-                            if blocks.insert(index, (name.to_owned(), String::new())).is_some() {
+                            if blocks
+                                .insert(index, (name.to_owned(), String::new()))
+                                .is_some()
+                            {
                                 return Err(invalid());
                             }
                         }
@@ -866,9 +873,13 @@ impl AnthropicDecisionSource {
                     Some("content_block_delta") => {
                         if event["delta"]["type"] == "input_json_delta" {
                             let index = event["index"].as_u64().ok_or_else(invalid)? as usize;
-                            let chunk = event["delta"]["partial_json"].as_str().ok_or_else(invalid)?;
+                            let chunk = event["delta"]["partial_json"]
+                                .as_str()
+                                .ok_or_else(invalid)?;
                             let (_, arguments) = blocks.get_mut(&index).ok_or_else(invalid)?;
-                            if completed_blocks.contains(&index) || arguments.len().saturating_add(chunk.len()) > 256 * 1024 {
+                            if completed_blocks.contains(&index)
+                                || arguments.len().saturating_add(chunk.len()) > 256 * 1024
+                            {
                                 return Err(invalid());
                             }
                             arguments.push_str(chunk);
@@ -894,12 +905,18 @@ impl AnthropicDecisionSource {
         )?;
         if !completed || blocks.len() != 1 || completed_blocks.len() != 1 {
             return Err(ModelError::ProviderInvalidToolCall(
-                ModelProvider::Anthropic, "stream ended without one complete tool call",
+                ModelProvider::Anthropic,
+                "stream ended without one complete tool call",
             ));
         }
-        let (_, (name, arguments)) = blocks.into_iter().next().ok_or(
-            ModelError::ProviderInvalidToolCall(ModelProvider::Anthropic, "missing tool call"),
-        )?;
+        let (_, (name, arguments)) =
+            blocks
+                .into_iter()
+                .next()
+                .ok_or(ModelError::ProviderInvalidToolCall(
+                    ModelProvider::Anthropic,
+                    "missing tool call",
+                ))?;
         let args: Value = serde_json::from_str(&arguments)
             .map_err(|_| ModelError::ProviderInvalidJson(ModelProvider::Anthropic))?;
         action_from_provider_call(ModelProvider::Anthropic, &name, &args)
@@ -912,7 +929,9 @@ impl AnthropicDecisionSource {
         project_guidance: Option<&str>,
     ) -> Result<WorkspaceAction, ModelError> {
         self.choose_with_streaming(
-            goal, observations, project_guidance,
+            goal,
+            observations,
+            project_guidance,
             std::env::var_os("KRYPPER_ANTHROPIC_STREAM").is_some(),
         )
     }
@@ -1220,15 +1239,26 @@ mod tests {
         let endpoint = format!("http://{}", listener.local_addr().expect("address"));
         let server = std::thread::spawn(move || {
             let (mut socket, _) = listener.accept().expect("accept");
-            socket.set_read_timeout(Some(Duration::from_secs(5))).expect("timeout");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("timeout");
             let mut request = [0_u8; 16384];
             let count = socket.read(&mut request).expect("request");
             let received = String::from_utf8_lossy(&request[..count]);
             assert!(received.contains("x-api-key:") || received.contains("X-Api-Key:"));
             let frames = [
-                ("content_block_start", json!({"index":0,"content_block":{"type":"tool_use","id":"tool_1","name":"read_file","input":{}}})),
-                ("content_block_delta", json!({"index":0,"delta":{"type":"input_json_delta","partial_json":r#"{"path":"#}})),
-                ("content_block_delta", json!({"index":0,"delta":{"type":"input_json_delta","partial_json":r#""README.md"}"#}})),
+                (
+                    "content_block_start",
+                    json!({"index":0,"content_block":{"type":"tool_use","id":"tool_1","name":"read_file","input":{}}}),
+                ),
+                (
+                    "content_block_delta",
+                    json!({"index":0,"delta":{"type":"input_json_delta","partial_json":r#"{"path":"#}}),
+                ),
+                (
+                    "content_block_delta",
+                    json!({"index":0,"delta":{"type":"input_json_delta","partial_json":r#""README.md"}"#}}),
+                ),
                 ("content_block_stop", json!({"index":0})),
                 ("message_delta", json!({"delta":{"stop_reason":"tool_use"}})),
                 ("message_stop", json!({})),
@@ -1243,10 +1273,10 @@ mod tests {
             );
             socket.write_all(response.as_bytes()).expect("response");
         });
-        let mut source = AnthropicDecisionSource::with_endpoint(
-            "test-model", "local-test-key", 2, endpoint,
-        );
-        let action = source.choose_with_streaming("read README", &[], None, true)
+        let mut source =
+            AnthropicDecisionSource::with_endpoint("test-model", "local-test-key", 2, endpoint);
+        let action = source
+            .choose_with_streaming("read README", &[], None, true)
             .expect("complete tool use");
         assert!(matches!(action, WorkspaceAction::ReadFile { .. }));
         server.join().expect("server");
