@@ -137,6 +137,7 @@ fn run_task_with_options(
     let mut checkpoint_out = None;
     let mut resume = None;
     let mut no_config = false;
+    let mut activity_jsonl = false;
     let mut position = 0;
     while let Some(argument) = arguments.get(position) {
         let Some(option) = argument.to_str() else {
@@ -286,6 +287,12 @@ fn run_task_with_options(
                 };
                 resume = Some(PathBuf::from(value.as_os_str()));
                 position += 1;
+            }
+            "--activity-jsonl" => {
+                if activity_jsonl {
+                    return usage_error(error, Some("task"), "--activity-jsonl may be provided only once");
+                }
+                activity_jsonl = true;
             }
             "--no-config" => {
                 if no_config {
@@ -560,6 +567,9 @@ fn run_task_with_options(
         let stop_reason = result.stop_reason();
 
         reconcile_task_state(&mut session, task_id, stop_reason)?;
+        if activity_jsonl {
+            crate::streaming::write_activity_positions(&session, error)?;
+        }
 
         if let Some(cause) = stream_error.take() {
             return Err(cause);
@@ -1061,7 +1071,7 @@ fn usage_error(error: &mut dyn Write, command: Option<&str>, message: &str) -> i
         Some("list") => "usage: krypper list [-h] [path]",
         Some("write") => "usage: krypper write [-h] [--stdin] path ...",
         Some("task") => {
-            "usage: krypper task [-h] [--goal GOAL] --max-actions N [--workspace PATH] [--model NAME] [--provider NAME] [--no-config] [--checkpoint-out PATH] [--resume PATH]"
+            "usage: krypper task [-h] [--goal GOAL] --max-actions N [--workspace PATH] [--model NAME] [--provider NAME] [--no-config] [--checkpoint-out PATH] [--resume PATH] [--activity-jsonl]"
         }
         _ => "usage: krypper [-h] {show,list,write,task} ...",
     };
@@ -1090,6 +1100,7 @@ fn write_task_help(output: &mut dyn Write) -> io::Result<()> {
             "  --no-config          ignore the user configuration file for this run\n",
             "  --checkpoint-out PATH write only when a completed turn reaches continue; file must be new\n",
             "  --resume PATH        restore one running task and start a fresh turn\n",
+            "  --activity-jsonl    write read-only task activity positions as JSONL to stderr after each turn\n",
             "  -h, --help           show this help message and exit\n\n",
             "Without --workspace, task captures the current directory as its workspace.\n",
             "With --workspace, the selected directory is validated before task history starts;\n",
