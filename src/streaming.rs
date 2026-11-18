@@ -119,6 +119,7 @@ pub struct SseDecoder {
     event: Option<String>,
     data: Vec<String>,
     limit: usize,
+    frame_bytes: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -134,13 +135,15 @@ impl SseDecoder {
             event: None,
             data: Vec::new(),
             limit,
+            frame_bytes: 0,
         }
     }
 
     pub fn push(&mut self, chunk: &[u8]) -> Result<Vec<SseFrame>, SseDecodeError> {
-        if self.pending.len().saturating_add(chunk.len()) > self.limit {
+        if self.frame_bytes.saturating_add(chunk.len()) > self.limit {
             return Err(SseDecodeError::FrameTooLarge);
         }
+        self.frame_bytes += chunk.len();
         self.pending.extend_from_slice(chunk);
         let mut frames = Vec::new();
         while let Some(end) = self.pending.iter().position(|byte| *byte == b'\n') {
@@ -150,6 +153,7 @@ impl SseDecoder {
                 line.pop();
             }
             if line.is_empty() {
+                self.frame_bytes = self.pending.len();
                 if !self.data.is_empty() {
                     frames.push(SseFrame {
                         event: self.event.take(),
@@ -305,6 +309,25 @@ mod tests {
         let second: StreamEnvelope = serde_json::from_slice(lines[1]).unwrap();
         assert_eq!(first.sequence, 1);
         assert_eq!(second.sequence, 2);
+    }
+
+
+    #[test]
+    fn sse_decoder_handles_split_crlf_and_multiple_data_lines() {
+        let mut decoder = SseDecoder::new(1024);
+        assert!(decoder.push(b"event: response.output_text.delta\r\n").unwrap().is_empty());
+        assert!(decoder.push(b"data: one\r\ndata: tw").unwrap().is_empty());
+        let frames = decoder.push(b"o\r\n\r\n").unwrap();
+        assert_eq!(frames, vec![SseFrame {
+            event: Some("response.output_text.delta".into()),
+            data: "one\ntwo".into(),
+        }]);
+    }
+
+    #[test]
+    fn sse_decoder_rejects_oversized_incomplete_frame() {
+        let mut decoder = SseDecoder::new(4);
+        assert_eq!(decoder.push(b"12345"), Err(SseDecodeError::FrameTooLarge));
     }
 
     struct FailingSink;
