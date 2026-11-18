@@ -944,10 +944,7 @@ impl AnthropicDecisionSource {
                         tool_use_stop = true;
                     }
                     Some("message_stop") => {
-                        if !tool_use_stop
-                            || blocks.len() != 1
-                            || completed_blocks.len() != 1
-                        {
+                        if !tool_use_stop || blocks.len() != 1 || completed_blocks.len() != 1 {
                             return Err(invalid());
                         }
                         completed = true;
