@@ -1042,6 +1042,49 @@ mod tests {
         server.join().expect("server completed");
     }
 
+    /// A transport that closes before response.completed must never yield an action.
+    #[test]
+    fn responses_stream_rejects_truncated_tool_call() {
+        use super::{ResponsesDecisionSource, ResponsesProvider};
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::time::Duration;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local server");
+        let endpoint = format!("http://{}", listener.local_addr().expect("local address"));
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept request");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set timeout");
+            let mut request = [0_u8; 16384];
+            socket.read(&mut request).expect("read request");
+            let body = concat!(
+                "event: response.output_item.added\\n",
+                "data: {\\"output_index\\":0,\\"item\\":{\\"type\\":\\"function_call\\",\\"call_id\\":\\"call_a\\",\\"name\\":\\"read_file\\"}}\\n\\n",
+                "event: response.function_call_arguments.delta\\n",
+                "data: {\\"output_index\\":0,\\"delta\\":\\"{\\\\\\"path\\\\\\":\\"}\\n\\n"
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\\r\\nContent-Type: text/event-stream\\r\\nContent-Length: {}\\r\\nConnection: close\\r\\n\\r\\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).expect("send partial SSE");
+        });
+        let mut source = ResponsesDecisionSource::with_endpoint(
+            "test-model",
+            ResponsesProvider::OpenAi,
+            "local-test-key",
+            2,
+            endpoint,
+        );
+        assert!(source
+            .stream_validated_action("read README", &[], None, |_| Ok(()))
+            .is_err());
+        server.join().expect("server completed");
+    }
+
     #[test]
     fn mistral_credentials_bind_to_the_fixed_endpoint() {
         let key = "local-mistral-test-key";
