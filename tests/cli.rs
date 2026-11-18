@@ -3136,7 +3136,11 @@ fn task_activity_jsonl_emits_metadata_without_goal_or_action_text() {
         .filter(|line| line.starts_with('{'))
         .map(|line| serde_json::from_str(line).expect("valid activity JSONL"))
         .collect();
-    assert!(!records.is_empty(), "expected activity JSONL on stderr");
+    assert!(
+        !records.is_empty(),
+        "expected activity JSONL on stderr; actual stderr: {activity:?}; stdout: {:?}",
+        stdout(&output)
+    );
     for record in records {
         assert!(record["task_id"].is_string());
         assert!(record["lifecycle_position"].is_u64());
