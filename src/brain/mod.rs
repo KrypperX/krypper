@@ -773,15 +773,16 @@ where
         .header("Content-Type", "application/json")
         .header("Accept", "text/event-stream");
     let request = if provider == ModelProvider::Anthropic {
-        request.header("x-api-key", api_key).header("anthropic-version", providers::ANTHROPIC_API_VERSION)
+        request
+            .header("x-api-key", api_key)
+            .header("anthropic-version", providers::ANTHROPIC_API_VERSION)
     } else {
         request.header("Authorization", &authorization)
     };
-    let response = request.send(body)
-        .map_err(|error| match error {
-            ureq::Error::StatusCode(status) => ModelError::ProviderHttpStatus(provider, status),
-            _ => ModelError::ProviderTransport(provider),
-        })?;
+    let response = request.send(body).map_err(|error| match error {
+        ureq::Error::StatusCode(status) => ModelError::ProviderHttpStatus(provider, status),
+        _ => ModelError::ProviderTransport(provider),
+    })?;
     let mut response_body = response.into_body();
     let mut reader = response_body.as_reader();
     crate::streaming::consume_sse(&mut reader, MAX_MODEL_RESPONSE_BYTES, on_frame).map_err(
