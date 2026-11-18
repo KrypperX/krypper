@@ -527,7 +527,7 @@ fn run_task_with_options(
                     } else {
                         write!(error, "action {decisions}/{max_actions}> ")
                     }
-                        .and_then(|()| error.flush())
+                    .and_then(|()| error.flush())
                     {
                         stream_error = Some(cause);
                         return WorkspaceAction::Unsupported {
