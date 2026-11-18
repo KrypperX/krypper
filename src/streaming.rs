@@ -1207,6 +1207,30 @@ mod tests {
     }
 
     #[test]
+    fn provider_text_delta_rejects_malformed_or_unrecognized_payloads() {
+        let invalid_json = SseFrame {
+            event: Some("response.output_text.delta".into()),
+            data: "{invalid".into(),
+        };
+        assert_eq!(provider_text_delta(&invalid_json), None);
+        let wrong_type = SseFrame {
+            event: Some("response.output_text.delta".into()),
+            data: r#"{"delta":42}"#.into(),
+        };
+        assert_eq!(provider_text_delta(&wrong_type), None);
+        let wrong_anthropic_delta = SseFrame {
+            event: Some("content_block_delta".into()),
+            data: r#"{"delta":{"type":"input_json_delta","text":"secret"}}"#.into(),
+        };
+        assert_eq!(provider_text_delta(&wrong_anthropic_delta), None);
+        let unknown = SseFrame {
+            event: Some("unknown.event".into()),
+            data: r#"{"delta":"ignored"}"#.into(),
+        };
+        assert_eq!(provider_text_delta(&unknown), None);
+    }
+
+    #[test]
     fn anthropic_text_delta_bridge_ignores_non_text_chunks() {
         let mut emitter = StreamEmitter::new(RecordingSink::default());
         let tool_chunk = SseFrame {
