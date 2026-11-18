@@ -634,9 +634,14 @@ impl ResponsesDecisionSource {
                 "expected exactly one tool call",
             ));
         }
-        let (_, name, arguments) = calls.into_iter().next().ok_or(
-            ModelError::ProviderInvalidToolCall(provider, "missing tool call"),
-        )?;
+        let (_, name, arguments) =
+            calls
+                .into_iter()
+                .next()
+                .ok_or(ModelError::ProviderInvalidToolCall(
+                    provider,
+                    "missing tool call",
+                ))?;
         action_from_provider_call(provider, &name, &arguments)
     }
 
