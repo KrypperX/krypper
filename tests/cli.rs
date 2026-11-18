@@ -3133,7 +3133,7 @@ fn task_activity_jsonl_emits_metadata_without_goal_or_action_text() {
     assert!(!activity.contains("complete done"), "{activity}");
     let records: Vec<serde_json::Value> = activity
         .lines()
-        .filter_map(|line| line.find('{').map(|start| &line[start..]))
+        .filter(|line| line.starts_with('{'))
         .map(|line| serde_json::from_str(line).expect("valid activity JSONL"))
         .collect();
     assert!(
