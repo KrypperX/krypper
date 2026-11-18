@@ -290,7 +290,11 @@ fn run_task_with_options(
             }
             "--activity-jsonl" => {
                 if activity_jsonl {
-                    return usage_error(error, Some("task"), "--activity-jsonl may be provided only once");
+                    return usage_error(
+                        error,
+                        Some("task"),
+                        "--activity-jsonl may be provided only once",
+                    );
                 }
                 activity_jsonl = true;
             }
