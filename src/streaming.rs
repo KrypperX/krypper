@@ -257,6 +257,24 @@ pub fn provider_text_delta(frame: &SseFrame) -> Option<String> {
     }
 }
 
+/// Project a recognized provider SSE text delta into the caller's event stream.
+/// Unknown events (including tool argument deltas) are ignored. Sink failures
+/// propagate to the caller so it can stop reading instead of buffering forever.
+pub fn emit_provider_text_delta<S: EventSink>(
+    emitter: &mut StreamEmitter<S>,
+    item_id: &str,
+    frame: &SseFrame,
+) -> Result<bool, EmitError<S::Error>> {
+    let Some(text) = provider_text_delta(frame) else {
+        return Ok(false);
+    };
+    emitter.emit(StreamEvent::TextDelta {
+        item_id: item_id.to_owned(),
+        text,
+    })?;
+    Ok(true)
+}
+
 /// Read-only projection of the authoritative TaskSession snapshot.
 ///
 /// Lifecycle and activity positions are independent. This function does not
