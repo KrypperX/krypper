@@ -768,12 +768,16 @@ where
         return Err(ModelError::RequestTooLarge);
     }
     let authorization = format!("Bearer {api_key}");
-    let response = agent
+    let request = agent
         .post(endpoint)
         .header("Content-Type", "application/json")
-        .header("Accept", "text/event-stream")
-        .header("Authorization", &authorization)
-        .send(body)
+        .header("Accept", "text/event-stream");
+    let request = if provider == ModelProvider::Anthropic {
+        request.header("x-api-key", api_key).header("anthropic-version", providers::ANTHROPIC_API_VERSION)
+    } else {
+        request.header("Authorization", &authorization)
+    };
+    let response = request.send(body)
         .map_err(|error| match error {
             ureq::Error::StatusCode(status) => ModelError::ProviderHttpStatus(provider, status),
             _ => ModelError::ProviderTransport(provider),
