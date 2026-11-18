@@ -713,8 +713,11 @@ impl<W: std::io::Write> EventSink for JsonlSink<W> {
     type Error = std::io::Error;
 
     fn send(&mut self, event: &StreamEnvelope) -> Result<(), Self::Error> {
-        serde_json::to_writer(&mut self.writer, event).map_err(std::io::Error::other)?;
-        self.writer.write_all(b"\n")?;
+        // Encode a full record before writing; a serialization failure must not
+        // leave a partial JSON value in the destination.
+        let mut line = serde_json::to_vec(event).map_err(std::io::Error::other)?;
+        line.push(b'\n');
+        self.writer.write_all(&line)?;
         self.writer.flush()
     }
 }
@@ -851,6 +854,25 @@ mod tests {
         let second: StreamEnvelope = serde_json::from_slice(lines[1]).unwrap();
         assert_eq!(first.sequence, 1);
         assert_eq!(second.sequence, 2);
+    }
+
+    #[test]
+    fn jsonl_sink_propagates_write_failure_without_advancing_sequence() {
+        struct RejectWriter;
+        impl std::io::Write for RejectWriter {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("consumer disconnected"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut emitter = StreamEmitter::new(JsonlSink::new(RejectWriter));
+        let result = emitter.emit(StreamEvent::ItemCompleted {
+            item_id: "test".into(),
+        });
+        assert!(result.is_err());
+        assert_eq!(emitter.next_sequence, 1);
     }
 
     #[test]
