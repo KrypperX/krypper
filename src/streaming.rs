@@ -539,6 +539,42 @@ impl ResponsesCallBatch {
         self.correlated_named_calls()
     }
 
+    /// Validate a provider function-call output item completion event.
+    ///
+    /// The output index, call ID and function name must match the registered
+    /// item, and its argument-done event must already have been observed.
+    /// This does not authorize execution or replace response-level completion.
+    pub fn complete_output_item(&self, frame: &SseFrame) -> Result<bool, ArgumentsError> {
+        if frame.event.as_deref() != Some("response.output_item.done") {
+            return Ok(false);
+        }
+        let value: serde_json::Value =
+            serde_json::from_str(&frame.data).map_err(|_| ArgumentsError::InvalidEvent)?;
+        let item = value.get("item").ok_or(ArgumentsError::InvalidEvent)?;
+        if item.get("type").and_then(serde_json::Value::as_str) != Some("function_call") {
+            return Ok(false);
+        }
+        let index = value
+            .get("output_index")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or(ArgumentsError::InvalidEvent)?;
+        let call_id = item
+            .get("call_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(ArgumentsError::InvalidEvent)?;
+        let name = item
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(ArgumentsError::InvalidEvent)?;
+        if self.call_ids.get(&index).map(String::as_str) != Some(call_id)
+            || self.function_names.get(&index).map(String::as_str) != Some(name)
+            || !self.completed.contains(&index)
+        {
+            return Err(ArgumentsError::InvalidEvent);
+        }
+        Ok(true)
+    }
+
     /// Parse buffered arguments; a caller must separately verify completion,
     /// correlate call IDs and authorize the resulting action.
     pub fn parsed(&self) -> Result<Vec<(u64, serde_json::Value)>, ArgumentsError> {
