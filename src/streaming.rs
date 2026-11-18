@@ -906,6 +906,69 @@ mod tests {
     }
 
     #[test]
+    fn sse_consumer_cancellation_stops_before_next_read() {
+        struct OneReadOnly {
+            reads: usize,
+        }
+        impl std::io::Read for OneReadOnly {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                self.reads += 1;
+                if self.reads > 1 {
+                    panic!("SSE reader was polled after cancellation");
+                }
+                let bytes = b"data: first\n\ndata: second\n\n";
+                buffer[..bytes.len()].copy_from_slice(bytes);
+                Ok(bytes.len())
+            }
+        }
+        let mut reader = OneReadOnly { reads: 0 };
+        let mut delivered = 0;
+        let result = consume_sse(&mut reader, 1024, |_| {
+            delivered += 1;
+            Err("cancelled")
+        });
+        assert!(matches!(result, Err(SseReadError::Consumer("cancelled"))));
+        assert_eq!(delivered, 1);
+        assert_eq!(reader.reads, 1);
+    }
+
+    #[test]
+    fn sse_sink_backpressure_propagates_without_consuming_more_input() {
+        struct OneReadOnly {
+            reads: usize,
+        }
+        impl std::io::Read for OneReadOnly {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                self.reads += 1;
+                if self.reads > 1 {
+                    panic!("SSE reader was polled after sink failure");
+                }
+                let bytes = b"event: response.output_text.delta\ndata: {\"delta\":\"hello\"}\n\n";
+                buffer[..bytes.len()].copy_from_slice(bytes);
+                Ok(bytes.len())
+            }
+        }
+        struct RejectSink;
+        impl EventSink for RejectSink {
+            type Error = &'static str;
+            fn send(&mut self, _: &StreamEnvelope) -> Result<(), Self::Error> {
+                Err("backpressure")
+            }
+        }
+        let mut reader = OneReadOnly { reads: 0 };
+        let mut emitter = StreamEmitter::new(RejectSink);
+        let result = consume_sse(&mut reader, 1024, |frame| {
+            emit_provider_text_delta(&mut emitter, "message", &frame)
+        });
+        assert!(matches!(
+            result,
+            Err(SseReadError::Consumer(EmitError::Sink("backpressure")))
+        ));
+        assert_eq!(reader.reads, 1);
+        assert_eq!(emitter.next_sequence, 1);
+    }
+
+    #[test]
     fn sse_decoder_handles_split_crlf_and_multiple_data_lines() {
         let mut decoder = SseDecoder::new(1024);
         assert!(decoder
