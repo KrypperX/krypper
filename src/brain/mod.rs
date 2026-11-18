@@ -791,6 +791,32 @@ where
     )
 }
 
+
+/** Forward only recognized provider text deltas to a presentation consumer.
+ *
+ * This opt-in path never interprets tool arguments as executable actions.
+ * The decision source continues to use its existing authoritative response.
+ */
+#[allow(dead_code)]
+fn post_hosted_text_stream<F>(
+    agent: &Agent,
+    provider: ModelProvider,
+    endpoint: &str,
+    api_key: &str,
+    body: &[u8],
+    mut on_text: F,
+) -> Result<(), ModelError>
+where
+    F: FnMut(String) -> Result<(), ModelError>,
+{
+    post_hosted_sse(agent, provider, endpoint, api_key, body, |frame| {
+        if let Some(text) = crate::streaming::provider_text_delta(&frame) {
+            on_text(text)?;
+        }
+        Ok(())
+    })
+}
+
 fn post_hosted(
     agent: &Agent,
     provider: ModelProvider,
