@@ -639,7 +639,7 @@ mod tests {
     #[test]
     fn responses_batch_keeps_interleaved_calls_separate() {
         let mut batch = ResponsesCallBatch::new(2, 64);
-        for (index, delta) in [(1, "{"), (0, "{}"), (1, "}") ] {
+        for (index, delta) in [(1, "{"), (0, "{}"), (1, "}")] {
             let frame = SseFrame {
                 event: Some("response.function_call_arguments.delta".into()),
                 data: serde_json::json!({"output_index": index, "delta": delta}).to_string(),
