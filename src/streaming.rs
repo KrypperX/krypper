@@ -619,7 +619,10 @@ mod tests {
             data: serde_json::json!({"output_index": 0, "delta": "{"}).to_string(),
         };
         assert_eq!(collector.push(&fragment), Ok(true));
-        assert_eq!(collector.parse_completed(), Err(ArgumentsError::InvalidJson));
+        assert_eq!(
+            collector.parse_completed(),
+            Err(ArgumentsError::InvalidJson)
+        );
         let oversize = SseFrame {
             event: Some("response.function_call_arguments.delta".into()),
             data: serde_json::json!({"output_index": 0, "delta": "12345"}).to_string(),
