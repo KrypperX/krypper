@@ -894,6 +894,11 @@ impl AnthropicDecisionSource {
                 }
                 let event: Value = serde_json::from_str(&frame.data)
                     .map_err(|_| ModelError::ProviderInvalidJson(provider))?;
+                // Anthropic repeats the event kind in the JSON payload. Reject
+                // contradictory framing before consuming arguments or text.
+                if frame.event.as_deref() != event["type"].as_str() {
+                    return Err(invalid());
+                }
                 // Once the provider has declared tool_use as the stop reason,
                 // no more content blocks or deltas may change the final action.
                 if tool_use_stop
