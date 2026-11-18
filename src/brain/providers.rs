@@ -606,6 +606,7 @@ impl ResponsesDecisionSource {
         let request = super::enable_responses_streaming(&request)?;
         let mut assembly = crate::streaming::ResponsesFinalActions::new(1, 256 * 1024);
         let mut final_calls = None;
+        let mut transport_done = false;
         super::post_hosted_sse(
             &self.agent,
             provider,
@@ -616,18 +617,19 @@ impl ResponsesDecisionSource {
                 // The optional transport sentinel is only valid after the
                 // response has completed; it must never hide truncation.
                 if frame.data.trim() == "[DONE]" {
-                    return if final_calls.is_some() {
-                        Ok(())
-                    } else {
-                        Err(ModelError::ProviderInvalidToolCall(
+                    if final_calls.is_none() || transport_done {
+                        return Err(ModelError::ProviderInvalidToolCall(
                             provider,
-                            "stream ended before response completion",
-                        ))
-                    };
+                            "unexpected streaming transport sentinel",
+                        ));
+                    }
+                    transport_done = true;
+                    return Ok(());
                 }
-                // Never forward text after completion or from a frame that
-                // fails action assembly validation.
-                if final_calls.is_some() {
+                // A transport sentinel is terminal. Reject any subsequent
+                // event, including an additional sentinel or text delta.
+                // Never forward text after response completion either.
+                if transport_done || final_calls.is_some() {
                     return Err(ModelError::ProviderInvalidToolCall(
                         provider,
                         "event received after response completion",
