@@ -816,6 +816,27 @@ where
     })
 }
 
+/// Opt-in Responses streaming transport. The caller owns presentation and
+/// cancellation; this path never authorizes actions or mutates task lifecycle.
+#[allow(dead_code)]
+fn post_responses_text_stream<F>(
+    agent: &Agent,
+    provider: ModelProvider,
+    endpoint: &str,
+    api_key: &str,
+    request: &[u8],
+    on_text: F,
+) -> Result<(), ModelError>
+where
+    F: FnMut(String) -> Result<(), ModelError>,
+{
+    let mut body: Value =
+        serde_json::from_slice(request).map_err(|error| ModelError::Transport(error.to_string()))?;
+    body["stream"] = Value::Bool(true);
+    let streaming_request = encode_model_request(&body)?;
+    post_hosted_text_stream(agent, provider, endpoint, api_key, &streaming_request, on_text)
+}
+
 fn post_hosted(
     agent: &Agent,
     provider: ModelProvider,
