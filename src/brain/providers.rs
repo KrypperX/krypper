@@ -1071,7 +1071,9 @@ mod tests {
                 body.len(),
                 body
             );
-            socket.write_all(response.as_bytes()).expect("send partial SSE");
+            socket
+                .write_all(response.as_bytes())
+                .expect("send partial SSE");
         });
         let mut source = ResponsesDecisionSource::with_endpoint(
             "test-model",
