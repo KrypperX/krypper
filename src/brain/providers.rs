@@ -1184,9 +1184,8 @@ mod tests {
 
     /// Exercise the real HTTP/SSE transport, assembly and action validator
     /// without contacting a provider or executing the returned workspace action.
-    #[test]
-    fn responses_stream_validates_action_only_after_completed_event() {
-        use super::{ResponsesDecisionSource, ResponsesProvider};
+    fn assert_responses_stream_validates_action(provider: super::ResponsesProvider) {
+        use super::ResponsesDecisionSource;
         use crate::agent_loop::WorkspaceAction;
         use std::io::{Read, Write};
         use std::net::TcpListener;
@@ -1252,7 +1251,7 @@ mod tests {
 
         let mut source = ResponsesDecisionSource::with_endpoint(
             "test-model",
-            ResponsesProvider::OpenAi,
+            provider,
             "local-test-key",
             2,
             endpoint,
@@ -1287,6 +1286,16 @@ mod tests {
         };
         assert_eq!(provider_text_delta(&text).as_deref(), Some("hello"));
         assert_eq!(provider_text_delta(&tool), None);
+    }
+
+    #[test]
+    fn openai_responses_stream_validates_completed_action() {
+        assert_responses_stream_validates_action(super::ResponsesProvider::OpenAi);
+    }
+
+    #[test]
+    fn xai_responses_stream_validates_completed_action() {
+        assert_responses_stream_validates_action(super::ResponsesProvider::Xai);
     }
 
     /// A transport that closes before response.completed must never yield an action.
