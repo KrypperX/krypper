@@ -999,7 +999,10 @@ mod tests {
             event: Some("response.completed".into()),
             data: serde_json::json!({"response": {"status": "completed"}}).to_string(),
         };
-        assert_eq!(actions.consume(&completed), Err(ArgumentsError::InvalidEvent));
+        assert_eq!(
+            actions.consume(&completed),
+            Err(ArgumentsError::InvalidEvent)
+        );
     }
 
     #[test]
