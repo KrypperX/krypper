@@ -7,6 +7,7 @@ pub mod cli;
 pub mod core;
 pub mod harness;
 pub mod task_lifecycle;
+pub mod streaming;
 pub(crate) mod tools;
 
 pub use tools::process::{OfflineCargoPolicy, ProcessOutcome, ProcessResource, ProcessResult};
