@@ -892,8 +892,15 @@ impl AnthropicDecisionSource {
                 }
                 let event: Value = serde_json::from_str(&frame.data)
                     .map_err(|_| ModelError::ProviderInvalidJson(provider))?;
-                if let Some(text) = crate::streaming::provider_text_delta(&frame) {
-                    on_text(text)?;
+                // Once the provider has declared tool_use as the stop reason,
+                // no more content blocks or deltas may change the final action.
+                if tool_use_stop
+                    && matches!(
+                        frame.event.as_deref(),
+                        Some("content_block_start" | "content_block_delta" | "content_block_stop")
+                    )
+                {
+                    return Err(invalid());
                 }
                 match frame.event.as_deref() {
                     Some("content_block_start") => {
@@ -901,12 +908,12 @@ impl AnthropicDecisionSource {
                         let block = &event["content_block"];
                         if block["type"] == "tool_use" {
                             let name = block["name"].as_str().ok_or_else(invalid)?;
-                            if blocks
-                                .insert(index, (name.to_owned(), String::new()))
-                                .is_some()
-                            {
+                            // A decision selects exactly one action. Reject a
+                            // second tool before buffering its arguments.
+                            if !blocks.is_empty() || completed_blocks.contains(&index) {
                                 return Err(invalid());
                             }
+                            blocks.insert(index, (name.to_owned(), String::new()));
                         }
                     }
                     Some("content_block_delta") => {
@@ -936,9 +943,21 @@ impl AnthropicDecisionSource {
                         }
                         tool_use_stop = true;
                     }
-                    Some("message_stop") => completed = true,
+                    Some("message_stop") => {
+                        if !tool_use_stop
+                            || blocks.len() != 1
+                            || completed_blocks.len() != 1
+                        {
+                            return Err(invalid());
+                        }
+                        completed = true;
+                    }
                     Some("error") => return Err(invalid()),
                     _ => {}
+                }
+                // Display text is never sourced from tool arguments.
+                if let Some(text) = crate::streaming::provider_text_delta(&frame) {
+                    on_text(text)?;
                 }
                 Ok(())
             },
