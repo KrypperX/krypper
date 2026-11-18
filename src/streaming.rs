@@ -317,6 +317,52 @@ impl ResponsesArguments {
     }
 }
 
+/// Collect interleaved Responses function-call argument fragments by output index.
+/// This is a bounded data buffer, never a tool executor.
+pub struct ResponsesCallBatch {
+    calls: std::collections::BTreeMap<u64, ResponsesArguments>,
+    max_calls: usize,
+    max_bytes_per_call: usize,
+}
+
+impl ResponsesCallBatch {
+    pub fn new(max_calls: usize, max_bytes_per_call: usize) -> Self {
+        Self {
+            calls: std::collections::BTreeMap::new(),
+            max_calls,
+            max_bytes_per_call,
+        }
+    }
+
+    pub fn push(&mut self, frame: &SseFrame) -> Result<bool, ArgumentsError> {
+        if frame.event.as_deref() != Some("response.function_call_arguments.delta") {
+            return Ok(false);
+        }
+        let value: serde_json::Value =
+            serde_json::from_str(&frame.data).map_err(|_| ArgumentsError::InvalidEvent)?;
+        let index = value
+            .get("output_index")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or(ArgumentsError::InvalidEvent)?;
+        if !self.calls.contains_key(&index) && self.calls.len() >= self.max_calls {
+            return Err(ArgumentsError::TooLarge);
+        }
+        self.calls
+            .entry(index)
+            .or_insert_with(|| ResponsesArguments::new(self.max_bytes_per_call))
+            .push(frame)
+    }
+
+    /// Parse buffered arguments; a caller must separately verify completion,
+    /// correlate call IDs and authorize the resulting action.
+    pub fn parsed(&self) -> Result<Vec<(u64, serde_json::Value)>, ArgumentsError> {
+        self.calls
+            .iter()
+            .map(|(index, arguments)| Ok((*index, arguments.parse_completed()?)))
+            .collect()
+    }
+}
+
 /// Project a recognized provider SSE text delta into the caller's event stream.
 /// Unknown events (including tool argument deltas) are ignored. Sink failures
 /// propagate to the caller so it can stop reading instead of buffering forever.
