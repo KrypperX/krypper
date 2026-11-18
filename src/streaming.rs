@@ -475,12 +475,18 @@ mod tests {
             event: Some("response.function_call_arguments.delta".into()),
             data: r#"{"delta":"do not emit"}"#.into(),
         };
-        assert_eq!(emit_provider_text_delta(&mut emitter, "answer", &tool_args), Ok(false));
+        assert_eq!(
+            emit_provider_text_delta(&mut emitter, "answer", &tool_args),
+            Ok(false)
+        );
         let text = SseFrame {
             event: Some("response.output_text.delta".into()),
             data: r#"{"delta":"hello"}"#.into(),
         };
-        assert_eq!(emit_provider_text_delta(&mut emitter, "answer", &text), Ok(true));
+        assert_eq!(
+            emit_provider_text_delta(&mut emitter, "answer", &text),
+            Ok(true)
+        );
         let sink = emitter.into_inner();
         assert_eq!(sink.0.len(), 1);
         assert_eq!(sink.0[0].sequence, 1);
