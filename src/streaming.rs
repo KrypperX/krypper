@@ -93,7 +93,7 @@ impl<W: std::io::Write> EventSink for JsonlSink<W> {
     fn send(&mut self, event: &StreamEnvelope) -> Result<(), Self::Error> {
         serde_json::to_writer(&mut self.writer, event)
             .map_err(std::io::Error::other)?;
-        self.writer.write_all(b"\\n")?;
+        self.writer.write_all(b"\n")?;
         self.writer.flush()
     }
 }
@@ -152,7 +152,7 @@ mod tests {
             item_id: "message".into(),
         }).unwrap();
         let bytes = emitter.into_inner().into_inner();
-        let lines: Vec<_> = bytes.split(|byte| *byte == b'\\n')
+        let lines: Vec<_> = bytes.split(|byte| *byte == b'\n')
             .filter(|line| !line.is_empty())
             .collect();
         assert_eq!(lines.len(), 2);
