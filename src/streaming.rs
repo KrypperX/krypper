@@ -1414,16 +1414,20 @@ mod tests {
     fn jsonl_sink_preserves_sequence_and_event_types() {
         let mut emitter = StreamEmitter::new(JsonlSink::new(Vec::<u8>::new()));
         assert_eq!(
-            emitter.emit(StreamEvent::ItemStarted {
-                item_id: "a".into(),
-                kind: ItemKind::Message,
-            }).expect("JSONL sink write"),
+            emitter
+                .emit(StreamEvent::ItemStarted {
+                    item_id: "a".into(),
+                    kind: ItemKind::Message,
+                })
+                .expect("JSONL sink write"),
             1
         );
         assert_eq!(
-            emitter.emit(StreamEvent::ItemCompleted {
-                item_id: "a".into(),
-            }).expect("JSONL sink write"),
+            emitter
+                .emit(StreamEvent::ItemCompleted {
+                    item_id: "a".into(),
+                })
+                .expect("JSONL sink write"),
             2
         );
         let output = String::from_utf8(emitter.into_inner().into_inner()).unwrap();
