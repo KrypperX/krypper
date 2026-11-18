@@ -823,6 +823,32 @@ mod tests {
     }
 
     #[test]
+    fn finalization_requires_successful_response_completion() {
+        let batch = ResponsesCallBatch::new(1, 64);
+        let incomplete = SseFrame {
+            event: Some("response.incomplete".into()),
+            data: serde_json::json!({"response": {"status": "incomplete"}}).to_string(),
+        };
+        assert_eq!(
+            batch.finalized_named_calls(&incomplete),
+            Err(ArgumentsError::InvalidEvent)
+        );
+        let failed = SseFrame {
+            event: Some("response.completed".into()),
+            data: serde_json::json!({"response": {"status": "failed"}}).to_string(),
+        };
+        assert_eq!(
+            batch.finalized_named_calls(&failed),
+            Err(ArgumentsError::InvalidEvent)
+        );
+        let completed = SseFrame {
+            event: Some("response.completed".into()),
+            data: serde_json::json!({"response": {"status": "completed"}}).to_string(),
+        };
+        assert_eq!(batch.finalized_named_calls(&completed), Ok(vec![]));
+    }
+
+    #[test]
     fn named_calls_require_name_id_and_completion() {
         let mut batch = ResponsesCallBatch::new(1, 64);
         let added = SseFrame {
