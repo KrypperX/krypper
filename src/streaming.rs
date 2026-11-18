@@ -1378,7 +1378,8 @@ mod tests {
 
     #[test]
     fn sse_reader_rejects_truncated_frame_at_eof() {
-        let mut input = std::io::Cursor::new(b"event: content_block_delta\ndata: {\"delta\":".to_vec());
+        let mut input =
+            std::io::Cursor::new(b"event: content_block_delta\ndata: {\"delta\":".to_vec());
         let result = consume_sse(&mut input, 1024, |_frame| Ok::<_, ()>(()));
         assert!(matches!(
             result,
@@ -1393,7 +1394,8 @@ mod tests {
         consume_sse(&mut input, 1024, |frame| {
             frames.push(frame);
             Ok::<_, ()>(())
-        }).expect("complete stream");
+        })
+        .expect("complete stream");
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, "ok");
     }
