@@ -613,17 +613,33 @@ impl ResponsesDecisionSource {
             &self.api_key,
             &request,
             |frame| {
+                // The optional transport sentinel is only valid after the
+                // response has completed; it must never hide truncation.
+                if frame.data.trim() == "[DONE]" {
+                    return if final_calls.is_some() {
+                        Ok(())
+                    } else {
+                        Err(ModelError::ProviderInvalidToolCall(
+                            provider,
+                            "stream ended before response completion",
+                        ))
+                    };
+                }
+                // Never forward text after completion or from a frame that
+                // fails action assembly validation.
+                if final_calls.is_some() {
+                    return Err(ModelError::ProviderInvalidToolCall(
+                        provider,
+                        "event received after response completion",
+                    ));
+                }
+                let completed_calls = assembly.consume(&frame).map_err(|_| {
+                    ModelError::ProviderInvalidToolCall(provider, "invalid streaming tool call")
+                })?;
                 if let Some(text) = crate::streaming::provider_text_delta(&frame) {
                     on_text(text)?;
                 }
-                // Responses streams may end with a transport sentinel after
-                // response.completed; it is not another model event.
-                if frame.data.trim() == "[DONE]" {
-                    return Ok(());
-                }
-                if let Some(calls) = assembly.consume(&frame).map_err(|_| {
-                    ModelError::ProviderInvalidToolCall(provider, "invalid streaming tool call")
-                })? {
+                if let Some(calls) = completed_calls {
                     final_calls = Some(calls);
                 }
                 Ok(())
