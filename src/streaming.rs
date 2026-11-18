@@ -311,17 +311,22 @@ mod tests {
         assert_eq!(second.sequence, 2);
     }
 
-
     #[test]
     fn sse_decoder_handles_split_crlf_and_multiple_data_lines() {
         let mut decoder = SseDecoder::new(1024);
-        assert!(decoder.push(b"event: response.output_text.delta\r\n").unwrap().is_empty());
+        assert!(decoder
+            .push(b"event: response.output_text.delta\r\n")
+            .unwrap()
+            .is_empty());
         assert!(decoder.push(b"data: one\r\ndata: tw").unwrap().is_empty());
         let frames = decoder.push(b"o\r\n\r\n").unwrap();
-        assert_eq!(frames, vec![SseFrame {
-            event: Some("response.output_text.delta".into()),
-            data: "one\ntwo".into(),
-        }]);
+        assert_eq!(
+            frames,
+            vec![SseFrame {
+                event: Some("response.output_text.delta".into()),
+                data: "one\ntwo".into(),
+            }]
+        );
     }
 
     #[test]
