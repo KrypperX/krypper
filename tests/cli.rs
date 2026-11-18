@@ -3122,7 +3122,7 @@ fn task_activity_jsonl_emits_metadata_without_goal_or_action_text() {
     .stderr(Stdio::piped())
     .spawn()
     .and_then(|mut child| {
-        child.stdin.take().unwrap().write_all(b"complete done\\n")?;
+        child.stdin.take().unwrap().write_all(b"complete done\n")?;
         child.wait_with_output()
     })
     .expect("run task with activity JSONL");
