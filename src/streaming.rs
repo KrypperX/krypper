@@ -1411,6 +1411,24 @@ mod tests {
     }
 
     #[test]
+    fn activity_jsonl_supports_dyn_writer_and_excludes_task_goal() {
+        let mut session = crate::task_lifecycle::TaskSession::new();
+        session.create_task("private goal must not appear");
+        let mut bytes = Vec::<u8>::new();
+        let writer: &mut dyn std::io::Write = &mut bytes;
+        write_activity_positions(&session, writer).expect("activity JSONL write");
+        let output = String::from_utf8(bytes).expect("UTF-8 JSONL");
+        assert!(!output.contains("private goal must not appear"));
+        for line in output.lines() {
+            let record: serde_json::Value =
+                serde_json::from_str(line).expect("valid activity JSONL");
+            assert!(record.get("task_id").is_some());
+            assert!(record.get("lifecycle_position").is_some());
+            assert!(record.get("activity_position").is_some());
+        }
+    }
+
+    #[test]
     fn jsonl_sink_preserves_sequence_and_event_types() {
         let mut emitter = StreamEmitter::new(JsonlSink::new(Vec::<u8>::new()));
         assert_eq!(
