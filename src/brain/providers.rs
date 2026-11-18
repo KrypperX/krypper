@@ -699,7 +699,22 @@ impl ResponsesDecisionSource {
         observations: &[WorkspaceObservation],
         project_guidance: Option<&str>,
     ) -> Result<WorkspaceAction, ModelError> {
-        if std::env::var_os("KRYPPER_RESPONSES_STREAM").is_some() {
+        self.choose_with_streaming(
+            goal,
+            observations,
+            project_guidance,
+            std::env::var_os("KRYPPER_RESPONSES_STREAM").is_some(),
+        )
+    }
+
+    fn choose_with_streaming(
+        &mut self,
+        goal: &str,
+        observations: &[WorkspaceObservation],
+        project_guidance: Option<&str>,
+        streaming: bool,
+    ) -> Result<WorkspaceAction, ModelError> {
+        if streaming {
             return self.stream_validated_action(goal, observations, project_guidance, |_| Ok(()));
         }
         let remaining = consume_decision_budget(&mut self.remaining_decisions)?;
@@ -1036,7 +1051,7 @@ mod tests {
             endpoint,
         );
         let action = source
-            .stream_validated_action("read README", &[], None, |_| Ok(()))
+            .choose_with_streaming("read README", &[], None, true)
             .expect("completed stream produces validated action");
         assert!(matches!(action, WorkspaceAction::ReadFile { .. }));
         server.join().expect("server completed");
@@ -1083,7 +1098,7 @@ mod tests {
             endpoint,
         );
         assert!(source
-            .stream_validated_action("read README", &[], None, |_| Ok(()))
+            .choose_with_streaming("read README", &[], None, true)
             .is_err());
         server.join().expect("server completed");
     }
