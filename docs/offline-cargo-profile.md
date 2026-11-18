@@ -1,8 +1,26 @@
 # Opt-in Linux offline Cargo profile
 
-Issue #178 implements one process Tool, `offline_cargo_test`, alongside the
-existing eight filesystem Tools. Its request may omit `test_filter` or include
-one literal test-name filter of at most 256 UTF-8 bytes. Empty values,
+## Registered operation effects
+
+The current workspace registry exposes nine filesystem Tools and one process
+Tool, `offline_cargo_test`. The five read-only filesystem Tools are
+`read_file`, `read_range`, `list_directory`, `search_text`, and
+`search_tree_text`; each has the `read-only workspace access` effect. The four
+filesystem Tools that mutate the workspace are `create_directory`,
+`create_file`, `replace_text`, and `apply_patch`; each has the
+`workspace mutation` effect. The process Tool has the
+`fixed sandboxed offline Cargo test` effect.
+
+These provider-facing descriptions are informational. Every workspace
+operation still requires its existing task authorization, while
+`offline_cargo_test` additionally requires its existing host authorization and
+verified Linux confinement. Runtime authorization checks remain authoritative
+and fail closed; descriptive metadata and model output do not grant access.
+
+## Fixed profile
+
+Issue #178 implements `offline_cargo_test`. Its request may omit `test_filter`
+or include one literal test-name filter of at most 256 UTF-8 bytes. Empty values,
 control characters, option-like values and over-limit values are rejected
 before process setup. The filter uses Rust's test harness literal substring
 matching; it is passed unchanged as one argument after Cargo's fixed `--`
@@ -10,8 +28,7 @@ separator and cannot add Cargo or test-harness flags.
 Without a filter it runs exactly `cargo test --offline --locked --all-targets`.
 Requests cannot supply an executable, other arguments, cwd, environment,
 sandbox options, or higher limits. This is an embedding API capability; no CLI
-syntax or default CLI permission has been added. Registry metadata and model
-output do not authorize execution.
+syntax or default CLI permission has been added.
 
 The bounded process observation records the selected filter, whether any tests
 ran, and the count of Rust test-harness per-test result lines. Aggregate summary
