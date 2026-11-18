@@ -958,7 +958,7 @@ mod tests {
         let mut reader = OneReadOnly { reads: 0 };
         let mut emitter = StreamEmitter::new(RejectSink);
         let result = consume_sse(&mut reader, 1024, |frame| {
-            emit_provider_text_delta(&mut emitter, "message", &frame)
+            emit_provider_text_delta(&mut emitter, "message", &frame).map(|_| ())
         });
         assert!(matches!(
             result,
