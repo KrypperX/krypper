@@ -641,8 +641,8 @@ impl ResponsesFinalActions {
         }
         // Never accept argument fragments before their registered output item.
         if event == Some("response.function_call_arguments.delta") {
-            let value: serde_json::Value = serde_json::from_str(&frame.data)
-                .map_err(|_| ArgumentsError::InvalidEvent)?;
+            let value: serde_json::Value =
+                serde_json::from_str(&frame.data).map_err(|_| ArgumentsError::InvalidEvent)?;
             let index = value
                 .get("output_index")
                 .and_then(serde_json::Value::as_u64)
@@ -1089,7 +1089,10 @@ mod tests {
             event: Some("response.function_call_arguments.delta".into()),
             data: serde_json::json!({"output_index": 0, "delta": "{}"}).to_string(),
         };
-        assert_eq!(actions.consume(&delta), Err(ArgumentsError::UnexpectedIndex));
+        assert_eq!(
+            actions.consume(&delta),
+            Err(ArgumentsError::UnexpectedIndex)
+        );
         assert_eq!(actions.consume(&delta), Err(ArgumentsError::InvalidEvent));
     }
 
@@ -1100,7 +1103,10 @@ mod tests {
             event: Some("response.completed".into()),
             data: serde_json::json!({"response": {"status": "completed"}}).to_string(),
         };
-        assert_eq!(actions.consume(&completed), Err(ArgumentsError::InvalidEvent));
+        assert_eq!(
+            actions.consume(&completed),
+            Err(ArgumentsError::InvalidEvent)
+        );
     }
 
     #[test]
