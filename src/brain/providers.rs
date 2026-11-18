@@ -938,7 +938,11 @@ impl AnthropicDecisionSource {
                         }
                     }
                     Some("message_delta") => {
-                        if event["delta"]["stop_reason"] != "tool_use" {
+                        if tool_use_stop
+                            || event["delta"]["stop_reason"] != "tool_use"
+                            || blocks.len() != 1
+                            || completed_blocks.len() != 1
+                        {
                             return Err(invalid());
                         }
                         tool_use_stop = true;
@@ -1309,7 +1313,7 @@ mod tests {
         server.join().expect("server completed");
     }
 
-    fn assert_anthropic_stream_decision(truncated: bool) {
+    fn assert_anthropic_stream_decision(truncated: bool, duplicate_stop: bool) {
         use super::AnthropicDecisionSource;
         use crate::agent_loop::WorkspaceAction;
         use serde_json::json;
@@ -1351,6 +1355,9 @@ mod tests {
                     break;
                 }
                 body.push_str(&format!("event: {kind}\ndata: {data}\n\n"));
+                if duplicate_stop && kind == "message_delta" {
+                    body.push_str(&format!("event: {kind}\ndata: {data}\n\n"));
+                }
             }
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -1361,8 +1368,8 @@ mod tests {
         let mut source =
             AnthropicDecisionSource::with_endpoint("test-model", "local-test-key", 2, endpoint);
         let result = source.choose_with_streaming("read README", &[], None, true);
-        if truncated {
-            assert!(result.is_err(), "truncated stream must not yield an action");
+        if truncated || duplicate_stop {
+            assert!(result.is_err(), "invalid stream must not yield an action");
         } else {
             assert!(matches!(result, Ok(WorkspaceAction::ReadFile { .. })));
         }
@@ -1371,12 +1378,17 @@ mod tests {
 
     #[test]
     fn anthropic_stream_assembles_and_validates_completed_tool_use() {
-        assert_anthropic_stream_decision(false);
+        assert_anthropic_stream_decision(false, false);
     }
 
     #[test]
     fn anthropic_truncated_stream_never_yields_an_action() {
-        assert_anthropic_stream_decision(true);
+        assert_anthropic_stream_decision(true, false);
+    }
+
+    #[test]
+    fn anthropic_duplicate_stop_reason_never_yields_an_action() {
+        assert_anthropic_stream_decision(false, true);
     }
 
     #[test]
