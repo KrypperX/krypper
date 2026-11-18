@@ -616,6 +616,11 @@ impl ResponsesDecisionSource {
                 if let Some(text) = crate::streaming::provider_text_delta(&frame) {
                     on_text(text)?;
                 }
+                // Responses streams may end with a transport sentinel after
+                // response.completed; it is not another model event.
+                if frame.data.trim() == "[DONE]" {
+                    return Ok(());
+                }
                 if let Some(calls) = assembly.consume(&frame).map_err(|_| {
                     ModelError::ProviderInvalidToolCall(provider, "invalid streaming tool call")
                 })? {
@@ -951,6 +956,73 @@ impl BoundedDecisionSource for OpenAiCompatibleDecisionSource {
 #[cfg(test)]
 mod tests {
     use super::{OpenAiCompatibleCredentials, OpenAiCompatibleProvider};
+
+    /// Exercise the real HTTP/SSE transport, assembly and action validator
+    /// without contacting a provider or executing the returned workspace action.
+    #[test]
+    fn responses_stream_validates_action_only_after_completed_event() {
+        use super::{ResponsesDecisionSource, ResponsesProvider};
+        use crate::agent_loop::WorkspaceAction;
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::time::Duration;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local test server");
+        let endpoint = format!("http://{}", listener.local_addr().expect("local address"));
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept request");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+            let mut request = [0_u8; 16384];
+            let count = socket.read(&mut request).expect("read request");
+            let received = String::from_utf8_lossy(&request[..count]);
+            assert!(received.contains("POST "));
+            let frames = [
+                ("response.output_item.added", serde_json::json!({
+                    "output_index": 0,
+                    "item": {"type": "function_call", "call_id": "call_a", "name": "read_file"}
+                })),
+                ("response.function_call_arguments.delta", serde_json::json!({
+                    "output_index": 0, "delta": r#"{"path":"README.md"}"#
+                })),
+                ("response.function_call_arguments.done", serde_json::json!({
+                    "output_index": 0
+                })),
+                ("response.output_item.done", serde_json::json!({
+                    "output_index": 0,
+                    "item": {"type": "function_call", "call_id": "call_a", "name": "read_file"}
+                })),
+                ("response.completed", serde_json::json!({
+                    "response": {"status": "completed"}
+                })),
+            ];
+            let mut body = String::new();
+            for (event, data) in frames {
+                body.push_str(&format!("event: {event}\\ndata: {data}\\n\\n"));
+            }
+            body.push_str("data: [DONE]\\n\\n");
+            let response = format!(
+                "HTTP/1.1 200 OK\\r\\nContent-Type: text/event-stream\\r\\nContent-Length: {}\\r\\nConnection: close\\r\\n\\r\\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).expect("send SSE");
+        });
+
+        let mut source = ResponsesDecisionSource::with_endpoint(
+            "test-model",
+            ResponsesProvider::OpenAi,
+            "local-test-key",
+            2,
+            endpoint,
+        );
+        let action = source
+            .stream_validated_action("read README", &[], None, |_| Ok(()))
+            .expect("completed stream produces validated action");
+        assert!(matches!(action, WorkspaceAction::ReadFile { .. }));
+        server.join().expect("server completed");
+    }
 
     #[test]
     fn mistral_credentials_bind_to_the_fixed_endpoint() {
