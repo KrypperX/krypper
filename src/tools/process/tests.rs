@@ -365,7 +365,6 @@ fn cargo_build_script_warning_cannot_fake_a_filtered_test_result() {
             .args([
                 "test",
                 "--offline",
-                "--locked",
                 "--all-targets",
                 "--manifest-path",
             ])
@@ -379,7 +378,11 @@ fn cargo_build_script_warning_cannot_fake_a_filtered_test_result() {
     };
 
     let selected = run_filter("selected_fixture_test", "selected-target");
-    assert!(selected.status.success());
+    assert!(
+        selected.status.success(),
+        "fixture cargo test failed: {}",
+        String::from_utf8_lossy(&selected.stderr)
+    );
     let mut selected_result = ProcessResult::empty(ProcessOutcome::Exited(0));
     selected_result.test_filter = Some("selected_fixture_test".into());
     selected_result.stdout = String::from_utf8_lossy(&selected.stdout).into_owned();
@@ -394,7 +397,11 @@ fn cargo_build_script_warning_cannot_fake_a_filtered_test_result() {
     assert!(selected_result.succeeded());
 
     let absent = run_filter("absent_fixture_test", "absent-target");
-    assert!(absent.status.success());
+    assert!(
+        absent.status.success(),
+        "fixture cargo test failed: {}",
+        String::from_utf8_lossy(&absent.stderr)
+    );
     let mut absent_result = ProcessResult::empty(ProcessOutcome::Exited(0));
     absent_result.test_filter = Some("absent_fixture_test".into());
     absent_result.stdout = String::from_utf8_lossy(&absent.stdout).into_owned();
