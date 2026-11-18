@@ -939,7 +939,7 @@ mod tests {
                 "item": {"type": "function_call", "call_id": "call_a", "name": "run"}
             })),
             ("response.function_call_arguments.delta", serde_json::json!({
-                "output_index": 0, "delta": "{\\"path\\":\\"src\\"}"
+                "output_index": 0, "delta": r#"{"path":"src"}"#
             })),
             ("response.function_call_arguments.done", serde_json::json!({
                 "output_index": 0
