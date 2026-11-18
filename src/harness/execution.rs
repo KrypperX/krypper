@@ -80,6 +80,16 @@ pub(crate) fn workspace_action_name(action: &WorkspaceAction) -> &'static str {
     }
 }
 
+pub(crate) fn workspace_mutation_target(action: &WorkspaceAction) -> Option<&PathBuf> {
+    match action {
+        WorkspaceAction::CreateDirectory { path }
+        | WorkspaceAction::CreateFile { path, .. }
+        | WorkspaceAction::ReplaceText { path, .. }
+        | WorkspaceAction::ApplyPatch { path, .. } => Some(path),
+        _ => None,
+    }
+}
+
 /// One ordered observation produced while a task-owned turn is running.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WorkspaceObservation {
@@ -188,12 +198,12 @@ pub trait BoundedDecisionSource {
         observations: &[WorkspaceObservation],
     ) -> WorkspaceAction;
 
-    /// Returns whether this source builds model context from the task's root project guidance.
+    /// Returns whether this source builds model context from the task's project guidance.
     fn needs_root_project_guidance(&self) -> bool {
         false
     }
 
-    /// Selects an action with bounded root project guidance when the source requests it.
+    /// Selects an action with bounded project guidance when the source requests it.
     fn choose_action_with_root_project_guidance(
         &mut self,
         goal: &str,
@@ -277,7 +287,7 @@ pub enum GoalTurnError {
     UnsupportedAction { action: String },
     /// The existing workspace safety policy rejected or could not perform a file read.
     WorkspaceRead(WorkspaceReadError),
-    /// Root project guidance could not be read safely before a model decision.
+    /// Project guidance could not be read safely before a model decision or edit.
     RootProjectGuidance(WorkspaceGuidanceReadError),
     /// The existing workspace safety policy rejected or could not list a directory.
     WorkspaceList(WorkspaceListError),
@@ -503,16 +513,61 @@ pub fn run_goal_turn_with_budget<D: BoundedDecisionSource + ?Sized>(
         None
     };
     while actions_taken < max_actions {
-        let action = if needs_root_project_guidance {
-            decision_source.choose_action_with_root_project_guidance(
-                goal,
-                &observations,
-                root_project_guidance.as_deref(),
-            )
-        } else {
-            decision_source.choose_action(goal, &observations)
+        let mut decision_guidance = root_project_guidance.clone();
+        let action = loop {
+            let action = if needs_root_project_guidance {
+                decision_source.choose_action_with_root_project_guidance(
+                    goal,
+                    &observations,
+                    decision_guidance.as_deref(),
+                )
+            } else {
+                decision_source.choose_action(goal, &observations)
+            };
+            actions_taken += 1;
+
+            if needs_root_project_guidance {
+                if let Some(target) = workspace_mutation_target(&action) {
+                    let applicable_guidance = match session
+                        .read_project_guidance_for_targets(task_id, std::slice::from_ref(target))
+                    {
+                        Ok(guidance) => guidance,
+                        Err(
+                            crate::task_lifecycle::WorkspaceGuidanceReadError::InvalidTargetPath,
+                        ) => break action,
+                        Err(error) => {
+                            return Err(GoalTurnError::RootProjectGuidance(error));
+                        }
+                    };
+                    if applicable_guidance != decision_guidance {
+                        if actions_taken == max_actions {
+                            activity.push(TurnActivitySummary::BudgetExhausted {
+                                actions: actions_taken,
+                            });
+                            return finish_turn(
+                                session,
+                                task_id,
+                                turn_id,
+                                observations,
+                                TurnCompletionData {
+                                    activity,
+                                    actions_taken,
+                                    stop_reason: GoalTurnStopReason::ActionBudgetExhausted,
+                                    outcome: TurnOutcome::Failure {
+                                        detail: format!(
+                                            "action budget exhausted after {actions_taken} actions"
+                                        ),
+                                    },
+                                },
+                            );
+                        }
+                        decision_guidance = applicable_guidance;
+                        continue;
+                    }
+                }
+            }
+            break action;
         };
-        actions_taken += 1;
         match execute_action(session, task_id, turn_id, &action)? {
             ActionExecution::Complete(result) => {
                 activity.push(TurnActivitySummary::Completed);

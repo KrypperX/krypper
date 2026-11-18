@@ -1,6 +1,6 @@
 use crate::agent_loop::{
-    run_goal_turn_with_budget, BoundedDecisionSource, GoalTurnStopReason, WorkspaceAction,
-    WorkspaceObservation,
+    run_goal_turn_with_budget, BoundedDecisionSource, GoalTurnError, GoalTurnStopReason,
+    WorkspaceAction, WorkspaceObservation,
 };
 use crate::brain::{
     validate_model_name_for_provider, AnthropicDecisionSource, CloudflareAccountId,
@@ -411,17 +411,13 @@ fn run_task_with_endpoint(
     let mut turn_results = Vec::new();
     let mut paused_checkpoint = None;
     loop {
-        let project_guidance = if model_source.is_some() {
-            session
-                .read_root_project_guidance(task_id)
-                .map_err(io::Error::other)?
-        } else {
-            None
-        };
         let mut displayed_observations = 0;
         let result = {
-            let mut decision_source =
-                |decision_goal: &str, observations: &[WorkspaceObservation]| {
+            let mut decision_source = CliDecisionSource {
+                needs_project_guidance: model_source.is_some(),
+                decide: |decision_goal: &str,
+                         observations: &[WorkspaceObservation],
+                         project_guidance: Option<&str>| {
                     while displayed_observations < observations.len() {
                         if let Err(cause) = write_observation(
                             output,
@@ -457,7 +453,7 @@ fn run_task_with_endpoint(
                         let action = model_source.choose_action_with_root_project_guidance(
                             decision_goal,
                             observations,
-                            project_guidance.as_deref(),
+                            project_guidance,
                         );
                         if let Err(cause) = writeln!(
                             output,
@@ -471,6 +467,7 @@ fn run_task_with_endpoint(
                         }
                         return action;
                     }
+
                     if let Err(cause) = write!(error, "action {decisions}/{max_actions}> ")
                         .and_then(|()| error.flush())
                     {
@@ -491,8 +488,8 @@ fn run_task_with_endpoint(
                         Ok(bytes_read) if bytes_read > MAX_TASK_ACTION_LINE_BYTES => {
                             WorkspaceAction::Unsupported {
                                 action: format!(
-                                "action line exceeds limit of {MAX_TASK_ACTION_LINE_BYTES} bytes"
-                            ),
+                                    "action line exceeds limit of {MAX_TASK_ACTION_LINE_BYTES} bytes"
+                                ),
                             }
                         }
                         Ok(_) => match std::str::from_utf8(&line) {
@@ -505,7 +502,8 @@ fn run_task_with_endpoint(
                             action: format!("input error: {cause}"),
                         },
                     }
-                };
+                },
+            };
             run_goal_turn_with_budget(
                 &mut session,
                 task_id,
@@ -514,7 +512,10 @@ fn run_task_with_endpoint(
                 max_actions - actions_taken,
                 &mut decision_source,
             )
-            .map_err(io::Error::other)?
+            .map_err(|cause| match cause {
+                GoalTurnError::RootProjectGuidance(cause) => io::Error::other(cause),
+                cause => io::Error::other(cause),
+            })?
         };
         actions_taken += result.actions_taken();
         let stop_reason = result.stop_reason();
@@ -674,6 +675,37 @@ fn snapshot_task_and_turn_state(
         .ok_or_else(|| io::Error::other("turn was not found in its task snapshot"))?;
 
     Ok((task.state(), turn.state()))
+}
+
+struct CliDecisionSource<F> {
+    needs_project_guidance: bool,
+    decide: F,
+}
+
+impl<F> BoundedDecisionSource for CliDecisionSource<F>
+where
+    F: FnMut(&str, &[WorkspaceObservation], Option<&str>) -> WorkspaceAction,
+{
+    fn choose_action(
+        &mut self,
+        goal: &str,
+        observations: &[WorkspaceObservation],
+    ) -> WorkspaceAction {
+        (self.decide)(goal, observations, None)
+    }
+
+    fn needs_root_project_guidance(&self) -> bool {
+        self.needs_project_guidance
+    }
+
+    fn choose_action_with_root_project_guidance(
+        &mut self,
+        goal: &str,
+        observations: &[WorkspaceObservation],
+        guidance: Option<&str>,
+    ) -> WorkspaceAction {
+        (self.decide)(goal, observations, guidance)
+    }
 }
 
 fn prepare_model_source(

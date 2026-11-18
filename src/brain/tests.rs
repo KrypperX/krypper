@@ -135,6 +135,48 @@ impl BoundedDecisionSource for RootGuidanceProbe {
     }
 }
 
+struct NestedGuidanceEditProbe {
+    workspace: PathBuf,
+    target: PathBuf,
+    decisions: Vec<(Option<String>, bool)>,
+}
+
+impl BoundedDecisionSource for NestedGuidanceEditProbe {
+    fn choose_action(
+        &mut self,
+        goal: &str,
+        observations: &[WorkspaceObservation],
+    ) -> WorkspaceAction {
+        self.choose_action_with_root_project_guidance(goal, observations, None)
+    }
+
+    fn needs_root_project_guidance(&self) -> bool {
+        true
+    }
+
+    fn choose_action_with_root_project_guidance(
+        &mut self,
+        _goal: &str,
+        _observations: &[WorkspaceObservation],
+        guidance: Option<&str>,
+    ) -> WorkspaceAction {
+        self.decisions.push((
+            guidance.map(str::to_owned),
+            self.workspace.join(&self.target).exists(),
+        ));
+        if self.decisions.len() <= 2 {
+            WorkspaceAction::CreateFile {
+                path: self.target.clone(),
+                contents: "created after nested guidance".to_owned(),
+            }
+        } else {
+            WorkspaceAction::Complete {
+                result: "created file with applicable guidance".to_owned(),
+            }
+        }
+    }
+}
+
 #[test]
 fn unsafe_root_guidance_fails_before_decision_and_preserves_outside_canary() {
     use std::os::unix::fs::symlink;
@@ -174,6 +216,167 @@ fn unsafe_root_guidance_fails_before_decision_and_preserves_outside_canary() {
     assert_eq!(
         task.get_turn(turn_id).expect("turn exists").state(),
         TurnState::Running
+    );
+}
+
+#[test]
+fn nested_edit_receives_only_its_ordered_ancestor_guidance_before_creation() {
+    let fixture = TempDir::new();
+    let workspace = fixture.path().join("workspace");
+    fs::create_dir_all(workspace.join("src/deep")).expect("create nested workspace");
+    fs::create_dir_all(workspace.join("tests")).expect("create sibling workspace");
+    fs::write(workspace.join("AGENTS.md"), "root guidance").expect("write root guidance");
+    fs::write(workspace.join("src/AGENTS.md"), "src guidance").expect("write src guidance");
+    fs::write(workspace.join("src/deep/AGENTS.md"), "deep guidance").expect("write deep guidance");
+    fs::write(
+        workspace.join("tests/AGENTS.md"),
+        "sibling guidance sentinel",
+    )
+    .expect("write sibling guidance");
+    let target = PathBuf::from("src/deep/generated.rs");
+    let goal = "Create the requested source file";
+    let (mut session, task_id, turn_id) = running_turn_in_workspace(&workspace, goal);
+    let mut source = NestedGuidanceEditProbe {
+        workspace: workspace.clone(),
+        target: target.clone(),
+        decisions: Vec::new(),
+    };
+
+    let result = run_goal_turn_with_budget(&mut session, task_id, turn_id, goal, 3, &mut source)
+        .expect("complete after receiving nested guidance");
+
+    assert_eq!(result.stop_reason(), GoalTurnStopReason::Completed);
+    assert_eq!(result.actions_taken(), 3);
+    assert_eq!(
+        source
+            .decisions
+            .iter()
+            .map(|(_, exists)| *exists)
+            .collect::<Vec<_>>(),
+        [false, false, true]
+    );
+    assert_eq!(source.decisions[0].0.as_deref(), Some("root guidance"));
+    let final_edit_context = source.decisions[1]
+        .0
+        .as_deref()
+        .expect("nested edit context");
+    let root_at = final_edit_context
+        .find("root guidance")
+        .expect("root guidance precedes nested guidance");
+    let src_at = final_edit_context
+        .find("src guidance")
+        .expect("src ancestor guidance is included");
+    let deep_at = final_edit_context
+        .find("deep guidance")
+        .expect("deep ancestor guidance is included");
+    assert!(root_at < src_at && src_at < deep_at);
+    assert!(!final_edit_context.contains("sibling guidance sentinel"));
+    assert_eq!(source.decisions[2].0.as_deref(), Some("root guidance"));
+    assert_eq!(
+        fs::read_to_string(workspace.join(&target)).expect("read created file"),
+        "created after nested guidance"
+    );
+}
+
+#[test]
+fn nested_unsafe_guidance_stops_a_write_without_touching_the_outside_canary() {
+    use std::os::unix::fs::symlink;
+
+    for case in ["symlink", "invalid_utf8", "oversized"] {
+        let fixture = TempDir::new();
+        let workspace = fixture.path().join("workspace");
+        fs::create_dir_all(workspace.join("src")).expect("create nested workspace");
+        let outside = fixture.path().join("outside.txt");
+        fs::write(&outside, "outside canary").expect("write outside canary");
+        let guidance_path = workspace.join("src/AGENTS.md");
+        match case {
+            "symlink" => symlink(&outside, &guidance_path).expect("create guidance symlink"),
+            "invalid_utf8" => fs::write(&guidance_path, [0xff]).expect("write invalid guidance"),
+            "oversized" => fs::write(&guidance_path, vec![b'x'; 16 * 1024 + 1])
+                .expect("write oversized guidance"),
+            _ => unreachable!("test case is listed above"),
+        }
+        let target = PathBuf::from("src/generated.rs");
+        let goal = "Create the requested source file";
+        let (mut session, task_id, turn_id) = running_turn_in_workspace(&workspace, goal);
+        let mut source = NestedGuidanceEditProbe {
+            workspace: workspace.clone(),
+            target: target.clone(),
+            decisions: Vec::new(),
+        };
+
+        let result =
+            run_goal_turn_with_budget(&mut session, task_id, turn_id, goal, 2, &mut source);
+
+        assert!(matches!(result, Err(GoalTurnError::RootProjectGuidance(_))));
+        assert_eq!(source.decisions.len(), 1);
+        assert!(!workspace.join(&target).exists());
+        assert_eq!(
+            fs::read_to_string(outside).expect("read outside canary"),
+            "outside canary"
+        );
+    }
+}
+
+#[test]
+fn out_of_workspace_edit_target_is_rejected_without_changing_canary() {
+    let fixture = TempDir::new();
+    let workspace = fixture.path().join("workspace");
+    fs::create_dir(&workspace).expect("create workspace");
+    let outside = fixture.path().join("outside.txt");
+    fs::write(&outside, "outside canary").expect("write outside canary");
+    let goal = "Create a workspace file";
+    let (mut session, task_id, turn_id) = running_turn_in_workspace(&workspace, goal);
+    let mut source = NestedGuidanceEditProbe {
+        workspace: workspace.clone(),
+        target: PathBuf::from("../outside.txt"),
+        decisions: Vec::new(),
+    };
+
+    let result = run_goal_turn_with_budget(&mut session, task_id, turn_id, goal, 2, &mut source)
+        .expect("record the existing safe path rejection");
+    assert_eq!(result.stop_reason(), GoalTurnStopReason::ActionFailed);
+    assert!(matches!(
+        result.outcome(),
+        Some(TurnOutcome::Failure { .. })
+    ));
+    assert_eq!(source.decisions.len(), 1);
+    assert_eq!(
+        fs::read_to_string(outside).expect("read outside canary"),
+        "outside canary"
+    );
+}
+
+#[test]
+fn symlink_edit_target_is_rejected_without_touching_its_target() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = TempDir::new();
+    let workspace = fixture.path().join("workspace");
+    fs::create_dir_all(workspace.join("src")).expect("create workspace");
+    let outside = fixture.path().join("outside.txt");
+    fs::write(&outside, "outside canary").expect("write outside canary");
+    symlink(&outside, workspace.join("src/generated.rs")).expect("create target symlink");
+    let goal = "Create a workspace file";
+    let (mut session, task_id, turn_id) = running_turn_in_workspace(&workspace, goal);
+    let mut source = NestedGuidanceEditProbe {
+        workspace: workspace.clone(),
+        target: PathBuf::from("src/generated.rs"),
+        decisions: Vec::new(),
+    };
+
+    let result = run_goal_turn_with_budget(&mut session, task_id, turn_id, goal, 2, &mut source)
+        .expect("record the existing safe symlink rejection");
+    assert_eq!(result.stop_reason(), GoalTurnStopReason::ActionFailed);
+    assert!(matches!(
+        result.outcome(),
+        Some(TurnOutcome::Failure { .. })
+    ));
+    assert_eq!(source.decisions.len(), 1);
+    assert!(workspace.join("src/generated.rs").is_symlink());
+    assert_eq!(
+        fs::read_to_string(outside).expect("read outside canary"),
+        "outside canary"
     );
 }
 
@@ -874,8 +1077,134 @@ fn harness_planner_rejects_root_guidance_symlink_before_model_request() {
 }
 
 #[test]
+fn harness_planner_rejects_nested_guidance_symlink_before_accepting_a_write_plan() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = TempDir::new();
+    let workspace = fixture.path().join("workspace");
+    fs::create_dir_all(workspace.join("src")).expect("create nested workspace");
+    let outside = fixture.path().join("outside.txt");
+    fs::write(&outside, "outside canary").expect("write outside canary");
+    symlink(&outside, workspace.join("src/AGENTS.md")).expect("create guidance symlink");
+    let goal = "Create the requested source file";
+    let (session, task_id, _) = running_turn_in_workspace(&workspace, goal);
+    let (address, server) = mock_server(vec![ok(tool_response(
+        "create_file",
+        json!({"path":"src/generated.rs","contents":"generated"}),
+    ))]);
+    let mut source = OllamaDecisionSource::with_endpoint("fixture-model", 4, address);
+
+    let plan = create_plan_with_workspace_context(&session, task_id, &mut source, goal, &[], 4);
+
+    assert!(matches!(
+        plan,
+        Err(WorkspacePlanError::RootGuidanceRead(
+            WorkspaceGuidanceReadError::Symlink
+        ))
+    ));
+    assert_eq!(server.join().expect("join local fixture server").len(), 1);
+    assert!(!workspace.join("src/generated.rs").exists());
+    assert_eq!(
+        fs::read_to_string(outside).expect("read outside canary"),
+        "outside canary"
+    );
+}
+
+#[test]
+fn harness_planner_reconsiders_nested_targets_with_ordered_guidance_before_execution() {
+    let fixture = TempDir::new();
+    let workspace = fixture.path().join("workspace");
+    fs::create_dir_all(workspace.join("src/deep")).expect("create nested workspace");
+    fs::create_dir_all(workspace.join("tests")).expect("create sibling workspace");
+    fs::write(workspace.join("AGENTS.md"), "root planner guidance").expect("write root guidance");
+    fs::write(workspace.join("src/AGENTS.md"), "src planner guidance").expect("write src guidance");
+    fs::write(
+        workspace.join("src/deep/AGENTS.md"),
+        "deep planner guidance",
+    )
+    .expect("write deep guidance");
+    fs::write(
+        workspace.join("tests/AGENTS.md"),
+        "planner sibling sentinel",
+    )
+    .expect("write sibling guidance");
+
+    let goal = "Create the requested source file";
+    let (mut session, task_id, turn_id) = running_turn_in_workspace(&workspace, goal);
+    let target = "src/deep/generated.rs";
+    let response = tool_response(
+        "create_file",
+        json!({"path":target,"contents":"generated after guidance"}),
+    );
+    let (address, server) = mock_server(vec![ok(response.clone()), ok(response)]);
+    let mut source = OllamaDecisionSource::with_endpoint("fixture-model", 4, address);
+
+    let plan = create_plan_with_workspace_context(&session, task_id, &mut source, goal, &[], 2)
+        .expect("create a plan after gathering target guidance");
+    let mut control = |_: &str, _: &[WorkspaceObservation]| WorkspaceAction::Complete {
+        result: "created after planning".to_owned(),
+    };
+    let result = run_goal_turn_with_plan(
+        &mut session,
+        task_id,
+        turn_id,
+        goal,
+        2,
+        Ok(plan),
+        &mut control,
+    )
+    .expect("run the guidance-aware plan");
+    let requests = server.join().expect("join local fixture server");
+
+    assert_eq!(result.stop_reason(), GoalTurnStopReason::Completed);
+    assert_eq!(requests.len(), 2);
+    let first_request = request_json(&requests[0]);
+    let first_prompt = first_request["messages"][1]["content"]
+        .as_str()
+        .expect("proposal prompt");
+    assert!(first_prompt.contains("root planner guidance"));
+    assert!(!first_prompt.contains("src planner guidance"));
+    let final_request = request_json(&requests[1]);
+    let final_prompt = final_request["messages"][1]["content"]
+        .as_str()
+        .expect("guidance-aware plan prompt");
+    let root_at = final_prompt
+        .find("root planner guidance")
+        .expect("root guidance reaches the final planner");
+    let src_at = final_prompt
+        .find("src planner guidance")
+        .expect("src guidance reaches the final planner");
+    let deep_at = final_prompt
+        .find("deep planner guidance")
+        .expect("deep guidance reaches the final planner");
+    assert!(root_at < src_at && src_at < deep_at);
+    assert!(!final_prompt.contains("planner sibling sentinel"));
+    assert!(final_prompt.contains(target));
+    assert!(final_request["messages"][0]["content"]
+        .as_str()
+        .expect("planner system instructions")
+        .contains("including nested files"));
+    assert_eq!(
+        fs::read_to_string(workspace.join(target)).expect("read generated file"),
+        "generated after guidance"
+    );
+}
+
+#[test]
 fn opt_in_reflection_uses_a_verified_success_and_only_proposes_a_bounded_plan() {
     let workspace = TempDir::new();
+    fs::create_dir_all(workspace.path().join("src")).expect("create nested workspace");
+    fs::create_dir_all(workspace.path().join("tests")).expect("create sibling workspace");
+    fs::write(
+        workspace.path().join("src/AGENTS.md"),
+        "reflective src guidance",
+    )
+    .expect("write nested guidance");
+    fs::write(
+        workspace.path().join("tests/AGENTS.md"),
+        "reflective sibling sentinel",
+    )
+    .expect("write sibling guidance");
     let (mut session, task_id, prior_turn_id) =
         running_turn_in_workspace(workspace.path(), "record an observed file creation");
     let mut prior_decisions =
@@ -915,7 +1244,11 @@ fn opt_in_reflection_uses_a_verified_success_and_only_proposes_a_bounded_plan() 
         )),
         ok(tool_response(
             "create_file",
-            json!({"path":"follow-up.txt","contents":"proposed by Brain"}),
+            json!({"path":"src/follow-up.txt","contents":"proposed by Brain"}),
+        )),
+        ok(tool_response(
+            "create_file",
+            json!({"path":"src/follow-up.txt","contents":"proposed by Brain"}),
         )),
     ]);
     let mut brain = OllamaDecisionSource::with_endpoint("fixture-model", 3, address);
@@ -936,10 +1269,10 @@ fn opt_in_reflection_uses_a_verified_success_and_only_proposes_a_bounded_plan() 
             .state(),
         prior_turn_state
     );
-    assert!(!workspace.path().join("follow-up.txt").exists());
+    assert!(!workspace.path().join("src/follow-up.txt").exists());
 
     let requests = server.join().expect("join local reflection fixture");
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 3);
     let reflection_request = request_json(&requests[0]);
     let reflection_prompt = reflection_request["messages"][1]["content"]
         .as_str()
@@ -957,6 +1290,18 @@ fn opt_in_reflection_uses_a_verified_success_and_only_proposes_a_bounded_plan() 
     assert!(proposal_prompt.contains("The recorded file creation can guide a follow-up."));
     assert!(proposal_prompt.contains("outcome: success"));
     assert!(proposal_prompt.contains("untrusted advisory"));
+    assert!(!proposal_prompt.contains("reflective src guidance"));
+
+    let final_request = request_json(&requests[2]);
+    let final_prompt = final_request["messages"][1]["content"]
+        .as_str()
+        .expect("guidance-aware reflective plan prompt");
+    assert!(final_prompt.contains("reflective src guidance"));
+    assert!(!final_prompt.contains("reflective sibling sentinel"));
+    assert!(final_request["messages"][0]["content"]
+        .as_str()
+        .expect("reflective plan system instructions")
+        .contains("including nested files"));
 
     let next_turn_id = {
         let task = session.get_task_mut(task_id).expect("task exists");
@@ -982,7 +1327,7 @@ fn opt_in_reflection_uses_a_verified_success_and_only_proposes_a_bounded_plan() 
     assert_eq!(next_result.actions_taken(), 2);
     assert!(next_result.actions_taken() <= 3);
     assert_eq!(
-        fs::read_to_string(workspace.path().join("follow-up.txt"))
+        fs::read_to_string(workspace.path().join("src/follow-up.txt"))
             .expect("read Harness-created follow-up"),
         "proposed by Brain"
     );

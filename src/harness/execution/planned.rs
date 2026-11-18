@@ -1,6 +1,7 @@
 use super::{
-    run_goal_turn_with_budget, workspace_action_name, BoundedDecisionSource, GoalTurnError,
-    GoalTurnResult, GoalTurnStopReason, WorkspaceAction, WorkspaceObservation,
+    run_goal_turn_with_budget, workspace_action_name, workspace_mutation_target,
+    BoundedDecisionSource, GoalTurnError, GoalTurnResult, GoalTurnStopReason, WorkspaceAction,
+    WorkspaceObservation,
 };
 use crate::brain::{OllamaDecisionSource, WorkspacePlan, WorkspacePlanError};
 use crate::harness::verification::{
@@ -10,16 +11,19 @@ use crate::harness::verification::{
 use crate::task_lifecycle::{TaskSession, TurnState};
 use crate::tools::registry::workspace_operations;
 use crate::{ProcessOutcome, ProcessResult};
+use std::collections::BTreeSet;
 use std::fmt;
 use std::io;
 use uuid::Uuid;
 
-/// Reads the task workspace's optional root guidance before requesting a bounded Brain plan.
+/// Reads root guidance before proposing targets, then supplies applicable nested guidance before
+/// requesting the plan that Harness may execute.
 ///
-/// The read uses the task's captured workspace root and existing no-follow, 16 KiB UTF-8
-/// boundary. Missing guidance leaves the planner prompt unchanged. A failed or unsafe read is
-/// returned before any planner model request. Guidance remains untrusted prompt context; the
-/// resulting plan is validated and executed through the existing Harness path.
+/// Every guidance read uses the captured workspace root, no-follow descriptor checks, and the
+/// existing 16 KiB UTF-8/context boundary. Missing guidance leaves the planner prompt unchanged.
+/// Unsafe guidance and target paths fail before a plan can reach the executor. Guidance remains
+/// untrusted prompt context; the resulting plan is validated and executed through the existing
+/// Harness path.
 pub fn create_plan_with_workspace_context(
     session: &TaskSession,
     task_id: Uuid,
@@ -28,15 +32,62 @@ pub fn create_plan_with_workspace_context(
     observations: &[WorkspaceObservation],
     action_budget: usize,
 ) -> Result<WorkspacePlan, WorkspacePlanError> {
-    let project_guidance = session
+    let root_guidance = session
         .read_root_project_guidance(task_id)
         .map_err(WorkspacePlanError::RootGuidanceRead)?;
-    decision_source.create_plan_with_project_guidance(
+    let proposal = decision_source.propose_plan_with_project_guidance(
         goal,
         observations,
         action_budget,
-        project_guidance.as_deref(),
-    )
+        root_guidance.as_deref(),
+        None,
+    )?;
+    let proposal_targets = plan_mutation_targets(&proposal);
+    if proposal_targets.is_empty() {
+        return decision_source.accept_plan_with_project_guidance(
+            proposal,
+            action_budget,
+            root_guidance,
+        );
+    }
+
+    let proposed_guidance = session
+        .read_project_guidance_for_targets(task_id, &proposal_targets)
+        .map_err(WorkspacePlanError::RootGuidanceRead)?;
+    if proposed_guidance == root_guidance {
+        return decision_source.accept_plan_with_project_guidance(
+            proposal,
+            action_budget,
+            proposed_guidance,
+        );
+    }
+
+    let final_plan = decision_source.propose_plan_with_project_guidance(
+        goal,
+        observations,
+        action_budget,
+        proposed_guidance.as_deref(),
+        Some(&proposal_targets),
+    )?;
+    let final_targets = plan_mutation_targets(&final_plan);
+    let final_guidance = session
+        .read_project_guidance_for_targets(task_id, &final_targets)
+        .map_err(WorkspacePlanError::RootGuidanceRead)?;
+    if final_guidance != proposed_guidance {
+        return Err(WorkspacePlanError::GuidanceTargetsChanged);
+    }
+
+    decision_source.accept_plan_with_project_guidance(final_plan, action_budget, final_guidance)
+}
+
+fn plan_mutation_targets(plan: &WorkspacePlan) -> Vec<std::path::PathBuf> {
+    plan.operations()
+        .iter()
+        .filter_map(workspace_mutation_target)
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 /// Feeds plan operations through the existing bounded turn executor.
@@ -74,7 +125,21 @@ where
     E: fmt::Display,
 {
     let operations = match plan {
-        Ok(plan) => plan.into_actions(),
+        Ok(plan) => {
+            let targets = plan_mutation_targets(&plan);
+            if !targets.is_empty() {
+                let current_guidance = session
+                    .read_project_guidance_for_targets(task_id, &targets)
+                    .map_err(GoalTurnError::RootProjectGuidance)?;
+                let expected_guidance = plan.project_guidance_context();
+                if current_guidance.as_deref() != expected_guidance {
+                    return Err(GoalTurnError::RootProjectGuidance(
+                        crate::task_lifecycle::WorkspaceGuidanceReadError::GuidanceChanged,
+                    ));
+                }
+            }
+            plan.into_actions()
+        }
         Err(error) => vec![WorkspaceAction::Unsupported {
             action: error.to_string(),
         }],

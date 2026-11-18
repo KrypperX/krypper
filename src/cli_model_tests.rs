@@ -502,6 +502,89 @@ fn model_cli_forwards_captured_root_guidance_to_each_provider_request() {
 }
 
 #[test]
+fn model_cli_reconsiders_nested_edits_with_only_applicable_guidance() {
+    let workspace = TempDir::new();
+    fs::create_dir_all(workspace.path().join("src/deep")).expect("create nested workspace");
+    fs::create_dir_all(workspace.path().join("tests")).expect("create sibling workspace");
+    fs::write(workspace.path().join("AGENTS.md"), "root CLI guidance")
+        .expect("write root guidance");
+    fs::write(workspace.path().join("src/AGENTS.md"), "src CLI guidance")
+        .expect("write src guidance");
+    fs::write(
+        workspace.path().join("src/deep/AGENTS.md"),
+        "deep CLI guidance",
+    )
+    .expect("write deep guidance");
+    fs::write(
+        workspace.path().join("tests/AGENTS.md"),
+        "CLI sibling sentinel",
+    )
+    .expect("write sibling guidance");
+    let (endpoint, server) = mock_server(vec![
+        MockResponse {
+            status: 200,
+            body: tool_response(
+                "create_file",
+                json!({"path":"src/deep/generated.rs","contents":"done"}),
+            ),
+        },
+        MockResponse {
+            status: 200,
+            body: tool_response(
+                "create_file",
+                json!({"path":"src/deep/generated.rs","contents":"done"}),
+            ),
+        },
+        MockResponse {
+            status: 200,
+            body: tool_response("complete_task", json!({"result":"Created generated.rs."})),
+        },
+    ]);
+    let mut args = task_args("3");
+    args.push(OsString::from("--workspace"));
+    args.push(workspace.path().as_os_str().to_owned());
+    let mut input = Cursor::new(Vec::<u8>::new());
+    let mut output = Vec::new();
+    let mut error = Vec::new();
+
+    let code = run_task_with_endpoint(&args, &mut input, &mut output, &mut error, endpoint)
+        .expect("run the guidance-aware model task");
+
+    assert_eq!(code, 0);
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("src/deep/generated.rs"))
+            .expect("read generated file"),
+        "done"
+    );
+    let requests = server.join().expect("join mock model server");
+    assert_eq!(requests.len(), 3);
+    let first_request = request_json(&requests[0]);
+    let first_prompt = first_request["messages"][1]["content"]
+        .as_str()
+        .expect("initial edit proposal");
+    assert!(first_prompt.contains("root CLI guidance"));
+    assert!(!first_prompt.contains("src CLI guidance"));
+    let second_request = request_json(&requests[1]);
+    let second_prompt = second_request["messages"][1]["content"]
+        .as_str()
+        .expect("guidance-aware edit decision");
+    let root_at = second_prompt
+        .find("root CLI guidance")
+        .expect("root guidance is included");
+    let src_at = second_prompt
+        .find("src CLI guidance")
+        .expect("src guidance is included");
+    let deep_at = second_prompt
+        .find("deep CLI guidance")
+        .expect("deep guidance is included");
+    assert!(root_at < src_at && src_at < deep_at);
+    assert!(!second_prompt.contains("CLI sibling sentinel"));
+    assert!(String::from_utf8(error)
+        .expect("UTF-8 progress output")
+        .contains("model decision 3/3"));
+}
+
+#[test]
 fn model_cli_stops_with_a_typed_guidance_error_before_dispatch() {
     use std::os::unix::fs::symlink;
 

@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fmt;
 use std::fs::{self, File};
@@ -17,6 +17,7 @@ const MAX_FILE_SIZE: usize = 1024 * 1024;
 const MAX_ROOT_AGENTS_BYTES: usize = 16 * 1024;
 const MAX_SYMLINKS: usize = 40;
 const MAX_TASK_DIRECTORY_ENTRIES: usize = 1024;
+const NESTED_GUIDANCE_MARKER: &str = "\n\n--- AGENTS.md: ";
 
 #[derive(Debug)]
 pub(crate) struct CliError(String);
@@ -39,6 +40,7 @@ pub(crate) struct WorkspaceRoot {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RootGuidanceReadError {
+    InvalidTargetPath,
     Symlink,
     NotRegularFile,
     TooLarge,
@@ -50,14 +52,17 @@ pub(crate) enum RootGuidanceReadError {
 impl fmt::Display for RootGuidanceReadError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Symlink => formatter.write_str("root AGENTS.md is a symlink"),
-            Self::NotRegularFile => formatter.write_str("root AGENTS.md is not a regular file"),
-            Self::TooLarge => formatter.write_str("root AGENTS.md exceeds 16 KiB"),
-            Self::InvalidUtf8 => formatter.write_str("root AGENTS.md is not valid UTF-8"),
-            Self::ChangedDuringRead => {
-                formatter.write_str("root AGENTS.md changed during the safe read")
+            Self::InvalidTargetPath => {
+                formatter.write_str("edit target path is invalid or outside the task workspace")
             }
-            Self::ReadFailed => formatter.write_str("root AGENTS.md could not be read"),
+            Self::Symlink => formatter.write_str("AGENTS.md guidance or edit target is a symlink"),
+            Self::NotRegularFile => formatter.write_str("AGENTS.md guidance is not a regular file"),
+            Self::TooLarge => formatter.write_str("AGENTS.md guidance exceeds 16 KiB"),
+            Self::InvalidUtf8 => formatter.write_str("AGENTS.md guidance is not valid UTF-8"),
+            Self::ChangedDuringRead => {
+                formatter.write_str("AGENTS.md guidance changed during the safe read")
+            }
+            Self::ReadFailed => formatter.write_str("AGENTS.md guidance could not be read"),
         }
     }
 }
@@ -129,7 +134,7 @@ pub(crate) fn read_text_file_at(root: &WorkspaceRoot, path: &OsStr) -> Result<St
 pub(crate) fn read_root_agents_md_at(
     root: &WorkspaceRoot,
 ) -> Result<Option<String>, RootGuidanceReadError> {
-    read_root_agents_md_at_with_reader(root, |file| {
+    read_agents_md_at(root.descriptor.as_raw_fd(), |file| {
         let mut contents = Vec::with_capacity(MAX_ROOT_AGENTS_BYTES + 1);
         file.take((MAX_ROOT_AGENTS_BYTES + 1) as u64)
             .read_to_end(&mut contents)?;
@@ -137,15 +142,203 @@ pub(crate) fn read_root_agents_md_at(
     })
 }
 
+#[cfg(test)]
 fn read_root_agents_md_at_with_reader(
     root: &WorkspaceRoot,
-    read: impl FnOnce(&mut File) -> io::Result<Vec<u8>>,
+    read: impl FnMut(&mut File) -> io::Result<Vec<u8>>,
 ) -> Result<Option<String>, RootGuidanceReadError> {
-    let parent_fd = root.descriptor.as_raw_fd();
+    read_agents_md_at(root.descriptor.as_raw_fd(), read)
+}
+
+pub(crate) fn read_project_guidance_at(
+    root: &WorkspaceRoot,
+    targets: &[PathBuf],
+) -> Result<Option<String>, RootGuidanceReadError> {
+    read_project_guidance_at_with_reader(root, targets, |file| {
+        let mut contents = Vec::with_capacity(MAX_ROOT_AGENTS_BYTES + 1);
+        file.take((MAX_ROOT_AGENTS_BYTES + 1) as u64)
+            .read_to_end(&mut contents)?;
+        Ok(contents)
+    })
+}
+
+fn read_project_guidance_at_with_reader(
+    root: &WorkspaceRoot,
+    targets: &[PathBuf],
+    mut read: impl FnMut(&mut File) -> io::Result<Vec<u8>>,
+) -> Result<Option<String>, RootGuidanceReadError> {
+    // Invalid edit targets cannot be read for guidance; the registered writer still rejects
+    // them before mutation, while valid targets in the same plan are checked.
+    let mut normalized_targets = Vec::new();
+    for target in targets {
+        match normalize_guidance_target(target) {
+            Ok(target) => normalized_targets.push(target),
+            Err(RootGuidanceReadError::InvalidTargetPath) => {}
+            Err(error) => return Err(error),
+        }
+    }
+
+    let mut safe_targets = Vec::new();
+    for (parent, name) in normalized_targets {
+        let parent_fd = match open_guidance_directory(root, &parent) {
+            Ok(Some(parent_fd)) => parent_fd,
+            Ok(None) => {
+                safe_targets.push((parent, name));
+                continue;
+            }
+            Err(RootGuidanceReadError::Symlink | RootGuidanceReadError::InvalidTargetPath) => {
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        match stat_at(parent_fd.as_raw_fd(), &name) {
+            Ok(status) if is_symlink(&status) => {}
+            Ok(status) if is_regular_file(&status) || is_directory(&status) => {
+                safe_targets.push((parent, name));
+            }
+            Ok(_) => {}
+            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {
+                safe_targets.push((parent, name));
+            }
+            Err(_) => return Err(RootGuidanceReadError::ReadFailed),
+        }
+    }
+
+    let mut directories = BTreeSet::from([Vec::<OsString>::new()]);
+    for (parent, _) in &safe_targets {
+        for depth in 1..=parent.len() {
+            directories.insert(parent[..depth].to_vec());
+        }
+    }
+
+    let mut guidance = String::new();
+    let mut found_guidance = false;
+    for path in directories {
+        let Some(directory) = open_guidance_directory(root, &path)? else {
+            continue;
+        };
+        if let Some(contents) = read_agents_md_at(directory.as_raw_fd(), &mut read)? {
+            found_guidance = true;
+            if !path.is_empty() {
+                let directory_path = path.iter().fold(PathBuf::new(), |mut path, component| {
+                    path.push(component);
+                    path
+                });
+                guidance.push_str(NESTED_GUIDANCE_MARKER);
+                guidance.push_str(&directory_path.join("AGENTS.md").display().to_string());
+                guidance.push_str(" ---\n");
+            }
+            guidance.push_str(&contents);
+            if guidance.len() > MAX_ROOT_AGENTS_BYTES {
+                return Err(RootGuidanceReadError::TooLarge);
+            }
+        }
+        verify_guidance_directory(root, &path, directory.as_raw_fd())?;
+    }
+
+    if found_guidance {
+        Ok(Some(guidance))
+    } else {
+        Ok(None)
+    }
+}
+
+fn normalize_guidance_target(
+    target: &Path,
+) -> Result<(Vec<OsString>, OsString), RootGuidanceReadError> {
+    if target.is_absolute() {
+        return Err(RootGuidanceReadError::InvalidTargetPath);
+    }
+    let mut components = Vec::new();
+    for component in target.components() {
+        match component {
+            Component::Normal(name) if name.to_str().is_some() => {
+                components.push(name.to_os_string());
+            }
+            Component::CurDir => {}
+            _ => return Err(RootGuidanceReadError::InvalidTargetPath),
+        }
+    }
+    let name = components
+        .pop()
+        .ok_or(RootGuidanceReadError::InvalidTargetPath)?;
+    Ok((components, name))
+}
+
+fn open_guidance_directory(
+    root: &WorkspaceRoot,
+    components: &[OsString],
+) -> Result<Option<OwnedFd>, RootGuidanceReadError> {
+    let mut directory = root
+        .descriptor
+        .try_clone()
+        .map_err(|_| RootGuidanceReadError::ReadFailed)?;
+    for component in components {
+        let status = match stat_at(directory.as_raw_fd(), component) {
+            Ok(status) => status,
+            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => return Ok(None),
+            Err(_) => return Err(RootGuidanceReadError::ReadFailed),
+        };
+        if is_symlink(&status) {
+            return Err(RootGuidanceReadError::Symlink);
+        }
+        if !is_directory(&status) {
+            return Err(RootGuidanceReadError::InvalidTargetPath);
+        }
+        let opened = open_at(
+            directory.as_raw_fd(),
+            component,
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0,
+        )
+        .map_err(|error| {
+            if error.raw_os_error() == Some(libc::ELOOP) {
+                RootGuidanceReadError::ChangedDuringRead
+            } else {
+                RootGuidanceReadError::ReadFailed
+            }
+        })?;
+        let opened_status =
+            fstat(opened.as_raw_fd()).map_err(|_| RootGuidanceReadError::ReadFailed)?;
+        if !same_file_snapshot(&status, &opened_status) {
+            return Err(RootGuidanceReadError::ChangedDuringRead);
+        }
+        directory = opened;
+    }
+    Ok(Some(directory))
+}
+
+fn verify_guidance_directory(
+    root: &WorkspaceRoot,
+    components: &[OsString],
+    original_fd: RawFd,
+) -> Result<(), RootGuidanceReadError> {
+    let original_status = fstat(original_fd).map_err(|_| RootGuidanceReadError::ReadFailed)?;
+    let Some(current) = open_guidance_directory(root, components)? else {
+        return Err(RootGuidanceReadError::ChangedDuringRead);
+    };
+    let current_status =
+        fstat(current.as_raw_fd()).map_err(|_| RootGuidanceReadError::ReadFailed)?;
+    if !same_inode(&original_status, &current_status) {
+        return Err(RootGuidanceReadError::ChangedDuringRead);
+    }
+    Ok(())
+}
+
+fn read_agents_md_at(
+    parent_fd: RawFd,
+    mut read: impl FnMut(&mut File) -> io::Result<Vec<u8>>,
+) -> Result<Option<String>, RootGuidanceReadError> {
     let name = OsStr::new("AGENTS.md");
     let original_status = match stat_at(parent_fd, name) {
         Ok(status) => status,
-        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => return Ok(None),
+        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {
+            return match stat_at(parent_fd, name) {
+                Err(error) if error.raw_os_error() == Some(libc::ENOENT) => Ok(None),
+                Ok(_) => Err(RootGuidanceReadError::ChangedDuringRead),
+                Err(_) => Err(RootGuidanceReadError::ReadFailed),
+            }
+        }
         Err(_) => return Err(RootGuidanceReadError::ReadFailed),
     };
     if is_symlink(&original_status) {
@@ -1743,6 +1936,66 @@ mod tests {
         );
         fs::remove_file(workspace.join("AGENTS.md")).unwrap();
         assert_eq!(super::read_root_agents_md_at(&root).unwrap(), None);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn project_guidance_is_root_to_target_ordered_and_excludes_siblings() {
+        let (base, workspace) = guidance_workspace();
+        fs::create_dir_all(workspace.join("src/deep")).unwrap();
+        fs::create_dir_all(workspace.join("tests")).unwrap();
+        fs::write(workspace.join("AGENTS.md"), "root guidance").unwrap();
+        fs::write(workspace.join("src/AGENTS.md"), "src guidance").unwrap();
+        fs::write(workspace.join("src/deep/AGENTS.md"), "deep guidance").unwrap();
+        fs::write(workspace.join("tests/AGENTS.md"), "sibling guidance").unwrap();
+        let root = capture_workspace_root_at(&workspace).unwrap();
+
+        let nested =
+            super::read_project_guidance_at(&root, &[PathBuf::from("src/deep/generated.rs")])
+                .unwrap();
+        assert_eq!(
+            nested.as_deref(),
+            Some(
+                "root guidance\n\n--- AGENTS.md: src/AGENTS.md ---\nsrc guidance\n\n--- AGENTS.md: src/deep/AGENTS.md ---\ndeep guidance"
+            )
+        );
+        assert_eq!(
+            super::read_project_guidance_at(&root, &[PathBuf::from("note.txt")]).unwrap(),
+            Some("root guidance".to_owned())
+        );
+        fs::remove_file(workspace.join("AGENTS.md")).unwrap();
+        assert_eq!(
+            super::read_project_guidance_at(&root, &[PathBuf::from("note.txt")]).unwrap(),
+            None
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn nested_guidance_changed_during_a_safe_read_is_rejected() {
+        use std::io::Read;
+
+        let (base, workspace) = guidance_workspace();
+        fs::create_dir_all(workspace.join("src")).unwrap();
+        let agents = workspace.join("src/AGENTS.md");
+        fs::write(&agents, "stable guidance").unwrap();
+        let outside = base.join("outside.txt");
+        fs::write(&outside, "outside canary").unwrap();
+        let root = capture_workspace_root_at(&workspace).unwrap();
+
+        let result = super::read_project_guidance_at_with_reader(
+            &root,
+            &[PathBuf::from("src/generated.rs")],
+            |file| {
+                fs::write(&agents, "changed guidance")?;
+                let mut bytes = Vec::new();
+                file.read_to_end(&mut bytes)?;
+                Ok(bytes)
+            },
+        );
+
+        assert_eq!(result, Err(super::RootGuidanceReadError::ChangedDuringRead));
+        assert_eq!(fs::read_to_string(outside).unwrap(), "outside canary");
         fs::remove_dir_all(base).unwrap();
     }
 
