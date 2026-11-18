@@ -324,6 +324,7 @@ pub struct ResponsesCallBatch {
     max_calls: usize,
     max_bytes_per_call: usize,
     completed: std::collections::BTreeSet<u64>,
+    call_ids: std::collections::BTreeMap<u64, String>,
 }
 
 impl ResponsesCallBatch {
@@ -333,6 +334,7 @@ impl ResponsesCallBatch {
             max_calls,
             max_bytes_per_call,
             completed: std::collections::BTreeSet::new(),
+            call_ids: std::collections::BTreeMap::new(),
         }
     }
 
@@ -356,6 +358,40 @@ impl ResponsesCallBatch {
             .entry(index)
             .or_insert_with(|| ResponsesArguments::new(self.max_bytes_per_call))
             .push(frame)
+    }
+
+    /// Correlate a provider function-call output item with its stable call ID.
+    /// Reject mismatched IDs and unknown output indexes.
+    pub fn register_call(&mut self, frame: &SseFrame) -> Result<bool, ArgumentsError> {
+        if frame.event.as_deref() != Some("response.output_item.added") {
+            return Ok(false);
+        }
+        let value: serde_json::Value =
+            serde_json::from_str(&frame.data).map_err(|_| ArgumentsError::InvalidEvent)?;
+        let item = value.get("item").ok_or(ArgumentsError::InvalidEvent)?;
+        if item.get("type").and_then(serde_json::Value::as_str) != Some("function_call") {
+            return Ok(false);
+        }
+        let index = value
+            .get("output_index")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or(ArgumentsError::InvalidEvent)?;
+        let call_id = item
+            .get("call_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or(ArgumentsError::InvalidEvent)?;
+        if self.call_ids.values().any(|existing| existing == call_id) {
+            return Err(ArgumentsError::InvalidEvent);
+        }
+        if self.call_ids.contains_key(&index) {
+            return Err(ArgumentsError::UnexpectedIndex);
+        }
+        if self.call_ids.len() >= self.max_calls {
+            return Err(ArgumentsError::TooLarge);
+        }
+        self.call_ids.insert(index, call_id.to_owned());
+        Ok(true)
     }
 
     /// Mark a known output item complete only when the provider sends its
