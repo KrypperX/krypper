@@ -996,15 +996,24 @@ mod tests {
     #[test]
     fn sse_decoder_rejects_partial_event_at_eof() {
         let mut decoder = SseDecoder::new(1024);
-        assert!(decoder.push(b"event: response.output_text.delta\ndata: {\"delta\":\"partial\"}").unwrap().is_empty());
+        assert!(decoder
+            .push(b"event: response.output_text.delta\ndata: {\"delta\":\"partial\"}")
+            .unwrap()
+            .is_empty());
         assert_eq!(decoder.finish(), Err(SseDecodeError::TruncatedFrame));
     }
 
     #[test]
     fn sse_decoder_recovers_cleanly_after_invalid_utf8() {
         let mut decoder = SseDecoder::new(1024);
-        assert!(decoder.push(b"event: response.output_text.delta\n").unwrap().is_empty());
-        assert_eq!(decoder.push(b"data: \xff\n"), Err(SseDecodeError::InvalidUtf8));
+        assert!(decoder
+            .push(b"event: response.output_text.delta\n")
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            decoder.push(b"data: \xff\n"),
+            Err(SseDecodeError::InvalidUtf8)
+        );
         assert_eq!(decoder.finish(), Ok(()));
         let frames = decoder.push(b"data: recovered\n\n").unwrap();
         assert_eq!(frames.len(), 1);
