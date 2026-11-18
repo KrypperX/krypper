@@ -106,6 +106,76 @@ impl<S: EventSink> StreamEmitter<S> {
     }
 }
 
+/// A complete server-sent event frame, without provider-specific interpretation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SseFrame {
+    pub event: Option<String>,
+    pub data: String,
+}
+
+/// Incremental, bounded SSE framing. Does not execute or authorize model actions.
+pub struct SseDecoder {
+    pending: Vec<u8>,
+    event: Option<String>,
+    data: Vec<String>,
+    limit: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SseDecodeError {
+    FrameTooLarge,
+    InvalidUtf8,
+}
+
+impl SseDecoder {
+    pub fn new(limit: usize) -> Self {
+        Self {
+            pending: Vec::new(),
+            event: None,
+            data: Vec::new(),
+            limit,
+        }
+    }
+
+    pub fn push(&mut self, chunk: &[u8]) -> Result<Vec<SseFrame>, SseDecodeError> {
+        if self.pending.len().saturating_add(chunk.len()) > self.limit {
+            return Err(SseDecodeError::FrameTooLarge);
+        }
+        self.pending.extend_from_slice(chunk);
+        let mut frames = Vec::new();
+        while let Some(end) = self.pending.iter().position(|byte| *byte == b'\n') {
+            let mut line = self.pending.drain(..=end).collect::<Vec<_>>();
+            line.pop();
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            if line.is_empty() {
+                if !self.data.is_empty() {
+                    frames.push(SseFrame {
+                        event: self.event.take(),
+                        data: std::mem::take(&mut self.data).join("\n"),
+                    });
+                } else {
+                    self.event = None;
+                }
+                continue;
+            }
+            if line.first() == Some(&b':') {
+                continue;
+            }
+            let line = std::str::from_utf8(&line).map_err(|_| SseDecodeError::InvalidUtf8)?;
+            let (field, value) = line.split_once(':').unwrap_or((line, ""));
+            let value = value.strip_prefix(' ').unwrap_or(value);
+            match field {
+                "event" => self.event = Some(value.to_owned()),
+                "data" => self.data.push(value.to_owned()),
+                _ => {}
+            }
+        }
+        Ok(frames)
+    }
+}
+
 /// Read-only projection of the authoritative TaskSession snapshot.
 ///
 /// Lifecycle and activity positions are independent. This function does not
