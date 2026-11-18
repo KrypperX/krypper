@@ -462,7 +462,10 @@ mod tests {
     #[test]
     fn sse_decoder_resets_after_invalid_utf8() {
         let mut decoder = SseDecoder::new(32);
-        assert_eq!(decoder.push(b"data: \xff\n"), Err(SseDecodeError::InvalidUtf8));
+        assert_eq!(
+            decoder.push(b"data: \xff\n"),
+            Err(SseDecodeError::InvalidUtf8)
+        );
         let frames = decoder.push(b"data: ok\n\n").unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, "ok");
