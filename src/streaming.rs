@@ -180,6 +180,44 @@ impl SseDecoder {
     }
 }
 
+/// Read SSE frames directly from a streaming HTTP response body or any reader.
+///
+/// Frames are delivered immediately as they arrive; the entire response is
+/// never buffered. The callback's error stops consumption (for cancellation,
+/// sink backpressure, or a disconnected consumer). Callers must validate
+/// provider-specific event payloads before using them for model decisions.
+pub fn consume_sse<R, F, E>(
+    reader: &mut R,
+    max_frame_bytes: usize,
+    mut on_frame: F,
+) -> Result<(), SseReadError<E>>
+where
+    R: std::io::Read + ?Sized,
+    F: FnMut(SseFrame) -> Result<(), E>,
+{
+    let mut decoder = SseDecoder::new(max_frame_bytes);
+    let mut buffer = [0u8; 4096];
+    loop {
+        let count = reader.read(&mut buffer).map_err(SseReadError::Io)?;
+        if count == 0 {
+            return Ok(());
+        }
+        for frame in decoder
+            .push(&buffer[..count])
+            .map_err(SseReadError::Decode)?
+        {
+            on_frame(frame).map_err(SseReadError::Consumer)?;
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum SseReadError<E> {
+    Io(std::io::Error),
+    Decode(SseDecodeError),
+    Consumer(E),
+}
+
 /// Read-only projection of the authoritative TaskSession snapshot.
 ///
 /// Lifecycle and activity positions are independent. This function does not
@@ -333,6 +371,25 @@ mod tests {
     fn sse_decoder_rejects_oversized_incomplete_frame() {
         let mut decoder = SseDecoder::new(4);
         assert_eq!(decoder.push(b"12345"), Err(SseDecodeError::FrameTooLarge));
+    }
+
+    #[test]
+    fn sse_reader_delivers_frames_without_waiting_for_eof() {
+        let mut reader = std::io::Cursor::new(b"data: first\n\ndata: second\n\n".to_vec());
+        let mut seen = Vec::new();
+        let result = consume_sse(&mut reader, 1024, |frame| {
+            seen.push(frame.data);
+            Ok::<(), ()>(())
+        });
+        assert!(result.is_ok());
+        assert_eq!(seen, vec!["first", "second"]);
+    }
+
+    #[test]
+    fn sse_reader_propagates_consumer_cancellation() {
+        let mut reader = std::io::Cursor::new(b"data: first\n\ndata: second\n\n".to_vec());
+        let result = consume_sse(&mut reader, 1024, |_| Err("cancelled"));
+        assert!(matches!(result, Err(SseReadError::Consumer("cancelled"))));
     }
 
     struct FailingSink;
