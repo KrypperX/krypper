@@ -859,6 +859,23 @@ mod tests {
     }
 
     #[test]
+    fn output_item_completion_rejects_unregistered_identity() {
+        let batch = ResponsesCallBatch::new(1, 64);
+        let done = SseFrame {
+            event: Some("response.output_item.done".into()),
+            data: serde_json::json!({
+                "output_index": 0,
+                "item": {"type": "function_call", "call_id": "call_a", "name": "run"}
+            })
+            .to_string(),
+        };
+        assert_eq!(
+            batch.complete_output_item(&done),
+            Err(ArgumentsError::InvalidEvent)
+        );
+    }
+
+    #[test]
     fn finalization_requires_successful_response_completion() {
         let batch = ResponsesCallBatch::new(1, 64);
         let incomplete = SseFrame {
