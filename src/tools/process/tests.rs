@@ -362,12 +362,7 @@ fn cargo_build_script_warning_cannot_fake_a_filtered_test_result() {
     .unwrap();
     let run_filter = |filter: &str, target: &str| {
         std::process::Command::new("cargo")
-            .args([
-                "test",
-                "--offline",
-                "--all-targets",
-                "--manifest-path",
-            ])
+            .args(["test", "--offline", "--all-targets", "--manifest-path"])
             .arg(path.join("Cargo.toml"))
             .arg("--")
             .arg(filter)
