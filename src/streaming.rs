@@ -549,7 +549,7 @@ impl ResponsesCallBatch {
         if response.get("status").and_then(serde_json::Value::as_str) != Some("completed") {
             return Err(ArgumentsError::InvalidEvent);
         }
-        if self.calls.len() != self.output_items_done.len() {
+        if self.calls.is_empty() || self.calls.len() != self.output_items_done.len() {
             return Err(ArgumentsError::InvalidEvent);
         }
         self.correlated_named_calls()
@@ -638,6 +638,19 @@ impl ResponsesFinalActions {
         ) {
             self.failed = true;
             return Err(ArgumentsError::InvalidEvent);
+        }
+        // Never accept argument fragments before their registered output item.
+        if event == Some("response.function_call_arguments.delta") {
+            let value: serde_json::Value = serde_json::from_str(&frame.data)
+                .map_err(|_| ArgumentsError::InvalidEvent)?;
+            let index = value
+                .get("output_index")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or(ArgumentsError::InvalidEvent)?;
+            if !self.batch.call_ids.contains_key(&index) {
+                self.failed = true;
+                return Err(ArgumentsError::UnexpectedIndex);
+            }
         }
         let result = match event {
             Some("response.output_item.added") => self.batch.register_call(frame).map(|_| None),
@@ -1067,6 +1080,27 @@ mod tests {
                 assert_eq!(result, None);
             }
         }
+    }
+
+    #[test]
+    fn final_actions_reject_unregistered_argument_fragments() {
+        let mut actions = ResponsesFinalActions::new(1, 128);
+        let delta = SseFrame {
+            event: Some("response.function_call_arguments.delta".into()),
+            data: serde_json::json!({"output_index": 0, "delta": "{}"}).to_string(),
+        };
+        assert_eq!(actions.consume(&delta), Err(ArgumentsError::UnexpectedIndex));
+        assert_eq!(actions.consume(&delta), Err(ArgumentsError::InvalidEvent));
+    }
+
+    #[test]
+    fn final_actions_reject_completed_response_without_tool_call() {
+        let mut actions = ResponsesFinalActions::new(1, 128);
+        let completed = SseFrame {
+            event: Some("response.completed".into()),
+            data: serde_json::json!({"response": {"status": "completed"}}).to_string(),
+        };
+        assert_eq!(actions.consume(&completed), Err(ArgumentsError::InvalidEvent));
     }
 
     #[test]
