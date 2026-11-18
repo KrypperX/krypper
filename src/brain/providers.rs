@@ -1075,14 +1075,14 @@ mod tests {
             let mut request = [0_u8; 16384];
             socket.read(&mut request).expect("read request");
             let body = format!(
-                "event: response.output_item.added\\ndata: {}\\n\\n",
+                "event: response.output_item.added\ndata: {}\n\n",
                 serde_json::json!({
                     "output_index": 0,
                     "item": {"type": "function_call", "call_id": "call_a", "name": "read_file"}
                 })
             );
             let response = format!(
-                "HTTP/1.1 200 OK\\r\\nContent-Type: text/event-stream\\r\\nContent-Length: {}\\r\\nConnection: close\\r\\n\\r\\n{}",
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(),
                 body
             );
