@@ -592,6 +592,71 @@ impl ResponsesCallBatch {
     }
 }
 
+/// Stateful, fail-closed assembler for one OpenAI Responses function-call stream.
+///
+/// This is a provider-data boundary, not an execution boundary. Callers must
+/// validate each returned action against the normal tool schema and permissions.
+pub struct ResponsesFinalActions {
+    batch: ResponsesCallBatch,
+    finished: bool,
+    failed: bool,
+}
+
+impl ResponsesFinalActions {
+    pub fn new(max_calls: usize, max_bytes_per_call: usize) -> Self {
+        Self {
+            batch: ResponsesCallBatch::new(max_calls, max_bytes_per_call),
+            finished: false,
+            failed: false,
+        }
+    }
+
+    /// Consume one frame in provider order, returning untrusted actions only
+    /// after successful response completion and all per-call done events.
+    pub fn consume(
+        &mut self,
+        frame: &SseFrame,
+    ) -> Result<Option<Vec<(String, String, serde_json::Value)>>, ArgumentsError> {
+        if self.finished || self.failed {
+            return Err(ArgumentsError::InvalidEvent);
+        }
+        let event = frame.event.as_deref();
+        if matches!(
+            event,
+            Some("response.failed" | "response.incomplete" | "error")
+        ) {
+            self.failed = true;
+            return Err(ArgumentsError::InvalidEvent);
+        }
+        let result = match event {
+            Some("response.output_item.added") => self.batch.register_call(frame).map(|_| None),
+            Some("response.function_call_arguments.delta") => {
+                self.batch.push(frame).map(|_| None)
+            }
+            Some("response.function_call_arguments.done") => {
+                self.batch.complete(frame).map(|_| None)
+            }
+            Some("response.output_item.done") => {
+                self.batch.complete_output_item(frame).map(|_| None)
+            }
+            Some("response.completed") => self.batch.finalized_named_calls(frame).map(Some),
+            _ => Ok(None),
+        };
+        match result {
+            Ok(actions) => {
+                if actions.is_some() {
+                    self.finished = true;
+                }
+                Ok(actions)
+            }
+            Err(error) => {
+                self.failed = true;
+                Err(error)
+            }
+        }
+    }
+}
+
 /// Project a recognized provider SSE text delta into the caller's event stream.
 /// Unknown events (including tool argument deltas) are ignored. Sink failures
 /// propagate to the caller so it can stop reading instead of buffering forever.
@@ -863,6 +928,65 @@ mod tests {
                 text: "hello".into()
             }
         );
+    }
+
+    #[test]
+    fn final_actions_require_full_ordered_completion_and_reject_replay() {
+        let mut actions = ResponsesFinalActions::new(2, 128);
+        let frames = [
+            ("response.output_item.added", serde_json::json!({
+                "output_index": 0,
+                "item": {"type": "function_call", "call_id": "call_a", "name": "run"}
+            })),
+            ("response.function_call_arguments.delta", serde_json::json!({
+                "output_index": 0, "delta": "{\\"path\\":\\"src\\"}"
+            })),
+            ("response.function_call_arguments.done", serde_json::json!({
+                "output_index": 0
+            })),
+            ("response.output_item.done", serde_json::json!({
+                "output_index": 0,
+                "item": {"type": "function_call", "call_id": "call_a", "name": "run"}
+            })),
+            ("response.completed", serde_json::json!({
+                "response": {"status": "completed"}
+            })),
+        ];
+        for (index, (event, data)) in frames.iter().enumerate() {
+            let frame = SseFrame {
+                event: Some((*event).into()),
+                data: data.to_string(),
+            };
+            let result = actions.consume(&frame).expect("valid stream event");
+            if index == 4 {
+                assert_eq!(
+                    result,
+                    Some(vec![(
+                        "call_a".to_owned(),
+                        "run".to_owned(),
+                        serde_json::json!({"path": "src"})
+                    )])
+                );
+                assert_eq!(actions.consume(&frame), Err(ArgumentsError::InvalidEvent));
+            } else {
+                assert_eq!(result, None);
+            }
+        }
+    }
+
+    #[test]
+    fn final_actions_fail_closed_after_provider_failure() {
+        let mut actions = ResponsesFinalActions::new(1, 64);
+        let failed = SseFrame {
+            event: Some("response.failed".into()),
+            data: "{}".into(),
+        };
+        assert_eq!(actions.consume(&failed), Err(ArgumentsError::InvalidEvent));
+        let completed = SseFrame {
+            event: Some("response.completed".into()),
+            data: serde_json::json!({"response": {"status": "completed"}}).to_string(),
+        };
+        assert_eq!(actions.consume(&completed), Err(ArgumentsError::InvalidEvent));
     }
 
     #[test]
