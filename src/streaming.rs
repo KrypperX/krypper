@@ -518,6 +518,27 @@ impl ResponsesCallBatch {
             .collect()
     }
 
+    /// Expose named calls only after the provider confirms response completion.
+    ///
+    /// A successful response-level event is distinct from argument-done events.
+    /// Even after both checks, action schemas and tool permissions must be
+    /// validated by the normal decision path before any tool can run.
+    pub fn finalized_named_calls(
+        &self,
+        response_event: &SseFrame,
+    ) -> Result<Vec<(String, String, serde_json::Value)>, ArgumentsError> {
+        if response_event.event.as_deref() != Some("response.completed") {
+            return Err(ArgumentsError::InvalidEvent);
+        }
+        let value: serde_json::Value =
+            serde_json::from_str(&response_event.data).map_err(|_| ArgumentsError::InvalidEvent)?;
+        let response = value.get("response").ok_or(ArgumentsError::InvalidEvent)?;
+        if response.get("status").and_then(serde_json::Value::as_str) != Some("completed") {
+            return Err(ArgumentsError::InvalidEvent);
+        }
+        self.correlated_named_calls()
+    }
+
     /// Parse buffered arguments; a caller must separately verify completion,
     /// correlate call IDs and authorize the resulting action.
     pub fn parsed(&self) -> Result<Vec<(u64, serde_json::Value)>, ArgumentsError> {
