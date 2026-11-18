@@ -699,6 +699,9 @@ impl ResponsesDecisionSource {
         observations: &[WorkspaceObservation],
         project_guidance: Option<&str>,
     ) -> Result<WorkspaceAction, ModelError> {
+        if std::env::var_os("KRYPPER_RESPONSES_STREAM").is_some() {
+            return self.stream_validated_action(goal, observations, project_guidance, |_| Ok(()));
+        }
         let remaining = consume_decision_budget(&mut self.remaining_decisions)?;
         let provider = self.provider.model_provider();
         let request = build_responses_request(
