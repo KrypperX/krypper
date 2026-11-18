@@ -870,11 +870,15 @@ impl AnthropicDecisionSource {
                         "invalid Anthropic streaming tool call",
                     )
                 };
-                if let Some(text) = crate::streaming::provider_text_delta(&frame) {
-                    on_text(text)?;
+                // Never expose text from an invalid or post-completion frame.
+                if completed {
+                    return Err(invalid());
                 }
                 let event: Value = serde_json::from_str(&frame.data)
                     .map_err(|_| ModelError::ProviderInvalidJson(provider))?;
+                if let Some(text) = crate::streaming::provider_text_delta(&frame) {
+                    on_text(text)?;
+                }
                 match frame.event.as_deref() {
                     Some("content_block_start") => {
                         let index = event["index"].as_u64().ok_or_else(invalid)? as usize;
