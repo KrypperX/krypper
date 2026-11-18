@@ -638,7 +638,11 @@ impl ResponsesDecisionSource {
                 let completed_calls = assembly.consume(&frame).map_err(|_| {
                     ModelError::ProviderInvalidToolCall(provider, "invalid streaming tool call")
                 })?;
-                if let Some(text) = crate::streaming::provider_text_delta(&frame) {
+                let text = crate::streaming::provider_text_delta(&frame);
+                if frame.event.as_deref() == Some("response.output_text.delta") && text.is_none() {
+                    return Err(ModelError::ProviderInvalidJson(provider));
+                }
+                if let Some(text) = text {
                     on_text(text)?;
                 }
                 if let Some(calls) = completed_calls {
@@ -968,7 +972,14 @@ impl AnthropicDecisionSource {
                     _ => {}
                 }
                 // Display text is never sourced from tool arguments.
-                if let Some(text) = crate::streaming::provider_text_delta(&frame) {
+                let text = crate::streaming::provider_text_delta(&frame);
+                if frame.event.as_deref() == Some("content_block_delta")
+                    && event["delta"]["type"] == "text_delta"
+                    && text.is_none()
+                {
+                    return Err(ModelError::ProviderInvalidJson(provider));
+                }
+                if let Some(text) = text {
                     on_text(text)?;
                 }
                 Ok(())
