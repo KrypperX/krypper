@@ -757,7 +757,7 @@ impl<W: std::io::Write> EventSink for TextSink<W> {
 
 /// Emit a read-only TaskSession position as a stable, versioned JSONL line.
 /// This deliberately carries no prompts, workspace paths, or tool arguments.
-pub fn write_activity_positions<W: std::io::Write>(
+pub fn write_activity_positions<W: std::io::Write + ?Sized>(
     session: &crate::task_lifecycle::TaskSession,
     writer: &mut W,
 ) -> std::io::Result<()> {
