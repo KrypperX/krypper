@@ -864,7 +864,7 @@ mod tests {
 
     #[test]
     fn output_item_completion_rejects_unregistered_identity() {
-        let batch = ResponsesCallBatch::new(1, 64);
+        let mut batch = ResponsesCallBatch::new(1, 64);
         let done = SseFrame {
             event: Some("response.output_item.done".into()),
             data: serde_json::json!({
