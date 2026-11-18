@@ -257,8 +257,10 @@ pub fn provider_text_delta(frame: &SseFrame) -> Option<String> {
     }
 }
 
-/// Bounded, provider-native argument fragments. This is data only: callers must
-/// validate the completed JSON and authorize any resulting action separately.
+/// Bounded, provider-native argument fragments for one Responses output index.
+///
+/// This collector only buffers and parses JSON; it does not observe provider
+/// completion itself, validate an action schema, or authorize tool execution.
 pub struct ResponsesArguments {
     output_index: Option<u64>,
     bytes: String,
@@ -308,7 +310,10 @@ impl ResponsesArguments {
         Ok(true)
     }
 
-    /// Parse only after a provider completion event; parsing never executes tools.
+    /// Parse buffered JSON without checking provider completion.
+    ///
+    /// Callers must independently verify completion and authorize any action;
+    /// this method is deliberately not an execution boundary.
     pub fn parse_completed(&self) -> Result<serde_json::Value, ArgumentsError> {
         if self.output_index.is_none() {
             return Err(ArgumentsError::InvalidEvent);
@@ -317,8 +322,10 @@ impl ResponsesArguments {
     }
 }
 
-/// Collect interleaved Responses function-call argument fragments by output index.
-/// This is a bounded data buffer, never a tool executor.
+/// Collect interleaved Responses function-call fragments by output index.
+///
+/// Call IDs and completion markers are tracked separately from JSON buffers.
+/// Neither a completed buffer nor a registered call ID authorizes execution.
 pub struct ResponsesCallBatch {
     calls: std::collections::BTreeMap<u64, ResponsesArguments>,
     max_calls: usize,
@@ -338,6 +345,10 @@ impl ResponsesCallBatch {
         }
     }
 
+    /// Buffer an argument delta, rejecting late fragments and excess call buffers.
+    ///
+    /// This does not require prior call-ID registration: provider event ordering
+    /// must be validated separately before a final action can be trusted.
     pub fn push(&mut self, frame: &SseFrame) -> Result<bool, ArgumentsError> {
         if frame.event.as_deref() != Some("response.function_call_arguments.delta") {
             return Ok(false);
@@ -360,8 +371,11 @@ impl ResponsesCallBatch {
             .push(frame)
     }
 
-    /// Correlate a provider function-call output item with its stable call ID.
-    /// Reject mismatched IDs and unknown output indexes.
+    /// Record a function-call ID against the provider's output index.
+    ///
+    /// Duplicate IDs and indexes are rejected. This currently does not verify
+    /// subsequent completion-event identity or the function name, so it is not
+    /// sufficient to construct a trusted final action.
     pub fn register_call(&mut self, frame: &SseFrame) -> Result<bool, ArgumentsError> {
         if frame.event.as_deref() != Some("response.output_item.added") {
             return Ok(false);
@@ -394,8 +408,11 @@ impl ResponsesCallBatch {
         Ok(true)
     }
 
-    /// Mark a known output item complete only when the provider sends its
-    /// function-call arguments completion event. Does not execute the call.
+    /// Record an argument-done event after checking the buffered JSON parses.
+    ///
+    /// The index must have buffered arguments, but this currently does not
+    /// require a registered call ID or a response-level completion event.
+    /// A done event must never be treated as permission to execute a tool.
     pub fn complete(&mut self, frame: &SseFrame) -> Result<bool, ArgumentsError> {
         if frame.event.as_deref() != Some("response.function_call_arguments.done") {
             return Ok(false);
@@ -418,6 +435,9 @@ impl ResponsesCallBatch {
         Ok(true)
     }
 
+    /// Return only indexes that received argument-done events.
+    ///
+    /// These are untrusted parsed values, not validated executable actions.
     pub fn completed_arguments(&self) -> Result<Vec<(u64, serde_json::Value)>, ArgumentsError> {
         self.completed
             .iter()
