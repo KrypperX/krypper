@@ -840,6 +840,7 @@ impl AnthropicDecisionSource {
         let mut blocks = std::collections::BTreeMap::<usize, (String, String)>::new();
         let mut completed_blocks = std::collections::BTreeSet::<usize>::new();
         let mut completed = false;
+        let mut tool_use_stop = false;
         super::post_hosted_sse(
             &self.agent,
             ModelProvider::Anthropic,
@@ -895,6 +896,7 @@ impl AnthropicDecisionSource {
                         if event["delta"]["stop_reason"] != "tool_use" {
                             return Err(invalid());
                         }
+                        tool_use_stop = true;
                     }
                     Some("message_stop") => completed = true,
                     Some("error") => return Err(invalid()),
@@ -903,7 +905,7 @@ impl AnthropicDecisionSource {
                 Ok(())
             },
         )?;
-        if !completed || blocks.len() != 1 || completed_blocks.len() != 1 {
+        if !completed || !tool_use_stop || blocks.len() != 1 || completed_blocks.len() != 1 {
             return Err(ModelError::ProviderInvalidToolCall(
                 ModelProvider::Anthropic,
                 "stream ended without one complete tool call",
@@ -1228,8 +1230,7 @@ mod tests {
         server.join().expect("server completed");
     }
 
-    #[test]
-    fn anthropic_stream_assembles_and_validates_completed_tool_use() {
+    fn assert_anthropic_stream_decision(truncated: bool) {
         use super::AnthropicDecisionSource;
         use crate::agent_loop::WorkspaceAction;
         use serde_json::json;
@@ -1267,6 +1268,9 @@ mod tests {
             ];
             let mut body = String::new();
             for (kind, data) in frames {
+                if truncated && kind == "message_stop" {
+                    break;
+                }
                 body.push_str(&format!("event: {kind}\ndata: {data}\n\n"));
             }
             let response = format!(
@@ -1277,11 +1281,23 @@ mod tests {
         });
         let mut source =
             AnthropicDecisionSource::with_endpoint("test-model", "local-test-key", 2, endpoint);
-        let action = source
-            .choose_with_streaming("read README", &[], None, true)
-            .expect("complete tool use");
-        assert!(matches!(action, WorkspaceAction::ReadFile { .. }));
+        let result = source.choose_with_streaming("read README", &[], None, true);
+        if truncated {
+            assert!(result.is_err(), "truncated stream must not yield an action");
+        } else {
+            assert!(matches!(result, Ok(WorkspaceAction::ReadFile { .. })));
+        }
         server.join().expect("server");
+    }
+
+    #[test]
+    fn anthropic_stream_assembles_and_validates_completed_tool_use() {
+        assert_anthropic_stream_decision(false);
+    }
+
+    #[test]
+    fn anthropic_truncated_stream_never_yields_an_action() {
+        assert_anthropic_stream_decision(true);
     }
 
     #[test]
