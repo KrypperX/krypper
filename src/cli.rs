@@ -522,7 +522,11 @@ fn run_task_with_options(
                         }
                         return action;
                     }
-                    if let Err(cause) = write!(error, "action {decisions}/{max_actions}> ")
+                    if let Err(cause) = if activity_jsonl {
+                        writeln!(error, "action {decisions}/{max_actions}> ")
+                    } else {
+                        write!(error, "action {decisions}/{max_actions}> ")
+                    }
                         .and_then(|()| error.flush())
                     {
                         stream_error = Some(cause);
