@@ -485,6 +485,39 @@ impl ResponsesCallBatch {
             .collect()
     }
 
+    /// Return function names, call IDs and parsed arguments for completed calls.
+    ///
+    /// This rejects incomplete correlation, but does not verify response-level
+    /// completion or authorize the named tool. The normal decision path must
+    /// validate action schemas and permissions before any execution.
+    pub fn correlated_named_calls(
+        &self,
+    ) -> Result<Vec<(String, String, serde_json::Value)>, ArgumentsError> {
+        if self.calls.len() != self.completed.len()
+            || self.calls.len() != self.call_ids.len()
+            || self.calls.len() != self.function_names.len()
+        {
+            return Err(ArgumentsError::InvalidEvent);
+        }
+        self.calls
+            .iter()
+            .map(|(index, arguments)| {
+                if !self.completed.contains(index) {
+                    return Err(ArgumentsError::InvalidEvent);
+                }
+                let call_id = self
+                    .call_ids
+                    .get(index)
+                    .ok_or(ArgumentsError::UnexpectedIndex)?;
+                let name = self
+                    .function_names
+                    .get(index)
+                    .ok_or(ArgumentsError::UnexpectedIndex)?;
+                Ok((call_id.clone(), name.clone(), arguments.parse_completed()?))
+            })
+            .collect()
+    }
+
     /// Parse buffered arguments; a caller must separately verify completion,
     /// correlate call IDs and authorize the resulting action.
     pub fn parsed(&self) -> Result<Vec<(u64, serde_json::Value)>, ArgumentsError> {
