@@ -3,7 +3,8 @@ use crate::harness::context::build_task_prompt_with_project_guidance;
 use super::{
     action_from_provider_call, build_anthropic_request, build_responses_request,
     consume_decision_budget, encode_model_request, model_agent, parse_anthropic_response,
-    parse_responses_response, post_hosted, tool_definitions, ModelError, OllamaDecisionSource,
+    parse_responses_response, post_hosted, post_responses_text_stream, tool_definitions, ModelError,
+    OllamaDecisionSource,
 };
 use crate::agent_loop::{BoundedDecisionSource, WorkspaceAction, WorkspaceObservation};
 use serde_json::{json, Value};
@@ -546,6 +547,38 @@ pub(crate) struct ResponsesDecisionSource {
 }
 
 impl ResponsesDecisionSource {
+    /// Opt-in provider SSE text delivery. No action is selected or executed here.
+    /// The normal bounded decision path remains authoritative.
+    #[allow(dead_code)]
+    pub(crate) fn stream_text_deltas<F>(
+        &self,
+        goal: &str,
+        observations: &[WorkspaceObservation],
+        project_guidance: Option<&str>,
+        on_text: F,
+    ) -> Result<(), ModelError>
+    where
+        F: FnMut(String) -> Result<(), ModelError>,
+    {
+        let provider = self.provider.model_provider();
+        let request = build_responses_request(
+            &self.model,
+            provider,
+            goal,
+            observations,
+            self.remaining_decisions,
+            project_guidance,
+        )?;
+        post_responses_text_stream(
+            &self.agent,
+            provider,
+            &self.endpoint,
+            &self.api_key,
+            &request,
+            on_text,
+        )
+    }
+
     pub(crate) fn new(
         model: impl Into<String>,
         provider: ResponsesProvider,
