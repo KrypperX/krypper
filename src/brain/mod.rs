@@ -791,7 +791,6 @@ where
     )
 }
 
-
 /** Forward only recognized provider text deltas to a presentation consumer.
  *
  * This opt-in path never interprets tool arguments as executable actions.
