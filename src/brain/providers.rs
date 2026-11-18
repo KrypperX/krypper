@@ -15,7 +15,7 @@ const XAI_RESPONSES_URL: &str = "https://api.x.ai/v1/responses";
 const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
 pub(super) const GEMINI_GENERATE_CONTENT_URL: &str =
     "https://generativelanguage.googleapis.com/v1beta/models";
-const ANTHROPIC_API_VERSION: &str = "2026-10-21";
+pub(super) const ANTHROPIC_API_VERSION: &str = "2026-10-21";
 const GROQ_CHAT_COMPLETIONS_URL: &str = "https://api.groq.com/openai/v1/chat/completions";
 const OPENROUTER_CHAT_COMPLETIONS_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 const DEEPSEEK_CHAT_COMPLETIONS_URL: &str = "https://api.deepseek.com/chat/completions";
@@ -811,7 +811,113 @@ impl AnthropicDecisionSource {
         }
     }
 
+    fn choose_with_streaming(
+        &mut self,
+        goal: &str,
+        observations: &[WorkspaceObservation],
+        project_guidance: Option<&str>,
+        streaming: bool,
+    ) -> Result<WorkspaceAction, ModelError> {
+        if streaming {
+            return self.stream_validated_action(goal, observations, project_guidance);
+        }
+        self.choose_nonstreaming(goal, observations, project_guidance)
+    }
+
+    fn stream_validated_action(
+        &mut self,
+        goal: &str,
+        observations: &[WorkspaceObservation],
+        project_guidance: Option<&str>,
+    ) -> Result<WorkspaceAction, ModelError> {
+        let remaining = consume_decision_budget(&mut self.remaining_decisions)?;
+        let request = build_anthropic_request(
+            &self.model, goal, observations, remaining, project_guidance,
+        )?;
+        let mut body: Value = serde_json::from_slice(&request)
+            .map_err(|_| ModelError::RequestEncoding)?;
+        body["stream"] = Value::Bool(true);
+        let request = encode_model_request(&body)?;
+        let mut blocks = std::collections::BTreeMap::<usize, (String, String)>::new();
+        let mut completed_blocks = std::collections::BTreeSet::<usize>::new();
+        let mut completed = false;
+        super::post_hosted_sse(
+            &self.agent,
+            ModelProvider::Anthropic,
+            &self.endpoint,
+            &self.api_key,
+            &request,
+            |frame| {
+                let provider = ModelProvider::Anthropic;
+                let invalid = || ModelError::ProviderInvalidToolCall(provider, "invalid Anthropic streaming tool call");
+                let event: Value = serde_json::from_str(&frame.data)
+                    .map_err(|_| ModelError::ProviderInvalidJson(provider))?;
+                match frame.event.as_deref() {
+                    Some("content_block_start") => {
+                        let index = event["index"].as_u64().ok_or_else(invalid)? as usize;
+                        let block = &event["content_block"];
+                        if block["type"] == "tool_use" {
+                            let name = block["name"].as_str().ok_or_else(invalid)?;
+                            if blocks.insert(index, (name.to_owned(), String::new())).is_some() {
+                                return Err(invalid());
+                            }
+                        }
+                    }
+                    Some("content_block_delta") => {
+                        if event["delta"]["type"] == "input_json_delta" {
+                            let index = event["index"].as_u64().ok_or_else(invalid)? as usize;
+                            let chunk = event["delta"]["partial_json"].as_str().ok_or_else(invalid)?;
+                            let (_, arguments) = blocks.get_mut(&index).ok_or_else(invalid)?;
+                            if completed_blocks.contains(&index) || arguments.len().saturating_add(chunk.len()) > 256 * 1024 {
+                                return Err(invalid());
+                            }
+                            arguments.push_str(chunk);
+                        }
+                    }
+                    Some("content_block_stop") => {
+                        let index = event["index"].as_u64().ok_or_else(invalid)? as usize;
+                        if blocks.contains_key(&index) && !completed_blocks.insert(index) {
+                            return Err(invalid());
+                        }
+                    }
+                    Some("message_delta") => {
+                        if event["delta"]["stop_reason"] != "tool_use" {
+                            return Err(invalid());
+                        }
+                    }
+                    Some("message_stop") => completed = true,
+                    Some("error") => return Err(invalid()),
+                    _ => {}
+                }
+                Ok(())
+            },
+        )?;
+        if !completed || blocks.len() != 1 || completed_blocks.len() != 1 {
+            return Err(ModelError::ProviderInvalidToolCall(
+                ModelProvider::Anthropic, "stream ended without one complete tool call",
+            ));
+        }
+        let (_, (name, arguments)) = blocks.into_iter().next().ok_or(
+            ModelError::ProviderInvalidToolCall(ModelProvider::Anthropic, "missing tool call"),
+        )?;
+        let args: Value = serde_json::from_str(&arguments)
+            .map_err(|_| ModelError::ProviderInvalidJson(ModelProvider::Anthropic))?;
+        action_from_provider_call(ModelProvider::Anthropic, &name, &args)
+    }
+
     fn choose(
+        &mut self,
+        goal: &str,
+        observations: &[WorkspaceObservation],
+        project_guidance: Option<&str>,
+    ) -> Result<WorkspaceAction, ModelError> {
+        self.choose_with_streaming(
+            goal, observations, project_guidance,
+            std::env::var_os("KRYPPER_ANTHROPIC_STREAM").is_some(),
+        )
+    }
+
+    fn choose_nonstreaming(
         &mut self,
         goal: &str,
         observations: &[WorkspaceObservation],
