@@ -1026,10 +1026,7 @@ mod tests {
         let mut decoder = SseDecoder::new(1024);
         assert!(decoder.push(b"data: \xe2\x82").unwrap().is_empty());
         assert_eq!(decoder.finish(), Err(SseDecodeError::TruncatedFrame));
-        assert_eq!(
-            decoder.push(b"\xff\n"),
-            Err(SseDecodeError::InvalidUtf8)
-        );
+        assert_eq!(decoder.push(b"\xff\n"), Err(SseDecodeError::InvalidUtf8));
         assert_eq!(decoder.finish(), Ok(()));
         let frames = decoder.push(b"data: valid\n\n").unwrap();
         assert_eq!(frames.len(), 1);
