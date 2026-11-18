@@ -333,6 +333,7 @@ pub struct ResponsesCallBatch {
     completed: std::collections::BTreeSet<u64>,
     call_ids: std::collections::BTreeMap<u64, String>,
     function_names: std::collections::BTreeMap<u64, String>,
+    output_items_done: std::collections::BTreeSet<u64>,
 }
 
 impl ResponsesCallBatch {
@@ -344,6 +345,7 @@ impl ResponsesCallBatch {
             completed: std::collections::BTreeSet::new(),
             call_ids: std::collections::BTreeMap::new(),
             function_names: std::collections::BTreeMap::new(),
+            output_items_done: std::collections::BTreeSet::new(),
         }
     }
 
@@ -544,7 +546,7 @@ impl ResponsesCallBatch {
     /// The output index, call ID and function name must match the registered
     /// item, and its argument-done event must already have been observed.
     /// This does not authorize execution or replace response-level completion.
-    pub fn complete_output_item(&self, frame: &SseFrame) -> Result<bool, ArgumentsError> {
+    pub fn complete_output_item(&mut self, frame: &SseFrame) -> Result<bool, ArgumentsError> {
         if frame.event.as_deref() != Some("response.output_item.done") {
             return Ok(false);
         }
@@ -569,9 +571,11 @@ impl ResponsesCallBatch {
         if self.call_ids.get(&index).map(String::as_str) != Some(call_id)
             || self.function_names.get(&index).map(String::as_str) != Some(name)
             || !self.completed.contains(&index)
+            || self.output_items_done.contains(&index)
         {
             return Err(ArgumentsError::InvalidEvent);
         }
+        self.output_items_done.insert(index);
         Ok(true)
     }
 
