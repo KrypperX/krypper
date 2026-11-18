@@ -994,7 +994,10 @@ mod tests {
             .push(b": heartbeat\n\nevent: response.output_text.delta\ndata: one\n\n: ping\n\ndata: two\n\n")
             .unwrap();
         assert_eq!(frames.len(), 2);
-        assert_eq!(frames[0].event.as_deref(), Some("response.output_text.delta"));
+        assert_eq!(
+            frames[0].event.as_deref(),
+            Some("response.output_text.delta")
+        );
         assert_eq!(frames[0].data, "one");
         assert_eq!(frames[1].event, None);
         assert_eq!(frames[1].data, "two");
