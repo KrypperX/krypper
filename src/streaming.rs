@@ -459,9 +459,7 @@ impl ResponsesCallBatch {
     pub fn correlated_completed_calls(
         &self,
     ) -> Result<Vec<(String, serde_json::Value)>, ArgumentsError> {
-        if self.calls.len() != self.completed.len()
-            || self.calls.len() != self.call_ids.len()
-        {
+        if self.calls.len() != self.completed.len() || self.calls.len() != self.call_ids.len() {
             return Err(ArgumentsError::InvalidEvent);
         }
         self.calls
