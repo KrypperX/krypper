@@ -106,6 +106,25 @@ impl<S: EventSink> StreamEmitter<S> {
     }
 }
 
+/// Read-only projection of the authoritative TaskSession snapshot.
+///
+/// Lifecycle and activity positions are independent. This function does not
+/// synthesize a total ordering or copy any workspace or model payloads.
+pub fn snapshot_positions(session: &crate::task_lifecycle::TaskSession) -> Vec<ActivityPosition> {
+    session
+        .snapshot()
+        .tasks()
+        .iter()
+        .map(|task| {
+            ActivityPosition::new(
+                task.id().to_string(),
+                task.lifecycle_sequence_high_water(),
+                task.activity_sequence_high_water(),
+            )
+        })
+        .collect()
+}
+
 /// A newline-delimited JSON transport for a caller-owned writer.
 ///
 /// The writer is not shared with the runtime. A failed write is surfaced to
