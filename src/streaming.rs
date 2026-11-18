@@ -593,7 +593,7 @@ mod tests {
     #[test]
     fn responses_arguments_collect_fragments_without_executing() {
         let mut collector = ResponsesArguments::new(64);
-        for (index, delta) in [(0, "{\\\"path\\\":"), (0, "\\\"src\\\"}")] {
+        for (index, delta) in [(0, r#"{"path":"#), (0, r#""src"}"#)] {
             let frame = SseFrame {
                 event: Some("response.function_call_arguments.delta".into()),
                 data: serde_json::json!({"output_index": index, "delta": delta}).to_string(),
