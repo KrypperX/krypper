@@ -866,6 +866,38 @@ mod tests {
     }
 
     #[test]
+    fn finalization_rejects_missing_output_item_completion() {
+        let mut batch = ResponsesCallBatch::new(1, 64);
+        let added = SseFrame {
+            event: Some("response.output_item.added".into()),
+            data: serde_json::json!({
+                "output_index": 0,
+                "item": {"type": "function_call", "call_id": "call_a", "name": "run"}
+            })
+            .to_string(),
+        };
+        assert_eq!(batch.register_call(&added), Ok(true));
+        let delta = SseFrame {
+            event: Some("response.function_call_arguments.delta".into()),
+            data: serde_json::json!({"output_index": 0, "delta": "{}"}).to_string(),
+        };
+        assert_eq!(batch.push(&delta), Ok(true));
+        let done = SseFrame {
+            event: Some("response.function_call_arguments.done".into()),
+            data: serde_json::json!({"output_index": 0}).to_string(),
+        };
+        assert_eq!(batch.complete(&done), Ok(true));
+        let completed = SseFrame {
+            event: Some("response.completed".into()),
+            data: serde_json::json!({"response": {"status": "completed"}}).to_string(),
+        };
+        assert_eq!(
+            batch.finalized_named_calls(&completed),
+            Err(ArgumentsError::InvalidEvent)
+        );
+    }
+
+    #[test]
     fn output_item_completion_rejects_unregistered_identity() {
         let mut batch = ResponsesCallBatch::new(1, 64);
         let done = SseFrame {
