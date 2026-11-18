@@ -549,7 +549,7 @@ impl ResponsesCallBatch {
         if response.get("status").and_then(serde_json::Value::as_str) != Some("completed") {
             return Err(ArgumentsError::InvalidEvent);
         }
-        if self.calls.is_empty() || self.calls.len() != self.output_items_done.len() {
+        if self.calls.len() != self.output_items_done.len() {
             return Err(ArgumentsError::InvalidEvent);
         }
         self.correlated_named_calls()
@@ -661,7 +661,13 @@ impl ResponsesFinalActions {
             Some("response.output_item.done") => {
                 self.batch.complete_output_item(frame).map(|_| None)
             }
-            Some("response.completed") => self.batch.finalized_named_calls(frame).map(Some),
+            Some("response.completed") => {
+                if self.batch.calls.is_empty() {
+                    Err(ArgumentsError::InvalidEvent)
+                } else {
+                    self.batch.finalized_named_calls(frame).map(Some)
+                }
+            }
             _ => Ok(None),
         };
         match result {
