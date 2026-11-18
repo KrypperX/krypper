@@ -781,7 +781,7 @@ mod tests {
             event: Some("response.output_item.added".into()),
             data: serde_json::json!({
                 "output_index": 0,
-                "item": {"type": "function_call", "call_id": "call_a"}
+                "item": {"type": "function_call", "call_id": "call_a", "name": "run"}
             })
             .to_string(),
         };
@@ -805,7 +805,7 @@ mod tests {
             event: Some("response.output_item.added".into()),
             data: serde_json::json!({
                 "output_index": 0,
-                "item": {"type": "function_call", "call_id": "call_a"}
+                "item": {"type": "function_call", "call_id": "call_a", "name": "run"}
             })
             .to_string(),
         };
@@ -814,7 +814,7 @@ mod tests {
             event: Some("response.output_item.added".into()),
             data: serde_json::json!({
                 "output_index": 1,
-                "item": {"type": "function_call", "call_id": "call_a"}
+                "item": {"type": "function_call", "call_id": "call_a", "name": "run"}
             })
             .to_string(),
         };
