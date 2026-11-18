@@ -637,6 +637,27 @@ mod tests {
     }
 
     #[test]
+    fn responses_batch_keeps_interleaved_calls_separate() {
+        let mut batch = ResponsesCallBatch::new(2, 64);
+        for (index, delta) in [(1, "{"), (0, "{}"), (1, "}") ] {
+            let frame = SseFrame {
+                event: Some("response.function_call_arguments.delta".into()),
+                data: serde_json::json!({"output_index": index, "delta": delta}).to_string(),
+            };
+            assert_eq!(batch.push(&frame), Ok(true));
+        }
+        assert_eq!(
+            batch.parsed(),
+            Ok(vec![(0, serde_json::json!({})), (1, serde_json::json!({}))])
+        );
+        let extra = SseFrame {
+            event: Some("response.function_call_arguments.delta".into()),
+            data: serde_json::json!({"output_index": 2, "delta": "{}"}).to_string(),
+        };
+        assert_eq!(batch.push(&extra), Err(ArgumentsError::TooLarge));
+    }
+
+    #[test]
     fn responses_arguments_collect_fragments_without_executing() {
         let mut collector = ResponsesArguments::new(64);
         for (index, delta) in [(0, r#"{"path":"#), (0, r#""src"}"#)] {
