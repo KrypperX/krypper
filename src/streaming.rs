@@ -1417,14 +1417,14 @@ mod tests {
             emitter.emit(StreamEvent::ItemStarted {
                 item_id: "a".into(),
                 kind: ItemKind::Message,
-            }),
-            Ok(1)
+            }).expect("JSONL sink write"),
+            1
         );
         assert_eq!(
             emitter.emit(StreamEvent::ItemCompleted {
                 item_id: "a".into(),
-            }),
-            Ok(2)
+            }).expect("JSONL sink write"),
+            2
         );
         let output = String::from_utf8(emitter.into_inner().into_inner()).unwrap();
         let records: Vec<serde_json::Value> = output
