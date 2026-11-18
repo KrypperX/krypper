@@ -320,7 +320,8 @@ the selected hosted provider too. `--model NAME` without `--provider` keeps
 inference local through Ollama at `127.0.0.1:11434`; Ollama needs no API key.
 
 Without `--model` or `--provider`, `task` stays caller-directed and makes no
-model request. `--model NAME` without `--provider` continues to select local
+model request, unless you created the optional user configuration file
+described below. `--model NAME` without `--provider` continues to select local
 Ollama. `--provider` requires `--model`. All providers use the same task action
 budget and expose only the existing bounded actions. Missing credentials,
 failed requests, invalid responses, unsupported tool calls, or an exhausted
@@ -353,6 +354,37 @@ code explicitly grants it to the task; the CLI grants no such permission.
 See [the opt-in Linux profile](docs/offline-cargo-profile.md). See Ollama's
 [tool-calling API example](https://github.com/ollama/ollama/blob/main/docs/capabilities/tool-calling.mdx)
 for its local chat tool-call format.
+
+### Default model from a user configuration file (opt in)
+
+Creating the file below is your opt-in: when it exists and you pass neither
+`--model` nor `--provider`, `krypper task` uses its model selection, exactly as
+if you had typed those flags. Without the file, nothing changes.
+
+```toml
+# ~/.config/krypper/config.toml
+provider = "ollama"   # optional; same names as --provider, default ollama
+model = "qwen3"       # required when the file sets anything
+```
+
+- **Location:** `$KRYPPER_CONFIG` (absolute path), else
+  `$XDG_CONFIG_HOME/krypper/config.toml`, else `$HOME/.config/krypper/config.toml`.
+  Krypper never reads a configuration file from a task workspace, so repository
+  contents cannot choose where your task data is sent.
+- **Precedence:** passing `--model` or `--provider` (alone or together) ignores
+  the file entirely; the file's provider is never combined with a flag.
+  `--no-config` ignores it for one run.
+- **Visibility:** when the file applies, Krypper prints
+  `krypper: using model '...' (provider: ...) from <path>` to standard error
+  before the task starts.
+- **Format:** a small TOML subset: `key = "value"` lines, blank lines, and `#`
+  comments. Only `provider` and `model` are accepted; tables, escapes, duplicate
+  or unknown keys, files over 16 KiB, and non-UTF-8 files are rejected. A
+  present but invalid file fails the command with status 2 instead of being
+  skipped.
+- **Credentials:** never stored here. Hosted providers still read their API keys
+  from the environment, and a hosted provider in the file without its key fails
+  before any request.
 
 ## In-process local model decisions (opt in)
 
