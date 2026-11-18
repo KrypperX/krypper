@@ -830,6 +830,21 @@ impl AnthropicDecisionSource {
         observations: &[WorkspaceObservation],
         project_guidance: Option<&str>,
     ) -> Result<WorkspaceAction, ModelError> {
+        self.stream_validated_action_with_text(goal, observations, project_guidance, |_| Ok(()))
+    }
+
+    /// Deliver only provider text deltas. Tool arguments stay inside the
+    /// bounded action assembler and are never forwarded as display text.
+    pub(crate) fn stream_validated_action_with_text<F>(
+        &mut self,
+        goal: &str,
+        observations: &[WorkspaceObservation],
+        project_guidance: Option<&str>,
+        mut on_text: F,
+    ) -> Result<WorkspaceAction, ModelError>
+    where
+        F: FnMut(String) -> Result<(), ModelError>,
+    {
         let remaining = consume_decision_budget(&mut self.remaining_decisions)?;
         let request =
             build_anthropic_request(&self.model, goal, observations, remaining, project_guidance)?;
@@ -855,6 +870,9 @@ impl AnthropicDecisionSource {
                         "invalid Anthropic streaming tool call",
                     )
                 };
+                if let Some(text) = crate::streaming::provider_text_delta(&frame) {
+                    on_text(text)?;
+                }
                 let event: Value = serde_json::from_str(&frame.data)
                     .map_err(|_| ModelError::ProviderInvalidJson(provider))?;
                 match frame.event.as_deref() {
@@ -1182,6 +1200,29 @@ mod tests {
             .expect("completed stream produces validated action");
         assert!(matches!(action, WorkspaceAction::ReadFile { .. }));
         server.join().expect("server completed");
+    }
+
+    #[test]
+    fn anthropic_text_delta_excludes_tool_argument_chunks() {
+        use crate::streaming::{provider_text_delta, SseFrame};
+        let text = SseFrame {
+            event: Some("content_block_delta".into()),
+            data: serde_json::json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": "hello"}
+            }).to_string(),
+        };
+        let tool = SseFrame {
+            event: Some("content_block_delta".into()),
+            data: serde_json::json!({
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": {"type": "input_json_delta", "partial_json": "secret"}
+            }).to_string(),
+        };
+        assert_eq!(provider_text_delta(&text).as_deref(), Some("hello"));
+        assert_eq!(provider_text_delta(&tool), None);
     }
 
     /// A transport that closes before response.completed must never yield an action.
