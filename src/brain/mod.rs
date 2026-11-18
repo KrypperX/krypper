@@ -750,6 +750,46 @@ fn post_chat(agent: &Agent, address: SocketAddr, body: &[u8]) -> Result<Vec<u8>,
     Ok(body)
 }
 
+/// Opt-in SSE transport for hosted providers. This does not change the
+/// authoritative non-streaming decision path or authorize workspace actions.
+#[allow(dead_code)]
+fn post_hosted_sse<F>(
+    agent: &Agent,
+    provider: ModelProvider,
+    endpoint: &str,
+    api_key: &str,
+    body: &[u8],
+    on_frame: F,
+) -> Result<(), ModelError>
+where
+    F: FnMut(crate::streaming::SseFrame) -> Result<(), ModelError>,
+{
+    if body.len() > MAX_MODEL_REQUEST_BYTES {
+        return Err(ModelError::RequestTooLarge);
+    }
+    let authorization = format!("Bearer {api_key}");
+    let response = agent
+        .post(endpoint)
+        .header("Content-Type", "application/json")
+        .header("Accept", "text/event-stream")
+        .header("Authorization", &authorization)
+        .send(body)
+        .map_err(|error| match error {
+            ureq::Error::StatusCode(status) => ModelError::ProviderHttpStatus(provider, status),
+            _ => ModelError::ProviderTransport(provider),
+        })?;
+    let mut reader = response.into_body().as_reader();
+    crate::streaming::consume_sse(&mut reader, MAX_MODEL_RESPONSE_BYTES, on_frame).map_err(
+        |error| match error {
+            crate::streaming::SseReadError::Io(_) => ModelError::ProviderTransport(provider),
+            crate::streaming::SseReadError::Decode(_) => {
+                ModelError::ProviderResponseTooLarge(provider)
+            }
+            crate::streaming::SseReadError::Consumer(error) => error,
+        },
+    )
+}
+
 fn post_hosted(
     agent: &Agent,
     provider: ModelProvider,
