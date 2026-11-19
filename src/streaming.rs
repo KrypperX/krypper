@@ -47,7 +47,13 @@ pub enum StreamEvent {
     StreamError {
         code: String,
     },
-}
+    /// Read-only high-water marks from the authoritative task snapshot.
+    /// Lifecycle and activity positions belong to independent histories.
+    ActivityPositionUpdated {
+        task_id: String,
+        lifecycle_position: u64,
+        activity_position: u64,
+    },}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -739,6 +745,31 @@ pub fn snapshot_positions(session: &crate::task_lifecycle::TaskSession) -> Vec<A
         .collect()
 }
 
+/// Projects existing metadata-only task positions into versioned stream events.
+///
+/// # Invariants
+/// - Only reads the authoritative TaskSession snapshot.
+/// - Lifecycle and activity high-water marks are independent.
+/// - Does not emit goals, prompts, tool arguments, paths, or secrets.
+/// - Sink failure stops projection without changing task or checkpoint state.
+/// - Stream-local sequence numbers are not history cursors or replay tokens.
+///
+/// # Errors
+/// Propagates sequence exhaustion or sink delivery failure.
+pub fn emit_activity_positions<S: EventSink>(
+    session: &crate::task_lifecycle::TaskSession,
+    emitter: &mut StreamEmitter<S>,
+) -> Result<(), EmitError<S::Error>> {
+    for position in snapshot_positions(session) {
+        emitter.emit(StreamEvent::ActivityPositionUpdated {
+            task_id: position.task_id,
+            lifecycle_position: position.lifecycle_position,
+            activity_position: position.activity_position,
+        })?;
+    }
+    Ok(())
+}
+
 /// A newline-delimited JSON transport for a caller-owned writer.
 ///
 /// The writer is not shared with the runtime. A failed write is surfaced to
@@ -849,6 +880,44 @@ mod tests {
             self.0.push(event.clone());
             Ok(())
         }
+    }
+
+    #[test]
+    fn activity_projection_reuses_snapshot_positions_without_mutating_session() {
+        let mut session = crate::task_lifecycle::TaskSession::new();
+        session.create_task("private goal never emitted");
+        session.create_task("another private goal");
+        let before = session.snapshot();
+        let positions = snapshot_positions(&session);
+        let mut emitter = StreamEmitter::new(RecordingSink::default());
+        emit_activity_positions(&session, &mut emitter).unwrap();
+        let events = emitter.into_inner().0;
+        assert_eq!(events.len(), positions.len());
+        for (index, (event, position)) in events.iter().zip(positions.iter()).enumerate() {
+            assert_eq!(event.version, 1);
+            assert_eq!(event.sequence, index as u64 + 1);
+            assert_eq!(event.event, StreamEvent::ActivityPositionUpdated {
+                task_id: position.task_id.clone(),
+                lifecycle_position: position.lifecycle_position,
+                activity_position: position.activity_position,
+            });
+            let serialized = serde_json::to_string(event).unwrap();
+            assert!(!serialized.contains("private goal"));
+        }
+        assert_eq!(session.snapshot(), before);
+    }
+
+    #[test]
+    fn activity_projection_stops_on_sink_failure_without_mutating_session() {
+        let mut session = crate::task_lifecycle::TaskSession::new();
+        session.create_task("private goal");
+        let before = session.snapshot();
+        let mut emitter = StreamEmitter::new(FailingSink);
+        assert_eq!(
+            emit_activity_positions(&session, &mut emitter),
+            Err(EmitError::Sink("disconnected"))
+        );
+        assert_eq!(session.snapshot(), before);
     }
 
     #[test]
