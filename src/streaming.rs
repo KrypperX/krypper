@@ -771,6 +771,40 @@ pub fn emit_activity_positions<S: EventSink>(
     Ok(())
 }
 
+/// Emits only task positions that differ from a previously observed snapshot.
+///
+/// This is a read-only *snapshot comparison*, not history replay. It does not
+/// infer missing events, combine independent histories, or create a cursor.
+/// Consumers must retain their own prior positions; no runtime state is stored.
+///
+/// A task absent from `previous` is emitted even when both positions are zero.
+/// A changed position is emitted with the existing stream-local sequence.
+/// The caller must not advance its observed snapshot after a sink failure.
+///
+/// # Errors
+/// Propagates sink failures or sequence exhaustion without mutating TaskSession.
+pub fn emit_changed_activity_positions<S: EventSink>(
+    session: &crate::task_lifecycle::TaskSession,
+    previous: &[ActivityPosition],
+    emitter: &mut StreamEmitter<S>,
+) -> Result<(), EmitError<S::Error>> {
+    for current in snapshot_positions(session) {
+        let unchanged = previous.iter().any(|old| {
+            old.task_id == current.task_id
+                && old.lifecycle_position == current.lifecycle_position
+                && old.activity_position == current.activity_position
+        });
+        if !unchanged {
+            emitter.emit(StreamEvent::ActivityPositionUpdated {
+                task_id: current.task_id,
+                lifecycle_position: current.lifecycle_position,
+                activity_position: current.activity_position,
+            })?;
+        }
+    }
+    Ok(())
+}
+
 /// A newline-delimited JSON transport for a caller-owned writer.
 ///
 /// The writer is not shared with the runtime. A failed write is surfaced to
@@ -919,6 +953,44 @@ mod tests {
         let mut emitter = StreamEmitter::new(FailingSink);
         assert_eq!(
             emit_activity_positions(&session, &mut emitter),
+            Err(EmitError::Sink("disconnected"))
+        );
+        assert_eq!(session.snapshot(), before);
+    }
+
+    #[test]
+    fn unchanged_snapshot_emits_no_duplicate_position_events() {
+        let mut session = crate::task_lifecycle::TaskSession::new();
+        session.create_task("private");
+        let positions = snapshot_positions(&session);
+        let mut emitter = StreamEmitter::new(RecordingSink::default());
+        emit_changed_activity_positions(&session, &positions, &mut emitter).unwrap();
+        assert!(emitter.into_inner().0.is_empty());
+    }
+
+    #[test]
+    fn new_task_position_is_emitted_even_with_zero_high_water_marks() {
+        let mut session = crate::task_lifecycle::TaskSession::new();
+        let previous = snapshot_positions(&session);
+        session.create_task("private");
+        let before = session.snapshot();
+        let mut emitter = StreamEmitter::new(RecordingSink::default());
+        emit_changed_activity_positions(&session, &previous, &mut emitter).unwrap();
+        let events = emitter.into_inner().0;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].sequence, 1);
+        assert_eq!(session.snapshot(), before);
+        assert!(!serde_json::to_string(&events).unwrap().contains("private"));
+    }
+
+    #[test]
+    fn changed_projection_failure_does_not_mutate_authoritative_snapshot() {
+        let mut session = crate::task_lifecycle::TaskSession::new();
+        session.create_task("private");
+        let before = session.snapshot();
+        let mut emitter = StreamEmitter::new(FailingSink);
+        assert_eq!(
+            emit_changed_activity_positions(&session, &[], &mut emitter),
             Err(EmitError::Sink("disconnected"))
         );
         assert_eq!(session.snapshot(), before);
