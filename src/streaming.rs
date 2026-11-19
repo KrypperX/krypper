@@ -1717,6 +1717,57 @@ mod tests {
             Err(EmitError::Sink("disconnected"))
         );
     }
+    struct FailOnceSink {
+        attempts: usize,
+        delivered: Vec<StreamEnvelope>,
+    }
+
+    impl EventSink for FailOnceSink {
+        type Error = &'static str;
+
+        fn send(&mut self, event: &StreamEnvelope) -> Result<(), Self::Error> {
+            self.attempts += 1;
+            if self.attempts == 1 {
+                return Err("backpressure");
+            }
+            self.delivered.push(event.clone());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn failed_sink_delivery_does_not_advance_sequence_on_retry() {
+        let mut emitter = StreamEmitter::new(FailOnceSink {
+            attempts: 0,
+            delivered: Vec::new(),
+        });
+        assert_eq!(
+            emitter.emit(StreamEvent::ItemStarted {
+                item_id: "message".into(),
+                kind: ItemKind::Message,
+            }),
+            Err(EmitError::Sink("backpressure"))
+        );
+        assert_eq!(
+            emitter.emit(StreamEvent::ItemStarted {
+                item_id: "message".into(),
+                kind: ItemKind::Message,
+            }),
+            Ok(1)
+        );
+        assert_eq!(
+            emitter.emit(StreamEvent::ItemCompleted {
+                item_id: "message".into(),
+            }),
+            Ok(2)
+        );
+        let sink = emitter.into_inner();
+        assert_eq!(sink.attempts, 3);
+        assert_eq!(sink.delivered.len(), 2);
+        assert_eq!(sink.delivered[0].sequence, 1);
+        assert_eq!(sink.delivered[1].sequence, 2);
+    }
+
     #[test]
     fn text_sink_renders_only_public_event_content() {
         let mut emitter = StreamEmitter::new(TextSink::new(Vec::<u8>::new()));
