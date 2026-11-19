@@ -22,6 +22,7 @@ use std::path::PathBuf;
 
 mod checkpoint_files;
 mod config;
+mod models;
 mod outcome;
 mod task_args;
 use self::checkpoint_files::{
@@ -79,6 +80,7 @@ fn run_with(
         "list" => run_list(arguments, output, error),
         "write" => run_write(arguments, input, output, error),
         "task" => run_task(arguments, input, output, error),
+        "models" => models::run(arguments, output, error),
         _ if command_name.starts_with('-') => usage_error(
             error,
             None,
@@ -88,7 +90,7 @@ fn run_with(
             error,
             None,
             &format!(
-                "invalid choice: '{command_name}' (choose from 'show', 'list', 'write', 'task')"
+                "invalid choice: '{command_name}' (choose from 'show', 'list', 'write', 'task', 'models')"
             ),
         ),
     }
@@ -1078,10 +1080,11 @@ fn usage_error(error: &mut dyn Write, command: Option<&str>, message: &str) -> i
         Some("show") => "usage: krypper show [-h] path",
         Some("list") => "usage: krypper list [-h] [path]",
         Some("write") => "usage: krypper write [-h] [--stdin] path ...",
+        Some("models") => "usage: krypper models [--provider NAME] [--id MODEL_ID] [--json]",
         Some("task") => {
             "usage: krypper task [-h] [--goal GOAL] --max-actions N [--workspace PATH] [--model NAME] [--provider NAME] [--no-config] [--checkpoint-out PATH] [--resume PATH] [--activity-jsonl]"
         }
-        _ => "usage: krypper [-h] {show,list,write,task} ...",
+        _ => "usage: krypper [-h] {show,list,write,task,models} ...",
     };
     let program = command.map_or_else(|| "krypper".to_owned(), |name| format!("krypper {name}"));
     writeln!(error, "{usage}")?;
@@ -1091,7 +1094,7 @@ fn usage_error(error: &mut dyn Write, command: Option<&str>, message: &str) -> i
 
 fn write_root_help(output: &mut dyn Write) -> io::Result<()> {
     output.write_all(
-        b"usage: krypper [-h] {show,list,write,task} ...\n\nLocal command-line entry point for Krypper.\n\npositional arguments:\n  {show,list,write,task}\n    show        display a UTF-8 text file\n    list        list immediate directory entries\n    write       create a new UTF-8 text file\n    task        run a caller-directed bounded task\n\noptions:\n  -h, --help    show this help message and exit\n",
+        b"usage: krypper [-h] {show,list,write,task,models} ...\n\nLocal command-line entry point for Krypper.\n\npositional arguments:\n  {show,list,write,task,models}\n    show        display a UTF-8 text file\n    list        list immediate directory entries\n    write       create a new UTF-8 text file\n    task        run a caller-directed bounded task\n    models      browse offline model catalog\n\noptions:\n  -h, --help    show this help message and exit\n",
     )
 }
 
