@@ -401,7 +401,10 @@ impl ModelProvider {
         };
         ProviderCapabilities {
             protocol,
-            native_sse_decisions: matches!(protocol, DecisionProtocol::Responses | DecisionProtocol::AnthropicMessages),
+            native_sse_decisions: matches!(
+                protocol,
+                DecisionProtocol::Responses | DecisionProtocol::AnthropicMessages
+            ),
         }
     }
 
@@ -757,7 +760,8 @@ impl ResponsesDecisionSource {
             goal,
             observations,
             project_guidance,
-            std::env::var_os("KRYPPER_RESPONSES_STREAM").is_some(),
+            self.provider.model_provider().capabilities().native_sse_decisions
+                && std::env::var_os("KRYPPER_RESPONSES_STREAM").is_some(),
         )
     }
 
@@ -1046,7 +1050,8 @@ impl AnthropicDecisionSource {
             goal,
             observations,
             project_guidance,
-            std::env::var_os("KRYPPER_ANTHROPIC_STREAM").is_some(),
+            ModelProvider::Anthropic.capabilities().native_sse_decisions
+                && std::env::var_os("KRYPPER_ANTHROPIC_STREAM").is_some(),
         )
     }
 
