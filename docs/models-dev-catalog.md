@@ -7,12 +7,12 @@ Model specs are **advisory metadata**, not an allowlist. An unknown model is not
 To regenerate the optional normalized JSON artifact from the pinned snapshot:
 
 ```sh
-python3 tools/generate_model_catalog.py
-python3 tools/generate_model_catalog.py --check
+cargo run --locked --example generate_model_catalog
+cargo run --locked --example generate_model_catalog -- --check
 cargo test
 ```
 
-The generator checks the original bytes against the recorded SHA-256 and provider count, sorts providers and model IDs, and maps `limit.context`, `limit.output`, `tool_call`, `reasoning`, `modalities`, `name`, and `status`. Missing fields remain null rather than guessed.
+The Rust generator checks the original bytes against the recorded SHA-256 and provider count, sorts providers and model IDs, and maps `limit.context`, `limit.output`, `tool_call`, `reasoning`, `modalities`, `name`, and `status`. Missing fields remain null rather than guessed. The `--check` mode compares generated records with the authoritative Rust runtime reader; the normalized `src/catalog_data.json` artifact is optional and is not committed.
 
 Refreshing the snapshot is an explicit developer action. Replace `api.json`, update `metadata.json` with its new SHA-256 and provider count, preserve the upstream license notice, regenerate and review the diff. Do not add implicit network syncing to normal Krypper execution.
 
