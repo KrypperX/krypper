@@ -9,6 +9,7 @@ fn module_names(source: &str) -> Vec<String> {
         .lines()
         .filter_map(|line| {
             let line = line.trim();
+            let line = line.strip_prefix("pub(crate) ").unwrap_or(line);
             let rest = line
                 .strip_prefix("pub mod ")
                 .or_else(|| line.strip_prefix("mod "))?;
