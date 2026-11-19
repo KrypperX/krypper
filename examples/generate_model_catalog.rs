@@ -36,7 +36,11 @@ fn normalize(raw: &Value) -> Result<Vec<Value>, String> {
             let record = ModelRecord {
                 provider: provider_id,
                 id: model_id,
-                name: model.get("name").and_then(Value::as_str).filter(|name| !name.is_empty()).unwrap_or(model_id),
+                name: model
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or(model_id),
                 context_window: limits.and_then(|limits| limits.get("context")),
                 max_output_tokens: limits.and_then(|limits| limits.get("output")),
                 tool_calling: model.get("tool_call"),
@@ -54,14 +58,24 @@ fn normalize(raw: &Value) -> Result<Vec<Value>, String> {
 }
 
 fn generate(source: &[u8], metadata: &Value) -> Result<Vec<u8>, String> {
-    let expected_hash = metadata.get("sha256").and_then(Value::as_str).ok_or("missing snapshot sha256")?;
+    let expected_hash = metadata
+        .get("sha256")
+        .and_then(Value::as_str)
+        .ok_or("missing snapshot sha256")?;
     let actual_hash = digest(&SHA256, source);
-    let actual_hash = actual_hash.as_ref().iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    let actual_hash = actual_hash
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
     if actual_hash != expected_hash {
         return Err("Snapshot SHA-256 mismatch".into());
     }
     let raw: Value = serde_json::from_slice(source).map_err(|error| error.to_string())?;
-    let provider_count = metadata.get("provider_count").and_then(Value::as_u64).ok_or("missing provider_count")?;
+    let provider_count = metadata
+        .get("provider_count")
+        .and_then(Value::as_u64)
+        .ok_or("missing provider_count")?;
     if raw.as_object().map(|providers| providers.len() as u64) != Some(provider_count) {
         return Err("Snapshot provider count mismatch".into());
     }
@@ -72,12 +86,20 @@ fn generate(source: &[u8], metadata: &Value) -> Result<Vec<u8>, String> {
     for (index, record) in records.iter().enumerate() {
         let provider = record["provider"].as_str().ok_or("invalid provider")?;
         let id = record["id"].as_str().ok_or("invalid model id")?;
-        let model = raw.get(provider).and_then(|provider| provider.get("models")).and_then(|models| models.get(id)).ok_or("missing model")?;
+        let model = raw
+            .get(provider)
+            .and_then(|provider| provider.get("models"))
+            .and_then(|models| models.get(id))
+            .ok_or("missing model")?;
         let limits = model.get("limit").and_then(Value::as_object);
         let row = ModelRecord {
             provider,
             id,
-            name: model.get("name").and_then(Value::as_str).filter(|name| !name.is_empty()).unwrap_or(id),
+            name: model
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|name| !name.is_empty())
+                .unwrap_or(id),
             context_window: limits.and_then(|limits| limits.get("context")),
             max_output_tokens: limits.and_then(|limits| limits.get("output")),
             tool_calling: model.get("tool_call"),
@@ -109,13 +131,20 @@ fn run() -> Result<(), String> {
         _ => return Err("usage: cargo run --example generate_model_catalog -- [--check]".into()),
     };
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let source = fs::read(root.join("snapshots/models-dev/api.json")).map_err(|error| error.to_string())?;
-    let metadata: Value = serde_json::from_slice(&fs::read(root.join("snapshots/models-dev/metadata.json")).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
+    let source =
+        fs::read(root.join("snapshots/models-dev/api.json")).map_err(|error| error.to_string())?;
+    let metadata: Value = serde_json::from_slice(
+        &fs::read(root.join("snapshots/models-dev/metadata.json"))
+            .map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
     let output = generate(&source, &metadata)?;
     let target = root.join("src/catalog_data.json");
     if check {
         if fs::read(&target).map_err(|error| error.to_string())? != output {
-            return Err("Catalog out of date: rerun cargo run --example generate_model_catalog".into());
+            return Err(
+                "Catalog out of date: rerun cargo run --example generate_model_catalog".into(),
+            );
         }
         println!("Catalog verified");
     } else {
@@ -138,6 +167,9 @@ mod tests {
     #[test]
     fn rejects_invalid_snapshot_hash() {
         let metadata = serde_json::json!({"sha256": "bad", "provider_count": 1});
-        assert_eq!(generate(b"{}", &metadata).unwrap_err(), "Snapshot SHA-256 mismatch");
+        assert_eq!(
+            generate(b"{}", &metadata).unwrap_err(),
+            "Snapshot SHA-256 mismatch"
+        );
     }
 }
