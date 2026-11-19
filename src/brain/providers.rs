@@ -760,7 +760,10 @@ impl ResponsesDecisionSource {
             goal,
             observations,
             project_guidance,
-            self.provider.model_provider().capabilities().native_sse_decisions
+            self.provider
+                .model_provider()
+                .capabilities()
+                .native_sse_decisions
                 && std::env::var_os("KRYPPER_RESPONSES_STREAM").is_some(),
         )
     }
@@ -1518,8 +1521,17 @@ mod tests {
     fn provider_capability_registry_covers_every_cli_provider() {
         use super::{DecisionProtocol, ModelProvider};
         for name in [
-            "ollama", "gemini", "openai", "xai", "anthropic", "cloudflare",
-            "groq", "openrouter", "deepseek", "zai", "mistral",
+            "ollama",
+            "gemini",
+            "openai",
+            "xai",
+            "anthropic",
+            "cloudflare",
+            "groq",
+            "openrouter",
+            "deepseek",
+            "zai",
+            "mistral",
         ] {
             let provider = ModelProvider::parse(name).expect("registered provider");
             let capabilities = provider.capabilities();
