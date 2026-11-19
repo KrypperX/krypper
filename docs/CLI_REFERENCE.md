@@ -1,9 +1,8 @@
 # Krypper CLI and Runtime Reference
 
-Krypper is a local Rust command-line tool and in-process task runtime. Runtime
-behavior stays on the machine and works offline.
+Krypper is a local Rust command-line tool and in-process task runtime. Workspace operations run locally; explicitly selected hosted model providers require network access.
 
-See [DEVELOPMENT.md](DEVELOPMENT.md) for the current code layout, proposed
+See [DEVELOPMENT.md](../DEVELOPMENT.md) for the current code layout, proposed
 module boundaries, observability contract, and migration rules.
 
 ## Build and run
@@ -351,7 +350,7 @@ workspace containment, symlink, UTF-8, size, lifecycle, and action-budget
 checks; model output cannot request arbitrary shell or process execution.
 The registered `offline_cargo_test` profile is denied unless trusted embedding
 code explicitly grants it to the task; the CLI grants no such permission.
-See [the opt-in Linux profile](docs/offline-cargo-profile.md). See Ollama's
+See [the opt-in Linux profile](offline-cargo-profile.md). See Ollama's
 [tool-calling API example](https://github.com/ollama/ollama/blob/main/docs/capabilities/tool-calling.mdx)
 for its local chat tool-call format.
 
