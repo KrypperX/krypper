@@ -39,55 +39,6 @@ The executable is `target/release/krypper`. Run it from the directory you want t
 
 Task actions can also be selected by an explicitly configured model. See the [CLI and runtime reference](docs/CLI_REFERENCE.md) for provider setup, task controls, and safety limits.
 
-## Architecture
-
-The diagram below shows the **conceptual flow** of a Krypper task. It is a high-level guide, not a generated runtime call graph.
-
-```mermaid
-flowchart LR
-    User["User / CLI"] --> Harness["Agent harness"]
-    Harness --> Brain["Decision engine"]
-    Brain <--> Models["Model providers"]
-    Harness --> Tools["Typed tool registry"]
-    Tools --> Workspace["Workspace operations"]
-    Workspace --> Harness
-    Harness --> Result["Result / feedback"]
-```
-
-<details>
-<summary>View generated module and workspace-operation inventory</summary>
-
-The following inventory is generated from Rust declarations and checked by CI; its arrows indicate membership, not runtime execution.
-
-<!-- architecture:generated:start -->
-```mermaid
-flowchart TD
-    root["Krypper crate"] --> m_agent_loop["agent_loop"]
-    root["Krypper crate"] --> m_brain["brain"]
-    root["Krypper crate"] --> m_catalog_data["catalog_data"]
-    root["Krypper crate"] --> m_cli["cli"]
-    root["Krypper crate"] --> m_core["core"]
-    root["Krypper crate"] --> m_harness["harness"]
-    root["Krypper crate"] --> m_streaming["streaming"]
-    root["Krypper crate"] --> m_task_lifecycle["task_lifecycle"]
-    root["Krypper crate"] --> m_tools["tools"]
-    m_tools --> registry["Typed workspace registry"]
-    registry --> op_offline_cargo_test["offline_cargo_test"]
-    registry --> op_read_file["read_file"]
-    registry --> op_read_range["read_range"]
-    registry --> op_list_directory["list_directory"]
-    registry --> op_create_directory["create_directory"]
-    registry --> op_search_text["search_text"]
-    registry --> op_search_tree_text["search_tree_text"]
-    registry --> op_create_file["create_file"]
-    registry --> op_replace_text["replace_text"]
-    registry --> op_apply_patch["apply_patch"]
-```
-<!-- architecture:generated:end -->
-
-</details>
-Generated from declared crate modules and the typed workspace operation registry. This inventory does not represent runtime call edges. Update with `cargo run --example generate_architecture`. See [Development guide](DEVELOPMENT.md) for the detailed implementation and proposed changes.
-
 ## Documentation
 
 - [CLI and runtime reference](docs/CLI_REFERENCE.md) — commands, model providers, checkpoints, streaming, and safety constraints
