@@ -63,8 +63,17 @@ pub trait EventSink {
     fn send(&mut self, event: &StreamEnvelope) -> Result<(), Self::Error>;
 }
 
-/// Assigns sequence numbers only after a successful sink write.
-/// Sequence overflow is reported instead of silently wrapping.
+/// Assigns stream-local sequence numbers only after a successful sink write.
+///
+/// # Invariants
+/// - The first successfully delivered envelope has sequence 1.
+/// - A rejected delivery does not consume its sequence number; a subsequent
+///   successful delivery may reuse that number.
+/// - A failed writer can still have partially emitted bytes, so this is not
+///   an atomic-delivery, replay, or exactly-once guarantee.
+/// - Sequence overflow fails closed rather than wrapping.
+///
+/// These numbers are independent of TaskSession lifecycle/activity positions.
 pub struct StreamEmitter<S> {
     sink: S,
     next_sequence: u64,
@@ -84,6 +93,12 @@ impl<S: EventSink> StreamEmitter<S> {
         }
     }
 
+    /// Delivers an event and returns its sequence number on success.
+    ///
+    /// # Errors
+    /// Returns `SequenceExhausted` before writing when no next sequence can
+    /// be reserved, or `Sink` when the downstream consumer rejects delivery.
+    /// In either case the next sequence remains unchanged.
     pub fn emit(&mut self, event: StreamEvent) -> Result<u64, EmitError<S::Error>> {
         let next = self
             .next_sequence
@@ -101,6 +116,7 @@ impl<S: EventSink> StreamEmitter<S> {
         Ok(sequence)
     }
 
+    /// Returns the underlying sink without performing another write.
     pub fn into_inner(self) -> S {
         self.sink
     }
@@ -1717,6 +1733,8 @@ mod tests {
             Err(EmitError::Sink("disconnected"))
         );
     }
+    // Simulates transient backpressure without relying on timing or threads.
+    // A failed send must not acknowledge an envelope or consume its sequence.
     struct FailOnceSink {
         attempts: usize,
         delivered: Vec<StreamEnvelope>,
@@ -1735,6 +1753,8 @@ mod tests {
         }
     }
 
+    /// Regression: accepted envelopes remain contiguous after a rejected send.
+    /// This does not assert atomic writes or automatic replay by a real sink.
     #[test]
     fn failed_sink_delivery_does_not_advance_sequence_on_retry() {
         let mut emitter = StreamEmitter::new(FailOnceSink {
