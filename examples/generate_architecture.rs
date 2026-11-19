@@ -5,33 +5,48 @@ const START: &str = "<!-- architecture:generated:start -->";
 const END: &str = "<!-- architecture:generated:end -->";
 
 fn module_names(source: &str) -> Vec<String> {
-    source.lines().filter_map(|line| {
-        let line = line.trim();
-        let rest = line.strip_prefix("pub mod ").or_else(|| line.strip_prefix("mod "))?;
-        let name = rest.strip_suffix(';')?;
-        if name.chars().all(|c| c.is_ascii_lowercase() || c == '_') {
-            Some(name.to_owned())
-        } else {
-            None
-        }
-    }).collect()
+    source
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let rest = line
+                .strip_prefix("pub mod ")
+                .or_else(|| line.strip_prefix("mod "))?;
+            let name = rest.strip_suffix(';')?;
+            if name.chars().all(|c| c.is_ascii_lowercase() || c == '_') {
+                Some(name.to_owned())
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 fn operation_names(source: &str) -> Result<Vec<String>, String> {
-    let section = source.split("impl WorkspaceOperation {").nth(1)
+    let section = source
+        .split("impl WorkspaceOperation {")
+        .nth(1)
         .ok_or("WorkspaceOperation implementation missing")?;
-    let mapping = section.split("const fn name(").nth(1)
+    let mapping = section
+        .split("const fn name(")
+        .nth(1)
         .ok_or("WorkspaceOperation name mapping missing")?;
-    let mapping = mapping.split("\n}\n").next().ok_or("name mapping incomplete")?;
-    let result: Vec<String> = mapping.lines().filter_map(|line| {
-        let (_, value) = line.trim().split_once(" => \"")?;
-        let name = value.strip_suffix("\",")?;
-        if name.chars().all(|c| c.is_ascii_lowercase() || c == '_') {
-            Some(name.to_owned())
-        } else {
-            None
-        }
-    }).collect();
+    let mapping = mapping
+        .split("\n}\n")
+        .next()
+        .ok_or("name mapping incomplete")?;
+    let result: Vec<String> = mapping
+        .lines()
+        .filter_map(|line| {
+            let (_, value) = line.trim().split_once(" => \"")?;
+            let name = value.strip_suffix("\",")?;
+            if name.chars().all(|c| c.is_ascii_lowercase() || c == '_') {
+                Some(name.to_owned())
+            } else {
+                None
+            }
+        })
+        .collect();
     if result.is_empty() {
         return Err("No workspace operations found".into());
     }
@@ -41,7 +56,9 @@ fn operation_names(source: &str) -> Result<Vec<String>, String> {
 fn diagram(modules: &[String], operations: &[String]) -> String {
     let mut out = String::from("```mermaid\nflowchart TD\n");
     for name in modules {
-        out.push_str(&format!("    root[\"Krypper crate\"] --> m_{name}[\"{name}\"]\n"));
+        out.push_str(&format!(
+            "    root[\"Krypper crate\"] --> m_{name}[\"{name}\"]\n"
+        ));
     }
     out.push_str("    m_tools --> registry[\"Typed workspace registry\"]\n");
     for name in operations {
@@ -70,10 +87,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let (before, rest) = original.split_once(START).ok_or("missing start marker")?;
     let (_, after) = rest.split_once(END).ok_or("missing end marker")?;
-    let expected = format!("{before}{START}\n{}{END}{after}", diagram(&modules, &operations));
+    let expected = format!(
+        "{before}{START}\n{}{END}{after}",
+        diagram(&modules, &operations)
+    );
     if check {
         if original != expected {
-            return Err("README architecture is stale; run cargo run --example generate_architecture".into());
+            return Err(
+                "README architecture is stale; run cargo run --example generate_architecture"
+                    .into(),
+            );
         }
         println!("README architecture is current");
     } else if original != expected {
@@ -88,7 +111,10 @@ mod tests {
     use super::*;
     #[test]
     fn extracts_declared_modules() {
-        assert_eq!(module_names("pub mod cli;\nmod brain;\n// mod fake;\n"), vec!["cli", "brain"]);
+        assert_eq!(
+            module_names("pub mod cli;\nmod brain;\n// mod fake;\n"),
+            vec!["cli", "brain"]
+        );
     }
     #[test]
     fn rejects_missing_registry_mapping() {
