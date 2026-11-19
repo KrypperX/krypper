@@ -7,8 +7,8 @@ Model specs are **advisory metadata**, not an allowlist. An unknown model is not
 To regenerate the optional normalized JSON artifact from the pinned snapshot:
 
 ```sh
-python3 tools/generate_model_catalog.py
-python3 tools/generate_model_catalog.py --check
+cargo run --locked --example generate_model_catalog
+cargo run --locked --example generate_model_catalog -- --check
 cargo test
 ```
 
