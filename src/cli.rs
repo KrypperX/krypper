@@ -140,6 +140,7 @@ fn run_task_with_options(
     let mut resume = None;
     let mut no_config = false;
     let mut activity_jsonl = false;
+    let mut stream_events_jsonl = false;
     let mut position = 0;
     while let Some(argument) = arguments.get(position) {
         let Some(option) = argument.to_str() else {
@@ -289,6 +290,16 @@ fn run_task_with_options(
                 };
                 resume = Some(PathBuf::from(value.as_os_str()));
                 position += 1;
+            }
+            "--stream-events-jsonl" => {
+                if stream_events_jsonl {
+                    return usage_error(
+                        error,
+                        Some("task"),
+                        "--stream-events-jsonl may be provided only once",
+                    );
+                }
+                stream_events_jsonl = true;
             }
             "--activity-jsonl" => {
                 if activity_jsonl {
@@ -463,6 +474,9 @@ fn run_task_with_options(
     let mut actions_taken = 0;
     let mut turn_results = Vec::new();
     let mut paused_checkpoint = None;
+    // The emitter's sequence is scoped to this CLI invocation, not TaskSession history.
+    let mut stream_event_sequence = 1_u64;
+    let mut last_stream_positions = Vec::new();
     loop {
         let project_guidance = if model_source.is_some() {
             session
@@ -579,6 +593,36 @@ fn run_task_with_options(
         reconcile_task_state(&mut session, task_id, stop_reason)?;
         if activity_jsonl {
             crate::streaming::write_activity_positions(&session, error)?;
+        }
+        if stream_events_jsonl {
+            // Reuse the authoritative metadata-only snapshot. Do not project
+            // raw model deltas, tool arguments, or workspace observations.
+            let positions = crate::streaming::snapshot_positions(&session);
+            for position in &positions {
+                if last_stream_positions
+                    .iter()
+                    .any(|old: &crate::streaming::ActivityPosition| old == position)
+                {
+                    continue;
+                }
+                let next = stream_event_sequence
+                    .checked_add(1)
+                    .ok_or_else(|| io::Error::other("stream event sequence exhausted"))?;
+                let envelope = crate::streaming::StreamEnvelope {
+                    version: 1,
+                    sequence: stream_event_sequence,
+                    event: crate::streaming::StreamEvent::ActivityPositionUpdated {
+                        task_id: position.task_id.clone(),
+                        lifecycle_position: position.lifecycle_position,
+                        activity_position: position.activity_position,
+                    },
+                };
+                serde_json::to_writer(&mut *error, &envelope).map_err(io::Error::other)?;
+                error.write_all(b"\n")?;
+                error.flush()?;
+                stream_event_sequence = next;
+            }
+            last_stream_positions = positions;
         }
 
         if let Some(cause) = stream_error.take() {
@@ -1112,6 +1156,7 @@ fn write_task_help(output: &mut dyn Write) -> io::Result<()> {
             "  --checkpoint-out PATH write only when a completed turn reaches continue; file must be new\n",
             "  --resume PATH        restore one running task and start a fresh turn\n",
             "  --activity-jsonl    write read-only task activity positions as JSONL to stderr after each turn\n",
+            "  --stream-events-jsonl  write versioned metadata-only stream events as JSONL to stderr after each turn\n",
             "  -h, --help           show this help message and exit\n\n",
             "Without --workspace, task captures the current directory as its workspace.\n",
             "With --workspace, the selected directory is validated before task history starts;\n",

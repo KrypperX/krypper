@@ -47,6 +47,13 @@ pub enum StreamEvent {
     StreamError {
         code: String,
     },
+    /// Read-only high-water marks from the authoritative task snapshot.
+    /// Lifecycle and activity positions belong to independent histories.
+    ActivityPositionUpdated {
+        task_id: String,
+        lifecycle_position: u64,
+        activity_position: u64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,8 +70,17 @@ pub trait EventSink {
     fn send(&mut self, event: &StreamEnvelope) -> Result<(), Self::Error>;
 }
 
-/// Assigns sequence numbers only after a successful sink write.
-/// Sequence overflow is reported instead of silently wrapping.
+/// Assigns stream-local sequence numbers only after a successful sink write.
+///
+/// # Invariants
+/// - The first successfully delivered envelope has sequence 1.
+/// - A rejected delivery does not consume its sequence number; a subsequent
+///   successful delivery may reuse that number.
+/// - A failed writer can still have partially emitted bytes, so this is not
+///   an atomic-delivery, replay, or exactly-once guarantee.
+/// - Sequence overflow fails closed rather than wrapping.
+///
+/// These numbers are independent of TaskSession lifecycle/activity positions.
 pub struct StreamEmitter<S> {
     sink: S,
     next_sequence: u64,
@@ -84,6 +100,12 @@ impl<S: EventSink> StreamEmitter<S> {
         }
     }
 
+    /// Delivers an event and returns its sequence number on success.
+    ///
+    /// # Errors
+    /// Returns `SequenceExhausted` before writing when no next sequence can
+    /// be reserved, or `Sink` when the downstream consumer rejects delivery.
+    /// In either case the next sequence remains unchanged.
     pub fn emit(&mut self, event: StreamEvent) -> Result<u64, EmitError<S::Error>> {
         let next = self
             .next_sequence
@@ -101,6 +123,7 @@ impl<S: EventSink> StreamEmitter<S> {
         Ok(sequence)
     }
 
+    /// Returns the underlying sink without performing another write.
     pub fn into_inner(self) -> S {
         self.sink
     }
@@ -723,6 +746,65 @@ pub fn snapshot_positions(session: &crate::task_lifecycle::TaskSession) -> Vec<A
         .collect()
 }
 
+/// Projects existing metadata-only task positions into versioned stream events.
+///
+/// # Invariants
+/// - Only reads the authoritative TaskSession snapshot.
+/// - Lifecycle and activity high-water marks are independent.
+/// - Does not emit goals, prompts, tool arguments, paths, or secrets.
+/// - Sink failure stops projection without changing task or checkpoint state.
+/// - Stream-local sequence numbers are not history cursors or replay tokens.
+///
+/// # Errors
+/// Propagates sequence exhaustion or sink delivery failure.
+pub fn emit_activity_positions<S: EventSink>(
+    session: &crate::task_lifecycle::TaskSession,
+    emitter: &mut StreamEmitter<S>,
+) -> Result<(), EmitError<S::Error>> {
+    for position in snapshot_positions(session) {
+        emitter.emit(StreamEvent::ActivityPositionUpdated {
+            task_id: position.task_id,
+            lifecycle_position: position.lifecycle_position,
+            activity_position: position.activity_position,
+        })?;
+    }
+    Ok(())
+}
+
+/// Emits only task positions that differ from a previously observed snapshot.
+///
+/// This is a read-only *snapshot comparison*, not history replay. It does not
+/// infer missing events, combine independent histories, or create a cursor.
+/// Consumers must retain their own prior positions; no runtime state is stored.
+///
+/// A task absent from `previous` is emitted even when both positions are zero.
+/// A changed position is emitted with the existing stream-local sequence.
+/// The caller must not advance its observed snapshot after a sink failure.
+///
+/// # Errors
+/// Propagates sink failures or sequence exhaustion without mutating TaskSession.
+pub fn emit_changed_activity_positions<S: EventSink>(
+    session: &crate::task_lifecycle::TaskSession,
+    previous: &[ActivityPosition],
+    emitter: &mut StreamEmitter<S>,
+) -> Result<(), EmitError<S::Error>> {
+    for current in snapshot_positions(session) {
+        let unchanged = previous.iter().any(|old| {
+            old.task_id == current.task_id
+                && old.lifecycle_position == current.lifecycle_position
+                && old.activity_position == current.activity_position
+        });
+        if !unchanged {
+            emitter.emit(StreamEvent::ActivityPositionUpdated {
+                task_id: current.task_id,
+                lifecycle_position: current.lifecycle_position,
+                activity_position: current.activity_position,
+            })?;
+        }
+    }
+    Ok(())
+}
+
 /// A newline-delimited JSON transport for a caller-owned writer.
 ///
 /// The writer is not shared with the runtime. A failed write is surfaced to
@@ -833,6 +915,85 @@ mod tests {
             self.0.push(event.clone());
             Ok(())
         }
+    }
+
+    #[test]
+    fn activity_projection_reuses_snapshot_positions_without_mutating_session() {
+        let mut session = crate::task_lifecycle::TaskSession::new();
+        session.create_task("private goal never emitted");
+        session.create_task("another private goal");
+        let before = session.snapshot();
+        let positions = snapshot_positions(&session);
+        let mut emitter = StreamEmitter::new(RecordingSink::default());
+        emit_activity_positions(&session, &mut emitter).unwrap();
+        let events = emitter.into_inner().0;
+        assert_eq!(events.len(), positions.len());
+        for (index, (event, position)) in events.iter().zip(positions.iter()).enumerate() {
+            assert_eq!(event.version, 1);
+            assert_eq!(event.sequence, index as u64 + 1);
+            assert_eq!(
+                event.event,
+                StreamEvent::ActivityPositionUpdated {
+                    task_id: position.task_id.clone(),
+                    lifecycle_position: position.lifecycle_position,
+                    activity_position: position.activity_position,
+                }
+            );
+            let serialized = serde_json::to_string(event).unwrap();
+            assert!(!serialized.contains("private goal"));
+        }
+        assert_eq!(session.snapshot(), before);
+    }
+
+    #[test]
+    fn activity_projection_stops_on_sink_failure_without_mutating_session() {
+        let mut session = crate::task_lifecycle::TaskSession::new();
+        session.create_task("private goal");
+        let before = session.snapshot();
+        let mut emitter = StreamEmitter::new(FailingSink);
+        assert_eq!(
+            emit_activity_positions(&session, &mut emitter),
+            Err(EmitError::Sink("disconnected"))
+        );
+        assert_eq!(session.snapshot(), before);
+    }
+
+    #[test]
+    fn unchanged_snapshot_emits_no_duplicate_position_events() {
+        let mut session = crate::task_lifecycle::TaskSession::new();
+        session.create_task("private");
+        let positions = snapshot_positions(&session);
+        let mut emitter = StreamEmitter::new(RecordingSink::default());
+        emit_changed_activity_positions(&session, &positions, &mut emitter).unwrap();
+        assert!(emitter.into_inner().0.is_empty());
+    }
+
+    #[test]
+    fn new_task_position_is_emitted_even_with_zero_high_water_marks() {
+        let mut session = crate::task_lifecycle::TaskSession::new();
+        let previous = snapshot_positions(&session);
+        session.create_task("private");
+        let before = session.snapshot();
+        let mut emitter = StreamEmitter::new(RecordingSink::default());
+        emit_changed_activity_positions(&session, &previous, &mut emitter).unwrap();
+        let events = emitter.into_inner().0;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].sequence, 1);
+        assert_eq!(session.snapshot(), before);
+        assert!(!serde_json::to_string(&events).unwrap().contains("private"));
+    }
+
+    #[test]
+    fn changed_projection_failure_does_not_mutate_authoritative_snapshot() {
+        let mut session = crate::task_lifecycle::TaskSession::new();
+        session.create_task("private");
+        let before = session.snapshot();
+        let mut emitter = StreamEmitter::new(FailingSink);
+        assert_eq!(
+            emit_changed_activity_positions(&session, &[], &mut emitter),
+            Err(EmitError::Sink("disconnected"))
+        );
+        assert_eq!(session.snapshot(), before);
     }
 
     #[test]
@@ -1717,6 +1878,61 @@ mod tests {
             Err(EmitError::Sink("disconnected"))
         );
     }
+    // Simulates transient backpressure without relying on timing or threads.
+    // A failed send must not acknowledge an envelope or consume its sequence.
+    struct FailOnceSink {
+        attempts: usize,
+        delivered: Vec<StreamEnvelope>,
+    }
+
+    impl EventSink for FailOnceSink {
+        type Error = &'static str;
+
+        fn send(&mut self, event: &StreamEnvelope) -> Result<(), Self::Error> {
+            self.attempts += 1;
+            if self.attempts == 1 {
+                return Err("backpressure");
+            }
+            self.delivered.push(event.clone());
+            Ok(())
+        }
+    }
+
+    /// Regression: accepted envelopes remain contiguous after a rejected send.
+    /// This does not assert atomic writes or automatic replay by a real sink.
+    #[test]
+    fn failed_sink_delivery_does_not_advance_sequence_on_retry() {
+        let mut emitter = StreamEmitter::new(FailOnceSink {
+            attempts: 0,
+            delivered: Vec::new(),
+        });
+        assert_eq!(
+            emitter.emit(StreamEvent::ItemStarted {
+                item_id: "message".into(),
+                kind: ItemKind::Message,
+            }),
+            Err(EmitError::Sink("backpressure"))
+        );
+        assert_eq!(
+            emitter.emit(StreamEvent::ItemStarted {
+                item_id: "message".into(),
+                kind: ItemKind::Message,
+            }),
+            Ok(1)
+        );
+        assert_eq!(
+            emitter.emit(StreamEvent::ItemCompleted {
+                item_id: "message".into(),
+            }),
+            Ok(2)
+        );
+        let sink = emitter.into_inner();
+        assert_eq!(sink.attempts, 3);
+        assert_eq!(sink.delivered.len(), 2);
+        assert_eq!(sink.delivered[0].sequence, 1);
+        assert_eq!(sink.delivered[1].sequence, 2);
+    }
+
     #[test]
     fn text_sink_renders_only_public_event_content() {
         let mut emitter = StreamEmitter::new(TextSink::new(Vec::<u8>::new()));
