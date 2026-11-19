@@ -14,6 +14,16 @@ cargo build --release
 
 The executable is `target/release/krypper`. Run it from the directory you want to use as your workspace.
 
+## Commands at a glance
+
+| Command | Purpose |
+| --- | --- |
+| `krypper list [path]` | List entries in a workspace directory |
+| `krypper show <path>` | Display a UTF-8 file |
+| `krypper write <path> <text>` | Create a new file |
+| `krypper task --goal <goal> --max-actions <n>` | Run a bounded task |
+| `krypper models` | Browse the offline model catalog |
+
 ## Quick start
 
 ```sh
