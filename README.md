@@ -41,17 +41,32 @@ Task actions can also be selected by an explicitly configured model. See the [CL
 
 ## Architecture
 
+<!-- architecture:generated:start -->
 ```mermaid
 flowchart TD
-    CLI["CLI"] --> Harness["Harness / task execution"]
-    Harness --> Brain["Brain / decision source"]
-    Brain --> Providers["Model provider adapters"]
-    Harness --> Session["Core / TaskSession"]
-    Session --> Tools["Tools registry / workspace operations"]
-    Tools --> Workspace["Bounded local workspace"]
+    root["Krypper crate"] --> m_agent_loop["agent_loop"]
+    root["Krypper crate"] --> m_brain["brain"]
+    root["Krypper crate"] --> m_catalog_data["catalog_data"]
+    root["Krypper crate"] --> m_cli["cli"]
+    root["Krypper crate"] --> m_core["core"]
+    root["Krypper crate"] --> m_harness["harness"]
+    root["Krypper crate"] --> m_streaming["streaming"]
+    root["Krypper crate"] --> m_task_lifecycle["task_lifecycle"]
+    root["Krypper crate"] --> m_tools["tools"]
+    m_tools --> registry["Typed workspace registry"]
+    registry --> op_offline_cargo_test["offline_cargo_test"]
+    registry --> op_read_file["read_file"]
+    registry --> op_read_range["read_range"]
+    registry --> op_list_directory["list_directory"]
+    registry --> op_create_directory["create_directory"]
+    registry --> op_search_text["search_text"]
+    registry --> op_search_tree_text["search_tree_text"]
+    registry --> op_create_file["create_file"]
+    registry --> op_replace_text["replace_text"]
+    registry --> op_apply_patch["apply_patch"]
 ```
-
-This is a high-level view of the implemented boundaries. See [Development guide](DEVELOPMENT.md) for the detailed implementation and proposed changes.
+<!-- architecture:generated:end -->
+Generated from declared crate modules and the typed workspace operation registry. This inventory does not represent runtime call edges. Update with `cargo run --example generate_architecture`. See [Development guide](DEVELOPMENT.md) for the detailed implementation and proposed changes.
 
 ## Documentation
 
