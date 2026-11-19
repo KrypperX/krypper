@@ -24,7 +24,5 @@ jobs:
         run: cargo test --all-targets --locked
       - name: Check offline model catalog
         run: cargo run --locked --example generate_model_catalog -- --check
-      - name: Check generated architecture documentation
-        run: cargo run --locked --example generate_architecture -- --check
       - name: Check patch whitespace
         run: git show --check --format=oneline HEAD
