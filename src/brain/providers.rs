@@ -355,6 +355,24 @@ pub(crate) enum ModelProvider {
     OpenAiCompatible(OpenAiCompatibleProvider),
 }
 
+/// Provider protocol and feature support are independent of model names.
+/// A provider can remain usable through its non-streaming decision path even
+/// when no validated native SSE assembler is available.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DecisionProtocol {
+    OllamaChat,
+    GeminiGenerateContent,
+    Responses,
+    AnthropicMessages,
+    CompatibleChat,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ProviderCapabilities {
+    pub(crate) protocol: DecisionProtocol,
+    pub(crate) native_sse_decisions: bool,
+}
+
 impl ModelProvider {
     pub(crate) fn parse(name: &str) -> Option<Self> {
         match name {
@@ -370,6 +388,20 @@ impl ModelProvider {
             "zai" => Some(Self::OpenAiCompatible(OpenAiCompatibleProvider::Zai)),
             "mistral" => Some(Self::OpenAiCompatible(OpenAiCompatibleProvider::Mistral)),
             _ => None,
+        }
+    }
+
+    pub(crate) fn capabilities(self) -> ProviderCapabilities {
+        let protocol = match self {
+            Self::Ollama => DecisionProtocol::OllamaChat,
+            Self::Gemini => DecisionProtocol::GeminiGenerateContent,
+            Self::OpenAi | Self::Xai => DecisionProtocol::Responses,
+            Self::Anthropic => DecisionProtocol::AnthropicMessages,
+            Self::OpenAiCompatible(_) => DecisionProtocol::CompatibleChat,
+        };
+        ProviderCapabilities {
+            protocol,
+            native_sse_decisions: matches!(protocol, DecisionProtocol::Responses | DecisionProtocol::AnthropicMessages),
         }
     }
 
@@ -1475,6 +1507,32 @@ mod tests {
     #[test]
     fn anthropic_mismatched_event_type_never_yields_an_action() {
         assert_anthropic_stream_decision(false, false, true);
+    }
+
+    #[test]
+    fn provider_capability_registry_covers_every_cli_provider() {
+        use super::{DecisionProtocol, ModelProvider};
+        for name in [
+            "ollama", "gemini", "openai", "xai", "anthropic", "cloudflare",
+            "groq", "openrouter", "deepseek", "zai", "mistral",
+        ] {
+            let provider = ModelProvider::parse(name).expect("registered provider");
+            let capabilities = provider.capabilities();
+            assert_eq!(
+                capabilities.native_sse_decisions,
+                matches!(
+                    capabilities.protocol,
+                    DecisionProtocol::Responses | DecisionProtocol::AnthropicMessages
+                ),
+                "{name}"
+            );
+            assert_eq!(
+                capabilities.native_sse_decisions,
+                matches!(name, "openai" | "xai" | "anthropic"),
+                "{name}"
+            );
+        }
+        assert!(ModelProvider::parse("unknown-provider").is_none());
     }
 
     #[test]
