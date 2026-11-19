@@ -200,6 +200,7 @@ version = "0.1.0"
 dependencies = [
  "ignore",
  "libc",
+ "ring",
  "serde",
  "serde_json",
  "ureq",
