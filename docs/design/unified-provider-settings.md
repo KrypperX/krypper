@@ -18,6 +18,10 @@ Do not conflate the informational models.dev snapshot with an allowlist of usabl
 
 **Do not create a second execution engine or duplicate provider adapters.** Refactor current provider construction into one reusable resolver/factory used by CLI and future TUI.
 
+## Scope boundary
+
+The product's complete future feature set is **not yet decided**. Implement only the shared integration foundations needed by existing CLI/config/provider paths. Avoid overengineering for imagined TUI workflows, speculative routing strategies, or unrequested features. Future TUI design and feature prioritization require a separate product decision.
+
 ## Proposed work packages (implementation PRs)
 
 ### A. Provider descriptor and adapter registry
@@ -39,11 +43,11 @@ Do not conflate the informational models.dev snapshot with an allowlist of usabl
 - Add priority/fallback or health-aware strategies **only** alongside tested implementations; avoid advertising nonfunctional options.
 - Maintain execution budgets, existing tool permissions and harness safety checks on all paths. No hidden provider switching.
 
-### D. TUI integration contract
-- Define a settings service/API used by both TUI and config-file editing, with read, validate, list supported providers/models, register credential reference, select profile, and save operations.
-- The TUI is a presentation layer, not a second state store.
-- Display only shipped capabilities; allow selection of models supported by the adapter, with catalog metadata as hints.
-- TUI delivery can be a separate PR; the service must be usable headlessly first.
+### D. UI-neutral integration boundary (no TUI development)
+- Keep configuration read/validate/resolve logic independent of CLI presentation so future interfaces can reuse it.
+- Expose only the minimal typed settings and registry query interfaces required by the current CLI/config use cases; avoid speculative UI APIs, settings screens, navigation or feature inventories.
+- Treat the config file as the single persisted source of truth; future TUI design is deliberately undecided.
+- Do not implement a TUI, TUI-specific state, UI framework, or unused UI abstractions.
 
 ## Example (illustrative only; NOT an implemented schema)
 
@@ -68,13 +72,13 @@ router = "explicit"
 3. Unknown provider/adapter/router IDs fail validation; known provider with user API credential succeeds without source changes.
 4. A catalog miss does not automatically make an otherwise valid model ID unusable.
 5. No secret values appear in logs, errors, snapshots, or serialized config.
-6. Both future TUI and direct config editing produce identical validated runtime configuration.
+6. The shared resolver produces the same validated runtime configuration regardless of its future caller; no TUI implementation is required now.
 7. Existing harness budgets, permissions, error handling and recovery behavior remain intact.
 8. Add unit tests for schema migrations, precedence, registration, adapter dispatch and invalid combinations; run formatting, tests and CI.
 
 ## Out of scope for this design PR
 
-- No implementation of a TUI or runtime registry in this PR.
+- No implementation of a TUI or runtime registry in this design PR; no TUI implementation is included in the current development scope.
 - No new provider integration, auto-selection algorithm, secret-storage backend, or arbitrary third-party adapter loading.
 - No change to current default routing behavior.
 
@@ -83,6 +87,6 @@ router = "explicit"
 1. Registry descriptors and factory extraction (A).
 2. Shared configuration schema, validation, credential references and migration (B).
 3. Explicit router registry, then optional new strategies (C).
-4. Shared settings service and TUI screen (D).
+4. Keep a minimal UI-neutral boundary that future interfaces can call (D); defer all TUI feature and screen planning.
 
 Each implementation PR should include passing exact-head CI and a focused migration/compatibility review before merge.
