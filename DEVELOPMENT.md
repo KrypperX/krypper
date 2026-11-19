@@ -244,9 +244,26 @@ system.
 The `src/streaming.rs` module defines a versioned presentation envelope,
 fallible synchronous event sink, stream-local sequence counter, and JSONL
 writer adapter. It does **not** subscribe to the runtime or expose a CLI flag.
-No provider currently emits model deltas through this module. It must not be
-advertised as end-to-end streaming until those integrations are implemented
-and tested.
+OpenAI Responses, xAI Responses, and Anthropic Messages have opt-in native
+SSE decision-source paths (via `KRYPPER_RESPONSES_STREAM` for OpenAI/xAI and
+`KRYPPER_ANTHROPIC_STREAM` for Anthropic). These paths assemble and validate
+one complete tool action before returning it; they do not execute the action.
+Their text-delta callbacks are internal and the normal `choose` entry point
+discards text deltas. Therefore this is **not** end-to-end CLI streaming.
+
+All other configured decision sources (Gemini, Ollama, and the
+OpenAI-compatible chat-completions providers Cloudflare Workers AI, Groq,
+OpenRouter, DeepSeek, Z.AI, and Mistral) continue using their existing
+non-streaming requests and parsers. Setting either SSE opt-in variable does
+not enable native streaming for these providers. Do not silently switch
+their tool-call protocol to an incompatible SSE parser.
+
+Offline local-HTTP integration fixtures exercise successful completion,
+truncated streams, and malformed events. Equivalent successful tool calls
+are checked against the non-streaming action parsers for OpenAI, xAI, and
+Anthropic. These fixtures do not prove live provider interoperability or
+CLI rendering. Keep end-to-end streaming claims deferred until runtime
+integration and provider smoke tests are completed.
 
 Stream sequence numbers are scoped to a single emitter, not to the persisted
 TaskSession lifecycle or activity histories. The independent lifecycle and
