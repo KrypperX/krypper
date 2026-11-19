@@ -53,7 +53,8 @@ pub enum StreamEvent {
         task_id: String,
         lifecycle_position: u64,
         activity_position: u64,
-    },}
+    },
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -896,11 +897,14 @@ mod tests {
         for (index, (event, position)) in events.iter().zip(positions.iter()).enumerate() {
             assert_eq!(event.version, 1);
             assert_eq!(event.sequence, index as u64 + 1);
-            assert_eq!(event.event, StreamEvent::ActivityPositionUpdated {
-                task_id: position.task_id.clone(),
-                lifecycle_position: position.lifecycle_position,
-                activity_position: position.activity_position,
-            });
+            assert_eq!(
+                event.event,
+                StreamEvent::ActivityPositionUpdated {
+                    task_id: position.task_id.clone(),
+                    lifecycle_position: position.lifecycle_position,
+                    activity_position: position.activity_position,
+                }
+            );
             let serialized = serde_json::to_string(event).unwrap();
             assert!(!serialized.contains("private goal"));
         }
