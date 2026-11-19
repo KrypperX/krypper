@@ -1,3 +1,21 @@
+#[test]
+fn responses_streaming_request_preserves_decision_payload() {
+    let request = json!({
+        "model": "gpt-test",
+        "input": "inspect workspace",
+        "tools": [{"type": "function", "name": "inspect"}],
+        "stream": false
+    });
+    let bytes = serde_json::to_vec(&request).expect("serialize request");
+    let result = enable_responses_streaming(&bytes).expect("enable SSE");
+    let converted: Value = serde_json::from_slice(&result).expect("parse converted request");
+    assert_eq!(converted["stream"], true);
+    assert_eq!(converted["model"], request["model"]);
+    assert_eq!(converted["input"], request["input"]);
+    assert_eq!(converted["tools"], request["tools"]);
+    assert_eq!(request["stream"], false);
+}
+
 use super::*;
 use crate::agent_loop::{
     run_goal_turn_with_budget, BoundedDecisionSource, GoalTurnError, GoalTurnResult,

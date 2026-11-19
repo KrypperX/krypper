@@ -6,6 +6,7 @@ mod brain;
 pub mod cli;
 pub mod core;
 pub mod harness;
+pub mod streaming;
 pub mod task_lifecycle;
 pub(crate) mod tools;
 

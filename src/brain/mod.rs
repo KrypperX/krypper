@@ -750,6 +750,112 @@ fn post_chat(agent: &Agent, address: SocketAddr, body: &[u8]) -> Result<Vec<u8>,
     Ok(body)
 }
 
+/// Opt-in SSE transport for hosted providers. This does not change the
+/// authoritative non-streaming decision path or authorize workspace actions.
+#[allow(dead_code)]
+fn post_hosted_sse<F>(
+    agent: &Agent,
+    provider: ModelProvider,
+    endpoint: &str,
+    api_key: &str,
+    body: &[u8],
+    on_frame: F,
+) -> Result<(), ModelError>
+where
+    F: FnMut(crate::streaming::SseFrame) -> Result<(), ModelError>,
+{
+    if body.len() > MAX_MODEL_REQUEST_BYTES {
+        return Err(ModelError::RequestTooLarge);
+    }
+    let authorization = format!("Bearer {api_key}");
+    let request = agent
+        .post(endpoint)
+        .header("Content-Type", "application/json")
+        .header("Accept", "text/event-stream");
+    let request = if provider == ModelProvider::Anthropic {
+        request
+            .header("x-api-key", api_key)
+            .header("anthropic-version", providers::ANTHROPIC_API_VERSION)
+    } else {
+        request.header("Authorization", &authorization)
+    };
+    let response = request.send(body).map_err(|error| match error {
+        ureq::Error::StatusCode(status) => ModelError::ProviderHttpStatus(provider, status),
+        _ => ModelError::ProviderTransport(provider),
+    })?;
+    let mut response_body = response.into_body();
+    let mut reader = response_body.as_reader();
+    crate::streaming::consume_sse(&mut reader, MAX_MODEL_RESPONSE_BYTES, on_frame).map_err(
+        |error| match error {
+            crate::streaming::SseReadError::Io(_) => ModelError::ProviderTransport(provider),
+            crate::streaming::SseReadError::Decode(
+                crate::streaming::SseDecodeError::FrameTooLarge,
+            ) => ModelError::ProviderResponseTooLarge(provider),
+            crate::streaming::SseReadError::Decode(_) => ModelError::ProviderInvalidJson(provider),
+            crate::streaming::SseReadError::Consumer(error) => error,
+        },
+    )
+}
+
+/** Forward only recognized provider text deltas to a presentation consumer.
+ *
+ * This opt-in path never interprets tool arguments as executable actions.
+ * The decision source continues to use its existing authoritative response.
+ */
+#[allow(dead_code)]
+fn post_hosted_text_stream<F>(
+    agent: &Agent,
+    provider: ModelProvider,
+    endpoint: &str,
+    api_key: &str,
+    body: &[u8],
+    mut on_text: F,
+) -> Result<(), ModelError>
+where
+    F: FnMut(String) -> Result<(), ModelError>,
+{
+    post_hosted_sse(agent, provider, endpoint, api_key, body, |frame| {
+        if let Some(text) = crate::streaming::provider_text_delta(&frame) {
+            on_text(text)?;
+        }
+        Ok(())
+    })
+}
+
+/// Preserve the decision request while enabling provider-native SSE transport.
+#[allow(dead_code)]
+fn enable_responses_streaming(request: &[u8]) -> Result<Vec<u8>, ModelError> {
+    let mut body: Value = serde_json::from_slice(request)
+        .map_err(|error| ModelError::Transport(error.to_string()))?;
+    body["stream"] = Value::Bool(true);
+    encode_model_request(&body)
+}
+
+/// Opt-in Responses streaming transport. The caller owns presentation and
+/// cancellation; this path never authorizes actions or mutates task lifecycle.
+#[allow(dead_code)]
+fn post_responses_text_stream<F>(
+    agent: &Agent,
+    provider: ModelProvider,
+    endpoint: &str,
+    api_key: &str,
+    request: &[u8],
+    on_text: F,
+) -> Result<(), ModelError>
+where
+    F: FnMut(String) -> Result<(), ModelError>,
+{
+    let streaming_request = enable_responses_streaming(request)?;
+    post_hosted_text_stream(
+        agent,
+        provider,
+        endpoint,
+        api_key,
+        &streaming_request,
+        on_text,
+    )
+}
+
 fn post_hosted(
     agent: &Agent,
     provider: ModelProvider,

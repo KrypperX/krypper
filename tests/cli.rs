@@ -3100,3 +3100,50 @@ fn task_without_a_config_file_stays_caller_directed() {
     assert!(stdout(&output).contains("Task outcome: succeeded"));
     assert!(!stderr(&output).contains("using model"));
 }
+
+#[test]
+fn task_activity_jsonl_emits_metadata_without_goal_or_action_text() {
+    let directory = TempDir::new();
+    let missing = directory.path().join("absent.toml");
+    let output = task_command_with_config(
+        &directory,
+        &missing,
+        &[
+            "task",
+            "--goal",
+            "private-goal-sentinel",
+            "--max-actions",
+            "1",
+            "--activity-jsonl",
+        ],
+    )
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .and_then(|mut child| {
+        child.stdin.take().unwrap().write_all(b"complete done\n")?;
+        child.wait_with_output()
+    })
+    .expect("run task with activity JSONL");
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let activity = stderr(&output);
+    assert!(!activity.contains("private-goal-sentinel"), "{activity}");
+    assert!(!activity.contains("complete done"), "{activity}");
+    let records: Vec<serde_json::Value> = activity
+        .lines()
+        .filter(|line| line.starts_with('{'))
+        .map(|line| serde_json::from_str(line).expect("valid activity JSONL"))
+        .collect();
+    assert!(
+        !records.is_empty(),
+        "expected activity JSONL on stderr; actual stderr: {activity:?}; stdout: {:?}",
+        stdout(&output)
+    );
+    for record in records {
+        assert!(record["task_id"].is_string());
+        assert!(record["lifecycle_position"].is_u64());
+        assert!(record["activity_position"].is_u64());
+    }
+}
