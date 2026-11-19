@@ -1260,6 +1260,21 @@ mod tests {
             .choose_with_streaming("read README", &[], None, true)
             .expect("completed stream produces validated action");
         assert!(matches!(action, WorkspaceAction::ReadFile { .. }));
+        let response = serde_json::json!({
+            "status": "completed",
+            "output": [{
+                "type": "function_call",
+                "call_id": "call_a",
+                "name": "read_file",
+                "arguments": r#"{"path":"README.md"}"#
+            }]
+        });
+        let nonstreamed = super::parse_responses_response(
+            response.to_string().as_bytes(),
+            provider.model_provider(),
+        )
+        .expect("equivalent non-streaming decision");
+        assert_eq!(format!("{action:?}"), format!("{nonstreamed:?}"));
         server.join().expect("server completed");
     }
 
