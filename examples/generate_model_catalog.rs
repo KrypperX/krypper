@@ -141,12 +141,29 @@ fn run() -> Result<(), String> {
     let output = generate(&source, &metadata)?;
     let target = root.join("src/catalog_data.json");
     if check {
-        if fs::read(&target).map_err(|error| error.to_string())? != output {
-            return Err(
-                "Catalog out of date: rerun cargo run --example generate_model_catalog".into(),
-            );
+        // The normalized JSON is optional and is not checked into this repo.
+        // Validate the generated records against the authoritative Rust reader.
+        let generated: Vec<Value> =
+            serde_json::from_slice(&output).map_err(|error| error.to_string())?;
+        let runtime = krypper::catalog_data::models().map_err(|error| error.to_string())?;
+        if generated.len() != runtime.len() {
+            return Err("Catalog record count differs from the Rust runtime".into());
         }
-        println!("Catalog verified");
+        for (record, model) in generated.iter().zip(runtime.iter()) {
+            if record["provider"] != model.provider
+                || record["id"] != model.id
+                || record["name"] != model.name
+                || record["context_window"].as_u64() != model.context_window
+                || record["max_output_tokens"].as_u64() != model.max_output_tokens
+                || record["tool_calling"].as_bool() != model.tool_calling
+                || record["reasoning"].as_bool() != model.reasoning
+                || record["modalities"] != model.modalities
+                || record["status"].as_str() != model.status.as_deref()
+            {
+                return Err("Catalog differs from the Rust runtime".into());
+            }
+        }
+        println!("Verified {} catalog records", generated.len());
     } else {
         fs::write(target, output).map_err(|error| error.to_string())?;
         println!("Catalog generated");
