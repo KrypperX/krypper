@@ -227,7 +227,7 @@ fn help_prints_usage_and_succeeds() {
     let output = run(None, &["--help"]);
     assert!(output.status.success());
     assert!(stdout(&output).contains("usage: krypper"));
-    assert!(stdout(&output).contains("{show,list,write,task}"));
+    assert!(stdout(&output).contains("{show,list,write,task,models}"));
 }
 
 #[test]
@@ -235,7 +235,7 @@ fn missing_command_prints_usage_and_fails() {
     let output = run(None, &[]);
     assert_eq!(output.status.code(), Some(2));
     assert!(stderr(&output).contains("usage: krypper"));
-    assert!(stderr(&output).contains("{show,list,write,task}"));
+    assert!(stderr(&output).contains("{show,list,write,task,models}"));
 }
 
 #[test]
