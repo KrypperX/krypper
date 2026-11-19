@@ -1424,7 +1424,20 @@ mod tests {
         if truncated || duplicate_stop || mismatched_type {
             assert!(result.is_err(), "invalid stream must not yield an action");
         } else {
-            assert!(matches!(result, Ok(WorkspaceAction::ReadFile { .. })));
+            let streamed = result.expect("valid Anthropic SSE decision");
+            assert!(matches!(streamed, WorkspaceAction::ReadFile { .. }));
+            let response = json!({
+                "stop_reason": "tool_use",
+                "content": [{
+                    "type": "tool_use",
+                    "id": "tool_1",
+                    "name": "read_file",
+                    "input": {"path": "README.md"}
+                }]
+            });
+            let nonstreamed = super::parse_anthropic_response(response.to_string().as_bytes())
+                .expect("equivalent non-streaming decision");
+            assert_eq!(format!("{streamed:?}"), format!("{nonstreamed:?}"));
         }
         server.join().expect("server");
     }
