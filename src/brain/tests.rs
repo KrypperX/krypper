@@ -365,13 +365,9 @@ fn symlink_edit_target_is_rejected_without_touching_its_target() {
         decisions: Vec::new(),
     };
 
-    let result = run_goal_turn_with_budget(&mut session, task_id, turn_id, goal, 2, &mut source)
-        .expect("record the existing safe symlink rejection");
-    assert_eq!(result.stop_reason(), GoalTurnStopReason::ActionFailed);
-    assert!(matches!(
-        result.outcome(),
-        Some(TurnOutcome::Failure { .. })
-    ));
+    let error = run_goal_turn_with_budget(&mut session, task_id, turn_id, goal, 2, &mut source)
+        .expect_err("unsafe symlink target must fail guidance preflight before mutation");
+    assert!(format!("{error:?}").contains("Symlink"));
     assert_eq!(source.decisions.len(), 1);
     assert!(workspace.join("src/generated.rs").is_symlink());
     assert_eq!(
@@ -1543,10 +1539,10 @@ fn contradictory_reflection_cannot_override_failure_or_bypass_tools() {
         )),
     ]);
     let mut brain = OllamaDecisionSource::with_endpoint("fixture-model", 3, address);
-    let plan = brain
+    let error = brain
         .create_reflective_plan(&session, &prior_result, "use the prior record", &[], 3)
-        .expect("create bounded proposal despite contradictory reflection");
-    assert_eq!(plan.operations().len(), 1);
+        .expect_err("unsafe reflective proposal must fail guidance preflight");
+    assert!(format!("{error:?}").contains("InvalidTargetPath"));
     assert_eq!(
         session.get_task(task_id).expect("task exists").state(),
         prior_task_state
@@ -1592,47 +1588,7 @@ fn contradictory_reflection_cannot_override_failure_or_bypass_tools() {
     assert!(proposal_prompt.contains("outcome: failure"));
     assert!(proposal_prompt.contains("untrusted advisory"));
 
-    let next_turn_id = {
-        let task = session.get_task_mut(task_id).expect("task exists");
-        let turn_id = task.create_turn().expect("create follow-up turn");
-        task.transition_turn(turn_id, TurnState::Running)
-            .expect("start follow-up turn");
-        turn_id
-    };
-    let mut control =
-        |_: &str, _: &[crate::agent_loop::WorkspaceObservation]| WorkspaceAction::Complete {
-            result: "must not run after denial".to_owned(),
-        };
-    let next_result = run_goal_turn_with_plan(
-        &mut session,
-        task_id,
-        next_turn_id,
-        "use the prior record",
-        3,
-        Ok(plan),
-        &mut control,
-    )
-    .expect("Tools denial is recorded by Harness");
-    assert_eq!(next_result.actions_taken(), 1);
-    assert!(next_result.actions_taken() <= 3);
-    assert_eq!(next_result.stop_reason(), GoalTurnStopReason::ActionFailed);
-    assert!(matches!(
-        next_result.outcome(),
-        Some(TurnOutcome::Failure { .. })
-    ));
-    assert_eq!(
-        fs::read_to_string(&outside_file).expect("read outside sentinel"),
-        "unchanged"
-    );
-    assert_eq!(
-        session
-            .get_task(task_id)
-            .expect("task exists")
-            .get_turn(prior_turn_id)
-            .expect("prior turn exists")
-            .outcome(),
-        prior_outcome.as_ref()
-    );
+
 }
 
 #[test]
