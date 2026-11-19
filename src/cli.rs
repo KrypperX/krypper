@@ -605,9 +605,9 @@ fn run_task_with_options(
                 {
                     continue;
                 }
-                let next = stream_event_sequence.checked_add(1).ok_or_else(|| {
-                    io::Error::other("stream event sequence exhausted")
-                })?;
+                let next = stream_event_sequence
+                    .checked_add(1)
+                    .ok_or_else(|| io::Error::other("stream event sequence exhausted"))?;
                 let envelope = crate::streaming::StreamEnvelope {
                     version: 1,
                     sequence: stream_event_sequence,
