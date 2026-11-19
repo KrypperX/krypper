@@ -42,6 +42,8 @@ impl EventSink for FailOnceSink {
 /// This does not assert atomic writes or automatic replay by a real sink.
 mod events;
 mod projection;
+mod provider;
 mod responses;
 mod sink;
 mod sse;
+mod sse_reader;
