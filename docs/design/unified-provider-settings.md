@@ -16,7 +16,7 @@ Do not conflate the informational models.dev snapshot with an allowlist of usabl
 - `src/cli/config.rs`: model/provider defaults from user configuration.
 - `src/harness/execution.rs`: existing decision-source abstraction and task safety boundary.
 
-**Do not create a second execution engine or duplicate provider adapters.** Refactor current provider construction into one reusable resolver/factory used by CLI and future TUI.
+**Do not create a second execution engine or duplicate provider adapters.** Refactor current provider construction into one reusable resolver/factory used by the existing CLI/config paths; future interfaces may reuse it without a UI dependency.
 
 ## Scope boundary
 
@@ -31,16 +31,16 @@ The product's complete future feature set is **not yet decided**. Implement only
 
 ### B. Versioned central configuration
 - Extend the existing configuration parser, preserving currently supported `model` / `provider` settings and CLI precedence.
-- Define versioned schema for named provider registrations, selected model, adapter defaults and an optional routing profile.
+- Define the smallest compatible schema needed for named provider registrations, selected model and explicit provider selection. Defer adapter defaults and routing profiles until concrete use cases require them.
 - A registration references a supported provider ID and a credential source; it does not add a new provider implementation.
 - Validate unknown fields/IDs, incompatible settings, duplicate registrations and missing required credentials before applying.
-- Use safe atomic writes, restrictive permissions, and deterministic precedence: CLI override > selected profile > defaults (document exact migration).
+- If programmatic config writes are introduced, use atomic writes and restrictive permissions. Preserve current CLI-over-config precedence; add profiles or migration only if required by the implemented scope.
 - Keep secrets out of committed config and logs; use environment variable references or OS secret storage where available. Never echo secret values in diagnostics.
 
 ### C. Router strategy registry
 - Preserve current explicit provider selection as the default behavior.
 - Introduce strategy identifiers only for implemented strategies; begin with explicit/manual selection.
-- Add priority/fallback or health-aware strategies **only** alongside tested implementations; avoid advertising nonfunctional options.
+- Defer priority/fallback, health-aware, cost-aware and automatic routing entirely until separately approved and implemented.
 - Maintain execution budgets, existing tool permissions and harness safety checks on all paths. No hidden provider switching.
 
 ### D. UI-neutral integration boundary (no TUI development)
@@ -53,16 +53,9 @@ The product's complete future feature set is **not yet decided**. Implement only
 
 ```toml
 version = 1
-active_profile = "work"
-
-[registrations.work-openai]
 provider = "openai"
-credential_env = "OPENAI_API_KEY"
-
-[profiles.work]
-registration = "work-openai"
 model = "example-model"
-router = "explicit"
+credential_env = "OPENAI_API_KEY"
 ```
 
 ## Compatibility and acceptance tests
@@ -74,7 +67,7 @@ router = "explicit"
 5. No secret values appear in logs, errors, snapshots, or serialized config.
 6. The shared resolver produces the same validated runtime configuration regardless of its future caller; no TUI implementation is required now.
 7. Existing harness budgets, permissions, error handling and recovery behavior remain intact.
-8. Add unit tests for schema migrations, precedence, registration, adapter dispatch and invalid combinations; run formatting, tests and CI.
+8. Add unit tests for backward compatibility, precedence, registration, adapter dispatch and invalid combinations; run formatting, tests and CI.
 
 ## Out of scope for this design PR
 
@@ -86,7 +79,7 @@ router = "explicit"
 
 1. Registry descriptors and factory extraction (A).
 2. Shared configuration schema, validation, credential references and migration (B).
-3. Explicit router registry, then optional new strategies (C).
+3. Reuse existing explicit routing through the shared resolver; do not add unused strategies (C).
 4. Keep a minimal UI-neutral boundary that future interfaces can call (D); defer all TUI feature and screen planning.
 
 Each implementation PR should include passing exact-head CI and a focused migration/compatibility review before merge.
