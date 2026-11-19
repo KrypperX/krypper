@@ -41,6 +41,24 @@ Task actions can also be selected by an explicitly configured model. See the [CL
 
 ## Architecture
 
+The diagram below shows the **conceptual flow** of a Krypper task. It is a high-level guide, not a generated runtime call graph.
+
+```mermaid
+flowchart LR
+    User["User / CLI"] --> Harness["Agent harness"]
+    Harness --> Brain["Decision engine"]
+    Brain <--> Models["Model providers"]
+    Harness --> Tools["Typed tool registry"]
+    Tools --> Workspace["Workspace operations"]
+    Workspace --> Harness
+    Harness --> Result["Result / feedback"]
+```
+
+<details>
+<summary>View generated module and workspace-operation inventory</summary>
+
+The following inventory is generated from Rust declarations and checked by CI; its arrows indicate membership, not runtime execution.
+
 <!-- architecture:generated:start -->
 ```mermaid
 flowchart TD
@@ -66,6 +84,8 @@ flowchart TD
     registry --> op_apply_patch["apply_patch"]
 ```
 <!-- architecture:generated:end -->
+
+</details>
 Generated from declared crate modules and the typed workspace operation registry. This inventory does not represent runtime call edges. Update with `cargo run --example generate_architecture`. See [Development guide](DEVELOPMENT.md) for the detailed implementation and proposed changes.
 
 ## Documentation
