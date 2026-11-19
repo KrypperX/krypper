@@ -293,7 +293,11 @@ fn run_task_with_options(
             }
             "--stream-events-jsonl" => {
                 if stream_events_jsonl {
-                    return usage_error(error, Some("task"), "--stream-events-jsonl may be provided only once");
+                    return usage_error(
+                        error,
+                        Some("task"),
+                        "--stream-events-jsonl may be provided only once",
+                    );
                 }
                 stream_events_jsonl = true;
             }
@@ -595,7 +599,10 @@ fn run_task_with_options(
             // raw model deltas, tool arguments, or workspace observations.
             let positions = crate::streaming::snapshot_positions(&session);
             for position in &positions {
-                if last_stream_positions.iter().any(|old: &crate::streaming::ActivityPosition| old == position) {
+                if last_stream_positions
+                    .iter()
+                    .any(|old: &crate::streaming::ActivityPosition| old == position)
+                {
                     continue;
                 }
                 let next = stream_event_sequence.checked_add(1).ok_or_else(|| {
@@ -610,7 +617,7 @@ fn run_task_with_options(
                         activity_position: position.activity_position,
                     },
                 };
-                serde_json::to_writer(&mut *error, &envelope)?;
+                serde_json::to_writer(&mut *error, &envelope).map_err(io::Error::other)?;
                 error.write_all(b"\n")?;
                 error.flush()?;
                 stream_event_sequence = next;
