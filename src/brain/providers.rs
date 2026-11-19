@@ -1299,9 +1299,8 @@ mod tests {
     }
 
     /// A transport that closes before response.completed must never yield an action.
-    #[test]
-    fn responses_stream_rejects_truncated_tool_call() {
-        use super::{ResponsesDecisionSource, ResponsesProvider};
+    fn assert_responses_stream_rejects_truncated_tool_call(provider: super::ResponsesProvider) {
+        use super::ResponsesDecisionSource;
         use std::io::{Read, Write};
         use std::net::TcpListener;
         use std::time::Duration;
@@ -1333,7 +1332,7 @@ mod tests {
         });
         let mut source = ResponsesDecisionSource::with_endpoint(
             "test-model",
-            ResponsesProvider::OpenAi,
+            provider,
             "local-test-key",
             2,
             endpoint,
@@ -1342,6 +1341,16 @@ mod tests {
             .choose_with_streaming("read README", &[], None, true)
             .is_err());
         server.join().expect("server completed");
+    }
+
+    #[test]
+    fn openai_responses_stream_rejects_truncated_tool_call() {
+        assert_responses_stream_rejects_truncated_tool_call(super::ResponsesProvider::OpenAi);
+    }
+
+    #[test]
+    fn xai_responses_stream_rejects_truncated_tool_call() {
+        assert_responses_stream_rejects_truncated_tool_call(super::ResponsesProvider::Xai);
     }
 
     fn assert_anthropic_stream_decision(
