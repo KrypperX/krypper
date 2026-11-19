@@ -157,7 +157,7 @@ fn run() -> Result<(), String> {
                 || record["max_output_tokens"].as_u64() != model.max_output_tokens
                 || record["tool_calling"].as_bool() != model.tool_calling
                 || record["reasoning"].as_bool() != model.reasoning
-                || record.get("modalities") != model.modalities.as_ref()
+                || record["modalities"] != model.modalities.clone().unwrap_or(Value::Null)
                 || record["status"].as_str() != model.status.as_deref()
             {
                 return Err("Catalog differs from the Rust runtime".into());
