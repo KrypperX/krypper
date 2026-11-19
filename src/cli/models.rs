@@ -50,12 +50,14 @@ pub(super) fn run(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -
     if json {
         let values: Vec<_> = selected
             .iter()
-            .map(|m| serde_json::json!({
-            "provider": m.provider, "id": m.id, "name": m.name,
-            "context_window": m.context_window, "max_output_tokens": m.max_output_tokens,
-            "tool_calling": m.tool_calling, "reasoning": m.reasoning,
-            "modalities": m.modalities, "status": m.status
-            }))
+            .map(|m| {
+                serde_json::json!({
+                "provider": m.provider, "id": m.id, "name": m.name,
+                "context_window": m.context_window, "max_output_tokens": m.max_output_tokens,
+                "tool_calling": m.tool_calling, "reasoning": m.reasoning,
+                "modalities": m.modalities, "status": m.status
+                })
+            })
             .collect();
         serde_json::to_writer_pretty(&mut *out, &values)?;
         writeln!(out)?;
@@ -64,9 +66,12 @@ pub(super) fn run(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -
             writeln!(
                 out,
                 "{}\t{}\t{}\tcontext={}\toutput={}\ttools={}\treasoning={}",
-                m.provider, m.id, m.name,
+                m.provider,
+                m.id,
+                m.name,
                 m.context_window.map_or("?".to_owned(), |v| v.to_string()),
-                m.max_output_tokens.map_or("?".to_owned(), |v| v.to_string()),
+                m.max_output_tokens
+                    .map_or("?".to_owned(), |v| v.to_string()),
                 m.tool_calling.map_or("?".to_owned(), |v| v.to_string()),
                 m.reasoning.map_or("?".to_owned(), |v| v.to_string())
             )?;

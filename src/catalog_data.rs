@@ -27,12 +27,23 @@ pub fn models() -> Result<Vec<ModelSpec>, serde_json::Error> {
                     result.push(ModelSpec {
                         provider: provider_id.clone(),
                         id: model_id.clone(),
-                        name: model.get("name").and_then(Value::as_str).unwrap_or(model_id).to_owned(),
-                        context_window: limits.and_then(|v| v.get("context")).and_then(Value::as_u64),
-                        max_output_tokens: limits.and_then(|v| v.get("output")).and_then(Value::as_u64),
+                        name: model
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or(model_id)
+                            .to_owned(),
+                        context_window: limits
+                            .and_then(|v| v.get("context"))
+                            .and_then(Value::as_u64),
+                        max_output_tokens: limits
+                            .and_then(|v| v.get("output"))
+                            .and_then(Value::as_u64),
                         tool_calling: model.get("tool_call").and_then(Value::as_bool),
                         reasoning: model.get("reasoning").and_then(Value::as_bool),
-                        status: model.get("status").and_then(Value::as_str).map(str::to_owned),
+                        status: model
+                            .get("status")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
                         modalities: model.get("modalities").cloned(),
                     });
                 }
@@ -45,7 +56,9 @@ pub fn models() -> Result<Vec<ModelSpec>, serde_json::Error> {
 
 /// Unknown models are not rejected; the catalog is descriptive, not restrictive.
 pub fn lookup(provider: &str, model_id: &str) -> Result<Option<ModelSpec>, serde_json::Error> {
-    Ok(models()?.into_iter().find(|m| m.provider == provider && m.id == model_id))
+    Ok(models()?
+        .into_iter()
+        .find(|m| m.provider == provider && m.id == model_id))
 }
 
 #[cfg(test)]
@@ -55,10 +68,14 @@ mod tests {
     fn snapshot_has_models() {
         let all = models().expect("valid vendored JSON");
         assert!(!all.is_empty());
-        assert!(all.windows(2).all(|w| (&w[0].provider, &w[0].id) <= (&w[1].provider, &w[1].id)));
+        assert!(all
+            .windows(2)
+            .all(|w| (&w[0].provider, &w[0].id) <= (&w[1].provider, &w[1].id)));
     }
     #[test]
     fn unknown_model_is_not_an_error() {
-        assert!(lookup("unknown-provider", "custom-model").unwrap().is_none());
+        assert!(lookup("unknown-provider", "custom-model")
+            .unwrap()
+            .is_none());
     }
 }
