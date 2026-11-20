@@ -77,6 +77,59 @@ mod extension_gate_tests {
     }
 
     #[test]
+    fn authorized_extension_invokes_executor_once_and_revocation_blocks_it() {
+        let task_id = Uuid::new_v4();
+        let grant = CapabilityGrant {
+            task_id,
+            namespace: "external".into(),
+            operation: "read".into(),
+            effect: ExtensionEffect::ReadWorkspace,
+            generation: 4,
+            host_approved: false,
+        };
+        let tools = [ExtensionTool {
+            descriptor: ExtensionDescriptor {
+                version: EXTENSION_CONTRACT_VERSION,
+                namespace: "external",
+                name: "read",
+                effect: ExtensionEffect::ReadWorkspace,
+                authority: ExtensionAuthority::Task,
+            },
+            description: "Read",
+            parameters: json!({"type":"object","properties":{}}),
+            grant: &grant,
+        }];
+        let context = CapabilityContext {
+            task_id,
+            generation: 4,
+            task_authorized: true,
+        };
+        let mut executions = 0;
+        let result = super::dispatch_authorized_extension(&tools, context, "external_read", || {
+            executions += 1;
+            "executed"
+        });
+        assert_eq!(result, Ok("executed"));
+        assert_eq!(executions, 1);
+
+        let revoked = CapabilityContext {
+            generation: 5,
+            ..context
+        };
+        let denied = super::dispatch_authorized_extension(
+            &tools,
+            revoked,
+            "external_read",
+            || {
+                executions += 1;
+                "must not execute"
+            },
+        );
+        assert_eq!(denied, Err(BridgeError::Denied(CapabilityDenial::StaleGrant)));
+        assert_eq!(executions, 1);
+    }
+
+    #[test]
     fn harness_rechecks_task_and_grant_before_extension_dispatch() {
         let task_id = Uuid::new_v4();
         let grant = CapabilityGrant {
