@@ -137,13 +137,7 @@ pub(crate) fn dispatch_registered_extension_with_arguments<T>(
             grant: entry.tool.grant,
         })
         .collect::<Vec<_>>();
-    dispatch_authorized_extension_with_arguments(
-        &tools,
-        context,
-        name,
-        arguments,
-        selected.execute,
-    )
+    dispatch_authorized_extension_with_arguments(&tools, context, name, arguments, selected.execute)
 }
 
 /// A host-owned handler that receives validated model arguments.
