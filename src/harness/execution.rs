@@ -390,17 +390,34 @@ mod extension_gate_tests {
                 arguments,
             )
         };
-        assert_eq!(dispatch(context, &json!({"path": "notes.txt"})), Ok("notes.txt".into()));
+        assert_eq!(
+            dispatch(context, &json!({"path": "notes.txt"})),
+            Ok("notes.txt".into())
+        );
         assert!(matches!(
             dispatch(context, &json!({"path": 42})),
             Err(ExtensionDispatchError::Bridge(BridgeError::InvalidArguments))
         ));
         assert!(matches!(
-            dispatch(CapabilityContext { generation: 2, ..context }, &json!({"path": "notes.txt"})),
-            Err(ExtensionDispatchError::Bridge(BridgeError::Denied(CapabilityDenial::StaleGrant)))
+            dispatch(
+                CapabilityContext {
+                    generation: 2,
+                    ..context
+                },
+                &json!({"path": "notes.txt"})
+            ),
+            Err(ExtensionDispatchError::Bridge(BridgeError::Denied(
+                CapabilityDenial::StaleGrant
+            )))
         ));
         assert!(matches!(
-            dispatch(CapabilityContext { task_id: Uuid::new_v4(), ..context }, &json!({"path": "notes.txt"})),
+            dispatch(
+                CapabilityContext {
+                    task_id: Uuid::new_v4(),
+                    ..context
+                },
+                &json!({"path": "notes.txt"})
+            ),
             Err(ExtensionDispatchError::TaskMismatch)
         ));
     }
