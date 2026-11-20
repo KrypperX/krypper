@@ -36,30 +36,57 @@ fn valid_parameters(parameters: &Value) -> bool {
 }
 
 fn valid_schema(schema: &Value) -> bool {
-    let Some(fields) = schema.as_object() else { return false };
-    if fields.keys().any(|key| !matches!(key.as_str(),
-        "type" | "properties" | "required" | "additionalProperties" | "items")) {
+    let Some(fields) = schema.as_object() else {
+        return false;
+    };
+    if fields.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "type" | "properties" | "required" | "additionalProperties" | "items"
+        )
+    }) {
         return false;
     }
-    let Some(kind) = fields.get("type").and_then(Value::as_str) else { return false };
-    if !matches!(kind, "object" | "array" | "string" | "boolean" | "integer" | "number" | "null") {
+    let Some(kind) = fields.get("type").and_then(Value::as_str) else {
+        return false;
+    };
+    if !matches!(
+        kind,
+        "object" | "array" | "string" | "boolean" | "integer" | "number" | "null"
+    ) {
         return false;
     }
     match kind {
         "object" => {
-            if fields.contains_key("items") { return false; }
-            if fields.get("additionalProperties").is_some_and(|v| v != &Value::Bool(false)) { return false; }
-            let Some(properties) = fields.get("properties").and_then(Value::as_object) else { return false };
-            if !properties.values().all(valid_schema) { return false; }
+            if fields.contains_key("items") {
+                return false;
+            }
+            if fields
+                .get("additionalProperties")
+                .is_some_and(|v| v != &Value::Bool(false))
+            {
+                return false;
+            }
+            let Some(properties) = fields.get("properties").and_then(Value::as_object) else {
+                return false;
+            };
+            if !properties.values().all(valid_schema) {
+                return false;
+            }
             match fields.get("required") {
                 None => true,
-                Some(Value::Array(required)) => required.iter().all(|v| v.as_str().is_some_and(|k| properties.contains_key(k))),
+                Some(Value::Array(required)) => required
+                    .iter()
+                    .all(|v| v.as_str().is_some_and(|k| properties.contains_key(k))),
                 _ => false,
             }
         }
-        "array" => !fields.contains_key("properties") && !fields.contains_key("required")
-            && !fields.contains_key("additionalProperties")
-            && fields.get("items").is_some_and(valid_schema),
+        "array" => {
+            !fields.contains_key("properties")
+                && !fields.contains_key("required")
+                && !fields.contains_key("additionalProperties")
+                && fields.get("items").is_some_and(valid_schema)
+        }
         _ => fields.len() == 1,
     }
 }
@@ -67,12 +94,28 @@ fn valid_schema(schema: &Value) -> bool {
 fn validate_value(schema: &Value, value: &Value) -> bool {
     match schema["type"].as_str() {
         Some("object") => {
-            let (Some(values), Some(properties)) = (value.as_object(), schema["properties"].as_object()) else { return false };
+            let (Some(values), Some(properties)) =
+                (value.as_object(), schema["properties"].as_object())
+            else {
+                return false;
+            };
             let required = schema.get("required").and_then(Value::as_array);
-            if required.is_some_and(|items| items.iter().any(|k| !values.contains_key(k.as_str().unwrap_or("")))) { return false; }
-            values.iter().all(|(key, value)| properties.get(key).is_some_and(|sub| validate_value(sub, value)))
+            if required.is_some_and(|items| {
+                items
+                    .iter()
+                    .any(|k| !values.contains_key(k.as_str().unwrap_or("")))
+            }) {
+                return false;
+            }
+            values.iter().all(|(key, value)| {
+                properties
+                    .get(key)
+                    .is_some_and(|sub| validate_value(sub, value))
+            })
         }
-        Some("array") => value.as_array().is_some_and(|items| items.iter().all(|v| validate_value(&schema["items"], v))),
+        Some("array") => value
+            .as_array()
+            .is_some_and(|items| items.iter().all(|v| validate_value(&schema["items"], v))),
         Some("string") => value.is_string(),
         Some("boolean") => value.is_boolean(),
         Some("integer") => value.as_i64().is_some() || value.as_u64().is_some(),
