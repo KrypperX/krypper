@@ -23,6 +23,7 @@ pub struct McpStdioConfig {
 pub enum McpConfigError {
     MissingExecutable,
     RelativeExecutable,
+    InvalidExecutable,
     InvalidArgument,
     TooManyArguments,
     InvalidTimeout,
@@ -38,6 +39,10 @@ impl McpStdioConfig {
         }
         if !self.executable.is_absolute() {
             return Err(McpConfigError::RelativeExecutable);
+        }
+        // Reject embedded NUL before a future stdio launcher reaches the OS API.
+        if self.executable.to_string_lossy().contains('\0') {
+            return Err(McpConfigError::InvalidExecutable);
         }
         if self.args.len() > 128 {
             return Err(McpConfigError::TooManyArguments);
@@ -76,6 +81,13 @@ mod tests {
         assert_eq!(config.validate(), Err(McpConfigError::MissingExecutable));
         config.executable = "mcp-server".into();
         assert_eq!(config.validate(), Err(McpConfigError::RelativeExecutable));
+    }
+
+    #[test]
+    fn rejects_executable_with_embedded_nul() {
+        let mut config = valid();
+        config.executable = "/usr/bin/mcp\0server".into();
+        assert_eq!(config.validate(), Err(McpConfigError::InvalidExecutable));
     }
 
     #[test]
