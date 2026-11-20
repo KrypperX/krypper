@@ -200,9 +200,11 @@ verify an outside-workspace canary remains unchanged. They use the same
 preprovisioned toolchain and registry settings as the host fixture above.
 
 The broader [process safety design](process-execution-safety.md) remains a
-historical proposal and requirements reference. This implementation provides
-no generic shell, interactive process session, new provider, deployment path,
-network-enabled profile, macOS/Windows backend, or persistent build cache.
+historical proposal and requirements reference. See
+[Current state at dcd22b5](process-execution-safety.md#current-state-at-dcd22b53b176668ae4b5f134d98b21b84ce55f40)
+for the implemented architecture and its evidence classes. This implementation
+provides no generic shell, interactive process session, new provider, deployment
+path, network-enabled profile, macOS/Windows backend, or persistent build cache.
 
 The additional ignored `real_product_workspace_runs_the_fixed_profile` fixture
 accepts `KRYPPER_TEST_WORKSPACE` in the trusted test harness only, and runs that
