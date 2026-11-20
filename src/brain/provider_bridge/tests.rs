@@ -327,3 +327,106 @@ fn dispatch_arguments_reject_missing_extra_and_wrong_types() {
         Err(BridgeError::UnknownTool)
     );
 }
+
+#[test]
+fn nested_arguments_are_checked_recursively() {
+    let task_id = Uuid::new_v4();
+    let context = CapabilityContext {
+        task_id,
+        generation: 1,
+        task_authorized: true,
+    };
+    let grant = CapabilityGrant {
+        task_id,
+        namespace: "external".into(),
+        operation: "read".into(),
+        effect: ExtensionEffect::ReadWorkspace,
+        generation: 1,
+        host_approved: false,
+    };
+    let tools = [ExtensionTool {
+        descriptor: ExtensionDescriptor {
+            version: EXTENSION_CONTRACT_VERSION,
+            namespace: "external",
+            name: "read",
+            effect: ExtensionEffect::ReadWorkspace,
+            authority: ExtensionAuthority::Task,
+        },
+        description: "Read",
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "filters": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["filters"],
+            "additionalProperties": false
+        }),
+        grant: &grant,
+    }];
+    assert!(authorized_declarations(&tools, context).is_ok());
+    assert_eq!(
+        authorize_dispatch_with_arguments(
+            &tools, context, "external_read", &json!({"filters": [{"path": "src"}]})
+        ),
+        Ok(())
+    );
+    for invalid in [
+        json!({"filters": [{"path": 42}]}),
+        json!({"filters": [{}]}),
+        json!({"filters": [{"path": "src", "extra": true}]}),
+        json!({"filters": "not an array"}),
+    ] {
+        assert_eq!(
+            authorize_dispatch_with_arguments(&tools, context, "external_read", &invalid),
+            Err(BridgeError::InvalidArguments)
+        );
+    }
+}
+
+#[test]
+fn unsupported_schema_keywords_are_rejected_before_advertisement() {
+    let task_id = Uuid::new_v4();
+    let context = CapabilityContext {
+        task_id,
+        generation: 1,
+        task_authorized: true,
+    };
+    let grant = CapabilityGrant {
+        task_id,
+        namespace: "external".into(),
+        operation: "read".into(),
+        effect: ExtensionEffect::ReadWorkspace,
+        generation: 1,
+        host_approved: false,
+    };
+    for schema in [
+        json!({"type": "object", "properties": {"path": {"type": "string", "minLength": 2}}}),
+        json!({"type": "object", "properties": {}, "additionalProperties": true}),
+        json!({"type": "object", "properties": {"values": {"type": "array"}}}),
+    ] {
+        let tools = [ExtensionTool {
+            descriptor: ExtensionDescriptor {
+                version: EXTENSION_CONTRACT_VERSION,
+                namespace: "external",
+                name: "read",
+                effect: ExtensionEffect::ReadWorkspace,
+                authority: ExtensionAuthority::Task,
+            },
+            description: "Read",
+            parameters: schema,
+            grant: &grant,
+        }];
+        assert_eq!(
+            authorized_declarations(&tools, context),
+            Err(BridgeError::InvalidSchema)
+        );
+    }
+}
