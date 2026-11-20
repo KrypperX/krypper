@@ -39,6 +39,9 @@ fn command(cwd: Option<&Path>, args: &[&str]) -> Command {
     if let Some(directory) = cwd {
         command.current_dir(directory);
     }
+    // Keep every test independent of a configuration file on the machine that
+    // runs it; tests that exercise configuration set their own path afterward.
+    command.env("KRYPPER_CONFIG", "/nonexistent/krypper-test/config.toml");
     command.args(args);
     command
 }
@@ -224,7 +227,7 @@ fn help_prints_usage_and_succeeds() {
     let output = run(None, &["--help"]);
     assert!(output.status.success());
     assert!(stdout(&output).contains("usage: krypper"));
-    assert!(stdout(&output).contains("{show,list,write,task}"));
+    assert!(stdout(&output).contains("{show,list,write,task,models}"));
 }
 
 #[test]
@@ -232,7 +235,7 @@ fn missing_command_prints_usage_and_fails() {
     let output = run(None, &[]);
     assert_eq!(output.status.code(), Some(2));
     assert!(stderr(&output).contains("usage: krypper"));
-    assert!(stderr(&output).contains("{show,list,write,task}"));
+    assert!(stderr(&output).contains("{show,list,write,task,models}"));
 }
 
 #[test]
@@ -2948,4 +2951,199 @@ fn checkpoint_with_tasks(workspace: &Path, task_count: usize, terminal_first: bo
         }
     }
     session.export_checkpoint().unwrap()
+}
+
+fn write_user_config(directory: &TempDir, text: &str) -> PathBuf {
+    let path = directory.path().join("user-config.toml");
+    fs::write(&path, text).unwrap();
+    path
+}
+
+fn task_command_with_config(directory: &TempDir, config: &Path, args: &[&str]) -> Command {
+    let mut task = command(Some(directory.path()), args);
+    task.env("KRYPPER_CONFIG", config);
+    for name in ["OPENAI_API_KEY", "GEMINI_API_KEY"] {
+        task.env_remove(name);
+    }
+    task
+}
+
+#[test]
+fn task_config_default_selects_the_configured_model_and_announces_it() {
+    let directory = TempDir::new();
+    let config = write_user_config(
+        &directory,
+        "provider = \"openai\"\nmodel = \"configured-model\"\n",
+    );
+    let output = task_command_with_config(
+        &directory,
+        &config,
+        &[
+            "task",
+            "--goal",
+            "Use the configured model",
+            "--max-actions",
+            "1",
+        ],
+    )
+    .output()
+    .expect("run configured task");
+
+    // The configured hosted provider is selected, so the missing key stops the
+    // run before any request is made.
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(stdout(&output).is_empty());
+    let error = stderr(&output);
+    assert!(
+        error.contains("using model 'configured-model' (provider: openai)"),
+        "{error}"
+    );
+    assert!(error.contains("OPENAI_API_KEY"), "{error}");
+}
+
+#[test]
+fn task_flags_disable_the_configured_defaults() {
+    let directory = TempDir::new();
+    let config = write_user_config(
+        &directory,
+        "provider = \"openai\"\nmodel = \"configured-model\"\n",
+    );
+    let output = task_command_with_config(
+        &directory,
+        &config,
+        &[
+            "task",
+            "--goal",
+            "Choose another provider",
+            "--max-actions",
+            "1",
+            "--provider",
+            "gemini",
+            "--model",
+            "gemini-2.5-flash",
+        ],
+    )
+    .output()
+    .expect("run task with explicit provider");
+
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    let error = stderr(&output);
+    assert!(error.contains("GEMINI_API_KEY"), "{error}");
+    assert!(!error.contains("using model"), "{error}");
+    assert!(!error.contains("OPENAI_API_KEY"), "{error}");
+}
+
+#[test]
+fn task_rejects_a_broken_config_file_before_any_action() {
+    let directory = TempDir::new();
+    let config = write_user_config(&directory, "api_key = \"sk-secret-value\"\n");
+    let output = task_command_with_config(
+        &directory,
+        &config,
+        &["task", "--goal", "Broken config", "--max-actions", "1"],
+    )
+    .output()
+    .expect("run task with broken config");
+
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(stdout(&output).is_empty());
+    let error = stderr(&output);
+    assert!(error.contains("invalid config file"), "{error}");
+    assert!(!error.contains("sk-secret-value"), "{error}");
+}
+
+#[test]
+fn task_no_config_flag_ignores_the_configuration_file() {
+    let directory = TempDir::new();
+    let config = write_user_config(&directory, "api_key = \"sk-secret-value\"\n");
+    let output = task_command_with_config(
+        &directory,
+        &config,
+        &[
+            "task",
+            "--goal",
+            "Skip the config",
+            "--max-actions",
+            "1",
+            "--no-config",
+        ],
+    )
+    .output()
+    .expect("run task with --no-config");
+
+    // With no input the caller-directed task ends at end-of-input, but it
+    // gets that far because the broken file was never read.
+    assert_ne!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(!stderr(&output).contains("config"), "{}", stderr(&output));
+}
+
+#[test]
+fn task_without_a_config_file_stays_caller_directed() {
+    let directory = TempDir::new();
+    let missing = directory.path().join("absent.toml");
+    let output = task_command_with_config(
+        &directory,
+        &missing,
+        &["task", "--goal", "No config", "--max-actions", "1"],
+    )
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .and_then(|mut child| {
+        child.stdin.take().unwrap().write_all(b"complete done\n")?;
+        child.wait_with_output()
+    })
+    .expect("run task without config");
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stdout(&output).contains("Task outcome: succeeded"));
+    assert!(!stderr(&output).contains("using model"));
+}
+
+#[test]
+fn task_activity_jsonl_emits_metadata_without_goal_or_action_text() {
+    let directory = TempDir::new();
+    let missing = directory.path().join("absent.toml");
+    let output = task_command_with_config(
+        &directory,
+        &missing,
+        &[
+            "task",
+            "--goal",
+            "private-goal-sentinel",
+            "--max-actions",
+            "1",
+            "--activity-jsonl",
+        ],
+    )
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .and_then(|mut child| {
+        child.stdin.take().unwrap().write_all(b"complete done\n")?;
+        child.wait_with_output()
+    })
+    .expect("run task with activity JSONL");
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let activity = stderr(&output);
+    assert!(!activity.contains("private-goal-sentinel"), "{activity}");
+    assert!(!activity.contains("complete done"), "{activity}");
+    let records: Vec<serde_json::Value> = activity
+        .lines()
+        .filter(|line| line.starts_with('{'))
+        .map(|line| serde_json::from_str(line).expect("valid activity JSONL"))
+        .collect();
+    assert!(
+        !records.is_empty(),
+        "expected activity JSONL on stderr; actual stderr: {activity:?}; stdout: {:?}",
+        stdout(&output)
+    );
+    for record in records {
+        assert!(record["task_id"].is_string());
+        assert!(record["lifecycle_position"].is_u64());
+        assert!(record["activity_position"].is_u64());
+    }
 }
