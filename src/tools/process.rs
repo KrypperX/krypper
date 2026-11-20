@@ -19,8 +19,6 @@ pub use self::supervisor::{ProcessOutcome, ProcessResource, ProcessResult};
 #[cfg(test)]
 use self::policy::{cargo_command_args, CPU_BUDGET, MEMORY, OUTPUT, TASKS, WALL};
 #[cfg(test)]
-use self::sandbox::sandbox;
-#[cfg(test)]
 use self::supervisor::{record_test_evidence, run_with_bounds, Supervisor};
 #[cfg(test)]
 use crate::tools::capture_workspace_root_at;
