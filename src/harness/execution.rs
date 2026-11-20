@@ -134,6 +134,59 @@ mod extension_gate_tests {
     use uuid::Uuid;
 
     #[test]
+    fn registered_executor_rechecks_authority_and_rejects_unknown_names() {
+        use super::{dispatch_registered_extension, RegisteredExtension};
+        let task_id = Uuid::new_v4();
+        let grant = CapabilityGrant {
+            task_id,
+            namespace: "external".into(),
+            operation: "read".into(),
+            effect: ExtensionEffect::ReadWorkspace,
+            generation: 4,
+            host_approved: false,
+        };
+        let registry = [RegisteredExtension {
+            tool: ExtensionTool {
+                descriptor: ExtensionDescriptor {
+                    version: EXTENSION_CONTRACT_VERSION,
+                    namespace: "external",
+                    name: "read",
+                    effect: ExtensionEffect::ReadWorkspace,
+                    authority: ExtensionAuthority::Task,
+                },
+                description: "Read",
+                parameters: json!({"type":"object","properties":{}}),
+                grant: &grant,
+            },
+            execute: || "host-result",
+        }];
+        let context = CapabilityContext {
+            task_id,
+            generation: 4,
+            task_authorized: true,
+        };
+        assert_eq!(
+            dispatch_registered_extension(&registry, context, "external_read"),
+            Ok("host-result")
+        );
+        assert_eq!(
+            dispatch_registered_extension(&registry, context, "external_missing"),
+            Err(BridgeError::UnknownTool)
+        );
+        assert_eq!(
+            dispatch_registered_extension(
+                &registry,
+                CapabilityContext {
+                    generation: 5,
+                    ..context
+                },
+                "external_read",
+            ),
+            Err(BridgeError::Denied(CapabilityDenial::StaleGrant))
+        );
+    }
+
+    #[test]
     fn rejected_extension_never_invokes_executor() {
         let context = CapabilityContext {
             task_id: Uuid::new_v4(),
