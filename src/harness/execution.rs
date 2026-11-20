@@ -69,14 +69,9 @@ mod extension_gate_tests {
             task_authorized: true,
         };
         let mut executed = false;
-        let result = super::dispatch_authorized_extension(
-            &[],
-            context,
-            "external_unknown",
-            || {
-                executed = true;
-            },
-        );
+        let result = super::dispatch_authorized_extension(&[], context, "external_unknown", || {
+            executed = true;
+        });
         assert_eq!(result, Err(BridgeError::UnknownTool));
         assert!(!executed);
     }
