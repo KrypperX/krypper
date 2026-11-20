@@ -349,13 +349,6 @@ pub(super) fn execute_action(
         WorkspaceAction::Unsupported { action: name } => {
             // Registered extensions use the argument-aware variant before this
             // dispatcher. Plain unsupported actions must never gain authority.
-            let context = crate::tools::capability_policy::CapabilityContext {
-                task_id,
-                generation: 0,
-                task_authorized: false,
-            };
-            let denied = super::dispatch_authorized_extension(&[], context, name, || ());
-            debug_assert!(denied.is_err());
             let error = GoalTurnError::UnsupportedAction {
                 action: name.clone(),
             };
