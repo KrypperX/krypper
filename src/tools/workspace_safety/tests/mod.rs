@@ -10,3 +10,4 @@ static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 mod guidance;
 mod other;
 mod replace;
+mod search;
