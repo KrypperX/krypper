@@ -1,6 +1,57 @@
 # Proposed Process-Execution Safety Boundary
 
 > **Historical design proposal (#176).** The observations below describe the inspected base revision, not current capabilities. Issue #178 implements one [opt-in Linux offline Cargo profile](offline-cargo-profile.md); that document describes its actual authorization, host requirements, confinement, limits and verification. The broader contracts here remain a requirements reference, not a claim that every proposed feature is implemented.
+>
+> See [Current state at dcd22b5](#current-state-at-dcd22b53b176668ae4b5f134d98b21b84ce55f40) for the implemented architecture. The sections below are retained as the original requirements and threat model.
+
+## Current state at dcd22b53b176668ae4b5f134d98b21b84ce55f40
+
+This section describes the process path in the current `main` revision. It separates runtime authority from descriptive metadata and does not claim host-level confinement from ordinary CI alone.
+
+### Implemented authority path
+
+```text
+Brain / caller: OfflineCargoTest action with an optional literal test filter
+  Harness: existing action budget, typed process observation and failure correction
+    TaskSession: owning task + running turn + explicit per-task host grant
+      Tools: registered process operation -> fixed Cargo policy -> supervisor
+        host lease + systemd transient unit + cgroup readbacks + Bubblewrap probe
+          fixed Cargo argv inside the verified sandbox
+```
+
+The authoritative runtime checks are:
+
+- Task ownership, running-turn state, grant presence and workspace binding in `src/core/lifecycle/session.rs:440-472`.
+- The registered `offline_cargo_test` operation and closed request schema in `src/tools/registry.rs:280-289` and `src/tools/registry.rs:147-152`.
+- Harness action dispatch and typed process observation in `src/harness/execution/action.rs:102-121`.
+- Filter validation and fixed argv construction in `src/tools/process/policy.rs:59-95`.
+- Fail-closed platform, cleanup-latch, cancellation, lease, supervisor, probe and resource-readback gates in `src/tools/process/supervisor.rs:549-621` and `src/tools/process/supervisor.rs:439-465`.
+- Sandbox mounts, namespace flags, fixed payload environment and descriptor hygiene in `src/tools/process/sandbox.rs:32-135` and `src/tools/process/sandbox.rs:138-195`.
+
+Registry effect descriptions, tool metadata and model output are descriptive inputs only; they do not authorize a process. The versioned descriptor in `src/tools/process_profile.rs` is also descriptive: its own module contract says it registers no tool, grants no authority, selects no sandbox and launches no process (`src/tools/process_profile.rs:1-6`).
+
+### Implemented boundaries
+
+- **Request:** only an optional literal `test_filter` is accepted. Empty, control-character, option-like and over-limit values are rejected before setup. Requests cannot choose an executable, other argv, cwd, environment, sandbox flags or higher limits.
+- **Environment:** host helper commands receive a minimal service environment; the payload starts with `--clearenv` and receives only eight fixed non-secret variables. No parent credentials, proxy variables, control sockets or arbitrary `PATH` are forwarded. Absence of secrets is asserted by an ignored host fixture, not by ordinary CI.
+- **Filesystem and network:** the workspace and selected trusted runtime directories are mounted read-only; private `/tmp` and `/cargo` tmpfs areas provide bounded writable space. Bubblewrap unshares the network namespace. There is no direct-spawn fallback.
+- **Readiness:** a non-root Linux gate, exclusive host lease, transient cgroup with finite control readbacks and a `/usr/bin/true` probe through the exact Bubblewrap command precede workspace code. Missing primitives deny the run.
+- **Limits and output:** fixed public limits are 180 wall seconds, 120 aggregate CPU seconds, 3 GiB memory, 128 processes, 256 descriptors, 64 MiB per file, 256 KiB combined raw stdout/stderr and a 195-second transient-unit bound. Output retains stream identity, is lossily decoded and is marked truncated when the cap is reached. CPU accounting is poll-based and can overshoot slightly.
+- **Outcomes and cleanup:** typed results distinguish denial, sandbox/setup failure, spawn failure, signals, timeouts, cancellation, resource/output limits, zero matches and unknown outcomes. Cleanup uses whole-cgroup termination plus direct-child reaping; uncertain cleanup latches further runs and preserves the lease. There is no canonical approval digest binding profile, argv, cwd and workspace revision.
+
+### Evidence classes
+
+- **Ordinary CI verifies** request-schema and filter denial, missing-grant denial, lifecycle/ownership gates, required cgroup readback with fake files, grant loss on checkpoint restore, fixed argv placement, per-test execution evidence and zero-match retyping, synthetic correction flow, and observation/CLI rendering. It does not exercise real namespaces.
+- **Ignored host fixtures** exercise the actual sandbox, supervisor, canaries, absent secrets and sockets, loopback denial, escape denial, nonzero exit, timeout, output/resource ceilings, cancellation and cleanup. They require a preprovisioned toolchain/registry, delegated cgroup v2 and a user systemd manager, so their results are local host evidence, not required CI.
+- **Source review only:** Bubblewrap flag semantics, namespace isolation from inside the payload, `pre_exec` cgroup attachment, `close_range` descriptor hygiene, delegated-subtree checks, crash-time lease recovery and cross-process cleanup holds are read from code but not proven by ordinary tests on a generic runner.
+
+### Relation to the versioned profile descriptor
+
+`src/tools/process_profile.rs` defines a v1 descriptor with validating construction, a fixed executable allowlist, closed argument grammar, reviewed environment names and hard ceilings. It has no production caller. Its argument grammar rejects option-like values and spaces, while the live Cargo profile requires `--offline`, `--locked`, `--all-targets` and permits literal filters containing spaces (`src/tools/process/policy.rs:78-89`). Its 300-second wall and 240-second CPU ceilings are contract maxima, not runtime configuration; live execution clamps to the fixed policy values (`src/tools/process/supervisor.rs:552-554`). Do not describe this descriptor as the live launch contract.
+
+### Current unknowns
+
+Supported OS set remains Linux-only in code; Bubblewrap feature/version detection, in-payload namespace assertions, PID-reuse protection, stream sequence identifiers, a canonical approval digest and cross-process recovery after a supervisor crash are not established by ordinary CI. macOS and Windows behavior is unknown. A broader profile or dispatch path requires separate design, tests and review.
 
 ## Request, evidence, and acceptance
 
