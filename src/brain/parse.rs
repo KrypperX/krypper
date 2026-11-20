@@ -59,7 +59,7 @@ pub(crate) fn parse_model_plan_response(
         .map(|call| {
             action_from_call(&call.function.name, &call.function.arguments).map_err(|error| {
                 match error {
-                    ModelError::UnsupportedTool => WorkspacePlanError::UnsupportedOperation,
+                    ModelError::UnsupportedTool { .. } => WorkspacePlanError::UnsupportedOperation,
                     ModelError::InvalidArguments(_) => WorkspacePlanError::InvalidOperation,
                     _ => WorkspacePlanError::InvalidResponse,
                 }

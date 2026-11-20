@@ -26,7 +26,7 @@ pub use decision::OllamaDecisionSource;
 pub use plan::{WorkspacePlan, WorkspacePlanError};
 pub use reflection::BrainReflectionError;
 
-pub(crate) use action::action_from_provider_call;
+pub(crate) use action::{action_from_error, action_from_provider_call};
 pub(crate) use decision::consume_decision_budget;
 pub(crate) use dto::{OllamaChatResponse, OllamaMessageRole};
 pub(crate) use errors::ModelError;

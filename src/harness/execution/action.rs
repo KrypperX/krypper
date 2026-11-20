@@ -92,6 +92,7 @@ pub(crate) fn summarize_observation(observation: &WorkspaceObservation) -> TurnA
                 WorkspaceAction::Complete { .. }
                 | WorkspaceAction::Continue
                 | WorkspaceAction::Cancel
+                | WorkspaceAction::Extension { .. }
                 | WorkspaceAction::Unsupported { .. } => TurnActivityAction::Unsupported,
             };
             TurnActivitySummary::ActionFailed { action }
@@ -331,18 +332,28 @@ pub(super) fn execute_action(
         WorkspaceAction::Complete { result } => Ok(ActionExecution::Complete(result.clone())),
         WorkspaceAction::Continue => Ok(ActionExecution::Continue),
         WorkspaceAction::Cancel => Ok(ActionExecution::Cancel),
+        WorkspaceAction::Extension { name, .. } => {
+            let error = GoalTurnError::UnsupportedAction {
+                action: name.clone(),
+            };
+            Ok(ActionExecution::Failed {
+                observation: WorkspaceObservation::ActionFailed {
+                    action: WorkspaceAction::Unsupported {
+                        action: name.clone(),
+                    },
+                    error: error.clone(),
+                },
+                error,
+            })
+        }
         WorkspaceAction::Unsupported { action: name } => {
-            // Both single-action and bounded turns enter this dispatcher.
-            // No extension executors are registered yet: fail closed even if
-            // a model supplies a namespaced extension tool name.
+            // Registered extensions use the argument-aware variant before this
+            // dispatcher. Plain unsupported actions must never gain authority.
             let context = crate::tools::capability_policy::CapabilityContext {
                 task_id,
                 generation: 0,
                 task_authorized: false,
             };
-            // Route extension-shaped requests through the same host authorization
-            // gate used by future registered executors. No grants or executors
-            // exist at this boundary yet, so the callback must never run.
             let denied = super::dispatch_authorized_extension(&[], context, name, || ());
             debug_assert!(denied.is_err());
             let error = GoalTurnError::UnsupportedAction {

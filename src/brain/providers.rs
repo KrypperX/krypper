@@ -1,7 +1,7 @@
 use crate::harness::context::build_task_prompt_with_project_guidance;
 
 use super::{
-    action_from_provider_call, build_anthropic_request, build_responses_request,
+    action_from_error, action_from_provider_call, build_anthropic_request, build_responses_request,
     consume_decision_budget, encode_model_request, model_agent, parse_anthropic_response,
     parse_responses_response, post_hosted, post_responses_text_stream, tool_definitions,
     ModelError, OllamaDecisionSource,
@@ -550,9 +550,7 @@ impl BoundedDecisionSource for GeminiDecisionSource {
         observations: &[WorkspaceObservation],
     ) -> WorkspaceAction {
         self.choose(goal, observations, None)
-            .unwrap_or_else(|error| WorkspaceAction::Unsupported {
-                action: error.to_string(),
-            })
+            .unwrap_or_else(action_from_error)
     }
 
     fn needs_root_project_guidance(&self) -> bool {
@@ -566,9 +564,7 @@ impl BoundedDecisionSource for GeminiDecisionSource {
         guidance: Option<&str>,
     ) -> WorkspaceAction {
         self.choose(goal, observations, guidance)
-            .unwrap_or_else(|error| WorkspaceAction::Unsupported {
-                action: error.to_string(),
-            })
+            .unwrap_or_else(action_from_error)
     }
 }
 
@@ -807,9 +803,7 @@ impl BoundedDecisionSource for ResponsesDecisionSource {
         observations: &[WorkspaceObservation],
     ) -> WorkspaceAction {
         self.choose(goal, observations, None)
-            .unwrap_or_else(|error| WorkspaceAction::Unsupported {
-                action: error.to_string(),
-            })
+            .unwrap_or_else(action_from_error)
     }
 
     fn needs_root_project_guidance(&self) -> bool {
@@ -823,9 +817,7 @@ impl BoundedDecisionSource for ResponsesDecisionSource {
         guidance: Option<&str>,
     ) -> WorkspaceAction {
         self.choose(goal, observations, guidance)
-            .unwrap_or_else(|error| WorkspaceAction::Unsupported {
-                action: error.to_string(),
-            })
+            .unwrap_or_else(action_from_error)
     }
 }
 
@@ -1086,9 +1078,7 @@ impl BoundedDecisionSource for AnthropicDecisionSource {
         observations: &[WorkspaceObservation],
     ) -> WorkspaceAction {
         self.choose(goal, observations, None)
-            .unwrap_or_else(|error| WorkspaceAction::Unsupported {
-                action: error.to_string(),
-            })
+            .unwrap_or_else(action_from_error)
     }
 
     fn needs_root_project_guidance(&self) -> bool {
@@ -1102,9 +1092,7 @@ impl BoundedDecisionSource for AnthropicDecisionSource {
         guidance: Option<&str>,
     ) -> WorkspaceAction {
         self.choose(goal, observations, guidance)
-            .unwrap_or_else(|error| WorkspaceAction::Unsupported {
-                action: error.to_string(),
-            })
+            .unwrap_or_else(action_from_error)
     }
 }
 
@@ -1196,9 +1184,7 @@ impl BoundedDecisionSource for OpenAiCompatibleDecisionSource {
         observations: &[WorkspaceObservation],
     ) -> WorkspaceAction {
         self.choose(goal, observations, None)
-            .unwrap_or_else(|error| WorkspaceAction::Unsupported {
-                action: error.to_string(),
-            })
+            .unwrap_or_else(action_from_error)
     }
 
     fn needs_root_project_guidance(&self) -> bool {
@@ -1212,9 +1198,7 @@ impl BoundedDecisionSource for OpenAiCompatibleDecisionSource {
         guidance: Option<&str>,
     ) -> WorkspaceAction {
         self.choose(goal, observations, guidance)
-            .unwrap_or_else(|error| WorkspaceAction::Unsupported {
-                action: error.to_string(),
-            })
+            .unwrap_or_else(action_from_error)
     }
 }
 

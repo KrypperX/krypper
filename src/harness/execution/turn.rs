@@ -13,7 +13,7 @@ use uuid::Uuid;
 /// A provider may request a name but cannot supply the registry, grant, or
 /// capability context. Unregistered names keep the ordinary fail-closed path.
 pub(crate) struct TurnExtensions<'a> {
-    pub registry: &'a [super::RegisteredExtension<'a, String>],
+    pub registry: &'a [super::RegisteredExtensionWithArguments<'a, String>],
     pub context: crate::tools::capability_policy::CapabilityContext,
 }
 
@@ -24,16 +24,17 @@ fn execute_with_extensions(
     action: &super::WorkspaceAction,
     extensions: Option<&TurnExtensions<'_>>,
 ) -> Result<ActionExecution, GoalTurnError> {
-    if let (super::WorkspaceAction::Unsupported { action: name }, Some(extensions)) =
+    if let (super::WorkspaceAction::Extension { name, arguments }, Some(extensions)) =
         (action, extensions)
     {
-        let result = super::dispatch_registered_extension_for_turn(
+        let result = super::dispatch_registered_extension_with_arguments_for_turn(
             session,
             task_id,
             turn_id,
             extensions.registry,
             extensions.context,
             name,
+            arguments,
         );
         return match result {
             Ok(value) => Ok(ActionExecution::Complete(value)),
@@ -496,7 +497,7 @@ mod extension_integration_tests {
             generation: 1,
             host_approved: false,
         };
-        let registry = [super::super::RegisteredExtension {
+        let registry = [super::super::RegisteredExtensionWithArguments {
             tool: ExtensionTool {
                 descriptor: ExtensionDescriptor {
                     version: EXTENSION_CONTRACT_VERSION,
@@ -509,7 +510,7 @@ mod extension_integration_tests {
                 parameters: json!({"type":"object","properties":{}}),
                 grant: &grant,
             },
-            execute: || "host-executed".to_owned(),
+            execute: |_: &serde_json::Value| "host-executed".to_owned(),
         }];
         let extensions = TurnExtensions {
             registry: &registry,
@@ -519,8 +520,9 @@ mod extension_integration_tests {
                 task_authorized: true,
             },
         };
-        let mut choose = |_: &str| super::super::WorkspaceAction::Unsupported {
-            action: "external_read".to_owned(),
+        let mut choose = |_: &str| super::super::WorkspaceAction::Extension {
+            name: "external_read".to_owned(),
+            arguments: serde_json::json!({}),
         };
         let result = run_goal_turn_with_extensions(
             &mut session,
@@ -541,7 +543,7 @@ mod extension_integration_tests {
     }
 
     #[test]
-    fn legacy_extension_with_required_arguments_fails_closed() {
+    fn required_extension_arguments_fail_closed_in_bounded_execution_loop() {
         let (mut session, task_id, turn_id) = running_turn();
         let grant = CapabilityGrant {
             task_id,
@@ -551,7 +553,7 @@ mod extension_integration_tests {
             generation: 1,
             host_approved: false,
         };
-        let registry = [super::super::RegisteredExtension {
+        let registry = [super::super::RegisteredExtensionWithArguments {
             tool: ExtensionTool {
                 descriptor: ExtensionDescriptor {
                     version: EXTENSION_CONTRACT_VERSION,
@@ -568,7 +570,7 @@ mod extension_integration_tests {
                 }),
                 grant: &grant,
             },
-            execute: || panic!("required arguments were bypassed"),
+            execute: |_: &serde_json::Value| panic!("required arguments were bypassed"),
         }];
         let extensions = TurnExtensions {
             registry: &registry,
@@ -579,8 +581,9 @@ mod extension_integration_tests {
             },
         };
         let mut choose =
-            |_: &str, _: &[WorkspaceObservation]| super::super::WorkspaceAction::Unsupported {
-                action: "external_read".to_owned(),
+            |_: &str, _: &[WorkspaceObservation]| super::super::WorkspaceAction::Extension {
+                name: "external_read".to_owned(),
+                arguments: serde_json::json!({}),
             };
         let result = run_goal_turn_with_budget_and_extensions(
             &mut session,
@@ -593,7 +596,10 @@ mod extension_integration_tests {
         )
         .expect("required arguments must fail closed");
         assert_eq!(result.stop_reason(), GoalTurnStopReason::ActionFailed);
-        assert!(matches!(result.outcome(), Some(TurnOutcome::Failure { .. })));
+        assert!(matches!(
+            result.outcome(),
+            Some(TurnOutcome::Failure { .. })
+        ));
     }
 
     #[test]
@@ -607,7 +613,7 @@ mod extension_integration_tests {
             generation: 1,
             host_approved: false,
         };
-        let registry = [super::super::RegisteredExtension {
+        let registry = [super::super::RegisteredExtensionWithArguments {
             tool: ExtensionTool {
                 descriptor: ExtensionDescriptor {
                     version: EXTENSION_CONTRACT_VERSION,
@@ -620,7 +626,7 @@ mod extension_integration_tests {
                 parameters: json!({"type":"object","properties":{}}),
                 grant: &grant,
             },
-            execute: || panic!("revoked extension executed"),
+            execute: |_: &serde_json::Value| panic!("revoked extension executed"),
         }];
         let extensions = TurnExtensions {
             registry: &registry,
@@ -631,8 +637,9 @@ mod extension_integration_tests {
             },
         };
         let mut choose =
-            |_: &str, _: &[WorkspaceObservation]| super::super::WorkspaceAction::Unsupported {
-                action: "external_read".to_owned(),
+            |_: &str, _: &[WorkspaceObservation]| super::super::WorkspaceAction::Extension {
+                name: "external_read".to_owned(),
+                arguments: serde_json::json!({}),
             };
         let result = run_goal_turn_with_budget_and_extensions(
             &mut session,
@@ -662,7 +669,7 @@ mod extension_integration_tests {
             generation: 1,
             host_approved: false,
         };
-        let registry = [super::super::RegisteredExtension {
+        let registry = [super::super::RegisteredExtensionWithArguments {
             tool: ExtensionTool {
                 descriptor: ExtensionDescriptor {
                     version: EXTENSION_CONTRACT_VERSION,
@@ -675,7 +682,7 @@ mod extension_integration_tests {
                 parameters: json!({"type":"object","properties":{}}),
                 grant: &grant,
             },
-            execute: || panic!("built-in action must not invoke extension"),
+            execute: |_: &serde_json::Value| panic!("built-in action must not invoke extension"),
         }];
         let extensions = TurnExtensions {
             registry: &registry,
@@ -716,8 +723,9 @@ mod extension_integration_tests {
             },
         };
         let mut choose =
-            |_: &str, _: &[WorkspaceObservation]| super::super::WorkspaceAction::Unsupported {
-                action: "external_read".to_owned(),
+            |_: &str, _: &[WorkspaceObservation]| super::super::WorkspaceAction::Extension {
+                name: "external_read".to_owned(),
+                arguments: serde_json::json!({}),
             };
         let result = run_goal_turn_with_budget_and_extensions(
             &mut session,

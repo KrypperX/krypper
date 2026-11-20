@@ -1,6 +1,7 @@
 //! Model error taxonomy and its formatting.
 
 use crate::harness::context::ContextError;
+use serde_json::Value;
 use std::fmt;
 
 use super::limits::*;
@@ -19,14 +20,21 @@ pub(crate) enum ModelError {
     HttpStatus(u16),
     InvalidJson,
     InvalidToolCall(&'static str),
-    UnsupportedTool,
+    UnsupportedTool {
+        name: String,
+        arguments: Value,
+    },
     InvalidArguments(&'static str),
     ProviderTransport(ModelProvider),
     ProviderHttpStatus(ModelProvider, u16),
     ProviderResponseTooLarge(ModelProvider),
     ProviderInvalidJson(ModelProvider),
     ProviderInvalidToolCall(ModelProvider, &'static str),
-    ProviderUnsupportedTool(ModelProvider),
+    ProviderUnsupportedTool {
+        provider: ModelProvider,
+        name: String,
+        arguments: Value,
+    },
     ProviderInvalidArguments(ModelProvider, &'static str),
 }
 
@@ -60,7 +68,7 @@ impl fmt::Display for ModelError {
             Self::InvalidToolCall(message) => {
                 write!(formatter, "invalid Ollama tool call: {message}")
             }
-            Self::UnsupportedTool => {
+            Self::UnsupportedTool { .. } => {
                 formatter.write_str("Ollama requested an unsupported task action")
             }
             Self::InvalidArguments(message) => {
@@ -92,7 +100,7 @@ impl fmt::Display for ModelError {
                     provider.label()
                 )
             }
-            Self::ProviderUnsupportedTool(provider) => {
+            Self::ProviderUnsupportedTool { provider, .. } => {
                 write!(
                     formatter,
                     "{} requested an unsupported task action",

@@ -16,6 +16,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use ureq::Agent;
 
+use super::action::action_from_error;
 use super::errors::*;
 use super::http::*;
 use super::limits::*;
@@ -353,9 +354,7 @@ impl BoundedDecisionSource for OllamaDecisionSource {
         observations: &[WorkspaceObservation],
     ) -> WorkspaceAction {
         self.choose(goal, observations, None)
-            .unwrap_or_else(|error| WorkspaceAction::Unsupported {
-                action: error.to_string(),
-            })
+            .unwrap_or_else(action_from_error)
     }
 
     fn needs_root_project_guidance(&self) -> bool {
@@ -369,9 +368,7 @@ impl BoundedDecisionSource for OllamaDecisionSource {
         guidance: Option<&str>,
     ) -> WorkspaceAction {
         self.choose(goal, observations, guidance)
-            .unwrap_or_else(|error| WorkspaceAction::Unsupported {
-                action: error.to_string(),
-            })
+            .unwrap_or_else(action_from_error)
     }
 }
 
