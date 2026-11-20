@@ -80,9 +80,7 @@ pub(crate) fn authorize_dispatch(
     validate_descriptors(&descriptors).map_err(BridgeError::InvalidContract)?;
     let tool = tools
         .iter()
-        .find(|tool| {
-            format!("{}_{}", tool.descriptor.namespace, tool.descriptor.name) == name
-        })
+        .find(|tool| format!("{}_{}", tool.descriptor.namespace, tool.descriptor.name) == name)
         .ok_or(BridgeError::UnknownTool)?;
     evaluate(&tool.descriptor, context, Some(tool.grant)).map_err(BridgeError::Denied)
 }
