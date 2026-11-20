@@ -1,6 +1,7 @@
 pub mod capability_policy;
 pub mod extension_contract;
 pub mod process;
+pub mod process_profile;
 pub(crate) mod registry;
 mod workspace_safety;
 
