@@ -374,7 +374,10 @@ fn nested_arguments_are_checked_recursively() {
     assert!(authorized_declarations(&tools, context).is_ok());
     assert_eq!(
         authorize_dispatch_with_arguments(
-            &tools, context, "external_read", &json!({"filters": [{"path": "src"}]})
+            &tools,
+            context,
+            "external_read",
+            &json!({"filters": [{"path": "src"}]})
         ),
         Ok(())
     );
