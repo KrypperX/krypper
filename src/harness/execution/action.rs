@@ -332,6 +332,16 @@ pub(super) fn execute_action(
         WorkspaceAction::Continue => Ok(ActionExecution::Continue),
         WorkspaceAction::Cancel => Ok(ActionExecution::Cancel),
         WorkspaceAction::Unsupported { action: name } => {
+            // Both single-action and bounded turns enter this dispatcher.
+            // No extension executors are registered yet: fail closed even if
+            // a model supplies a namespaced extension tool name.
+            let context = crate::tools::capability_policy::CapabilityContext {
+                task_id,
+                generation: 0,
+                task_authorized: false,
+            };
+            let denied = super::authorize_extension_at_harness(&[], context, name);
+            debug_assert!(denied.is_err());
             let error = GoalTurnError::UnsupportedAction {
                 action: name.clone(),
             };
