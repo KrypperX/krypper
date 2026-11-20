@@ -221,3 +221,45 @@ fn authorized_declarations_adapt_to_all_provider_formats() {
         Err(BridgeError::UnknownTool)
     );
 }
+
+#[test]
+fn revoked_extension_is_not_exposed_to_any_provider_format() {
+    let task_id = Uuid::new_v4();
+    let grant = CapabilityGrant {
+        task_id,
+        namespace: "external".into(),
+        operation: "read".into(),
+        effect: ExtensionEffect::ReadWorkspace,
+        generation: 1,
+        host_approved: false,
+    };
+    let tools = [ExtensionTool {
+        descriptor: ExtensionDescriptor {
+            version: EXTENSION_CONTRACT_VERSION,
+            namespace: "external",
+            name: "read",
+            effect: ExtensionEffect::ReadWorkspace,
+            authority: ExtensionAuthority::Task,
+        },
+        description: "Read",
+        parameters: json!({"type":"object","properties":{}}),
+        grant: &grant,
+    }];
+    let revoked = CapabilityContext {
+        task_id,
+        generation: 2,
+        task_authorized: true,
+    };
+    assert_eq!(
+        authorized_declarations(&tools, revoked),
+        Err(BridgeError::Denied(CapabilityDenial::StaleGrant))
+    );
+    assert_eq!(
+        authorize_dispatch(&tools, revoked, "external_read"),
+        Err(BridgeError::Denied(CapabilityDenial::StaleGrant))
+    );
+    let empty = Vec::new();
+    assert!(responses_declarations(&empty).is_empty());
+    assert!(anthropic_declarations(&empty).is_empty());
+    assert!(gemini_declarations(&empty).is_empty());
+}
