@@ -110,9 +110,9 @@ fn privileged_effects_require_host_approval_even_with_misleading_metadata() {
         let (context, mut grant) = fixture(effect);
         let request = descriptor(effect, ExtensionAuthority::Task);
         assert_eq!(
-        evaluate(&request, context, Some(&grant)),
-        Err(CapabilityDenial::HostApprovalRequired)
-    );
+            evaluate(&request, context, Some(&grant)),
+            Err(CapabilityDenial::HostApprovalRequired)
+        );
         grant.host_approved = true;
         assert_eq!(evaluate(&request, context, Some(&grant)), Ok(()));
     }
