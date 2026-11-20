@@ -238,7 +238,7 @@ fn planned_and_reactive_paths_match_on_observed_success() {
 }
 
 #[test]
-fn planned_denial_stops_later_operations_and_matches_reactive_failure() {
+fn planned_denial_fails_before_mutation_and_reactive_denial_stops_later_operations() {
     let root = TempDir::new();
     let planned_workspace = root.path().join("planned");
     let reactive_workspace = root.path().join("reactive");
@@ -320,8 +320,12 @@ fn planned_denial_stops_later_operations_and_matches_reactive_failure() {
         planned_result.stop_reason(),
         GoalTurnStopReason::ActionFailed
     );
-    assert_eq!(planned_result.actions_taken(), 2);
-    assert_same_observed_result(&planned_result, &reactive_result);
+    assert_eq!(planned_result.actions_taken(), 1);
+    assert_eq!(
+        reactive_result.stop_reason(),
+        GoalTurnStopReason::ActionFailed
+    );
+    assert_eq!(reactive_result.actions_taken(), 2);
     assert_eq!(control_calls, 0);
     assert_eq!(reactive_calls, 2);
     assert!(!planned_workspace.join("later.txt").exists());
@@ -330,13 +334,23 @@ fn planned_denial_stops_later_operations_and_matches_reactive_failure() {
         fs::read_to_string(outside).expect("outside sentinel"),
         "unchanged"
     );
-    assert_records_match(
-        &planned_session,
-        planned_task_id,
-        planned_turn_id,
-        &reactive_session,
-        reactive_task_id,
-        reactive_turn_id,
+    assert_eq!(
+        planned_session
+            .get_task(planned_task_id)
+            .expect("planned task")
+            .get_turn(planned_turn_id)
+            .expect("planned turn")
+            .state(),
+        TurnState::Failed
+    );
+    assert_eq!(
+        reactive_session
+            .get_task(reactive_task_id)
+            .expect("reactive task")
+            .get_turn(reactive_turn_id)
+            .expect("reactive turn")
+            .state(),
+        TurnState::Failed
     );
 }
 

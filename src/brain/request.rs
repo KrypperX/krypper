@@ -2,9 +2,11 @@
 
 use crate::agent_loop::WorkspaceObservation;
 use crate::harness::context::{
-    build_plan_prompt_with_project_guidance, build_task_prompt_with_project_guidance,
+    build_plan_prompt_with_project_guidance, build_plan_prompt_with_project_guidance_and_targets,
+    build_task_prompt_with_project_guidance,
 };
 use serde_json::{json, Value};
+use std::path::PathBuf;
 
 use super::errors::*;
 use super::limits::*;
@@ -74,14 +76,41 @@ pub(crate) fn build_plan_request_with_project_guidance(
     maximum_operations: usize,
     project_guidance: Option<&str>,
 ) -> Result<Vec<u8>, ModelError> {
-    validate_model_name_for_provider(model, ModelProvider::Ollama)
-        .map_err(ModelError::InvalidModelName)?;
-    let prompt = build_plan_prompt_with_project_guidance(
+    build_plan_request_with_project_guidance_and_targets(
+        model,
         goal,
         observations,
         maximum_operations,
         project_guidance,
-    )?;
+        None,
+    )
+}
+
+pub(crate) fn build_plan_request_with_project_guidance_and_targets(
+    model: &str,
+    goal: &str,
+    observations: &[WorkspaceObservation],
+    maximum_operations: usize,
+    project_guidance: Option<&str>,
+    proposed_targets: Option<&[PathBuf]>,
+) -> Result<Vec<u8>, ModelError> {
+    validate_model_name_for_provider(model, ModelProvider::Ollama)
+        .map_err(ModelError::InvalidModelName)?;
+    let prompt = match proposed_targets {
+        Some(targets) => build_plan_prompt_with_project_guidance_and_targets(
+            goal,
+            observations,
+            maximum_operations,
+            project_guidance,
+            targets,
+        )?,
+        None => build_plan_prompt_with_project_guidance(
+            goal,
+            observations,
+            maximum_operations,
+            project_guidance,
+        )?,
+    };
     let request = json!({
         "model": model,
         "messages": [

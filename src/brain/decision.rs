@@ -13,6 +13,7 @@ use crate::harness::verification::{
 use crate::task_lifecycle::TaskSession;
 use crate::ProcessResult;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use ureq::Agent;
 
 use super::errors::*;
@@ -65,6 +66,28 @@ impl OllamaDecisionSource {
         action_budget: usize,
         project_guidance: Option<&str>,
     ) -> Result<WorkspacePlan, WorkspacePlanError> {
+        let plan = self.propose_plan_with_project_guidance(
+            goal,
+            observations,
+            action_budget,
+            project_guidance,
+            None,
+        )?;
+        self.accept_plan_with_project_guidance(
+            plan,
+            action_budget,
+            project_guidance.map(str::to_owned),
+        )
+    }
+
+    pub(crate) fn propose_plan_with_project_guidance(
+        &mut self,
+        goal: &str,
+        observations: &[WorkspaceObservation],
+        action_budget: usize,
+        project_guidance: Option<&str>,
+        proposed_targets: Option<&[PathBuf]>,
+    ) -> Result<WorkspacePlan, WorkspacePlanError> {
         let maximum = action_budget
             .min(self.remaining_decisions)
             .saturating_sub(1)
@@ -73,21 +96,49 @@ impl OllamaDecisionSource {
             return Err(WorkspacePlanError::ActionBudgetExhausted);
         }
 
-        let request = build_plan_request_with_project_guidance(
-            &self.model,
-            goal,
-            observations,
-            maximum,
-            project_guidance,
-        )
+        let request = match proposed_targets {
+            Some(targets) => build_plan_request_with_project_guidance_and_targets(
+                &self.model,
+                goal,
+                observations,
+                maximum,
+                project_guidance,
+                Some(targets),
+            ),
+            None => build_plan_request_with_project_guidance(
+                &self.model,
+                goal,
+                observations,
+                maximum,
+                project_guidance,
+            ),
+        }
         .map_err(|_| WorkspacePlanError::ModelRequestFailed)?;
         let response = post_chat(&self.agent, self.address, &request)
             .map_err(|_| WorkspacePlanError::ModelRequestFailed)?;
-        let plan = parse_model_plan_response(&response, maximum)?;
+        parse_model_plan_response(&response, maximum)
+    }
+
+    pub(crate) fn accept_plan_with_project_guidance(
+        &mut self,
+        plan: WorkspacePlan,
+        action_budget: usize,
+        project_guidance_context: Option<String>,
+    ) -> Result<WorkspacePlan, WorkspacePlanError> {
+        let maximum = action_budget
+            .min(self.remaining_decisions)
+            .saturating_sub(1)
+            .min(MAX_PLAN_OPERATIONS);
+        if maximum == 0 {
+            return Err(WorkspacePlanError::ActionBudgetExhausted);
+        }
+        if plan.operations().len() > maximum {
+            return Err(WorkspacePlanError::TooManyOperations { maximum });
+        }
         self.remaining_decisions = self
             .remaining_decisions
             .saturating_sub(plan.operations().len());
-        Ok(plan)
+        Ok(plan.with_project_guidance_context(project_guidance_context))
     }
 
     /// Uses one verified prior Harness result to inform a bounded workspace-only plan.

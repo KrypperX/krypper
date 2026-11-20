@@ -2,8 +2,8 @@
 
 use super::action::{execute_action, summarize_observation};
 use super::types::{
-    ActionExecution, BoundedDecisionSource, DecisionSource, GoalTurnError, GoalTurnResult,
-    GoalTurnStopReason, TurnCompletionData, WorkspaceObservation,
+    workspace_mutation_target, ActionExecution, BoundedDecisionSource, DecisionSource,
+    GoalTurnError, GoalTurnResult, GoalTurnStopReason, TurnCompletionData, WorkspaceObservation,
 };
 use crate::task_lifecycle::{TaskSession, TurnActivitySummary, TurnOutcome};
 use uuid::Uuid;
@@ -231,16 +231,61 @@ pub(crate) fn run_goal_turn_with_budget_and_extensions<D: BoundedDecisionSource 
         None
     };
     while actions_taken < max_actions {
-        let action = if needs_root_project_guidance {
-            decision_source.choose_action_with_root_project_guidance(
-                goal,
-                &observations,
-                root_project_guidance.as_deref(),
-            )
-        } else {
-            decision_source.choose_action(goal, &observations)
+        let mut decision_guidance = root_project_guidance.clone();
+        let action = loop {
+            let action = if needs_root_project_guidance {
+                decision_source.choose_action_with_root_project_guidance(
+                    goal,
+                    &observations,
+                    decision_guidance.as_deref(),
+                )
+            } else {
+                decision_source.choose_action(goal, &observations)
+            };
+            actions_taken += 1;
+
+            if needs_root_project_guidance {
+                if let Some(target) = workspace_mutation_target(&action) {
+                    let applicable_guidance = match session
+                        .read_project_guidance_for_targets(task_id, std::slice::from_ref(target))
+                    {
+                        Ok(guidance) => guidance,
+                        Err(
+                            crate::task_lifecycle::WorkspaceGuidanceReadError::InvalidTargetPath,
+                        ) => break action,
+                        Err(error) => {
+                            return Err(GoalTurnError::RootProjectGuidance(error));
+                        }
+                    };
+                    if applicable_guidance != decision_guidance {
+                        if actions_taken == max_actions {
+                            activity.push(TurnActivitySummary::BudgetExhausted {
+                                actions: actions_taken,
+                            });
+                            return finish_turn(
+                                session,
+                                task_id,
+                                turn_id,
+                                observations,
+                                TurnCompletionData {
+                                    activity,
+                                    actions_taken,
+                                    stop_reason: GoalTurnStopReason::ActionBudgetExhausted,
+                                    outcome: TurnOutcome::Failure {
+                                        detail: format!(
+                                            "action budget exhausted after {actions_taken} actions"
+                                        ),
+                                    },
+                                },
+                            );
+                        }
+                        decision_guidance = applicable_guidance;
+                        continue;
+                    }
+                }
+            }
+            break action;
         };
-        actions_taken += 1;
         match execute_with_extensions(session, task_id, turn_id, &action, extensions)? {
             ActionExecution::Complete(result) => {
                 activity.push(TurnActivitySummary::Completed);

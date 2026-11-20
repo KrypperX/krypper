@@ -25,7 +25,7 @@ pub use self::types::{
 };
 
 pub(crate) use self::action::summarize_observation;
-pub(crate) use self::types::workspace_action_name;
+pub(crate) use self::types::{workspace_action_name, workspace_mutation_target};
 
 /// Recheck host-issued extension authority at the Harness boundary.
 ///

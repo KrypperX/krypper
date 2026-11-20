@@ -73,6 +73,16 @@ pub(crate) fn workspace_action_name(action: &WorkspaceAction) -> &'static str {
     }
 }
 
+pub(crate) fn workspace_mutation_target(action: &WorkspaceAction) -> Option<&PathBuf> {
+    match action {
+        WorkspaceAction::CreateDirectory { path }
+        | WorkspaceAction::CreateFile { path, .. }
+        | WorkspaceAction::ReplaceText { path, .. }
+        | WorkspaceAction::ApplyPatch { path, .. } => Some(path),
+        _ => None,
+    }
+}
+
 /// One ordered observation produced while a task-owned turn is running.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WorkspaceObservation {

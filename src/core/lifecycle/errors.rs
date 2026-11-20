@@ -57,22 +57,26 @@ impl fmt::Display for WorkspaceReadError {
 
 impl std::error::Error for WorkspaceReadError {}
 
-/// A bounded root project-guidance read could not be completed safely.
+/// A bounded project-guidance read could not be completed safely.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkspaceGuidanceReadError {
     /// The task has no captured workspace root.
     WorkspaceUnavailable,
-    /// Root `AGENTS.md` is a symbolic link.
+    /// An intended edit path is invalid or outside the captured workspace.
+    InvalidTargetPath,
+    /// The applicable guidance changed after a decision was made.
+    GuidanceChanged,
+    /// An applicable `AGENTS.md` guidance file is a symbolic link.
     Symlink,
-    /// Root `AGENTS.md` is not a regular file.
+    /// An applicable `AGENTS.md` guidance file is not a regular file.
     NotRegularFile,
-    /// Root `AGENTS.md` exceeds 16 KiB.
+    /// An applicable `AGENTS.md` guidance file exceeds 16 KiB.
     TooLarge,
-    /// Root `AGENTS.md` is not valid UTF-8.
+    /// An applicable `AGENTS.md` guidance file is not valid UTF-8.
     InvalidUtf8,
-    /// Root `AGENTS.md` changed while it was being read.
+    /// An applicable `AGENTS.md` guidance file changed while it was being read.
     ChangedDuringRead,
-    /// Root `AGENTS.md` could not be read.
+    /// An applicable `AGENTS.md` guidance file could not be read.
     ReadFailed,
 }
 
@@ -80,14 +84,20 @@ impl fmt::Display for WorkspaceGuidanceReadError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::WorkspaceUnavailable => formatter.write_str("task workspace is unavailable"),
-            Self::Symlink => formatter.write_str("root AGENTS.md is a symlink"),
-            Self::NotRegularFile => formatter.write_str("root AGENTS.md is not a regular file"),
-            Self::TooLarge => formatter.write_str("root AGENTS.md exceeds 16 KiB"),
-            Self::InvalidUtf8 => formatter.write_str("root AGENTS.md is not valid UTF-8"),
-            Self::ChangedDuringRead => {
-                formatter.write_str("root AGENTS.md changed during the safe read")
+            Self::InvalidTargetPath => {
+                formatter.write_str("edit target path is invalid or outside the task workspace")
             }
-            Self::ReadFailed => formatter.write_str("root AGENTS.md could not be read"),
+            Self::GuidanceChanged => {
+                formatter.write_str("applicable project guidance changed after the decision")
+            }
+            Self::Symlink => formatter.write_str("AGENTS.md guidance or edit target is a symlink"),
+            Self::NotRegularFile => formatter.write_str("AGENTS.md guidance is not a regular file"),
+            Self::TooLarge => formatter.write_str("AGENTS.md guidance exceeds 16 KiB"),
+            Self::InvalidUtf8 => formatter.write_str("AGENTS.md guidance is not valid UTF-8"),
+            Self::ChangedDuringRead => {
+                formatter.write_str("AGENTS.md guidance changed during the safe read")
+            }
+            Self::ReadFailed => formatter.write_str("AGENTS.md guidance could not be read"),
         }
     }
 }
@@ -97,6 +107,7 @@ impl std::error::Error for WorkspaceGuidanceReadError {}
 impl From<RootGuidanceReadError> for WorkspaceGuidanceReadError {
     fn from(error: RootGuidanceReadError) -> Self {
         match error {
+            RootGuidanceReadError::InvalidTargetPath => Self::InvalidTargetPath,
             RootGuidanceReadError::Symlink => Self::Symlink,
             RootGuidanceReadError::NotRegularFile => Self::NotRegularFile,
             RootGuidanceReadError::TooLarge => Self::TooLarge,

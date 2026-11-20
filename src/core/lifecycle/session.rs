@@ -14,12 +14,12 @@ use crate::core::task::{
 };
 use crate::tools::{
     apply_patch_file_at, capture_workspace_root, capture_workspace_root_at, create_directory_at,
-    create_text_file_at, list_task_directory_names_at, read_root_agents_md_at, read_text_file_at,
-    replace_text_file_at, search_text_files_at, search_tree_text_files_at, PatchEvidence,
-    WorkspaceRoot,
+    create_text_file_at, list_task_directory_names_at, read_project_guidance_at,
+    read_root_agents_md_at, read_text_file_at, replace_text_file_at, search_text_files_at,
+    search_tree_text_files_at, PatchEvidence, WorkspaceRoot,
 };
 use std::ffi::OsString;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -264,6 +264,20 @@ impl TaskSession {
             .as_ref()
             .map_err(|_| WorkspaceGuidanceReadError::WorkspaceUnavailable)?;
         read_root_agents_md_at(root).map_err(Into::into)
+    }
+
+    pub(crate) fn read_project_guidance_for_targets(
+        &self,
+        task_id: Uuid,
+        targets: &[PathBuf],
+    ) -> Result<Option<String>, WorkspaceGuidanceReadError> {
+        let root = self
+            .get_task(task_id)
+            .ok_or(WorkspaceGuidanceReadError::WorkspaceUnavailable)?
+            .workspace_root
+            .as_ref()
+            .map_err(|_| WorkspaceGuidanceReadError::WorkspaceUnavailable)?;
+        read_project_guidance_at(root, targets).map_err(Into::into)
     }
 
     /// Completes a running turn owned by the requested task in this session.

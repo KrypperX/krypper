@@ -2,6 +2,7 @@ use super::execution::workspace_action_name;
 use crate::agent_loop::WorkspaceObservation;
 use crate::task_lifecycle::WorkspaceSearchLocation;
 use serde_json::{json, Value};
+use std::path::PathBuf;
 
 const MAX_OBSERVATION_BYTES: usize = 2 * 1024 * 1024;
 
@@ -47,9 +48,38 @@ pub(crate) fn build_plan_prompt_with_project_guidance(
     Ok(prompt)
 }
 
+pub(crate) fn build_plan_prompt_with_project_guidance_and_targets(
+    goal: &str,
+    observations: &[WorkspaceObservation],
+    maximum_operations: usize,
+    project_guidance: Option<&str>,
+    proposed_targets: &[PathBuf],
+) -> Result<String, ContextError> {
+    let mut prompt = build_plan_prompt_with_project_guidance(
+        goal,
+        observations,
+        maximum_operations,
+        project_guidance,
+    )?;
+    let targets =
+        serde_json::to_string(proposed_targets).map_err(|_| ContextError::RequestEncoding)?;
+    prompt.push_str("\n\nProposed workspace mutation targets (JSON):\n");
+    prompt.push_str(&targets);
+    prompt.push_str(
+        "\nKeep the mutation target set unchanged while applying the applicable project guidance.",
+    );
+    Ok(prompt)
+}
+
 pub(crate) fn append_project_guidance(prompt: &mut String, project_guidance: Option<&str>) {
     if let Some(project_guidance) = project_guidance {
-        prompt.push_str("\n\nRoot AGENTS.md project guidance (lower priority):\n");
+        if project_guidance.contains("\n\n--- AGENTS.md: ") {
+            prompt.push_str(
+                "\n\nApplicable AGENTS.md project guidance in root-to-target order (lower priority):\n",
+            );
+        } else {
+            prompt.push_str("\n\nRoot AGENTS.md project guidance (lower priority):\n");
+        }
         prompt.push_str(project_guidance);
     }
 }
