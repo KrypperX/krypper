@@ -282,7 +282,8 @@ mod extension_gate_tests {
             let task = session.get_task_mut(task_id).expect("task");
             task.transition(TaskState::Running).expect("running");
             let turn = task.create_turn().expect("turn");
-            task.transition_turn(turn, TurnState::Running).expect("running turn");
+            task.transition_turn(turn, TurnState::Running)
+                .expect("running turn");
             turn
         };
         let grant = CapabilityGrant {
@@ -316,13 +317,22 @@ mod extension_gate_tests {
             task_id,
             turn_id,
             &tools,
-            CapabilityContext { task_id, generation: 1, task_authorized: true },
+            CapabilityContext {
+                task_id,
+                generation: 1,
+                task_authorized: true,
+            },
             "external_read",
-            || { invoked = true; "must not execute" },
+            || {
+                invoked = true;
+                "must not execute"
+            },
         );
         assert!(matches!(
             result,
-            Err(ExtensionDispatchError::Bridge(BridgeError::InvalidArguments))
+            Err(ExtensionDispatchError::Bridge(
+                BridgeError::InvalidArguments
+            ))
         ));
         assert!(!invoked);
     }
