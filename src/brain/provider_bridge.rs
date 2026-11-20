@@ -126,7 +126,7 @@ fn validate_value(schema: &Value, value: &Value) -> bool {
     }
 }
 
-/// Reject an extension name that could shadow a built-in tool or another extension. 
+/// Reject an extension name that could shadow a built-in tool or another extension.
 fn validate_extension_names(tools: &[ExtensionTool<'_>]) -> Result<(), BridgeError> {
     let mut seen = std::collections::HashSet::new();
     for tool in tools {
