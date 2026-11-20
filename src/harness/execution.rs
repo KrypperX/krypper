@@ -116,16 +116,14 @@ mod extension_gate_tests {
             generation: 5,
             ..context
         };
-        let denied = super::dispatch_authorized_extension(
-            &tools,
-            revoked,
-            "external_read",
-            || {
-                executions += 1;
-                "must not execute"
-            },
+        let denied = super::dispatch_authorized_extension(&tools, revoked, "external_read", || {
+            executions += 1;
+            "must not execute"
+        });
+        assert_eq!(
+            denied,
+            Err(BridgeError::Denied(CapabilityDenial::StaleGrant))
         );
-        assert_eq!(denied, Err(BridgeError::Denied(CapabilityDenial::StaleGrant)));
         assert_eq!(executions, 1);
     }
 
