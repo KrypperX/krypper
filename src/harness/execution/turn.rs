@@ -496,6 +496,62 @@ mod extension_integration_tests {
     }
 
     #[test]
+    fn legacy_extension_with_required_arguments_fails_closed() {
+        let (mut session, task_id, turn_id) = running_turn();
+        let grant = CapabilityGrant {
+            task_id,
+            namespace: "external".into(),
+            operation: "read".into(),
+            effect: ExtensionEffect::ReadWorkspace,
+            generation: 1,
+            host_approved: false,
+        };
+        let registry = [super::super::RegisteredExtension {
+            tool: ExtensionTool {
+                descriptor: ExtensionDescriptor {
+                    version: EXTENSION_CONTRACT_VERSION,
+                    namespace: "external",
+                    name: "read",
+                    effect: ExtensionEffect::ReadWorkspace,
+                    authority: ExtensionAuthority::Task,
+                },
+                description: "Read",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"]
+                }),
+                grant: &grant,
+            },
+            execute: || panic!("required arguments were bypassed"),
+        }];
+        let extensions = TurnExtensions {
+            registry: &registry,
+            context: CapabilityContext {
+                task_id,
+                generation: 1,
+                task_authorized: true,
+            },
+        };
+        let mut choose =
+            |_: &str, _: &[WorkspaceObservation]| super::super::WorkspaceAction::Unsupported {
+                action: "external_read".to_owned(),
+            };
+        let result = run_goal_turn_with_budget_and_extensions(
+            &mut session,
+            task_id,
+            turn_id,
+            "goal",
+            1,
+            &mut choose,
+            Some(&extensions),
+        )
+        .expect("required arguments must fail closed");
+        assert_eq!(result.stop_reason(), GoalTurnStopReason::ActionFailed);
+        assert!(matches!(result.outcome(), Some(TurnOutcome::Failure { .. })));
+    }
+
+    #[test]
     fn revoked_extension_is_denied_in_bounded_execution_loop() {
         let (mut session, task_id, turn_id) = running_turn();
         let grant = CapabilityGrant {
