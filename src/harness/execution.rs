@@ -90,6 +90,27 @@ pub(crate) fn dispatch_registered_extension<T>(
     dispatch_authorized_extension(&tools, context, name, selected.execute)
 }
 
+/// Dispatch a registered executor only while its owning task turn is running.
+///
+/// The host supplies the registry and capability context. The provider controls
+/// only the requested tool name; it cannot replace the executor or grant.
+pub(crate) fn dispatch_registered_extension_for_turn<T>(
+    session: &crate::task_lifecycle::TaskSession,
+    task_id: uuid::Uuid,
+    turn_id: uuid::Uuid,
+    registry: &[RegisteredExtension<'_, T>],
+    context: crate::tools::capability_policy::CapabilityContext,
+    name: &str,
+) -> Result<T, ExtensionDispatchError> {
+    session
+        .validate_running_turn(task_id, turn_id)
+        .map_err(ExtensionDispatchError::Turn)?;
+    if context.task_id != task_id {
+        return Err(ExtensionDispatchError::TaskMismatch);
+    }
+    dispatch_registered_extension(registry, context, name).map_err(ExtensionDispatchError::Bridge)
+}
+
 /// Dispatch a host-registered extension only for an active task-owned turn.
 ///
 /// The caller supplies the registered descriptor, host-issued grant and handler;
