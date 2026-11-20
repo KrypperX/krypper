@@ -393,10 +393,10 @@ mod extension_gate_tests {
                 arguments,
             )
         };
-        assert_eq!(
+        assert!(matches!(
             dispatch(context, &json!({"path": "notes.txt"})),
-            Ok("notes.txt".into())
-        );
+            Ok(value) if value == "notes.txt"
+        ));
         assert!(matches!(
             dispatch(context, &json!({"path": 42})),
             Err(ExtensionDispatchError::Bridge(
