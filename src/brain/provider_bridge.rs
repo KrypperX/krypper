@@ -31,9 +31,7 @@ pub(crate) enum BridgeError {
 /// Both advertisement and dispatch must reject unsupported parameter schemas.
 fn valid_parameters(parameters: &Value) -> bool {
     parameters.get("type").and_then(Value::as_str) == Some("object")
-        && parameters
-            .get("properties")
-            .is_some_and(Value::is_object)
+        && parameters.get("properties").is_some_and(Value::is_object)
 }
 
 /// Build declarations in the existing OpenAI-function shape used by Brain.
@@ -52,8 +50,7 @@ pub(crate) fn authorized_declarations(
     let mut declarations = Vec::with_capacity(tools.len());
     for tool in tools {
         evaluate(&tool.descriptor, context, Some(tool.grant)).map_err(BridgeError::Denied)?;
-        if !valid_parameters(&tool.parameters)
-        {
+        if !valid_parameters(&tool.parameters) {
             return Err(BridgeError::InvalidSchema);
         }
         declarations.push(json!({
