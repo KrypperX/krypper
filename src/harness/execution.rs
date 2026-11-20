@@ -110,6 +110,49 @@ pub(crate) fn dispatch_registered_extension<T>(
     dispatch_authorized_extension(&tools, context, name, selected.execute)
 }
 
+/// Resolve an argument-aware host handler by registered name, then recheck
+/// capability and schema before passing model arguments to that handler.
+/// Unknown names cannot select a handler or create authority.
+pub(crate) fn dispatch_registered_extension_with_arguments<T>(
+    registry: &[RegisteredExtensionWithArguments<'_, T>],
+    context: crate::tools::capability_policy::CapabilityContext,
+    name: &str,
+    arguments: &serde_json::Value,
+) -> Result<T, crate::brain::provider_bridge::BridgeError> {
+    let selected = registry
+        .iter()
+        .find(|entry| {
+            format!(
+                "{}_{}",
+                entry.tool.descriptor.namespace, entry.tool.descriptor.name
+            ) == name
+        })
+        .ok_or(crate::brain::provider_bridge::BridgeError::UnknownTool)?;
+    let tools = registry
+        .iter()
+        .map(|entry| crate::brain::provider_bridge::ExtensionTool {
+            descriptor: entry.tool.descriptor.clone(),
+            description: entry.tool.description,
+            parameters: entry.tool.parameters.clone(),
+            grant: entry.tool.grant,
+        })
+        .collect::<Vec<_>>();
+    dispatch_authorized_extension_with_arguments(
+        &tools,
+        context,
+        name,
+        arguments,
+        selected.execute,
+    )
+}
+
+/// A host-owned handler that receives validated model arguments.
+/// Registration is not a capability grant.
+pub(crate) struct RegisteredExtensionWithArguments<'a, T> {
+    pub tool: crate::brain::provider_bridge::ExtensionTool<'a>,
+    pub execute: fn(&serde_json::Value) -> T,
+}
+
 /// Dispatch a registered executor only while its owning task turn is running.
 ///
 /// The host supplies the registry and capability context. The provider controls
