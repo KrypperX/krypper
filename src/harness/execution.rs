@@ -23,3 +23,15 @@ pub use self::types::{
 
 pub(crate) use self::action::summarize_observation;
 pub(crate) use self::types::workspace_action_name;
+
+/// Recheck host-issued extension authority at the Harness boundary.
+///
+/// This gate never executes a provider-supplied call. Future extension
+/// executors must pass this check before using the existing TaskSession path.
+pub(crate) fn authorize_extension_at_harness(
+    tools: &[crate::brain::provider_bridge::ExtensionTool<'_>],
+    context: crate::tools::capability_policy::CapabilityContext,
+    name: &str,
+) -> Result<(), crate::brain::provider_bridge::BridgeError> {
+    crate::brain::provider_bridge::authorize_dispatch(tools, context, name)
+}
