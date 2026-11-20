@@ -85,6 +85,61 @@ pub(crate) fn authorize_dispatch(
     evaluate(&tool.descriptor, context, Some(tool.grant)).map_err(BridgeError::Denied)
 }
 
+/// Convert already-authorized declarations to the provider's existing schema.
+///
+/// The caller must pass only the result of `authorized_declarations`.
+/// Conversion does not confer execution authority.
+pub(crate) fn responses_declarations(declarations: &[Value]) -> Vec<Value> {
+    declarations
+        .iter()
+        .filter_map(|tool| {
+            let function = tool.get("function")?;
+            Some(json!({
+                "type": "function",
+                "name": function.get("name")?,
+                "description": function.get("description")?,
+                "parameters": function.get("parameters")?,
+                "strict": false
+            }))
+        })
+        .collect()
+}
+
+/// Translate authorized declarations to Anthropic's existing strict schema.
+pub(crate) fn anthropic_declarations(declarations: &[Value]) -> Vec<Value> {
+    declarations
+        .iter()
+        .filter_map(|tool| {
+            let function = tool.get("function")?;
+            Some(json!({
+                "name": function.get("name")?,
+                "description": function.get("description")?,
+                "strict": true,
+                "input_schema": super::tools_schema::anthropic_strict_schema(
+                    function.get("parameters")?
+                )
+            }))
+        })
+        .collect()
+}
+
+/// Translate authorized declarations to Gemini's supported schema subset.
+pub(crate) fn gemini_declarations(declarations: &[Value]) -> Vec<Value> {
+    declarations
+        .iter()
+        .filter_map(|tool| {
+            let function = tool.get("function")?;
+            Some(json!({
+                "name": function.get("name")?,
+                "description": function.get("description")?,
+                "parameters": super::tools_schema::gemini_supported_schema(
+                    function.get("parameters")?
+                )
+            }))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 #[path = "provider_bridge/tests.rs"]
 mod tests;
