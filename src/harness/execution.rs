@@ -53,6 +53,23 @@ pub(crate) fn dispatch_authorized_extension<T>(
     Ok(execute())
 }
 
+/// Dispatch a model-supplied argument object through the existing Harness gate.
+///
+/// Authority and schema validation both precede the host-owned executor.
+/// The model may supply arguments, but never the handler or its grant.
+pub(crate) fn dispatch_authorized_extension_with_arguments<T>(
+    tools: &[crate::brain::provider_bridge::ExtensionTool<'_>],
+    context: crate::tools::capability_policy::CapabilityContext,
+    name: &str,
+    arguments: &serde_json::Value,
+    execute: impl FnOnce(&serde_json::Value) -> T,
+) -> Result<T, crate::brain::provider_bridge::BridgeError> {
+    crate::brain::provider_bridge::authorize_dispatch_with_arguments(
+        tools, context, name, arguments,
+    )?;
+    Ok(execute(arguments))
+}
+
 /// One host-owned extension executor registered for a task.
 ///
 /// Registration never confers authority: dispatch separately verifies the
