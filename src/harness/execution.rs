@@ -399,7 +399,9 @@ mod extension_gate_tests {
         );
         assert!(matches!(
             dispatch(context, &json!({"path": 42})),
-            Err(ExtensionDispatchError::Bridge(BridgeError::InvalidArguments))
+            Err(ExtensionDispatchError::Bridge(
+                BridgeError::InvalidArguments
+            ))
         ));
         assert!(matches!(
             dispatch(
