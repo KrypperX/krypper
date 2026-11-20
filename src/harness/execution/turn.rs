@@ -551,6 +551,59 @@ mod extension_integration_tests {
     }
 
     #[test]
+    fn built_in_continue_does_not_invoke_registered_extension() {
+        let (mut session, task_id, turn_id) = running_turn();
+        let grant = CapabilityGrant {
+            task_id,
+            namespace: "external".into(),
+            operation: "read".into(),
+            effect: ExtensionEffect::ReadWorkspace,
+            generation: 1,
+            host_approved: false,
+        };
+        let registry = [super::super::RegisteredExtension {
+            tool: ExtensionTool {
+                descriptor: ExtensionDescriptor {
+                    version: EXTENSION_CONTRACT_VERSION,
+                    namespace: "external",
+                    name: "read",
+                    effect: ExtensionEffect::ReadWorkspace,
+                    authority: ExtensionAuthority::Task,
+                },
+                description: "Read",
+                parameters: json!({"type":"object","properties":{}}),
+                grant: &grant,
+            },
+            execute: || panic!("built-in action must not invoke extension"),
+        }];
+        let extensions = TurnExtensions {
+            registry: &registry,
+            context: CapabilityContext {
+                task_id,
+                generation: 1,
+                task_authorized: true,
+            },
+        };
+        let mut choose = |_: &str| super::super::WorkspaceAction::Continue;
+        let result = run_goal_turn_with_extensions(
+            &mut session,
+            task_id,
+            turn_id,
+            "goal",
+            &mut choose,
+            Some(&extensions),
+        )
+        .expect("built-in action remains available");
+        assert_eq!(result.stop_reason(), GoalTurnStopReason::Continued);
+        assert_eq!(
+            result.outcome(),
+            Some(&TurnOutcome::Success {
+                result: "continued".to_owned()
+            })
+        );
+    }
+
+    #[test]
     fn wrong_task_context_never_invokes_extension() {
         let (mut session, task_id, turn_id) = running_turn();
         let extensions = TurnExtensions {
