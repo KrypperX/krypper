@@ -31,7 +31,9 @@ pub(crate) enum BridgeError {
 /// Both advertisement and dispatch must reject unsupported parameter schemas.
 fn valid_parameters(parameters: &Value) -> bool {
     parameters.get("type").and_then(Value::as_str) == Some("object")
-        && parameters.get("properties").is_some_and(Value::is_object)
+        && parameters
+            .get("properties")
+            .is_some_and(Value::is_object)
 }
 
 /// Build declarations in the existing OpenAI-function shape used by Brain.
