@@ -433,3 +433,41 @@ fn unsupported_schema_keywords_are_rejected_before_advertisement() {
         );
     }
 }
+
+#[test]
+fn extension_cannot_shadow_builtin_completion() {
+    let task_id = Uuid::new_v4();
+    let context = CapabilityContext {
+        task_id,
+        generation: 1,
+        task_authorized: true,
+    };
+    let grant = CapabilityGrant {
+        task_id,
+        namespace: "complete".into(),
+        operation: "task".into(),
+        effect: ExtensionEffect::ReadWorkspace,
+        generation: 1,
+        host_approved: false,
+    };
+    let tools = [ExtensionTool {
+        descriptor: ExtensionDescriptor {
+            version: EXTENSION_CONTRACT_VERSION,
+            namespace: "complete",
+            name: "task",
+            effect: ExtensionEffect::ReadWorkspace,
+            authority: ExtensionAuthority::Task,
+        },
+        description: "Must not override completion",
+        parameters: json!({"type":"object","properties":{}}),
+        grant: &grant,
+    }];
+    assert_eq!(
+        authorized_declarations(&tools, context),
+        Err(BridgeError::NameCollision)
+    );
+    assert_eq!(
+        authorize_dispatch(&tools, context, "complete_task"),
+        Err(BridgeError::NameCollision)
+    );
+}
