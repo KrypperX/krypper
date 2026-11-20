@@ -78,12 +78,15 @@ pub(crate) fn dispatch_registered_extension<T>(
             ) == name
         })
         .ok_or(crate::brain::provider_bridge::BridgeError::UnknownTool)?;
-    let tools = registry.iter().map(|entry| crate::brain::provider_bridge::ExtensionTool {
-        descriptor: entry.tool.descriptor.clone(),
-        description: entry.tool.description,
-        parameters: entry.tool.parameters.clone(),
-        grant: entry.tool.grant,
-    }).collect::<Vec<_>>();
+    let tools = registry
+        .iter()
+        .map(|entry| crate::brain::provider_bridge::ExtensionTool {
+            descriptor: entry.tool.descriptor.clone(),
+            description: entry.tool.description,
+            parameters: entry.tool.parameters.clone(),
+            grant: entry.tool.grant,
+        })
+        .collect::<Vec<_>>();
     dispatch_authorized_extension(&tools, context, name, selected.execute)
 }
 
