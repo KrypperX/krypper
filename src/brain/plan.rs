@@ -12,6 +12,7 @@ pub(crate) const MAX_PLAN_OPERATIONS: usize = 32;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspacePlan {
     operations: Vec<WorkspaceAction>,
+    project_guidance_context: Option<String>,
 }
 
 impl WorkspacePlan {
@@ -36,7 +37,10 @@ impl WorkspacePlan {
             return Err(WorkspacePlanError::UnsupportedOperation);
         }
 
-        Ok(Self { operations })
+        Ok(Self {
+            operations,
+            project_guidance_context: None,
+        })
     }
 
     /// Returns the operations in their proposed execution order.
@@ -46,6 +50,18 @@ impl WorkspacePlan {
 
     pub(crate) fn into_actions(self) -> Vec<WorkspaceAction> {
         self.operations
+    }
+
+    pub(crate) fn with_project_guidance_context(
+        mut self,
+        project_guidance_context: Option<String>,
+    ) -> Self {
+        self.project_guidance_context = project_guidance_context;
+        self
+    }
+
+    pub(crate) fn project_guidance_context(&self) -> Option<&str> {
+        self.project_guidance_context.as_deref()
     }
 }
 
@@ -82,8 +98,10 @@ pub enum WorkspacePlanError {
     ModelRequestFailed,
     /// No action-budget slot remains for a workspace operation and existing control decision.
     ActionBudgetExhausted,
-    /// Root project guidance could not be read safely from the task workspace.
+    /// Applicable project guidance could not be read safely from the task workspace.
     RootGuidanceRead(WorkspaceGuidanceReadError),
+    /// The target paths changed after their applicable project guidance was supplied.
+    GuidanceTargetsChanged,
 }
 
 impl fmt::Display for WorkspacePlanError {
@@ -110,8 +128,11 @@ impl fmt::Display for WorkspacePlanError {
                 "action budget must leave room for a workspace operation and task control",
             ),
             Self::RootGuidanceRead(error) => {
-                write!(formatter, "root project guidance read failed: {error}")
+                write!(formatter, "project guidance read failed: {error}")
             }
+            Self::GuidanceTargetsChanged => formatter.write_str(
+                "workspace plan targets changed after applicable project guidance was supplied",
+            ),
         }
     }
 }

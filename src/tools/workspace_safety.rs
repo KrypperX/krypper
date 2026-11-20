@@ -21,8 +21,8 @@ pub(crate) use create::{create_directory_at, create_text_file, create_text_file_
 pub(crate) use listing::{list_directory, list_task_directory_names_at};
 pub(crate) use patch::MAX_PATCH_BYTES;
 pub(crate) use read::{
-    capture_workspace_root, capture_workspace_root_at, read_root_agents_md_at, read_text_file,
-    read_text_file_at,
+    capture_workspace_root, capture_workspace_root_at, read_project_guidance_at,
+    read_root_agents_md_at, read_text_file, read_text_file_at,
 };
 pub(crate) use replace::{apply_patch_file_at, replace_text_file_at};
 pub(crate) use search::{search_text_files_at, search_tree_text_files_at};

@@ -11,6 +11,18 @@ use std::path::PathBuf;
 #[test]
 fn opt_in_reflection_uses_a_verified_success_and_only_proposes_a_bounded_plan() {
     let workspace = TempDir::new();
+    fs::create_dir_all(workspace.path().join("src")).expect("create nested workspace");
+    fs::create_dir_all(workspace.path().join("tests")).expect("create sibling workspace");
+    fs::write(
+        workspace.path().join("src/AGENTS.md"),
+        "reflective src guidance",
+    )
+    .expect("write nested guidance");
+    fs::write(
+        workspace.path().join("tests/AGENTS.md"),
+        "reflective sibling sentinel",
+    )
+    .expect("write sibling guidance");
     let (mut session, task_id, prior_turn_id) =
         running_turn_in_workspace(workspace.path(), "record an observed file creation");
     let mut prior_decisions =
@@ -50,7 +62,11 @@ fn opt_in_reflection_uses_a_verified_success_and_only_proposes_a_bounded_plan() 
         )),
         ok(tool_response(
             "create_file",
-            json!({"path":"follow-up.txt","contents":"proposed by Brain"}),
+            json!({"path":"src/follow-up.txt","contents":"proposed by Brain"}),
+        )),
+        ok(tool_response(
+            "create_file",
+            json!({"path":"src/follow-up.txt","contents":"proposed by Brain"}),
         )),
     ]);
     let mut brain = OllamaDecisionSource::with_endpoint("fixture-model", 3, address);
@@ -71,10 +87,10 @@ fn opt_in_reflection_uses_a_verified_success_and_only_proposes_a_bounded_plan() 
             .state(),
         prior_turn_state
     );
-    assert!(!workspace.path().join("follow-up.txt").exists());
+    assert!(!workspace.path().join("src/follow-up.txt").exists());
 
     let requests = server.join().expect("join local reflection fixture");
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 3);
     let reflection_request = request_json(&requests[0]);
     let reflection_prompt = reflection_request["messages"][1]["content"]
         .as_str()
@@ -92,6 +108,18 @@ fn opt_in_reflection_uses_a_verified_success_and_only_proposes_a_bounded_plan() 
     assert!(proposal_prompt.contains("The recorded file creation can guide a follow-up."));
     assert!(proposal_prompt.contains("outcome: success"));
     assert!(proposal_prompt.contains("untrusted advisory"));
+    assert!(!proposal_prompt.contains("reflective src guidance"));
+
+    let final_request = request_json(&requests[2]);
+    let final_prompt = final_request["messages"][1]["content"]
+        .as_str()
+        .expect("guidance-aware reflective plan prompt");
+    assert!(final_prompt.contains("reflective src guidance"));
+    assert!(!final_prompt.contains("reflective sibling sentinel"));
+    assert!(final_request["messages"][0]["content"]
+        .as_str()
+        .expect("reflective plan system instructions")
+        .contains("including nested files"));
 
     let next_turn_id = {
         let task = session.get_task_mut(task_id).expect("task exists");
@@ -117,7 +145,7 @@ fn opt_in_reflection_uses_a_verified_success_and_only_proposes_a_bounded_plan() 
     assert_eq!(next_result.actions_taken(), 2);
     assert!(next_result.actions_taken() <= 3);
     assert_eq!(
-        fs::read_to_string(workspace.path().join("follow-up.txt"))
+        fs::read_to_string(workspace.path().join("src/follow-up.txt"))
             .expect("read Harness-created follow-up"),
         "proposed by Brain"
     );

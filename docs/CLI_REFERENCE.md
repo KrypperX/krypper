@@ -313,10 +313,11 @@ Hosted requests include the task goal, supported action schemas, remaining
 action budget, and prior observations. Observations can include workspace file
 contents, so explicitly selecting xAI or another hosted provider sends that
 task data to the provider and may incur provider charges. Review the goal and
-workspace data before opting in. Model-backed task turns also include the
-captured workspace root's `AGENTS.md` when present, so its contents are sent to
-the selected hosted provider too. `--model NAME` without `--provider` keeps
-inference local through Ollama at `127.0.0.1:11434`; Ollama needs no API key.
+workspace data before opting in. Model-backed task turns include the captured
+workspace root's `AGENTS.md` and, for proposed edits, applicable nested ancestor
+guidance. Those contents are sent to the selected hosted provider too.
+`--model NAME` without `--provider` keeps inference local through Ollama at
+`127.0.0.1:11434`; Ollama needs no API key.
 
 Without `--model` or `--provider`, `task` stays caller-directed and makes no
 model request, unless you created the optional user configuration file
@@ -335,14 +336,18 @@ excerpt. Directory listings, search locations, and action outcomes are also
 sent to the selected service when model mode is enabled. Requests and
 accumulated observations have size limits.
 
-Before a model-backed task decision, Krypper reads only a root-level
-`AGENTS.md` through the task's captured workspace and no-follow file checks.
-Valid UTF-8 guidance is limited to 16 KiB and appears in a separate lower-priority
-project-guidance section. It may guide task-relevant repository conventions but
-cannot change tool authorization, workspace confinement, process permissions,
-budgets, or completion evidence. An absent file leaves the prompt unchanged;
-nested `AGENTS.md` files are ignored. Invalid, oversized, symlinked, changed, or
-unreadable root guidance fails visibly before a model decision.
+For model-backed edits, Krypper first receives a non-mutating proposal, then
+reads `AGENTS.md` files from the captured workspace root through the directories
+that contain the proposed targets. It sends applicable guidance in deterministic
+root-to-target order before the final edit decision. Sibling and unrelated
+directory guidance is not read or included. Reads use no-follow descriptor
+checks and stay inside the captured workspace. Each file and the combined
+guidance context are limited to 16 KiB of valid UTF-8. Guidance is untrusted,
+lower-priority context for repository conventions; it cannot change tool
+authorization, workspace confinement, process permissions, budgets, or
+completion evidence. With no nested guidance, the existing prompt and action
+flow are preserved. Invalid target paths, symlinks, oversized or invalid UTF-8
+files, and guidance changed during a safe read fail before a write.
 
 The adapter exposes only the existing task workspace actions and task
 completion. Every selected action still passes through Krypper's existing

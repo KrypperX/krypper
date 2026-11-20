@@ -409,17 +409,13 @@ fn run_task_with_options(
     let mut stream_event_sequence = 1_u64;
     let mut last_stream_positions = Vec::new();
     loop {
-        let project_guidance = if model_source.is_some() {
-            session
-                .read_root_project_guidance(task_id)
-                .map_err(io::Error::other)?
-        } else {
-            None
-        };
         let mut displayed_observations = 0;
         let result = {
-            let mut decision_source =
-                |decision_goal: &str, observations: &[WorkspaceObservation]| {
+            let mut decision_source = CliDecisionSource {
+                needs_project_guidance: model_source.is_some(),
+                decide: |decision_goal: &str,
+                         observations: &[WorkspaceObservation],
+                         project_guidance: Option<&str>| {
                     while displayed_observations < observations.len() {
                         if let Err(cause) = write_observation(
                             output,
@@ -455,7 +451,7 @@ fn run_task_with_options(
                         let action = model_source.choose_action_with_root_project_guidance(
                             decision_goal,
                             observations,
-                            project_guidance.as_deref(),
+                            project_guidance,
                         );
                         if let Err(cause) = writeln!(
                             output,
@@ -507,7 +503,8 @@ fn run_task_with_options(
                             action: format!("input error: {cause}"),
                         },
                     }
-                };
+                },
+            };
             run_goal_turn_with_budget(
                 &mut session,
                 task_id,
@@ -689,6 +686,37 @@ fn run_task_with_options(
     } else {
         1
     })
+}
+
+struct CliDecisionSource<F> {
+    needs_project_guidance: bool,
+    decide: F,
+}
+
+impl<F> BoundedDecisionSource for CliDecisionSource<F>
+where
+    F: FnMut(&str, &[WorkspaceObservation], Option<&str>) -> WorkspaceAction,
+{
+    fn choose_action(
+        &mut self,
+        goal: &str,
+        observations: &[WorkspaceObservation],
+    ) -> WorkspaceAction {
+        (self.decide)(goal, observations, None)
+    }
+
+    fn needs_root_project_guidance(&self) -> bool {
+        self.needs_project_guidance
+    }
+
+    fn choose_action_with_root_project_guidance(
+        &mut self,
+        goal: &str,
+        observations: &[WorkspaceObservation],
+        guidance: Option<&str>,
+    ) -> WorkspaceAction {
+        (self.decide)(goal, observations, guidance)
+    }
 }
 
 pub(super) fn snapshot_task_and_turn_state(

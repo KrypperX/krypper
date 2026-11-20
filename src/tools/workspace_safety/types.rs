@@ -23,6 +23,7 @@ pub(crate) struct WorkspaceRoot {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RootGuidanceReadError {
+    InvalidTargetPath,
     Symlink,
     NotRegularFile,
     TooLarge,
@@ -56,14 +57,17 @@ impl CliError {
 impl fmt::Display for RootGuidanceReadError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Symlink => formatter.write_str("root AGENTS.md is a symlink"),
-            Self::NotRegularFile => formatter.write_str("root AGENTS.md is not a regular file"),
-            Self::TooLarge => formatter.write_str("root AGENTS.md exceeds 16 KiB"),
-            Self::InvalidUtf8 => formatter.write_str("root AGENTS.md is not valid UTF-8"),
-            Self::ChangedDuringRead => {
-                formatter.write_str("root AGENTS.md changed during the safe read")
+            Self::InvalidTargetPath => {
+                formatter.write_str("edit target path is invalid or outside the task workspace")
             }
-            Self::ReadFailed => formatter.write_str("root AGENTS.md could not be read"),
+            Self::Symlink => formatter.write_str("AGENTS.md guidance or edit target is a symlink"),
+            Self::NotRegularFile => formatter.write_str("AGENTS.md guidance is not a regular file"),
+            Self::TooLarge => formatter.write_str("AGENTS.md guidance exceeds 16 KiB"),
+            Self::InvalidUtf8 => formatter.write_str("AGENTS.md guidance is not valid UTF-8"),
+            Self::ChangedDuringRead => {
+                formatter.write_str("AGENTS.md guidance changed during the safe read")
+            }
+            Self::ReadFailed => formatter.write_str("AGENTS.md guidance could not be read"),
         }
     }
 }
