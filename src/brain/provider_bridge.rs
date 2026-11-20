@@ -141,7 +141,6 @@ fn validate_value(schema: &Value, value: &Value) -> bool {
     }
 }
 
-/// Reject an extension name that could shadow a built-in tool or another extension.
 // This in-process bridge is for workspace effects only; elevated effects need
 // the separate verified-supervisor/sandbox path.
 fn supported_effect(tool: &ExtensionTool<'_>) -> bool {
@@ -151,6 +150,7 @@ fn supported_effect(tool: &ExtensionTool<'_>) -> bool {
     )
 }
 
+/// Reject an extension name that could shadow a built-in tool or another extension.
 fn validate_extension_names(tools: &[ExtensionTool<'_>]) -> Result<(), BridgeError> {
     let mut seen = std::collections::HashSet::new();
     for tool in tools {
@@ -253,6 +253,44 @@ pub(crate) fn authorize_dispatch_with_arguments(
     let tool = authorize_tool(tools, context, name)?;
     if !validate_value(&tool.parameters, arguments) {
         return Err(BridgeError::InvalidArguments);
+    }
+    Ok(())
+}
+
+/// Validate declaration envelopes at a public request-builder boundary.
+///
+/// Callers still need `authorized_declarations` for capability checks; this gate
+/// only prevents malformed or name-colliding declarations from being advertised.
+pub(crate) fn validate_declarations(declarations: &[Value]) -> Result<(), BridgeError> {
+    let mut seen = std::collections::HashSet::new();
+    for declaration in declarations {
+        let Some(function) = declaration.get("function") else {
+            return Err(BridgeError::InvalidSchema);
+        };
+        let Some(name) = function.get("name").and_then(Value::as_str) else {
+            return Err(BridgeError::InvalidSchema);
+        };
+        if function
+            .get("description")
+            .and_then(Value::as_str)
+            .is_none()
+        {
+            return Err(BridgeError::InvalidSchema);
+        }
+        let Some(parameters) = function.get("parameters") else {
+            return Err(BridgeError::InvalidSchema);
+        };
+        if !valid_parameters(parameters) {
+            return Err(BridgeError::InvalidSchema);
+        }
+        if name == "complete_task"
+            || crate::tools::registry::workspace_operations()
+                .iter()
+                .any(|operation| operation.name() == name)
+            || !seen.insert(name)
+        {
+            return Err(BridgeError::NameCollision);
+        }
     }
     Ok(())
 }

@@ -10,7 +10,9 @@ use std::path::PathBuf;
 
 use super::errors::*;
 use super::limits::*;
-use super::provider_bridge::{anthropic_declarations, gemini_declarations, responses_declarations};
+use super::provider_bridge::{
+    anthropic_declarations, gemini_declarations, responses_declarations, validate_declarations,
+};
 use super::providers;
 use super::providers::*;
 use super::tools_schema::*;
@@ -100,6 +102,8 @@ pub fn build_chat_request_with_extensions(
     project_guidance: Option<&str>,
     extension_declarations: &[Value],
 ) -> Result<Vec<u8>, ModelError> {
+    validate_declarations(extension_declarations)
+        .map_err(|_| ModelError::InvalidToolCall("invalid extension declarations"))?;
     let mut tools = tool_definitions();
     if let Value::Array(items) = &mut tools {
         items.extend(extension_declarations.iter().cloned());
@@ -229,6 +233,8 @@ pub fn build_responses_request_with_extensions(
     project_guidance: Option<&str>,
     extension_declarations: &[Value],
 ) -> Result<Vec<u8>, ModelError> {
+    validate_declarations(extension_declarations)
+        .map_err(|_| ModelError::InvalidToolCall("invalid extension declarations"))?;
     let mut tools = openai_tool_definitions();
     if let Value::Array(items) = &mut tools {
         items.extend(responses_declarations(extension_declarations));
@@ -301,6 +307,8 @@ pub fn build_anthropic_request_with_extensions(
     project_guidance: Option<&str>,
     extension_declarations: &[Value],
 ) -> Result<Vec<u8>, ModelError> {
+    validate_declarations(extension_declarations)
+        .map_err(|_| ModelError::InvalidToolCall("invalid extension declarations"))?;
     let mut tools = anthropic_tool_definitions();
     if let Value::Array(items) = &mut tools {
         items.extend(anthropic_declarations(extension_declarations));
@@ -379,6 +387,8 @@ pub fn build_gemini_request_with_extensions(
     project_guidance: Option<&str>,
     extension_declarations: &[Value],
 ) -> Result<Vec<u8>, ModelError> {
+    validate_declarations(extension_declarations)
+        .map_err(|_| ModelError::InvalidToolCall("invalid extension declarations"))?;
     let mut declarations = gemini_function_declarations();
     declarations.extend(gemini_declarations(extension_declarations));
     build_gemini_request_with_declarations(

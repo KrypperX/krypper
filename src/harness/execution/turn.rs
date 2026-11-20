@@ -13,7 +13,9 @@ use uuid::Uuid;
 /// A provider may request a name but cannot supply the registry, grant, or
 /// capability context. Unregistered names keep the ordinary fail-closed path.
 pub struct TurnExtensions<'a> {
+    /// Trusted host handlers and their grants; never supplied by the model.
     pub registry: &'a [super::RegisteredExtensionWithArguments<'a, String>],
+    /// Trusted capability context for the active task and generation.
     pub context: crate::tools::capability_policy::CapabilityContext,
 }
 

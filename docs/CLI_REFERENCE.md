@@ -352,9 +352,11 @@ files, and guidance changed during a safe read fail before a write.
 The adapter exposes the existing task workspace actions and task completion.
 When an embedding host registers extension tools, the adapter can also advertise
 those host-authorized declarations; the CLI itself registers none, so its default
-behaviour is unchanged. Every selected action still passes through Krypper's
-existing workspace containment, symlink, UTF-8, size, lifecycle, and action-budget
-checks; model output cannot request arbitrary shell or process execution.
+behaviour is unchanged. Built-in actions pass through Krypper's existing workspace
+containment, symlink, UTF-8, size, lifecycle, and action-budget checks; model output
+cannot request arbitrary shell or process execution. Host-registered extensions are
+trusted host handlers rechecked against their grant, schema and active turn at
+dispatch; they do not add a model-controlled path to the Tools registry.
 See [extension bridge safety](extension-bridge-safety.md) for the threat-model
 and backward-compatibility notes.
 The registered `offline_cargo_test` profile is denied unless trusted embedding

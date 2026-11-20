@@ -246,6 +246,8 @@ pub fn build_compatible_chat_request_with_extensions(
     project_guidance: Option<&str>,
     extension_declarations: &[Value],
 ) -> Result<Vec<u8>, ModelError> {
+    super::provider_bridge::validate_declarations(extension_declarations)
+        .map_err(|_| ModelError::InvalidToolCall("invalid extension declarations"))?;
     super::validate_model_name_for_provider(model, ModelProvider::OpenAiCompatible(provider))
         .map_err(ModelError::InvalidModelName)?;
     let prompt = build_task_prompt_with_project_guidance(

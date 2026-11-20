@@ -20,6 +20,8 @@ mint a grant, or choose an arbitrary executor.
   verified-supervisor/sandbox path and are rejected here.
 - Extensions use the existing task lifecycle and capability boundary. No
   extension-owned execution loop or provider-issued authority is introduced.
+  Executors are trusted host code selected by registration name, never by
+  model-supplied code or paths; the host must implement each declared effect.
 - A successful extension produces an ordinary observation and does not complete
   the turn by itself; the model still decides when to complete or continue.
 - The CLI currently registers no extension handlers, so default CLI behaviour

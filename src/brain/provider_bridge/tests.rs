@@ -435,6 +435,45 @@ fn unsupported_schema_keywords_are_rejected_before_advertisement() {
 }
 
 #[test]
+fn public_request_boundary_rejects_invalid_declarations() {
+    let valid = [serde_json::json!({
+        "type": "function",
+        "function": {
+            "name": "external_read",
+            "description": "Read approved data",
+            "parameters": {"type":"object","properties":{}}
+        }
+    })];
+    assert_eq!(validate_declarations(&valid), Ok(()));
+
+    let malformed = [serde_json::json!({
+        "type": "function",
+        "function": {
+            "name": "external_read",
+            "description": "Read approved data",
+            "parameters": {"type":"array"}
+        }
+    })];
+    assert_eq!(
+        validate_declarations(&malformed),
+        Err(BridgeError::InvalidSchema)
+    );
+
+    let collision = [serde_json::json!({
+        "type": "function",
+        "function": {
+            "name": "complete_task",
+            "description": "Complete the task",
+            "parameters": {"type":"object","properties":{}}
+        }
+    })];
+    assert_eq!(
+        validate_declarations(&collision),
+        Err(BridgeError::NameCollision)
+    );
+}
+
+#[test]
 fn extension_cannot_shadow_builtin_completion() {
     let task_id = Uuid::new_v4();
     let context = CapabilityContext {
