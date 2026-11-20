@@ -3,7 +3,9 @@
 //! Only host-authorized descriptors may enter provider schemas. This module
 //! does not register executors or bypass the existing Harness dispatch.
 
-use crate::tools::capability_policy::{evaluate, CapabilityContext, CapabilityDenial, CapabilityGrant};
+use crate::tools::capability_policy::{
+    evaluate, CapabilityContext, CapabilityDenial, CapabilityGrant,
+};
 use crate::tools::extension_contract::{
     validate_descriptors, ExtensionContractError, ExtensionDescriptor,
 };
@@ -33,13 +35,19 @@ pub(crate) fn authorized_declarations(
     tools: &[ExtensionTool<'_>],
     context: CapabilityContext,
 ) -> Result<Vec<Value>, BridgeError> {
-    let descriptors = tools.iter().map(|tool| tool.descriptor.clone()).collect::<Vec<_>>();
+    let descriptors = tools
+        .iter()
+        .map(|tool| tool.descriptor.clone())
+        .collect::<Vec<_>>();
     validate_descriptors(&descriptors).map_err(BridgeError::InvalidContract)?;
     let mut declarations = Vec::with_capacity(tools.len());
     for tool in tools {
         evaluate(&tool.descriptor, context, Some(tool.grant)).map_err(BridgeError::Denied)?;
         if tool.parameters.get("type").and_then(Value::as_str) != Some("object")
-            || !tool.parameters.get("properties").is_some_and(Value::is_object)
+            || !tool
+                .parameters
+                .get("properties")
+                .is_some_and(Value::is_object)
         {
             return Err(BridgeError::InvalidSchema);
         }
