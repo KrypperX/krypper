@@ -25,6 +25,7 @@ pub(crate) enum BridgeError {
     InvalidContract(ExtensionContractError),
     Denied(CapabilityDenial),
     InvalidSchema,
+    InvalidArguments,
     UnknownTool,
 }
 
@@ -86,6 +87,65 @@ pub(crate) fn authorize_dispatch(
     evaluate(&tool.descriptor, context, Some(tool.grant)).map_err(BridgeError::Denied)?;
     if !valid_parameters(&tool.parameters) {
         return Err(BridgeError::InvalidSchema);
+    }
+    Ok(())
+}
+
+
+/// Validate model-supplied arguments against the registered object's declared
+/// properties before any host executor can receive them. This deliberately
+/// supports only a narrow JSON Schema subset and rejects unsupported keywords
+/// rather than silently weakening the host's declared contract.
+pub(crate) fn authorize_dispatch_with_arguments(
+    tools: &[ExtensionTool<'_>],
+    context: CapabilityContext,
+    name: &str,
+    arguments: &Value,
+) -> Result<(), BridgeError> {
+    authorize_dispatch(tools, context, name)?;
+    let tool = tools
+        .iter()
+        .find(|tool| format!("{}_{}", tool.descriptor.namespace, tool.descriptor.name) == name)
+        .ok_or(BridgeError::UnknownTool)?;
+    let properties = tool.parameters["properties"]
+        .as_object()
+        .ok_or(BridgeError::InvalidSchema)?;
+    let supplied = arguments.as_object().ok_or(BridgeError::InvalidArguments)?;
+    let required = tool.parameters.get("required");
+    let required = match required {
+        None => Vec::new(),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|item| item.as_str().ok_or(BridgeError::InvalidSchema))
+            .collect::<Result<Vec<_>, _>>()?,
+        _ => return Err(BridgeError::InvalidSchema),
+    };
+    if required.iter().any(|key| !properties.contains_key(*key)) {
+        return Err(BridgeError::InvalidSchema);
+    }
+    if required.iter().any(|key| !supplied.contains_key(*key)) {
+        return Err(BridgeError::InvalidArguments);
+    }
+    if supplied.keys().any(|key| !properties.contains_key(key)) {
+        return Err(BridgeError::InvalidArguments);
+    }
+    for (key, value) in supplied {
+        let schema = &properties[key];
+        let kind = schema.get("type").and_then(Value::as_str)
+            .ok_or(BridgeError::InvalidSchema)?;
+        let matches = match kind {
+            "string" => value.is_string(),
+            "boolean" => value.is_boolean(),
+            "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+            "number" => value.is_number(),
+            "object" => value.is_object(),
+            "array" => value.is_array(),
+            "null" => value.is_null(),
+            _ => return Err(BridgeError::InvalidSchema),
+        };
+        if !matches {
+            return Err(BridgeError::InvalidArguments);
+        }
     }
     Ok(())
 }
