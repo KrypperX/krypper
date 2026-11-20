@@ -1,5 +1,6 @@
 use super::{prepare_model_source, run_task_with_endpoint, snapshot_task_and_turn_state};
 use crate::brain::{ModelDecisionSource, ModelProvider};
+use crate::harness::execution::GoalTurnError;
 use crate::task_lifecycle::{
     TaskSession, TaskState, TurnOutcome, TurnState, WorkspaceGuidanceReadError,
 };
@@ -609,13 +610,14 @@ fn model_cli_stops_with_a_typed_guidance_error_before_dispatch() {
     let error = run_task_with_endpoint(&args, &mut input, &mut output, &mut error_output, endpoint)
         .expect_err("reject the symlink before dispatching the model");
 
-    assert_eq!(
+    assert!(matches!(
         error
             .get_ref()
-            .and_then(|cause| cause.downcast_ref::<WorkspaceGuidanceReadError>())
-            .copied(),
-        Some(WorkspaceGuidanceReadError::Symlink)
-    );
+            .and_then(|cause| cause.downcast_ref::<GoalTurnError>()),
+        Some(GoalTurnError::RootProjectGuidance(
+            WorkspaceGuidanceReadError::Symlink
+        ))
+    ));
     assert!(
         matches!(listener.accept(), Err(ref cause) if cause.kind() == std::io::ErrorKind::WouldBlock)
     );
