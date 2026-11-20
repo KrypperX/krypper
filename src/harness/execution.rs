@@ -36,6 +36,20 @@ pub(crate) fn authorize_extension_at_harness(
     crate::brain::provider_bridge::authorize_dispatch(tools, context, name)
 }
 
+/// Invoke a host-owned extension handler only after rechecking task authority.
+///
+/// The callback represents the existing Harness-owned execution boundary;
+/// provider output cannot supply either the grant or the handler.
+pub(crate) fn dispatch_authorized_extension<T>(
+    tools: &[crate::brain::provider_bridge::ExtensionTool<'_>],
+    context: crate::tools::capability_policy::CapabilityContext,
+    name: &str,
+    execute: impl FnOnce() -> T,
+) -> Result<T, crate::brain::provider_bridge::BridgeError> {
+    authorize_extension_at_harness(tools, context, name)?;
+    Ok(execute())
+}
+
 #[cfg(test)]
 mod extension_gate_tests {
     use super::authorize_extension_at_harness;
@@ -46,6 +60,26 @@ mod extension_gate_tests {
     };
     use serde_json::json;
     use uuid::Uuid;
+
+    #[test]
+    fn rejected_extension_never_invokes_executor() {
+        let context = CapabilityContext {
+            task_id: Uuid::new_v4(),
+            generation: 1,
+            task_authorized: true,
+        };
+        let mut executed = false;
+        let result = super::dispatch_authorized_extension(
+            &[],
+            context,
+            "external_unknown",
+            || {
+                executed = true;
+            },
+        );
+        assert_eq!(result, Err(BridgeError::UnknownTool));
+        assert!(!executed);
+    }
 
     #[test]
     fn harness_rechecks_task_and_grant_before_extension_dispatch() {
