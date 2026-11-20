@@ -28,6 +28,12 @@ pub(crate) enum BridgeError {
     UnknownTool,
 }
 
+/// Both advertisement and dispatch must reject unsupported parameter schemas.
+fn valid_parameters(parameters: &Value) -> bool {
+    parameters.get("type").and_then(Value::as_str) == Some("object")
+        && parameters.get("properties").is_some_and(Value::is_object)
+}
+
 /// Build declarations in the existing OpenAI-function shape used by Brain.
 ///
 /// An advertised tool is not executable until Harness separately validates
@@ -44,11 +50,7 @@ pub(crate) fn authorized_declarations(
     let mut declarations = Vec::with_capacity(tools.len());
     for tool in tools {
         evaluate(&tool.descriptor, context, Some(tool.grant)).map_err(BridgeError::Denied)?;
-        if tool.parameters.get("type").and_then(Value::as_str) != Some("object")
-            || !tool
-                .parameters
-                .get("properties")
-                .is_some_and(Value::is_object)
+        if !valid_parameters(&tool.parameters)
         {
             return Err(BridgeError::InvalidSchema);
         }
@@ -82,7 +84,11 @@ pub(crate) fn authorize_dispatch(
         .iter()
         .find(|tool| format!("{}_{}", tool.descriptor.namespace, tool.descriptor.name) == name)
         .ok_or(BridgeError::UnknownTool)?;
-    evaluate(&tool.descriptor, context, Some(tool.grant)).map_err(BridgeError::Denied)
+    evaluate(&tool.descriptor, context, Some(tool.grant)).map_err(BridgeError::Denied)?;
+    if !valid_parameters(&tool.parameters) {
+        return Err(BridgeError::InvalidSchema);
+    }
+    Ok(())
 }
 
 /// Convert already-authorized declarations to the provider's existing schema.
