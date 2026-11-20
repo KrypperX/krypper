@@ -69,9 +69,9 @@ pub fn validate_descriptors(
 fn valid_identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
-        && value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')
-        })
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
 #[cfg(test)]
