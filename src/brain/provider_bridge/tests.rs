@@ -471,3 +471,55 @@ fn extension_cannot_shadow_builtin_completion() {
         Err(BridgeError::NameCollision)
     );
 }
+
+#[test]
+fn extension_provider_formats_preserve_legacy_builtin_schemas() {
+    let task_id = Uuid::new_v4();
+    let context = CapabilityContext {
+        task_id,
+        generation: 1,
+        task_authorized: true,
+    };
+    let grant = CapabilityGrant {
+        task_id,
+        namespace: "external".into(),
+        operation: "read".into(),
+        effect: ExtensionEffect::ReadWorkspace,
+        generation: 1,
+        host_approved: false,
+    };
+    let tools = [ExtensionTool {
+        descriptor: ExtensionDescriptor {
+            version: EXTENSION_CONTRACT_VERSION,
+            namespace: "external",
+            name: "read",
+            effect: ExtensionEffect::ReadWorkspace,
+            authority: ExtensionAuthority::Task,
+        },
+        description: "Read external data",
+        parameters: json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+            "additionalProperties": false
+        }),
+        grant: &grant,
+    }];
+    let legacy = crate::brain::tools_schema::tool_definitions();
+    let declarations = authorized_declarations(&tools, context).expect("authorized");
+    assert_eq!(declarations.len(), 1);
+    assert_eq!(declarations[0]["function"]["name"], "external_read");
+
+    let responses = responses_declarations(&declarations);
+    let anthropic = anthropic_declarations(&declarations);
+    let gemini = gemini_declarations(&declarations);
+    assert_eq!(responses.len(), 1);
+    assert_eq!(anthropic.len(), 1);
+    assert_eq!(gemini.len(), 1);
+    for format in [&responses, &anthropic, &gemini] {
+        assert_eq!(format[0]["name"], "external_read");
+    }
+    assert_eq!(gemini[0]["parameters"]["type"], "OBJECT");
+    assert_eq!(anthropic[0]["input_schema"]["type"], "object");
+    assert_eq!(crate::brain::tools_schema::tool_definitions(), legacy);
+}
