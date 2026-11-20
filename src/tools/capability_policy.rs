@@ -69,7 +69,9 @@ pub fn evaluate(
     // even if a future descriptor incorrectly declares Task-only authority.
     let elevated = matches!(
         descriptor.effect,
-        ExtensionEffect::ExecuteProcess | ExtensionEffect::Network | ExtensionEffect::ExternalService
+        ExtensionEffect::ExecuteProcess
+            | ExtensionEffect::Network
+            | ExtensionEffect::ExternalService
     );
     if (elevated || descriptor.authority == ExtensionAuthority::TaskAndHostGrant)
         && !grant.host_approved
