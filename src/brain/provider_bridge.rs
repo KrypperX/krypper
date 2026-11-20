@@ -29,10 +29,57 @@ pub(crate) enum BridgeError {
     UnknownTool,
 }
 
-/// Both advertisement and dispatch must reject unsupported parameter schemas.
+/// Reject unsupported JSON Schema constructs before advertising a tool.
+/// The dispatch validator must enforce every accepted constraint.
 fn valid_parameters(parameters: &Value) -> bool {
-    parameters.get("type").and_then(Value::as_str) == Some("object")
-        && parameters.get("properties").is_some_and(Value::is_object)
+    valid_schema(parameters) && parameters.get("type").and_then(Value::as_str) == Some("object")
+}
+
+fn valid_schema(schema: &Value) -> bool {
+    let Some(fields) = schema.as_object() else { return false };
+    if fields.keys().any(|key| !matches!(key.as_str(),
+        "type" | "properties" | "required" | "additionalProperties" | "items")) {
+        return false;
+    }
+    let Some(kind) = fields.get("type").and_then(Value::as_str) else { return false };
+    if !matches!(kind, "object" | "array" | "string" | "boolean" | "integer" | "number" | "null") {
+        return false;
+    }
+    match kind {
+        "object" => {
+            if fields.contains_key("items") { return false; }
+            if fields.get("additionalProperties").is_some_and(|v| v != &Value::Bool(false)) { return false; }
+            let Some(properties) = fields.get("properties").and_then(Value::as_object) else { return false };
+            if !properties.values().all(valid_schema) { return false; }
+            match fields.get("required") {
+                None => true,
+                Some(Value::Array(required)) => required.iter().all(|v| v.as_str().is_some_and(|k| properties.contains_key(k))),
+                _ => false,
+            }
+        }
+        "array" => !fields.contains_key("properties") && !fields.contains_key("required")
+            && !fields.contains_key("additionalProperties")
+            && fields.get("items").is_some_and(valid_schema),
+        _ => fields.len() == 1,
+    }
+}
+
+fn validate_value(schema: &Value, value: &Value) -> bool {
+    match schema["type"].as_str() {
+        Some("object") => {
+            let (Some(values), Some(properties)) = (value.as_object(), schema["properties"].as_object()) else { return false };
+            let required = schema.get("required").and_then(Value::as_array);
+            if required.is_some_and(|items| items.iter().any(|k| !values.contains_key(k.as_str().unwrap_or("")))) { return false; }
+            values.iter().all(|(key, value)| properties.get(key).is_some_and(|sub| validate_value(sub, value)))
+        }
+        Some("array") => value.as_array().is_some_and(|items| items.iter().all(|v| validate_value(&schema["items"], v))),
+        Some("string") => value.is_string(),
+        Some("boolean") => value.is_boolean(),
+        Some("integer") => value.as_i64().is_some() || value.as_u64().is_some(),
+        Some("number") => value.is_number(),
+        Some("null") => value.is_null(),
+        _ => false,
+    }
 }
 
 /// Build declarations in the existing OpenAI-function shape used by Brain.
@@ -106,47 +153,11 @@ pub(crate) fn authorize_dispatch_with_arguments(
         .iter()
         .find(|tool| format!("{}_{}", tool.descriptor.namespace, tool.descriptor.name) == name)
         .ok_or(BridgeError::UnknownTool)?;
-    let properties = tool.parameters["properties"]
-        .as_object()
-        .ok_or(BridgeError::InvalidSchema)?;
-    let supplied = arguments.as_object().ok_or(BridgeError::InvalidArguments)?;
-    let required = tool.parameters.get("required");
-    let required = match required {
-        None => Vec::new(),
-        Some(Value::Array(items)) => items
-            .iter()
-            .map(|item| item.as_str().ok_or(BridgeError::InvalidSchema))
-            .collect::<Result<Vec<_>, _>>()?,
-        _ => return Err(BridgeError::InvalidSchema),
-    };
-    if required.iter().any(|key| !properties.contains_key(*key)) {
+    if !valid_parameters(&tool.parameters) {
         return Err(BridgeError::InvalidSchema);
     }
-    if required.iter().any(|key| !supplied.contains_key(*key)) {
+    if !validate_value(&tool.parameters, arguments) {
         return Err(BridgeError::InvalidArguments);
-    }
-    if supplied.keys().any(|key| !properties.contains_key(key)) {
-        return Err(BridgeError::InvalidArguments);
-    }
-    for (key, value) in supplied {
-        let schema = &properties[key];
-        let kind = schema
-            .get("type")
-            .and_then(Value::as_str)
-            .ok_or(BridgeError::InvalidSchema)?;
-        let matches = match kind {
-            "string" => value.is_string(),
-            "boolean" => value.is_boolean(),
-            "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
-            "number" => value.is_number(),
-            "object" => value.is_object(),
-            "array" => value.is_array(),
-            "null" => value.is_null(),
-            _ => return Err(BridgeError::InvalidSchema),
-        };
-        if !matches {
-            return Err(BridgeError::InvalidArguments);
-        }
     }
     Ok(())
 }
