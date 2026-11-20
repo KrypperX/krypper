@@ -340,7 +340,10 @@ pub(super) fn execute_action(
                 generation: 0,
                 task_authorized: false,
             };
-            let denied = super::authorize_extension_at_harness(&[], context, name);
+            // Route extension-shaped requests through the same host authorization
+            // gate used by future registered executors. No grants or executors
+            // exist at this boundary yet, so the callback must never run.
+            let denied = super::dispatch_authorized_extension(&[], context, name, || ());
             debug_assert!(denied.is_err());
             let error = GoalTurnError::UnsupportedAction {
                 action: name.clone(),
