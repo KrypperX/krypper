@@ -13,7 +13,7 @@ mod parse;
 mod parse_anthropic;
 mod parse_gemini;
 mod plan;
-mod provider_bridge;
+pub(crate) mod provider_bridge;
 mod providers;
 mod reflection;
 mod request;
