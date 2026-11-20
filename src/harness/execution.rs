@@ -35,3 +35,71 @@ pub(crate) fn authorize_extension_at_harness(
 ) -> Result<(), crate::brain::provider_bridge::BridgeError> {
     crate::brain::provider_bridge::authorize_dispatch(tools, context, name)
 }
+
+#[cfg(test)]
+mod extension_gate_tests {
+    use super::authorize_extension_at_harness;
+    use crate::brain::provider_bridge::{BridgeError, ExtensionTool};
+    use crate::tools::capability_policy::{
+        CapabilityContext, CapabilityDenial, CapabilityGrant,
+    };
+    use crate::tools::extension_contract::{
+        ExtensionAuthority, ExtensionDescriptor, ExtensionEffect, EXTENSION_CONTRACT_VERSION,
+    };
+    use serde_json::json;
+    use uuid::Uuid;
+
+    #[test]
+    fn harness_rechecks_task_and_grant_before_extension_dispatch() {
+        let task_id = Uuid::new_v4();
+        let grant = CapabilityGrant {
+            task_id,
+            namespace: "external".into(),
+            operation: "read".into(),
+            effect: ExtensionEffect::ReadWorkspace,
+            generation: 4,
+            host_approved: false,
+        };
+        let tools = [ExtensionTool {
+            descriptor: ExtensionDescriptor {
+                version: EXTENSION_CONTRACT_VERSION,
+                namespace: "external",
+                name: "read",
+                effect: ExtensionEffect::ReadWorkspace,
+                authority: ExtensionAuthority::Task,
+            },
+            description: "Read",
+            parameters: json!({"type":"object","properties":{}}),
+            grant: &grant,
+        }];
+        let context = CapabilityContext {
+            task_id,
+            generation: 4,
+            task_authorized: true,
+        };
+        assert_eq!(
+            authorize_extension_at_harness(&tools, context, "external_read"),
+            Ok(())
+        );
+        assert_eq!(
+            authorize_extension_at_harness(&tools, context, "external_write"),
+            Err(BridgeError::UnknownTool)
+        );
+        assert_eq!(
+            authorize_extension_at_harness(
+                &tools,
+                CapabilityContext { generation: 5, ..context },
+                "external_read"
+            ),
+            Err(BridgeError::Denied(CapabilityDenial::StaleGrant))
+        );
+        assert_eq!(
+            authorize_extension_at_harness(
+                &tools,
+                CapabilityContext { task_authorized: false, ..context },
+                "external_read"
+            ),
+            Err(BridgeError::Denied(CapabilityDenial::TaskUnauthorized))
+        );
+    }
+}
