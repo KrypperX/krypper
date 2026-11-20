@@ -263,3 +263,67 @@ fn revoked_extension_is_not_exposed_to_any_provider_format() {
     assert!(anthropic_declarations(&empty).is_empty());
     assert!(gemini_declarations(&empty).is_empty());
 }
+
+#[test]
+fn dispatch_arguments_reject_missing_extra_and_wrong_types() {
+    let task_id = Uuid::new_v4();
+    let context = CapabilityContext {
+        task_id,
+        generation: 1,
+        task_authorized: true,
+    };
+    let grant = CapabilityGrant {
+        task_id,
+        namespace: "external".into(),
+        operation: "read".into(),
+        effect: ExtensionEffect::ReadWorkspace,
+        generation: 1,
+        host_approved: false,
+    };
+    let tools = [ExtensionTool {
+        descriptor: ExtensionDescriptor {
+            version: EXTENSION_CONTRACT_VERSION,
+            namespace: "external",
+            name: "read",
+            effect: ExtensionEffect::ReadWorkspace,
+            authority: ExtensionAuthority::Task,
+        },
+        description: "Read",
+        parameters: json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+            "additionalProperties": false
+        }),
+        grant: &grant,
+    }];
+    for invalid in [
+        json!({}),
+        json!({"path": 42}),
+        json!({"path": "a", "unexpected": true}),
+        json!(null),
+    ] {
+        assert_eq!(
+            authorize_dispatch_with_arguments(&tools, context, "external_read", &invalid),
+            Err(BridgeError::InvalidArguments)
+        );
+    }
+    assert_eq!(
+        authorize_dispatch_with_arguments(
+            &tools,
+            context,
+            "external_read",
+            &json!({"path": "src/main.rs"})
+        ),
+        Ok(())
+    );
+    assert_eq!(
+        authorize_dispatch_with_arguments(
+            &tools,
+            context,
+            "external_unknown",
+            &json!({"path": "src/main.rs"})
+        ),
+        Err(BridgeError::UnknownTool)
+    );
+}
