@@ -529,11 +529,10 @@ mod extension_integration_tests {
                 task_authorized: true,
             },
         };
-        let mut choose = |_: &str, _: &[WorkspaceObservation]| {
-            super::super::WorkspaceAction::Unsupported {
+        let mut choose =
+            |_: &str, _: &[WorkspaceObservation]| super::super::WorkspaceAction::Unsupported {
                 action: "external_read".to_owned(),
-            }
-        };
+            };
         let result = run_goal_turn_with_budget_and_extensions(
             &mut session,
             task_id,
@@ -545,7 +544,10 @@ mod extension_integration_tests {
         )
         .expect("denial recorded as failed turn");
         assert_eq!(result.stop_reason(), GoalTurnStopReason::ActionFailed);
-        assert!(matches!(result.outcome(), Some(TurnOutcome::Failure { .. })));
+        assert!(matches!(
+            result.outcome(),
+            Some(TurnOutcome::Failure { .. })
+        ));
     }
 
     #[test]
@@ -559,11 +561,10 @@ mod extension_integration_tests {
                 task_authorized: true,
             },
         };
-        let mut choose = |_: &str, _: &[WorkspaceObservation]| {
-            super::super::WorkspaceAction::Unsupported {
+        let mut choose =
+            |_: &str, _: &[WorkspaceObservation]| super::super::WorkspaceAction::Unsupported {
                 action: "external_read".to_owned(),
-            }
-        };
+            };
         let result = run_goal_turn_with_budget_and_extensions(
             &mut session,
             task_id,
