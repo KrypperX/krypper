@@ -27,8 +27,9 @@ pub mod extensions {
     pub use crate::brain::{
         build_anthropic_request_with_extensions, build_chat_request_with_extensions,
         build_compatible_chat_request_with_extensions, build_gemini_request_with_extensions,
-        build_responses_request_with_extensions, ModelError, ModelProvider,
-        OpenAiCompatibleProvider,
+        build_responses_request_with_extensions, AnthropicDecisionSource, GeminiDecisionSource,
+        ModelError, ModelProvider, OpenAiCompatibleDecisionSource, OpenAiCompatibleProvider,
+        ResponsesDecisionSource, ResponsesProvider,
     };
     pub use crate::harness::execution::{
         dispatch_registered_extension_with_arguments_for_turn,

@@ -1,10 +1,10 @@
 use crate::harness::context::build_task_prompt_with_project_guidance;
 
 use super::{
-    action_from_error, action_from_provider_call, build_anthropic_request, build_responses_request,
-    consume_decision_budget, encode_model_request, model_agent, parse_anthropic_response,
-    parse_responses_response, post_hosted, post_responses_text_stream, tool_definitions,
-    ModelError, OllamaDecisionSource,
+    action_from_error, action_from_provider_call, build_anthropic_request_with_extensions,
+    build_responses_request_with_extensions, consume_decision_budget, encode_model_request,
+    model_agent, parse_anthropic_response, parse_responses_response, post_hosted,
+    post_responses_text_stream, tool_definitions, ModelError, OllamaDecisionSource,
 };
 use crate::agent_loop::{BoundedDecisionSource, WorkspaceAction, WorkspaceObservation};
 use serde_json::{json, Value};
@@ -22,9 +22,12 @@ const DEEPSEEK_CHAT_COMPLETIONS_URL: &str = "https://api.deepseek.com/chat/compl
 const ZAI_CHAT_COMPLETIONS_URL: &str = "https://api.z.ai/api/paas/v4/chat/completions";
 const MISTRAL_CHAT_COMPLETIONS_URL: &str = "https://api.mistral.ai/v1/chat/completions";
 
+/// Provider families that use the OpenAI Responses protocol.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ResponsesProvider {
+pub enum ResponsesProvider {
+    /// OpenAI Responses.
     OpenAi,
+    /// xAI Responses.
     Xai,
 }
 
@@ -47,11 +50,17 @@ impl ResponsesProvider {
 /// A provider that uses Krypper's OpenAI-compatible chat protocol.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OpenAiCompatibleProvider {
+    /// Cloudflare Workers AI.
     Cloudflare,
+    /// Groq.
     Groq,
+    /// OpenRouter.
     OpenRouter,
+    /// DeepSeek.
     DeepSeek,
+    /// Z.AI.
     Zai,
+    /// Mistral.
     Mistral,
 }
 
@@ -377,11 +386,17 @@ pub(super) fn parse_compatible_chat_response(
 /// The provider protocol selected for a model request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelProvider {
+    /// Local Ollama chat protocol.
     Ollama,
+    /// Gemini generate-content protocol.
     Gemini,
+    /// OpenAI Responses protocol.
     OpenAi,
+    /// xAI Responses protocol.
     Xai,
+    /// Anthropic Messages protocol.
     Anthropic,
+    /// An OpenAI-compatible chat-completions provider.
     OpenAiCompatible(OpenAiCompatibleProvider),
 }
 
@@ -503,12 +518,14 @@ impl BoundedDecisionSource for ModelDecisionSource {
     }
 }
 
-pub(crate) struct GeminiDecisionSource {
+/// Bounded Gemini decision source with optional extension declarations.
+pub struct GeminiDecisionSource {
     model: String,
     api_key: String,
     endpoint: String,
     agent: Agent,
     remaining_decisions: usize,
+    extension_declarations: Vec<Value>,
 }
 
 impl GeminiDecisionSource {
@@ -519,7 +536,7 @@ impl GeminiDecisionSource {
     ) -> Result<Self, &'static str> {
         let model = model.into();
         let endpoint = super::gemini_generate_content_endpoint(&model)?;
-        Ok(Self::with_url(model, api_key, action_budget, endpoint))
+        Ok(Self::with_url(model, api_key, action_budget, endpoint, &[]))
     }
 
     #[cfg(test)]
@@ -529,7 +546,24 @@ impl GeminiDecisionSource {
         action_budget: usize,
         endpoint: String,
     ) -> Self {
-        Self::with_url(model, api_key.into(), action_budget, endpoint)
+        Self::with_url(model, api_key.into(), action_budget, endpoint, &[])
+    }
+
+    /// Create a source that advertises host-authorized extension declarations.
+    pub fn with_endpoint_and_extensions(
+        model: impl Into<String>,
+        api_key: impl Into<String>,
+        action_budget: usize,
+        endpoint: String,
+        extension_declarations: &[Value],
+    ) -> Self {
+        Self::with_url(
+            model,
+            api_key.into(),
+            action_budget,
+            endpoint,
+            extension_declarations,
+        )
     }
 
     fn with_url(
@@ -537,6 +571,7 @@ impl GeminiDecisionSource {
         api_key: String,
         action_budget: usize,
         endpoint: String,
+        extension_declarations: &[Value],
     ) -> Self {
         Self {
             model: model.into(),
@@ -544,6 +579,7 @@ impl GeminiDecisionSource {
             endpoint,
             agent: super::model_agent(),
             remaining_decisions: action_budget,
+            extension_declarations: extension_declarations.to_vec(),
         }
     }
 
@@ -554,12 +590,13 @@ impl GeminiDecisionSource {
         project_guidance: Option<&str>,
     ) -> Result<WorkspaceAction, ModelError> {
         let remaining = super::consume_decision_budget(&mut self.remaining_decisions)?;
-        let request = super::build_gemini_request(
+        let request = super::build_gemini_request_with_extensions(
             &self.model,
             goal,
             observations,
             remaining,
             project_guidance,
+            &self.extension_declarations,
         )?;
         let response = super::post_hosted(
             &self.agent,
@@ -598,13 +635,15 @@ impl BoundedDecisionSource for GeminiDecisionSource {
     }
 }
 
-pub(crate) struct ResponsesDecisionSource {
+/// Bounded OpenAI-compatible Responses decision source with extensions.
+pub struct ResponsesDecisionSource {
     provider: ResponsesProvider,
     model: String,
     api_key: String,
     endpoint: String,
     agent: Agent,
     remaining_decisions: usize,
+    extension_declarations: Vec<Value>,
 }
 
 impl ResponsesDecisionSource {
@@ -622,13 +661,14 @@ impl ResponsesDecisionSource {
         F: FnMut(String) -> Result<(), ModelError>,
     {
         let provider = self.provider.model_provider();
-        let request = build_responses_request(
+        let request = build_responses_request_with_extensions(
             &self.model,
             provider,
             goal,
             observations,
             self.remaining_decisions,
             project_guidance,
+            &self.extension_declarations,
         )?;
         post_responses_text_stream(
             &self.agent,
@@ -656,13 +696,14 @@ impl ResponsesDecisionSource {
     {
         let remaining = consume_decision_budget(&mut self.remaining_decisions)?;
         let provider = self.provider.model_provider();
-        let request = build_responses_request(
+        let request = build_responses_request_with_extensions(
             &self.model,
             provider,
             goal,
             observations,
             remaining,
             project_guidance,
+            &self.extension_declarations,
         )?;
         let request = super::enable_responses_streaming(&request)?;
         let mut assembly = crate::streaming::ResponsesFinalActions::new(1, 256 * 1024);
@@ -745,6 +786,7 @@ impl ResponsesDecisionSource {
             api_key,
             action_budget,
             provider.endpoint().to_owned(),
+            &[],
         )
     }
 
@@ -756,7 +798,26 @@ impl ResponsesDecisionSource {
         action_budget: usize,
         endpoint: String,
     ) -> Self {
-        Self::with_url(model, provider, api_key, action_budget, endpoint)
+        Self::with_url(model, provider, api_key, action_budget, endpoint, &[])
+    }
+
+    /// Create a source that advertises host-authorized extension declarations.
+    pub fn with_endpoint_and_extensions(
+        model: impl Into<String>,
+        provider: ResponsesProvider,
+        api_key: impl Into<String>,
+        action_budget: usize,
+        endpoint: String,
+        extension_declarations: &[Value],
+    ) -> Self {
+        Self::with_url(
+            model,
+            provider,
+            api_key,
+            action_budget,
+            endpoint,
+            extension_declarations,
+        )
     }
 
     fn with_url(
@@ -765,6 +826,7 @@ impl ResponsesDecisionSource {
         api_key: impl Into<String>,
         action_budget: usize,
         endpoint: String,
+        extension_declarations: &[Value],
     ) -> Self {
         Self {
             provider,
@@ -773,6 +835,7 @@ impl ResponsesDecisionSource {
             endpoint,
             agent: model_agent(),
             remaining_decisions: action_budget,
+            extension_declarations: extension_declarations.to_vec(),
         }
     }
 
@@ -806,13 +869,14 @@ impl ResponsesDecisionSource {
         }
         let remaining = consume_decision_budget(&mut self.remaining_decisions)?;
         let provider = self.provider.model_provider();
-        let request = build_responses_request(
+        let request = build_responses_request_with_extensions(
             &self.model,
             provider,
             goal,
             observations,
             remaining,
             project_guidance,
+            &self.extension_declarations,
         )?;
         let response = post_hosted(
             &self.agent,
@@ -851,12 +915,14 @@ impl BoundedDecisionSource for ResponsesDecisionSource {
     }
 }
 
-pub(crate) struct AnthropicDecisionSource {
+/// Bounded Anthropic decision source with optional extension declarations.
+pub struct AnthropicDecisionSource {
     model: String,
     api_key: String,
     endpoint: String,
     agent: Agent,
     remaining_decisions: usize,
+    extension_declarations: Vec<Value>,
 }
 
 impl AnthropicDecisionSource {
@@ -866,6 +932,7 @@ impl AnthropicDecisionSource {
             api_key,
             action_budget,
             ANTHROPIC_MESSAGES_URL.to_owned(),
+            &[],
         )
     }
 
@@ -876,7 +943,24 @@ impl AnthropicDecisionSource {
         action_budget: usize,
         endpoint: String,
     ) -> Self {
-        Self::with_url(model, api_key, action_budget, endpoint)
+        Self::with_url(model, api_key, action_budget, endpoint, &[])
+    }
+
+    /// Create a source that advertises host-authorized extension declarations.
+    pub fn with_endpoint_and_extensions(
+        model: impl Into<String>,
+        api_key: impl Into<String>,
+        action_budget: usize,
+        endpoint: String,
+        extension_declarations: &[Value],
+    ) -> Self {
+        Self::with_url(
+            model,
+            api_key,
+            action_budget,
+            endpoint,
+            extension_declarations,
+        )
     }
 
     fn with_url(
@@ -884,6 +968,7 @@ impl AnthropicDecisionSource {
         api_key: impl Into<String>,
         action_budget: usize,
         endpoint: String,
+        extension_declarations: &[Value],
     ) -> Self {
         Self {
             model: model.into(),
@@ -891,6 +976,7 @@ impl AnthropicDecisionSource {
             endpoint,
             agent: model_agent(),
             remaining_decisions: action_budget,
+            extension_declarations: extension_declarations.to_vec(),
         }
     }
 
@@ -929,8 +1015,14 @@ impl AnthropicDecisionSource {
         F: FnMut(String) -> Result<(), ModelError>,
     {
         let remaining = consume_decision_budget(&mut self.remaining_decisions)?;
-        let request =
-            build_anthropic_request(&self.model, goal, observations, remaining, project_guidance)?;
+        let request = build_anthropic_request_with_extensions(
+            &self.model,
+            goal,
+            observations,
+            remaining,
+            project_guidance,
+            &self.extension_declarations,
+        )?;
         let mut body: Value =
             serde_json::from_slice(&request).map_err(|_| ModelError::RequestEncoding)?;
         body["stream"] = Value::Bool(true);
@@ -1087,8 +1179,14 @@ impl AnthropicDecisionSource {
         project_guidance: Option<&str>,
     ) -> Result<WorkspaceAction, ModelError> {
         let remaining = consume_decision_budget(&mut self.remaining_decisions)?;
-        let request =
-            build_anthropic_request(&self.model, goal, observations, remaining, project_guidance)?;
+        let request = build_anthropic_request_with_extensions(
+            &self.model,
+            goal,
+            observations,
+            remaining,
+            project_guidance,
+            &self.extension_declarations,
+        )?;
         let response = post_hosted(
             &self.agent,
             ModelProvider::Anthropic,
@@ -1126,13 +1224,15 @@ impl BoundedDecisionSource for AnthropicDecisionSource {
     }
 }
 
-pub(crate) struct OpenAiCompatibleDecisionSource {
+/// Bounded OpenAI-compatible chat decision source with extensions.
+pub struct OpenAiCompatibleDecisionSource {
     model: String,
     provider: OpenAiCompatibleProvider,
     api_key: String,
     endpoint: String,
     agent: Agent,
     remaining_decisions: usize,
+    extension_declarations: Vec<Value>,
 }
 
 impl OpenAiCompatibleDecisionSource {
@@ -1148,6 +1248,7 @@ impl OpenAiCompatibleDecisionSource {
             api_key,
             action_budget,
             endpoint,
+            &[],
         ))
     }
 
@@ -1159,7 +1260,26 @@ impl OpenAiCompatibleDecisionSource {
         action_budget: usize,
         endpoint: String,
     ) -> Self {
-        Self::with_url(model, provider, api_key, action_budget, endpoint)
+        Self::with_url(model, provider, api_key, action_budget, endpoint, &[])
+    }
+
+    /// Create a source that advertises host-authorized extension declarations.
+    pub fn with_endpoint_and_extensions(
+        model: impl Into<String>,
+        provider: OpenAiCompatibleProvider,
+        api_key: impl Into<String>,
+        action_budget: usize,
+        endpoint: String,
+        extension_declarations: &[Value],
+    ) -> Self {
+        Self::with_url(
+            model,
+            provider,
+            api_key,
+            action_budget,
+            endpoint,
+            extension_declarations,
+        )
     }
 
     fn with_url(
@@ -1168,6 +1288,7 @@ impl OpenAiCompatibleDecisionSource {
         api_key: impl Into<String>,
         action_budget: usize,
         endpoint: String,
+        extension_declarations: &[Value],
     ) -> Self {
         Self {
             model: model.into(),
@@ -1176,6 +1297,7 @@ impl OpenAiCompatibleDecisionSource {
             endpoint,
             agent: model_agent(),
             remaining_decisions: action_budget,
+            extension_declarations: extension_declarations.to_vec(),
         }
     }
 
@@ -1186,13 +1308,14 @@ impl OpenAiCompatibleDecisionSource {
         project_guidance: Option<&str>,
     ) -> Result<WorkspaceAction, ModelError> {
         let remaining = consume_decision_budget(&mut self.remaining_decisions)?;
-        let request = build_compatible_chat_request(
+        let request = build_compatible_chat_request_with_extensions(
             &self.model,
             self.provider,
             goal,
             observations,
             remaining,
             project_guidance,
+            &self.extension_declarations,
         )?;
         let provider = ModelProvider::OpenAiCompatible(self.provider);
         let response = post_hosted(
@@ -1235,6 +1358,130 @@ impl BoundedDecisionSource for OpenAiCompatibleDecisionSource {
 #[cfg(test)]
 mod tests {
     use super::{OpenAiCompatibleCredentials, OpenAiCompatibleProvider};
+
+    #[test]
+    fn decision_sources_carry_extension_declarations_into_requests() {
+        use crate::extensions::{
+            authorized_declarations, CapabilityContext, CapabilityGrant, ExtensionAuthority,
+            ExtensionDescriptor, ExtensionEffect, ExtensionTool, EXTENSION_CONTRACT_VERSION,
+        };
+        use uuid::Uuid;
+
+        let task_id = Uuid::new_v4();
+        let context = CapabilityContext {
+            task_id,
+            generation: 1,
+            task_authorized: true,
+        };
+        let grant = CapabilityGrant {
+            task_id,
+            namespace: "external".into(),
+            operation: "read".into(),
+            effect: ExtensionEffect::ReadWorkspace,
+            generation: 1,
+            host_approved: false,
+        };
+        let tools = [ExtensionTool {
+            descriptor: ExtensionDescriptor {
+                version: EXTENSION_CONTRACT_VERSION,
+                namespace: "external",
+                name: "read",
+                effect: ExtensionEffect::ReadWorkspace,
+                authority: ExtensionAuthority::Task,
+            },
+            description: "Read approved data",
+            parameters: serde_json::json!({"type":"object","properties":{}}),
+            grant: &grant,
+        }];
+        let declarations = authorized_declarations(&tools, context).expect("authorized");
+        let endpoint = "http://127.0.0.1:1".to_owned();
+
+        let ollama = super::OllamaDecisionSource::with_endpoint_and_extensions(
+            "test-model",
+            1,
+            "127.0.0.1:1".parse().unwrap(),
+            &declarations,
+        );
+        let gemini = super::GeminiDecisionSource::with_endpoint_and_extensions(
+            "test-model",
+            "key".to_owned(),
+            1,
+            endpoint.clone(),
+            &declarations,
+        );
+        let responses = super::ResponsesDecisionSource::with_endpoint_and_extensions(
+            "test-model",
+            super::ResponsesProvider::OpenAi,
+            "key",
+            1,
+            endpoint.clone(),
+            &declarations,
+        );
+        let anthropic = super::AnthropicDecisionSource::with_endpoint_and_extensions(
+            "test-model",
+            "key",
+            1,
+            endpoint.clone(),
+            &declarations,
+        );
+        let compatible = super::OpenAiCompatibleDecisionSource::with_endpoint_and_extensions(
+            "test-model",
+            OpenAiCompatibleProvider::Groq,
+            "key",
+            1,
+            endpoint,
+            &declarations,
+        );
+
+        let requests = [
+            crate::brain::build_chat_request_with_extensions(
+                "test-model",
+                "goal",
+                &[],
+                1,
+                None,
+                &ollama.extension_declarations,
+            ),
+            crate::brain::build_gemini_request_with_extensions(
+                "test-model",
+                "goal",
+                &[],
+                1,
+                None,
+                &gemini.extension_declarations,
+            ),
+            crate::brain::build_responses_request_with_extensions(
+                "test-model",
+                super::ModelProvider::OpenAi,
+                "goal",
+                &[],
+                1,
+                None,
+                &responses.extension_declarations,
+            ),
+            crate::brain::build_anthropic_request_with_extensions(
+                "test-model",
+                "goal",
+                &[],
+                1,
+                None,
+                &anthropic.extension_declarations,
+            ),
+            super::build_compatible_chat_request_with_extensions(
+                "test-model",
+                OpenAiCompatibleProvider::Groq,
+                "goal",
+                &[],
+                1,
+                None,
+                &compatible.extension_declarations,
+            ),
+        ];
+        for request in requests {
+            let body = String::from_utf8(request.expect("request")).expect("utf8");
+            assert!(body.contains("external_read"), "{body}");
+        }
+    }
 
     /// Exercise the real HTTP/SSE transport, assembly and action validator
     /// without contacting a provider or executing the returned workspace action.

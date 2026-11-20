@@ -17,7 +17,9 @@ fn dispatch_authorized_extension_with_arguments<T>(
 /// A host-owned handler that receives validated model arguments.
 /// Registration is not a capability grant.
 pub struct RegisteredExtensionWithArguments<'a, T> {
+    /// Validated declaration and host grant for the operation.
     pub tool: ExtensionTool<'a>,
+    /// Trusted host handler; it is never chosen from model output.
     pub execute: fn(&serde_json::Value) -> T,
 }
 
@@ -61,7 +63,10 @@ pub fn dispatch_registered_extension_with_arguments_for_turn<T>(
 /// Distinguishes lifecycle failures from capability denials without executing a handler.
 #[derive(Debug)]
 pub enum ExtensionDispatchError {
+    /// The active turn could not be validated.
     Turn(crate::task_lifecycle::WorkspaceReadError),
+    /// The capability context does not match the requested task.
     TaskMismatch,
+    /// Capability, schema or registration validation failed.
     Bridge(BridgeError),
 }

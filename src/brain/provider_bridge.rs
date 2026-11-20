@@ -7,7 +7,7 @@ use crate::tools::capability_policy::{
     evaluate, CapabilityContext, CapabilityDenial, CapabilityGrant,
 };
 use crate::tools::extension_contract::{
-    validate_descriptors, ExtensionContractError, ExtensionDescriptor,
+    validate_descriptors, ExtensionContractError, ExtensionDescriptor, ExtensionEffect,
 };
 use serde_json::{json, Value};
 
@@ -16,21 +16,33 @@ use serde_json::{json, Value};
 /// Hosts own the registry and the grant. Constructing this value does not make
 /// the operation executable by a provider.
 pub struct ExtensionTool<'a> {
+    /// Host-validated descriptor for the operation.
     pub descriptor: ExtensionDescriptor<'a>,
+    /// Provider-facing description of the operation.
     pub description: &'a str,
+    /// Supported JSON Schema object for model arguments.
     pub parameters: Value,
+    /// Host-issued grant for the active task.
     pub grant: &'a CapabilityGrant,
 }
 
-/// Errors that prevent an extension from being advertised to a provider.
+/// Errors that prevent an extension from being advertised or dispatched.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BridgeError {
+    /// The descriptor collection is malformed.
     InvalidContract(ExtensionContractError),
+    /// The host capability check denied the operation.
     Denied(CapabilityDenial),
+    /// The declared argument schema is unsupported.
     InvalidSchema,
+    /// Model arguments do not match the declared schema.
     InvalidArguments,
+    /// The requested name is not registered.
     UnknownTool,
+    /// The requested name collides with a built-in or another extension.
     NameCollision,
+    /// The declared effect cannot use this in-process bridge.
+    UnsupportedEffect,
 }
 
 /// Reject unsupported JSON Schema constructs before advertising a tool.
@@ -130,6 +142,15 @@ fn validate_value(schema: &Value, value: &Value) -> bool {
 }
 
 /// Reject an extension name that could shadow a built-in tool or another extension.
+// This in-process bridge is for workspace effects only; elevated effects need
+// the separate verified-supervisor/sandbox path.
+fn supported_effect(tool: &ExtensionTool<'_>) -> bool {
+    matches!(
+        tool.descriptor.effect,
+        ExtensionEffect::ReadWorkspace | ExtensionEffect::MutateWorkspace
+    )
+}
+
 fn validate_extension_names(tools: &[ExtensionTool<'_>]) -> Result<(), BridgeError> {
     let mut seen = std::collections::HashSet::new();
     for tool in tools {
@@ -160,6 +181,9 @@ pub fn authorized_declarations(
         .collect::<Vec<_>>();
     validate_descriptors(&descriptors).map_err(BridgeError::InvalidContract)?;
     validate_extension_names(tools)?;
+    if !tools.iter().all(supported_effect) {
+        return Err(BridgeError::UnsupportedEffect);
+    }
     let mut declarations = Vec::with_capacity(tools.len());
     for tool in tools {
         evaluate(&tool.descriptor, context, Some(tool.grant)).map_err(BridgeError::Denied)?;
@@ -189,6 +213,9 @@ fn authorize_tool<'a, 'b>(
         .collect::<Vec<_>>();
     validate_descriptors(&descriptors).map_err(BridgeError::InvalidContract)?;
     validate_extension_names(tools)?;
+    if !tools.iter().all(supported_effect) {
+        return Err(BridgeError::UnsupportedEffect);
+    }
     let tool = tools
         .iter()
         .find(|tool| tool.descriptor.qualified_name() == name)
@@ -204,6 +231,7 @@ fn authorize_tool<'a, 'b>(
 ///
 /// This gate must be called by the existing Harness dispatch path before any
 /// extension executor runs. Model-supplied names never create grants.
+/// Argument validation happens in the argument-aware dispatch path.
 pub fn authorize_dispatch(
     tools: &[ExtensionTool<'_>],
     context: CapabilityContext,

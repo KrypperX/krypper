@@ -39,13 +39,11 @@ pub(crate) use parse_anthropic::parse_anthropic_response;
 pub(crate) use parse_gemini::parse_gemini_response;
 pub(crate) use plan::MAX_PLAN_OPERATIONS;
 pub use providers::{
-    build_compatible_chat_request_with_extensions, ModelProvider, OpenAiCompatibleProvider,
+    build_compatible_chat_request_with_extensions, AnthropicDecisionSource, GeminiDecisionSource,
+    ModelProvider, OpenAiCompatibleDecisionSource, OpenAiCompatibleProvider,
+    ResponsesDecisionSource, ResponsesProvider,
 };
-pub(crate) use providers::{
-    AnthropicDecisionSource, CloudflareAccountId, GeminiDecisionSource, ModelDecisionSource,
-    OpenAiCompatibleCredentials, OpenAiCompatibleDecisionSource, ResponsesDecisionSource,
-    ResponsesProvider,
-};
+pub(crate) use providers::{CloudflareAccountId, ModelDecisionSource, OpenAiCompatibleCredentials};
 pub(crate) use request::{
     build_anthropic_request, build_gemini_request, build_responses_request,
     enable_responses_streaming, encode_model_request, gemini_generate_content_endpoint,

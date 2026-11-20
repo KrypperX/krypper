@@ -523,3 +523,47 @@ fn extension_provider_formats_preserve_legacy_builtin_schemas() {
     assert_eq!(anthropic[0]["input_schema"]["type"], "object");
     assert_eq!(crate::brain::tools_schema::tool_definitions(), legacy);
 }
+
+#[test]
+fn elevated_effects_are_rejected_before_advertisement_and_dispatch() {
+    let task_id = Uuid::new_v4();
+    let context = CapabilityContext {
+        task_id,
+        generation: 1,
+        task_authorized: true,
+    };
+    for effect in [
+        ExtensionEffect::ExecuteProcess,
+        ExtensionEffect::Network,
+        ExtensionEffect::ExternalService,
+    ] {
+        let grant = CapabilityGrant {
+            task_id,
+            namespace: "external".into(),
+            operation: "run".into(),
+            effect,
+            generation: 1,
+            host_approved: true,
+        };
+        let tools = [ExtensionTool {
+            descriptor: ExtensionDescriptor {
+                version: EXTENSION_CONTRACT_VERSION,
+                namespace: "external",
+                name: "run",
+                effect,
+                authority: ExtensionAuthority::TaskAndHostGrant,
+            },
+            description: "Elevated operation",
+            parameters: json!({"type":"object","properties":{}}),
+            grant: &grant,
+        }];
+        assert_eq!(
+            authorized_declarations(&tools, context),
+            Err(BridgeError::UnsupportedEffect)
+        );
+        assert_eq!(
+            authorize_dispatch(&tools, context, "external_run"),
+            Err(BridgeError::UnsupportedEffect)
+        );
+    }
+}

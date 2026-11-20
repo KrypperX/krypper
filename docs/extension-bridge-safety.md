@@ -12,8 +12,12 @@ mint a grant, or choose an arbitrary executor.
   built-in action or another extension are rejected before advertisement.
 - Capability grants, turn ownership and JSON schemas are rechecked at dispatch,
   not only when a tool is advertised. Denials fail closed.
-- Raw argument values are never persisted in observations or logs. Observations
+- Raw argument values are never persisted in observations or logs. Successful
+  observations retain the tool name and the host handler's result; denials
   retain only the tool name, matching existing unsupported-tool behaviour.
+- This bridge admits only `ReadWorkspace` and `MutateWorkspace` effects.
+  `ExecuteProcess`, `Network` and `ExternalService` effects require the separate
+  verified-supervisor/sandbox path and are rejected here.
 - Extensions use the existing task lifecycle and capability boundary. No
   extension-owned execution loop or provider-issued authority is introduced.
 - A successful extension produces an ordinary observation and does not complete
@@ -23,9 +27,13 @@ mint a grant, or choose an arbitrary executor.
 
 ## Backward compatibility
 
-- Adding `WorkspaceAction::Extension` is an explicitly scoped public-action
+- Adding `WorkspaceAction::Extension` and
+  `WorkspaceObservation::ExtensionCompleted` is an explicitly scoped public API
   migration. Downstream exhaustive matches must add a wildcard arm or the new
-  variant.
+  variants.
+- The `krypper::extensions` module adds host-facing declaration, request-builder,
+  decision-source and dispatch APIs; these are additive and require no changes
+  to built-in provider configuration.
 - With an empty host registry, existing built-in turn flows and observations are
   unchanged.
 - Unsupported provider tool calls that carry JSON arguments now map to the new
