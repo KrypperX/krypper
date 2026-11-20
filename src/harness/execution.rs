@@ -108,7 +108,27 @@ pub(crate) fn dispatch_registered_extension_for_turn<T>(
     if context.task_id != task_id {
         return Err(ExtensionDispatchError::TaskMismatch);
     }
-    dispatch_registered_extension(registry, context, name).map_err(ExtensionDispatchError::Bridge)
+    let selected = registry
+        .iter()
+        .find(|entry| {
+            format!(
+                "{}_{}",
+                entry.tool.descriptor.namespace, entry.tool.descriptor.name
+            ) == name
+        })
+        .ok_or(ExtensionDispatchError::Bridge(
+            crate::brain::provider_bridge::BridgeError::UnknownTool,
+        ))?;
+    let tools = registry
+        .iter()
+        .map(|entry| crate::brain::provider_bridge::ExtensionTool {
+            descriptor: entry.tool.descriptor.clone(),
+            description: entry.tool.description,
+            parameters: entry.tool.parameters.clone(),
+            grant: entry.tool.grant,
+        })
+        .collect::<Vec<_>>();
+    dispatch_extension_for_turn(session, task_id, turn_id, &tools, context, name, selected.execute)
 }
 
 /// Dispatch a host-registered extension only for an active task-owned turn.
