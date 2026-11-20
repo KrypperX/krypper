@@ -7,6 +7,9 @@ use std::time::Duration;
 /// Upper bound for a single MCP transport operation.
 pub const MAX_MCP_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Maximum combined UTF-8 byte length of all literal stdio arguments.
+pub const MAX_MCP_ARGV_BYTES: usize = 64 * 1024;
+
 /// A host-supplied local MCP server launch description.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct McpStdioConfig {
@@ -26,6 +29,7 @@ pub enum McpConfigError {
     InvalidExecutable,
     InvalidArgument,
     TooManyArguments,
+    ArgumentsTooLarge,
     InvalidTimeout,
 }
 
@@ -49,6 +53,11 @@ impl McpStdioConfig {
         }
         if self.args.iter().any(|arg| arg.contains('\0') || arg.len() > 16 * 1024) {
             return Err(McpConfigError::InvalidArgument);
+        }
+        // A per-argument bound alone permits more than 2 MiB of argv data.
+        // Bound the aggregate before a future launcher allocates or spawns.
+        if self.args.iter().map(String::len).sum::<usize>() > MAX_MCP_ARGV_BYTES {
+            return Err(McpConfigError::ArgumentsTooLarge);
         }
         if self.timeout.is_zero() || self.timeout > MAX_MCP_TIMEOUT {
             return Err(McpConfigError::InvalidTimeout);
@@ -88,6 +97,15 @@ mod tests {
         let mut config = valid();
         config.executable = "/usr/bin/mcp\0server".into();
         assert_eq!(config.validate(), Err(McpConfigError::InvalidExecutable));
+    }
+
+    #[test]
+    fn rejects_oversized_aggregate_argv() {
+        let mut config = valid();
+        config.args = vec!["x".repeat(16 * 1024); 5];
+        assert_eq!(config.validate(), Err(McpConfigError::ArgumentsTooLarge));
+        config.args = vec!["x".repeat(16 * 1024); 4];
+        assert_eq!(config.validate(), Ok(()));
     }
 
     #[test]
