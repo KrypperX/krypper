@@ -16,6 +16,9 @@ pub use self::planned::{
     ProcessFailureCorrectionResult, ProcessTestVerificationStatus,
 };
 pub use self::turn::{run_goal_turn, run_goal_turn_with_budget};
+pub(crate) use self::turn::{
+    run_goal_turn_with_budget_and_extensions, run_goal_turn_with_extensions, TurnExtensions,
+};
 pub use self::types::{
     BoundedDecisionSource, DecisionSource, GoalTurnError, GoalTurnResult, GoalTurnStopReason,
     WorkspaceAction, WorkspaceObservation,
