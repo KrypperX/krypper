@@ -183,6 +183,30 @@ pub(crate) fn dispatch_extension_for_turn<T>(
         .map_err(ExtensionDispatchError::Bridge)
 }
 
+/// Invoke an argument-aware extension only within the active, owning turn.
+///
+/// This uses the same task lifecycle and capability gate as built-in actions;
+/// no extension-owned execution loop or provider-issued grant is introduced.
+pub(crate) fn dispatch_extension_with_arguments_for_turn<T>(
+    session: &crate::task_lifecycle::TaskSession,
+    task_id: uuid::Uuid,
+    turn_id: uuid::Uuid,
+    tools: &[crate::brain::provider_bridge::ExtensionTool<'_>],
+    context: crate::tools::capability_policy::CapabilityContext,
+    name: &str,
+    arguments: &serde_json::Value,
+    execute: impl FnOnce(&serde_json::Value) -> T,
+) -> Result<T, ExtensionDispatchError> {
+    session
+        .validate_running_turn(task_id, turn_id)
+        .map_err(ExtensionDispatchError::Turn)?;
+    if context.task_id != task_id {
+        return Err(ExtensionDispatchError::TaskMismatch);
+    }
+    dispatch_authorized_extension_with_arguments(tools, context, name, arguments, execute)
+        .map_err(ExtensionDispatchError::Bridge)
+}
+
 /// Distinguishes lifecycle failures from capability denials without executing a handler.
 #[derive(Debug)]
 pub(crate) enum ExtensionDispatchError {
