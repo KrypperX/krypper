@@ -124,6 +124,40 @@ fn rejects_unsupported_schema() {
 }
 
 #[test]
+fn dispatch_rejects_invalid_schema_even_with_valid_grant() {
+    let task_id = Uuid::new_v4();
+    let context = CapabilityContext {
+        task_id,
+        generation: 1,
+        task_authorized: true,
+    };
+    let grant = CapabilityGrant {
+        task_id,
+        namespace: "external".into(),
+        operation: "read".into(),
+        effect: ExtensionEffect::ReadWorkspace,
+        generation: 1,
+        host_approved: false,
+    };
+    let tools = [ExtensionTool {
+        descriptor: ExtensionDescriptor {
+            version: EXTENSION_CONTRACT_VERSION,
+            namespace: "external",
+            name: "read",
+            effect: ExtensionEffect::ReadWorkspace,
+            authority: ExtensionAuthority::Task,
+        },
+        description: "Read",
+        parameters: json!({"type":"array"}),
+        grant: &grant,
+    }];
+    assert_eq!(
+        authorize_dispatch(&tools, context, "external_read"),
+        Err(BridgeError::InvalidSchema)
+    );
+}
+
+#[test]
 fn unknown_extension_cannot_dispatch() {
     let context = CapabilityContext {
         task_id: Uuid::new_v4(),
