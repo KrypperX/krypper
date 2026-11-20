@@ -216,8 +216,17 @@ pub(crate) fn dispatch_extension_for_turn<T>(
     if context.task_id != task_id {
         return Err(ExtensionDispatchError::TaskMismatch);
     }
-    dispatch_authorized_extension(tools, context, name, execute)
-        .map_err(ExtensionDispatchError::Bridge)
+    // The legacy no-argument executor must not silently bypass required
+    // model arguments. Validate an empty object against the same schema gate
+    // used by argument-aware handlers before invoking the host callback.
+    dispatch_authorized_extension_with_arguments(
+        tools,
+        context,
+        name,
+        &serde_json::json!({}),
+        |_| execute(),
+    )
+    .map_err(ExtensionDispatchError::Bridge)
 }
 
 /// Invoke an argument-aware extension only within the active, owning turn.
@@ -262,6 +271,61 @@ mod extension_gate_tests {
     };
     use serde_json::json;
     use uuid::Uuid;
+
+    #[test]
+    fn no_argument_turn_dispatch_rejects_required_arguments() {
+        use super::{dispatch_extension_for_turn, ExtensionDispatchError};
+        use crate::task_lifecycle::{TaskSession, TaskState, TurnState};
+        let mut session = TaskSession::new();
+        let task_id = session.create_task("required argument").id();
+        let turn_id = {
+            let task = session.get_task_mut(task_id).expect("task");
+            task.transition(TaskState::Running).expect("running");
+            let turn = task.create_turn().expect("turn");
+            task.transition_turn(turn, TurnState::Running).expect("running turn");
+            turn
+        };
+        let grant = CapabilityGrant {
+            task_id,
+            namespace: "external".into(),
+            operation: "read".into(),
+            effect: ExtensionEffect::ReadWorkspace,
+            generation: 1,
+            host_approved: false,
+        };
+        let tools = [ExtensionTool {
+            descriptor: ExtensionDescriptor {
+                version: EXTENSION_CONTRACT_VERSION,
+                namespace: "external",
+                name: "read",
+                effect: ExtensionEffect::ReadWorkspace,
+                authority: ExtensionAuthority::Task,
+            },
+            description: "Read",
+            parameters: json!({
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+                "additionalProperties": false
+            }),
+            grant: &grant,
+        }];
+        let mut invoked = false;
+        let result = dispatch_extension_for_turn(
+            &session,
+            task_id,
+            turn_id,
+            &tools,
+            CapabilityContext { task_id, generation: 1, task_authorized: true },
+            "external_read",
+            || { invoked = true; "must not execute" },
+        );
+        assert!(matches!(
+            result,
+            Err(ExtensionDispatchError::Bridge(BridgeError::InvalidArguments))
+        ));
+        assert!(!invoked);
+    }
 
     #[test]
     fn registered_executor_rechecks_authority_and_rejects_unknown_names() {
