@@ -333,7 +333,10 @@ mod extension_gate_tests {
         use crate::task_lifecycle::{TaskSession, TaskState, TurnState};
 
         fn handler(arguments: &serde_json::Value) -> String {
-            arguments["path"].as_str().expect("validated path").to_owned()
+            arguments["path"]
+                .as_str()
+                .expect("validated path")
+                .to_owned()
         }
 
         let mut session = TaskSession::new();
