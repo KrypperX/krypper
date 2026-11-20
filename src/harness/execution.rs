@@ -50,6 +50,43 @@ pub(crate) fn dispatch_authorized_extension<T>(
     Ok(execute())
 }
 
+/// One host-owned extension executor registered for a task.
+///
+/// Registration never confers authority: dispatch separately verifies the
+/// descriptor and grant before invoking the handler. No provider may install
+/// or replace a handler through its tool-call payload.
+pub(crate) struct RegisteredExtension<'a, T> {
+    pub tool: crate::brain::provider_bridge::ExtensionTool<'a>,
+    pub execute: fn() -> T,
+}
+
+/// Dispatch by the host registry, never by a provider-supplied handler.
+///
+/// An unknown name cannot invoke any registered handler. The selected grant
+/// is revalidated immediately before execution.
+pub(crate) fn dispatch_registered_extension<T>(
+    registry: &[RegisteredExtension<'_, T>],
+    context: crate::tools::capability_policy::CapabilityContext,
+    name: &str,
+) -> Result<T, crate::brain::provider_bridge::BridgeError> {
+    let selected = registry
+        .iter()
+        .find(|entry| {
+            format!(
+                "{}_{}",
+                entry.tool.descriptor.namespace, entry.tool.descriptor.name
+            ) == name
+        })
+        .ok_or(crate::brain::provider_bridge::BridgeError::UnknownTool)?;
+    let tools = registry.iter().map(|entry| crate::brain::provider_bridge::ExtensionTool {
+        descriptor: entry.tool.descriptor.clone(),
+        description: entry.tool.description,
+        parameters: entry.tool.parameters.clone(),
+        grant: entry.tool.grant,
+    }).collect::<Vec<_>>();
+    dispatch_authorized_extension(&tools, context, name, selected.execute)
+}
+
 /// Dispatch a host-registered extension only for an active task-owned turn.
 ///
 /// The caller supplies the registered descriptor, host-issued grant and handler;
