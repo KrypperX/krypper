@@ -8,6 +8,41 @@ use super::types::{
 use crate::task_lifecycle::{TaskSession, TurnActivitySummary, TurnOutcome};
 use uuid::Uuid;
 
+/// Host-owned extension configuration for an existing goal-turn execution.
+///
+/// A provider may request a name but cannot supply the registry, grant, or
+/// capability context. Unregistered names keep the ordinary fail-closed path.
+pub(crate) struct TurnExtensions<'a> {
+    pub registry: &'a [super::RegisteredExtension<'a, String>],
+    pub context: crate::tools::capability_policy::CapabilityContext,
+}
+
+fn execute_with_extensions(
+    session: &TaskSession,
+    task_id: Uuid,
+    turn_id: Uuid,
+    action: &super::WorkspaceAction,
+    extensions: Option<&TurnExtensions<'_>>,
+) -> Result<ActionExecution, GoalTurnError> {
+    if let (super::WorkspaceAction::Unsupported { action: name }, Some(extensions)) =
+        (action, extensions)
+    {
+        let result = super::dispatch_registered_extension_for_turn(
+            session,
+            task_id,
+            turn_id,
+            extensions.registry,
+            extensions.context,
+            name,
+        );
+        return match result {
+            Ok(value) => Ok(ActionExecution::Complete(value)),
+            Err(_) => execute_action(session, task_id, turn_id, action),
+        };
+    }
+    execute_action(session, task_id, turn_id, action)
+}
+
 /// Runs one decision-selected action for an already running, task-owned turn.
 ///
 /// This preserves the original one-action API. Use [`run_goal_turn_with_budget`] when the
@@ -21,12 +56,24 @@ pub fn run_goal_turn<D: DecisionSource + ?Sized>(
     goal: &str,
     decision_source: &mut D,
 ) -> Result<GoalTurnResult, GoalTurnError> {
+    run_goal_turn_with_extensions(session, task_id, turn_id, goal, decision_source, None)
+}
+
+/// Run the existing single-action turn with optional host-registered tools.
+pub(crate) fn run_goal_turn_with_extensions<D: DecisionSource + ?Sized>(
+    session: &mut TaskSession,
+    task_id: Uuid,
+    turn_id: Uuid,
+    goal: &str,
+    decision_source: &mut D,
+    extensions: Option<&TurnExtensions<'_>>,
+) -> Result<GoalTurnResult, GoalTurnError> {
     session
         .validate_running_turn(task_id, turn_id)
         .map_err(GoalTurnError::WorkspaceRead)?;
 
     let action = decision_source.choose_action(goal);
-    match execute_action(session, task_id, turn_id, &action)? {
+    match execute_with_extensions(session, task_id, turn_id, &action, extensions)? {
         ActionExecution::Complete(result) => finish_turn(
             session,
             task_id,
@@ -147,6 +194,27 @@ pub fn run_goal_turn_with_budget<D: BoundedDecisionSource + ?Sized>(
     max_actions: usize,
     decision_source: &mut D,
 ) -> Result<GoalTurnResult, GoalTurnError> {
+    run_goal_turn_with_budget_and_extensions(
+        session,
+        task_id,
+        turn_id,
+        goal,
+        max_actions,
+        decision_source,
+        None,
+    )
+}
+
+/// Run the bounded turn through the same action dispatcher with host tools.
+pub(crate) fn run_goal_turn_with_budget_and_extensions<D: BoundedDecisionSource + ?Sized>(
+    session: &mut TaskSession,
+    task_id: Uuid,
+    turn_id: Uuid,
+    goal: &str,
+    max_actions: usize,
+    decision_source: &mut D,
+    extensions: Option<&TurnExtensions<'_>>,
+) -> Result<GoalTurnResult, GoalTurnError> {
     session
         .validate_running_turn(task_id, turn_id)
         .map_err(GoalTurnError::WorkspaceRead)?;
@@ -173,7 +241,7 @@ pub fn run_goal_turn_with_budget<D: BoundedDecisionSource + ?Sized>(
             decision_source.choose_action(goal, &observations)
         };
         actions_taken += 1;
-        match execute_action(session, task_id, turn_id, &action)? {
+        match execute_with_extensions(session, task_id, turn_id, &action, extensions)? {
             ActionExecution::Complete(result) => {
                 activity.push(TurnActivitySummary::Completed);
                 return finish_turn(
