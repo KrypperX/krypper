@@ -91,7 +91,6 @@ pub(crate) fn authorize_dispatch(
     Ok(())
 }
 
-
 /// Validate model-supplied arguments against the registered object's declared
 /// properties before any host executor can receive them. This deliberately
 /// supports only a narrow JSON Schema subset and rejects unsupported keywords
@@ -131,7 +130,9 @@ pub(crate) fn authorize_dispatch_with_arguments(
     }
     for (key, value) in supplied {
         let schema = &properties[key];
-        let kind = schema.get("type").and_then(Value::as_str)
+        let kind = schema
+            .get("type")
+            .and_then(Value::as_str)
             .ok_or(BridgeError::InvalidSchema)?;
         let matches = match kind {
             "string" => value.is_string(),
