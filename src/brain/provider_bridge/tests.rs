@@ -177,7 +177,10 @@ fn authorized_declarations_adapt_to_all_provider_formats() {
     let gemini = gemini_declarations(&declarations);
     assert_eq!(gemini[0]["name"], "external_read");
     assert_eq!(gemini[0]["parameters"]["type"], "OBJECT");
-    assert_eq!(gemini[0]["parameters"]["properties"]["path"]["type"], "STRING");
+    assert_eq!(
+        gemini[0]["parameters"]["properties"]["path"]["type"],
+        "STRING"
+    );
     assert_eq!(authorize_dispatch(&tools, context, "external_read"), Ok(()));
     assert_eq!(
         authorize_dispatch(&tools, context, "external_write"),
