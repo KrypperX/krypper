@@ -135,3 +135,52 @@ fn unknown_extension_cannot_dispatch() {
         Err(BridgeError::UnknownTool)
     );
 }
+
+#[test]
+fn authorized_declarations_adapt_to_all_provider_formats() {
+    let task_id = Uuid::new_v4();
+    let context = CapabilityContext {
+        task_id,
+        generation: 3,
+        task_authorized: true,
+    };
+    let grant = CapabilityGrant {
+        task_id,
+        namespace: "external".into(),
+        operation: "read".into(),
+        effect: ExtensionEffect::ReadWorkspace,
+        generation: 3,
+        host_approved: false,
+    };
+    let tools = [ExtensionTool {
+        descriptor: ExtensionDescriptor {
+            version: EXTENSION_CONTRACT_VERSION,
+            namespace: "external",
+            name: "read",
+            effect: ExtensionEffect::ReadWorkspace,
+            authority: ExtensionAuthority::Task,
+        },
+        description: "Read approved data",
+        parameters: json!({"type":"object","properties":{"path":{"type":"string"}}}),
+        grant: &grant,
+    }];
+    let declarations = authorized_declarations(&tools, context).unwrap();
+    // Ollama and OpenAI-compatible chat use the common function envelope.
+    assert_eq!(declarations[0]["type"], "function");
+    assert_eq!(declarations[0]["function"]["name"], "external_read");
+    let responses = responses_declarations(&declarations);
+    assert_eq!(responses[0]["name"], "external_read");
+    assert_eq!(responses[0]["type"], "function");
+    let anthropic = anthropic_declarations(&declarations);
+    assert_eq!(anthropic[0]["name"], "external_read");
+    assert_eq!(anthropic[0]["input_schema"]["additionalProperties"], false);
+    let gemini = gemini_declarations(&declarations);
+    assert_eq!(gemini[0]["name"], "external_read");
+    assert_eq!(gemini[0]["parameters"]["type"], "OBJECT");
+    assert_eq!(gemini[0]["parameters"]["properties"]["path"]["type"], "STRING");
+    assert_eq!(authorize_dispatch(&tools, context, "external_read"), Ok(()));
+    assert_eq!(
+        authorize_dispatch(&tools, context, "external_write"),
+        Err(BridgeError::UnknownTool)
+    );
+}
