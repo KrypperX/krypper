@@ -122,3 +122,16 @@ fn rejects_unsupported_schema() {
         Err(BridgeError::InvalidSchema)
     );
 }
+
+#[test]
+fn unknown_extension_cannot_dispatch() {
+    let context = CapabilityContext {
+        task_id: Uuid::new_v4(),
+        generation: 1,
+        task_authorized: true,
+    };
+    assert_eq!(
+        authorize_dispatch(&[], context, "external_unknown"),
+        Err(BridgeError::UnknownTool)
+    );
+}
