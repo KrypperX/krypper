@@ -68,12 +68,13 @@ fn authorized_extension_runs_through_existing_goal_turn() {
         Some(&extensions),
     )
     .expect("authorized extension");
-    assert_eq!(result.stop_reason(), GoalTurnStopReason::Completed);
+    assert_eq!(result.stop_reason(), GoalTurnStopReason::ActionCompleted);
     assert_eq!(
-        result.outcome(),
-        Some(&TurnOutcome::Success {
+        result.observations(),
+        &[WorkspaceObservation::ExtensionCompleted {
+            name: "external_read".to_owned(),
             result: "host-executed".to_owned()
-        })
+        }]
     );
 }
 

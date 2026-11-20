@@ -13,4 +13,33 @@ pub(crate) mod tools;
 
 pub use tools::process::{OfflineCargoPolicy, ProcessOutcome, ProcessResource, ProcessResult};
 
-pub use brain::{BrainReflectionError, OllamaDecisionSource, WorkspacePlan, WorkspacePlanError};
+pub use brain::{
+    BrainReflectionError, ModelError, ModelProvider, OllamaDecisionSource, WorkspacePlan,
+    WorkspacePlanError,
+};
+
+/// Host-facing API for provider-authorized extensions and existing Harness dispatch.
+pub mod extensions {
+    pub use crate::brain::provider_bridge::{
+        anthropic_declarations, authorize_dispatch, authorized_declarations, gemini_declarations,
+        responses_declarations, BridgeError, ExtensionTool,
+    };
+    pub use crate::brain::{
+        build_anthropic_request_with_extensions, build_chat_request_with_extensions,
+        build_compatible_chat_request_with_extensions, build_gemini_request_with_extensions,
+        build_responses_request_with_extensions, ModelError, ModelProvider,
+        OpenAiCompatibleProvider,
+    };
+    pub use crate::harness::execution::{
+        dispatch_registered_extension_with_arguments_for_turn,
+        run_goal_turn_with_budget_and_extensions, run_goal_turn_with_extensions,
+        ExtensionDispatchError, RegisteredExtensionWithArguments, TurnExtensions,
+    };
+    pub use crate::tools::capability_policy::{
+        CapabilityContext, CapabilityDenial, CapabilityGrant,
+    };
+    pub use crate::tools::extension_contract::{
+        ExtensionAuthority, ExtensionContractError, ExtensionDescriptor, ExtensionEffect,
+        EXTENSION_CONTRACT_VERSION,
+    };
+}

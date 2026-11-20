@@ -77,6 +77,7 @@ pub(crate) fn summarize_observation(observation: &WorkspaceObservation) -> TurnA
         WorkspaceObservation::TreeTextSearchFailed { .. } => TurnActivitySummary::ActionFailed {
             action: TurnActivityAction::SearchTreeText,
         },
+        WorkspaceObservation::ExtensionCompleted { .. } => TurnActivitySummary::Completed,
         WorkspaceObservation::ActionFailed { action, .. } => {
             let action = match action {
                 WorkspaceAction::OfflineCargoTest { .. } => TurnActivityAction::OfflineCargoTest,

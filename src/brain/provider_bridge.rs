@@ -12,7 +12,10 @@ use crate::tools::extension_contract::{
 use serde_json::{json, Value};
 
 /// A validated declaration and the host-issued grant for one task.
-pub(crate) struct ExtensionTool<'a> {
+///
+/// Hosts own the registry and the grant. Constructing this value does not make
+/// the operation executable by a provider.
+pub struct ExtensionTool<'a> {
     pub descriptor: ExtensionDescriptor<'a>,
     pub description: &'a str,
     pub parameters: Value,
@@ -21,7 +24,7 @@ pub(crate) struct ExtensionTool<'a> {
 
 /// Errors that prevent an extension from being advertised to a provider.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum BridgeError {
+pub enum BridgeError {
     InvalidContract(ExtensionContractError),
     Denied(CapabilityDenial),
     InvalidSchema,
@@ -147,7 +150,7 @@ fn validate_extension_names(tools: &[ExtensionTool<'_>]) -> Result<(), BridgeErr
 ///
 /// An advertised tool is not executable until Harness separately validates
 /// its grant and routes it through the existing authorized dispatch boundary.
-pub(crate) fn authorized_declarations(
+pub fn authorized_declarations(
     tools: &[ExtensionTool<'_>],
     context: CapabilityContext,
 ) -> Result<Vec<Value>, BridgeError> {
@@ -201,7 +204,7 @@ fn authorize_tool<'a, 'b>(
 ///
 /// This gate must be called by the existing Harness dispatch path before any
 /// extension executor runs. Model-supplied names never create grants.
-pub(crate) fn authorize_dispatch(
+pub fn authorize_dispatch(
     tools: &[ExtensionTool<'_>],
     context: CapabilityContext,
     name: &str,
@@ -230,7 +233,7 @@ pub(crate) fn authorize_dispatch_with_arguments(
 ///
 /// The caller must pass only the result of `authorized_declarations`.
 /// Conversion does not confer execution authority.
-pub(crate) fn responses_declarations(declarations: &[Value]) -> Vec<Value> {
+pub fn responses_declarations(declarations: &[Value]) -> Vec<Value> {
     declarations
         .iter()
         .filter_map(|tool| {
@@ -247,7 +250,7 @@ pub(crate) fn responses_declarations(declarations: &[Value]) -> Vec<Value> {
 }
 
 /// Translate authorized declarations to Anthropic's existing strict schema.
-pub(crate) fn anthropic_declarations(declarations: &[Value]) -> Vec<Value> {
+pub fn anthropic_declarations(declarations: &[Value]) -> Vec<Value> {
     declarations
         .iter()
         .filter_map(|tool| {
@@ -265,7 +268,7 @@ pub(crate) fn anthropic_declarations(declarations: &[Value]) -> Vec<Value> {
 }
 
 /// Translate authorized declarations to Gemini's supported schema subset.
-pub(crate) fn gemini_declarations(declarations: &[Value]) -> Vec<Value> {
+pub fn gemini_declarations(declarations: &[Value]) -> Vec<Value> {
     declarations
         .iter()
         .filter_map(|tool| {

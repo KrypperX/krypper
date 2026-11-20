@@ -16,7 +16,7 @@ fn dispatch_authorized_extension_with_arguments<T>(
 
 /// A host-owned handler that receives validated model arguments.
 /// Registration is not a capability grant.
-pub(crate) struct RegisteredExtensionWithArguments<'a, T> {
+pub struct RegisteredExtensionWithArguments<'a, T> {
     pub tool: ExtensionTool<'a>,
     pub execute: fn(&serde_json::Value) -> T,
 }
@@ -26,7 +26,7 @@ pub(crate) struct RegisteredExtensionWithArguments<'a, T> {
 /// Both the host-issued capability and the declared JSON argument schema are
 /// checked before invoking the handler. A model can choose a registered name
 /// and supply arguments, but cannot install a handler or mint a grant.
-pub(crate) fn dispatch_registered_extension_with_arguments_for_turn<T>(
+pub fn dispatch_registered_extension_with_arguments_for_turn<T>(
     session: &crate::task_lifecycle::TaskSession,
     task_id: uuid::Uuid,
     turn_id: uuid::Uuid,
@@ -60,7 +60,7 @@ pub(crate) fn dispatch_registered_extension_with_arguments_for_turn<T>(
 
 /// Distinguishes lifecycle failures from capability denials without executing a handler.
 #[derive(Debug)]
-pub(crate) enum ExtensionDispatchError {
+pub enum ExtensionDispatchError {
     Turn(crate::task_lifecycle::WorkspaceReadError),
     TaskMismatch,
     Bridge(BridgeError),

@@ -7,8 +7,9 @@ use std::fmt;
 use super::limits::*;
 use super::providers::*;
 
+/// Errors produced while building, sending or interpreting a model request.
 #[derive(Debug)]
-pub(crate) enum ModelError {
+pub enum ModelError {
     DecisionBudgetExhausted,
     InvalidModelName(&'static str),
     RequestEncoding,

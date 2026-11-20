@@ -44,8 +44,9 @@ impl ResponsesProvider {
     }
 }
 
+/// A provider that uses Krypper's OpenAI-compatible chat protocol.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum OpenAiCompatibleProvider {
+pub enum OpenAiCompatibleProvider {
     Cloudflare,
     Groq,
     OpenRouter,
@@ -212,6 +213,30 @@ pub(crate) fn build_compatible_chat_request(
     remaining_decisions: usize,
     project_guidance: Option<&str>,
 ) -> Result<Vec<u8>, ModelError> {
+    build_compatible_chat_request_with_extensions(
+        model,
+        provider,
+        goal,
+        observations,
+        remaining_decisions,
+        project_guidance,
+        &[],
+    )
+}
+
+/// Build an OpenAI-compatible request with authorized extension declarations.
+///
+/// The declarations must come from `authorized_declarations`; conversion here
+/// does not grant execution authority.
+pub fn build_compatible_chat_request_with_extensions(
+    model: &str,
+    provider: OpenAiCompatibleProvider,
+    goal: &str,
+    observations: &[WorkspaceObservation],
+    remaining_decisions: usize,
+    project_guidance: Option<&str>,
+    extension_declarations: &[Value],
+) -> Result<Vec<u8>, ModelError> {
     super::validate_model_name_for_provider(model, ModelProvider::OpenAiCompatible(provider))
         .map_err(ModelError::InvalidModelName)?;
     let prompt = build_task_prompt_with_project_guidance(
@@ -230,13 +255,17 @@ pub(crate) fn build_compatible_chat_request(
     } else {
         "required"
     };
+    let mut tools = tool_definitions();
+    if let Value::Array(items) = &mut tools {
+        items.extend(extension_declarations.iter().cloned());
+    }
     let mut request = json!({
         "model": model,
         "messages": [
             { "role": "system", "content": super::SYSTEM_INSTRUCTIONS },
             { "role": "user", "content": prompt }
         ],
-        "tools": tool_definitions(),
+        "tools": tools,
         "tool_choice": tool_choice,
         "parallel_tool_calls": false,
         "n": 1,
@@ -345,8 +374,9 @@ pub(super) fn parse_compatible_chat_response(
     action_from_provider_call(provider, name, &arguments)
 }
 
+/// The provider protocol selected for a model request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ModelProvider {
+pub enum ModelProvider {
     Ollama,
     Gemini,
     OpenAi,

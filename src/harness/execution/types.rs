@@ -154,6 +154,8 @@ pub enum WorkspaceObservation {
         action: WorkspaceAction,
         error: GoalTurnError,
     },
+    /// A host-owned extension completed and returned a bounded, host-supplied result.
+    ExtensionCompleted { name: String, result: String },
 }
 
 /// Why a task-owned turn stopped running its action loop.

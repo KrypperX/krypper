@@ -28,7 +28,7 @@ pub use self::planned::{
     ProcessFailureCorrectionResult, ProcessTestVerificationStatus,
 };
 pub use self::turn::{run_goal_turn, run_goal_turn_with_budget};
-pub(crate) use self::turn::{
+pub use self::turn::{
     run_goal_turn_with_budget_and_extensions, run_goal_turn_with_extensions, TurnExtensions,
 };
 pub use self::types::{
@@ -37,7 +37,7 @@ pub use self::types::{
 };
 
 pub(crate) use self::action::summarize_observation;
-pub(crate) use self::dispatch::{
+pub use self::dispatch::{
     dispatch_registered_extension_with_arguments_for_turn, ExtensionDispatchError,
     RegisteredExtensionWithArguments,
 };

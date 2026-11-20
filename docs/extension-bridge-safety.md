@@ -1,9 +1,10 @@
 # Extension bridge safety
 
 PR 3 exposes host-registered extension tools through the existing Brain schema
-adapters and Harness dispatch. A provider supplies only a registered tool name
-and a JSON argument object. The provider cannot install a handler, mint a grant,
-or choose an arbitrary executor.
+adapters and Harness dispatch. The `krypper::extensions` module provides the
+host-facing declaration and turn APIs. A provider supplies only a registered
+tool name and a JSON argument object. The provider cannot install a handler,
+mint a grant, or choose an arbitrary executor.
 
 ## Threat model
 
@@ -15,6 +16,8 @@ or choose an arbitrary executor.
   retain only the tool name, matching existing unsupported-tool behaviour.
 - Extensions use the existing task lifecycle and capability boundary. No
   extension-owned execution loop or provider-issued authority is introduced.
+- A successful extension produces an ordinary observation and does not complete
+  the turn by itself; the model still decides when to complete or continue.
 - The CLI currently registers no extension handlers, so default CLI behaviour
   remains built-in-only. The production host registry is a separate concern.
 

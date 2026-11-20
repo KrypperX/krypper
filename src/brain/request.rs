@@ -10,6 +10,7 @@ use std::path::PathBuf;
 
 use super::errors::*;
 use super::limits::*;
+use super::provider_bridge::{anthropic_declarations, gemini_declarations, responses_declarations};
 use super::providers;
 use super::providers::*;
 use super::tools_schema::*;
@@ -42,12 +43,13 @@ pub(crate) fn validate_model_name_for_provider(
     Ok(())
 }
 
-pub(crate) fn build_chat_request(
+fn build_chat_request_with_tools(
     model: &str,
     goal: &str,
     observations: &[WorkspaceObservation],
     remaining_decisions: usize,
     project_guidance: Option<&str>,
+    tools: Value,
 ) -> Result<Vec<u8>, ModelError> {
     validate_model_name_for_provider(model, ModelProvider::OpenAi)
         .map_err(ModelError::InvalidModelName)?;
@@ -63,10 +65,53 @@ pub(crate) fn build_chat_request(
             { "role": "system", "content": SYSTEM_INSTRUCTIONS },
             { "role": "user", "content": prompt }
         ],
-        "tools": tool_definitions(),
+        "tools": tools,
         "stream": false
     });
     encode_model_request(&request)
+}
+
+pub(crate) fn build_chat_request(
+    model: &str,
+    goal: &str,
+    observations: &[WorkspaceObservation],
+    remaining_decisions: usize,
+    project_guidance: Option<&str>,
+) -> Result<Vec<u8>, ModelError> {
+    build_chat_request_with_tools(
+        model,
+        goal,
+        observations,
+        remaining_decisions,
+        project_guidance,
+        tool_definitions(),
+    )
+}
+
+/// Build an Ollama/OpenAI-compatible request with authorized extension declarations.
+///
+/// The declarations must come from `authorized_declarations`; conversion here
+/// does not grant execution authority.
+pub fn build_chat_request_with_extensions(
+    model: &str,
+    goal: &str,
+    observations: &[WorkspaceObservation],
+    remaining_decisions: usize,
+    project_guidance: Option<&str>,
+    extension_declarations: &[Value],
+) -> Result<Vec<u8>, ModelError> {
+    let mut tools = tool_definitions();
+    if let Value::Array(items) = &mut tools {
+        items.extend(extension_declarations.iter().cloned());
+    }
+    build_chat_request_with_tools(
+        model,
+        goal,
+        observations,
+        remaining_decisions,
+        project_guidance,
+        tools,
+    )
 }
 
 pub(crate) fn build_plan_request_with_project_guidance(
@@ -123,13 +168,14 @@ pub(crate) fn build_plan_request_with_project_guidance_and_targets(
     encode_model_request(&request)
 }
 
-pub(crate) fn build_responses_request(
+fn build_responses_request_with_tools(
     model: &str,
     provider: ModelProvider,
     goal: &str,
     observations: &[WorkspaceObservation],
     remaining_decisions: usize,
     project_guidance: Option<&str>,
+    tools: Value,
 ) -> Result<Vec<u8>, ModelError> {
     validate_model_name_for_provider(model, provider).map_err(ModelError::InvalidModelName)?;
     let prompt = build_task_prompt_with_project_guidance(
@@ -142,7 +188,7 @@ pub(crate) fn build_responses_request(
         "model": model,
         "instructions": SYSTEM_INSTRUCTIONS,
         "input": prompt,
-        "tools": openai_tool_definitions(),
+        "tools": tools,
         "tool_choice": "required",
         "parallel_tool_calls": false,
         "store": false,
@@ -151,12 +197,60 @@ pub(crate) fn build_responses_request(
     encode_model_request(&request)
 }
 
-pub(crate) fn build_anthropic_request(
+pub(crate) fn build_responses_request(
+    model: &str,
+    provider: ModelProvider,
+    goal: &str,
+    observations: &[WorkspaceObservation],
+    remaining_decisions: usize,
+    project_guidance: Option<&str>,
+) -> Result<Vec<u8>, ModelError> {
+    build_responses_request_with_tools(
+        model,
+        provider,
+        goal,
+        observations,
+        remaining_decisions,
+        project_guidance,
+        openai_tool_definitions(),
+    )
+}
+
+/// Build a Responses request with authorized extension declarations.
+///
+/// The declarations must come from `authorized_declarations`; conversion here
+/// does not grant execution authority.
+pub fn build_responses_request_with_extensions(
+    model: &str,
+    provider: ModelProvider,
+    goal: &str,
+    observations: &[WorkspaceObservation],
+    remaining_decisions: usize,
+    project_guidance: Option<&str>,
+    extension_declarations: &[Value],
+) -> Result<Vec<u8>, ModelError> {
+    let mut tools = openai_tool_definitions();
+    if let Value::Array(items) = &mut tools {
+        items.extend(responses_declarations(extension_declarations));
+    }
+    build_responses_request_with_tools(
+        model,
+        provider,
+        goal,
+        observations,
+        remaining_decisions,
+        project_guidance,
+        tools,
+    )
+}
+
+fn build_anthropic_request_with_tools(
     model: &str,
     goal: &str,
     observations: &[WorkspaceObservation],
     remaining_decisions: usize,
     project_guidance: Option<&str>,
+    tools: Value,
 ) -> Result<Vec<u8>, ModelError> {
     validate_model_name_for_provider(model, ModelProvider::Anthropic)
         .map_err(ModelError::InvalidModelName)?;
@@ -171,19 +265,63 @@ pub(crate) fn build_anthropic_request(
         "max_tokens": ANTHROPIC_MAX_OUTPUT_TOKENS,
         "system": SYSTEM_INSTRUCTIONS,
         "messages": [{ "role": "user", "content": prompt }],
-        "tools": anthropic_tool_definitions(),
+        "tools": tools,
         "tool_choice": {"type":"auto", "disable_parallel_tool_use":true},
         "stream": false
     });
     encode_model_request(&request)
 }
 
-pub(crate) fn build_gemini_request(
+pub(crate) fn build_anthropic_request(
     model: &str,
     goal: &str,
     observations: &[WorkspaceObservation],
     remaining_decisions: usize,
     project_guidance: Option<&str>,
+) -> Result<Vec<u8>, ModelError> {
+    build_anthropic_request_with_tools(
+        model,
+        goal,
+        observations,
+        remaining_decisions,
+        project_guidance,
+        anthropic_tool_definitions(),
+    )
+}
+
+/// Build an Anthropic request with authorized extension declarations.
+///
+/// The declarations must come from `authorized_declarations`; conversion here
+/// does not grant execution authority.
+pub fn build_anthropic_request_with_extensions(
+    model: &str,
+    goal: &str,
+    observations: &[WorkspaceObservation],
+    remaining_decisions: usize,
+    project_guidance: Option<&str>,
+    extension_declarations: &[Value],
+) -> Result<Vec<u8>, ModelError> {
+    let mut tools = anthropic_tool_definitions();
+    if let Value::Array(items) = &mut tools {
+        items.extend(anthropic_declarations(extension_declarations));
+    }
+    build_anthropic_request_with_tools(
+        model,
+        goal,
+        observations,
+        remaining_decisions,
+        project_guidance,
+        tools,
+    )
+}
+
+fn build_gemini_request_with_declarations(
+    model: &str,
+    goal: &str,
+    observations: &[WorkspaceObservation],
+    remaining_decisions: usize,
+    project_guidance: Option<&str>,
+    declarations: Vec<Value>,
 ) -> Result<Vec<u8>, ModelError> {
     validate_model_name_for_provider(model, ModelProvider::Gemini)
         .map_err(ModelError::InvalidModelName)?;
@@ -193,7 +331,6 @@ pub(crate) fn build_gemini_request(
         remaining_decisions,
         project_guidance,
     )?;
-    let declarations = gemini_function_declarations();
     let allowed_function_names = declarations
         .iter()
         .filter_map(|declaration| declaration.get("name").and_then(Value::as_str))
@@ -211,6 +348,47 @@ pub(crate) fn build_gemini_request(
         "generationConfig": {"candidateCount":1}
     });
     encode_model_request(&request)
+}
+
+pub(crate) fn build_gemini_request(
+    model: &str,
+    goal: &str,
+    observations: &[WorkspaceObservation],
+    remaining_decisions: usize,
+    project_guidance: Option<&str>,
+) -> Result<Vec<u8>, ModelError> {
+    build_gemini_request_with_declarations(
+        model,
+        goal,
+        observations,
+        remaining_decisions,
+        project_guidance,
+        gemini_function_declarations(),
+    )
+}
+
+/// Build a Gemini request with authorized extension declarations.
+///
+/// The declarations must come from `authorized_declarations`; conversion here
+/// does not grant execution authority.
+pub fn build_gemini_request_with_extensions(
+    model: &str,
+    goal: &str,
+    observations: &[WorkspaceObservation],
+    remaining_decisions: usize,
+    project_guidance: Option<&str>,
+    extension_declarations: &[Value],
+) -> Result<Vec<u8>, ModelError> {
+    let mut declarations = gemini_function_declarations();
+    declarations.extend(gemini_declarations(extension_declarations));
+    build_gemini_request_with_declarations(
+        model,
+        goal,
+        observations,
+        remaining_decisions,
+        project_guidance,
+        declarations,
+    )
 }
 
 pub(crate) fn gemini_generate_content_endpoint(model: &str) -> Result<String, &'static str> {

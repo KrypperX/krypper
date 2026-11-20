@@ -74,7 +74,7 @@ fn assert_extension_call<S: BoundedDecisionSource>(
         task_id,
         turn_id,
         "Use an extension",
-        1,
+        2,
         source,
         Some(&extensions),
     )
@@ -85,9 +85,16 @@ fn assert_extension_call<S: BoundedDecisionSource>(
             assert_eq!(
                 result.outcome(),
                 Some(&TurnOutcome::Success {
-                    result: result_text.to_owned()
+                    result: "done".to_owned()
                 })
             );
+            assert!(result.observations().iter().any(|observation| {
+                matches!(
+                    observation,
+                    crate::agent_loop::WorkspaceObservation::ExtensionCompleted { name, result }
+                        if name == "external_read" && result == result_text
+                )
+            }));
         }
         Expected::Failure => {
             assert_eq!(result.stop_reason(), GoalTurnStopReason::ActionFailed);
@@ -101,12 +108,15 @@ fn assert_extension_call<S: BoundedDecisionSource>(
 
 #[test]
 fn ollama_extension_arguments_reach_harness_dispatch() {
-    let (address, server) = mock_server(vec![ok(tool_response(
-        "external_read",
-        json!({"path": "ollama.txt"}),
-    ))]);
+    let (address, server) = mock_server(vec![
+        ok(tool_response(
+            "external_read",
+            json!({"path": "ollama.txt"}),
+        )),
+        ok(tool_response("complete_task", json!({"result": "done"}))),
+    ]);
     let (mut session, task_id, turn_id) = running_turn();
-    let mut source = OllamaDecisionSource::with_endpoint("test-model", 1, address);
+    let mut source = OllamaDecisionSource::with_endpoint("test-model", 2, address);
     assert_extension_call(
         &mut session,
         task_id,
@@ -121,7 +131,7 @@ fn ollama_extension_arguments_reach_harness_dispatch() {
 fn ollama_extension_without_required_arguments_fails_closed() {
     let (address, server) = mock_server(vec![ok(tool_response("external_read", json!({})))]);
     let (mut session, task_id, turn_id) = running_turn();
-    let mut source = OllamaDecisionSource::with_endpoint("test-model", 1, address);
+    let mut source = OllamaDecisionSource::with_endpoint("test-model", 2, address);
     assert_extension_call(
         &mut session,
         task_id,
@@ -138,13 +148,17 @@ fn openai_compatible_extension_arguments_reach_harness_dispatch() {
         "external_read",
         json!({"path": "compatible.txt"}),
     )]);
-    let (address, server) = mock_server(vec![ok(response)]);
+    let completion = compatible_chat_response(vec![compatible_chat_function_call(
+        "complete_task",
+        json!({"result": "done"}),
+    )]);
+    let (address, server) = mock_server(vec![ok(response), ok(completion)]);
     let (mut session, task_id, turn_id) = running_turn();
     let mut source = OpenAiCompatibleDecisionSource::with_endpoint(
         "test-model",
         OpenAiCompatibleProvider::DeepSeek,
         "local-key",
-        1,
+        2,
         format!("http://{address}/v1/chat/completions"),
     );
     assert_extension_call(
@@ -169,7 +183,7 @@ fn openai_compatible_extension_without_required_arguments_fails_closed() {
         "test-model",
         OpenAiCompatibleProvider::DeepSeek,
         "local-key",
-        1,
+        2,
         format!("http://{address}/v1/chat/completions"),
     );
     assert_extension_call(
@@ -189,13 +203,18 @@ fn responses_extension_arguments_reach_harness_dispatch() {
         "output": [openai_function_call("external_read", json!({"path": "responses.txt"}))]
     })
     .to_string();
-    let (address, server) = mock_server(vec![ok(response)]);
+    let completion = json!({
+        "status": "completed",
+        "output": [openai_function_call("complete_task", json!({"result": "done"}))]
+    })
+    .to_string();
+    let (address, server) = mock_server(vec![ok(response), ok(completion)]);
     let (mut session, task_id, turn_id) = running_turn();
     let mut source = ResponsesDecisionSource::with_endpoint(
         "test-model",
         ResponsesProvider::OpenAi,
         "local-key",
-        1,
+        2,
         format!("http://{address}/v1/responses"),
     );
     assert_extension_call(
@@ -221,7 +240,7 @@ fn responses_extension_without_required_arguments_fails_closed() {
         "test-model",
         ResponsesProvider::OpenAi,
         "local-key",
-        1,
+        2,
         format!("http://{address}/v1/responses"),
     );
     assert_extension_call(
@@ -241,12 +260,17 @@ fn anthropic_extension_arguments_reach_harness_dispatch() {
         "content": [anthropic_tool_use("external_read", json!({"path": "anthropic.txt"}))]
     })
     .to_string();
-    let (address, server) = mock_server(vec![ok(response)]);
+    let completion = json!({
+        "stop_reason": "tool_use",
+        "content": [anthropic_tool_use("complete_task", json!({"result": "done"}))]
+    })
+    .to_string();
+    let (address, server) = mock_server(vec![ok(response), ok(completion)]);
     let (mut session, task_id, turn_id) = running_turn();
     let mut source = AnthropicDecisionSource::with_endpoint(
         "test-model:cloud",
         "local-key",
-        1,
+        2,
         format!("http://{address}/v1/messages"),
     );
     assert_extension_call(
@@ -271,7 +295,7 @@ fn anthropic_extension_without_required_arguments_fails_closed() {
     let mut source = AnthropicDecisionSource::with_endpoint(
         "test-model:cloud",
         "local-key",
-        1,
+        2,
         format!("http://{address}/v1/messages"),
     );
     assert_extension_call(
@@ -290,12 +314,16 @@ fn gemini_extension_arguments_reach_harness_dispatch() {
         "external_read",
         json!({"path": "gemini.txt"}),
     )]);
-    let (address, server) = mock_server(vec![ok(response)]);
+    let completion = gemini_response(vec![gemini_function_call(
+        "complete_task",
+        json!({"result": "done"}),
+    )]);
+    let (address, server) = mock_server(vec![ok(response), ok(completion)]);
     let (mut session, task_id, turn_id) = running_turn();
     let mut source = GeminiDecisionSource::with_endpoint(
         "test-model",
         "local-key",
-        1,
+        2,
         format!("http://{address}/v1beta/models/test-model:generateContent"),
     );
     assert_extension_call(
@@ -316,7 +344,123 @@ fn gemini_extension_without_required_arguments_fails_closed() {
     let mut source = GeminiDecisionSource::with_endpoint(
         "test-model",
         "local-key",
-        1,
+        2,
+        format!("http://{address}/v1beta/models/test-model:generateContent"),
+    );
+    assert_extension_call(
+        &mut session,
+        task_id,
+        turn_id,
+        &mut source,
+        Expected::Failure,
+    );
+    server.join().expect("join Gemini mock server");
+}
+
+#[test]
+fn ollama_unregistered_extension_name_fails_closed() {
+    let response = tool_response("external_missing", json!({"path": "missing.txt"}));
+    let (address, server) = mock_server(vec![ok(response)]);
+    let (mut session, task_id, turn_id) = running_turn();
+    let mut source = OllamaDecisionSource::with_endpoint("test-model", 2, address);
+    assert_extension_call(
+        &mut session,
+        task_id,
+        turn_id,
+        &mut source,
+        Expected::Failure,
+    );
+    server.join().expect("join Ollama mock server");
+}
+
+#[test]
+fn openai_compatible_unregistered_extension_name_fails_closed() {
+    let response = compatible_chat_response(vec![compatible_chat_function_call(
+        "external_missing",
+        json!({"path": "missing.txt"}),
+    )]);
+    let (address, server) = mock_server(vec![ok(response)]);
+    let (mut session, task_id, turn_id) = running_turn();
+    let mut source = OpenAiCompatibleDecisionSource::with_endpoint(
+        "test-model",
+        OpenAiCompatibleProvider::DeepSeek,
+        "local-key",
+        2,
+        format!("http://{address}/v1/chat/completions"),
+    );
+    assert_extension_call(
+        &mut session,
+        task_id,
+        turn_id,
+        &mut source,
+        Expected::Failure,
+    );
+    server.join().expect("join OpenAI-compatible mock server");
+}
+
+#[test]
+fn responses_unregistered_extension_name_fails_closed() {
+    let response = json!({
+        "status": "completed",
+        "output": [openai_function_call("external_missing", json!({"path": "missing.txt"}))]
+    })
+    .to_string();
+    let (address, server) = mock_server(vec![ok(response)]);
+    let (mut session, task_id, turn_id) = running_turn();
+    let mut source = ResponsesDecisionSource::with_endpoint(
+        "test-model",
+        ResponsesProvider::OpenAi,
+        "local-key",
+        2,
+        format!("http://{address}/v1/responses"),
+    );
+    assert_extension_call(
+        &mut session,
+        task_id,
+        turn_id,
+        &mut source,
+        Expected::Failure,
+    );
+    server.join().expect("join Responses mock server");
+}
+
+#[test]
+fn anthropic_unregistered_extension_name_fails_closed() {
+    let response = json!({
+        "stop_reason": "tool_use",
+        "content": [anthropic_tool_use("external_missing", json!({"path": "missing.txt"}))]
+    })
+    .to_string();
+    let (address, server) = mock_server(vec![ok(response)]);
+    let (mut session, task_id, turn_id) = running_turn();
+    let mut source = AnthropicDecisionSource::with_endpoint(
+        "test-model:cloud",
+        "local-key",
+        2,
+        format!("http://{address}/v1/messages"),
+    );
+    assert_extension_call(
+        &mut session,
+        task_id,
+        turn_id,
+        &mut source,
+        Expected::Failure,
+    );
+    server.join().expect("join Anthropic mock server");
+}
+
+#[test]
+fn gemini_unregistered_extension_name_fails_closed() {
+    let response = gemini_response(vec![gemini_function_call(
+        "external_missing",
+        json!({"path": "missing.txt"}),
+    )]);
+    let (address, server) = mock_server(vec![ok(response)]);
+    let (mut session, task_id, turn_id) = running_turn();
+    let mut source = GeminiDecisionSource::with_endpoint(
+        "test-model",
+        "local-key",
+        2,
         format!("http://{address}/v1beta/models/test-model:generateContent"),
     );
     assert_extension_call(

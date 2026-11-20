@@ -12,7 +12,7 @@ use uuid::Uuid;
 ///
 /// A provider may request a name but cannot supply the registry, grant, or
 /// capability context. Unregistered names keep the ordinary fail-closed path.
-pub(crate) struct TurnExtensions<'a> {
+pub struct TurnExtensions<'a> {
     pub registry: &'a [super::RegisteredExtensionWithArguments<'a, String>],
     pub context: crate::tools::capability_policy::CapabilityContext,
 }
@@ -37,7 +37,12 @@ fn execute_with_extensions(
             arguments,
         );
         return match result {
-            Ok(value) => Ok(ActionExecution::Complete(value)),
+            Ok(result) => Ok(ActionExecution::Observation(
+                super::WorkspaceObservation::ExtensionCompleted {
+                    name: name.clone(),
+                    result,
+                },
+            )),
             Err(_) => execute_action(session, task_id, turn_id, action),
         };
     }
@@ -61,7 +66,7 @@ pub fn run_goal_turn<D: DecisionSource + ?Sized>(
 }
 
 /// Run the existing single-action turn with optional host-registered tools.
-pub(crate) fn run_goal_turn_with_extensions<D: DecisionSource + ?Sized>(
+pub fn run_goal_turn_with_extensions<D: DecisionSource + ?Sized>(
     session: &mut TaskSession,
     task_id: Uuid,
     turn_id: Uuid,
@@ -130,6 +135,7 @@ pub(crate) fn run_goal_turn_with_extensions<D: DecisionSource + ?Sized>(
                 WorkspaceObservation::PatchApplied { bytes_written, .. } => {
                     format!("replaced text ({bytes_written} bytes)")
                 }
+                WorkspaceObservation::ExtensionCompleted { result, .. } => result.clone(),
                 WorkspaceObservation::FileCreationFailed { .. }
                 | WorkspaceObservation::DirectoryCreationFailed { .. }
                 | WorkspaceObservation::TextReplacementFailed { .. }
@@ -207,7 +213,7 @@ pub fn run_goal_turn_with_budget<D: BoundedDecisionSource + ?Sized>(
 }
 
 /// Run the bounded turn through the same action dispatcher with host tools.
-pub(crate) fn run_goal_turn_with_budget_and_extensions<D: BoundedDecisionSource + ?Sized>(
+pub fn run_goal_turn_with_budget_and_extensions<D: BoundedDecisionSource + ?Sized>(
     session: &mut TaskSession,
     task_id: Uuid,
     turn_id: Uuid,
