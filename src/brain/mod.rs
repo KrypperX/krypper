@@ -14,6 +14,7 @@ mod parse_anthropic;
 mod parse_gemini;
 mod plan;
 mod providers;
+mod provider_bridge;
 mod reflection;
 mod request;
 mod tools_schema;
