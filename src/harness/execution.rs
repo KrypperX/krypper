@@ -196,6 +196,58 @@ pub(crate) fn dispatch_registered_extension_for_turn<T>(
     )
 }
 
+/// Dispatch an argument-aware registered handler for an active, task-owned turn.
+///
+/// Both the host-issued capability and the declared JSON argument schema are
+/// checked before invoking the handler. A model can choose a registered name
+/// and supply arguments, but cannot install a handler or mint a grant.
+pub(crate) fn dispatch_registered_extension_with_arguments_for_turn<T>(
+    session: &crate::task_lifecycle::TaskSession,
+    task_id: uuid::Uuid,
+    turn_id: uuid::Uuid,
+    registry: &[RegisteredExtensionWithArguments<'_, T>],
+    context: crate::tools::capability_policy::CapabilityContext,
+    name: &str,
+    arguments: &serde_json::Value,
+) -> Result<T, ExtensionDispatchError> {
+    session
+        .validate_running_turn(task_id, turn_id)
+        .map_err(ExtensionDispatchError::Turn)?;
+    if context.task_id != task_id {
+        return Err(ExtensionDispatchError::TaskMismatch);
+    }
+    let selected = registry
+        .iter()
+        .find(|entry| {
+            format!(
+                "{}_{}",
+                entry.tool.descriptor.namespace, entry.tool.descriptor.name
+            ) == name
+        })
+        .ok_or(ExtensionDispatchError::Bridge(
+            crate::brain::provider_bridge::BridgeError::UnknownTool,
+        ))?;
+    let tools = registry
+        .iter()
+        .map(|entry| crate::brain::provider_bridge::ExtensionTool {
+            descriptor: entry.tool.descriptor.clone(),
+            description: entry.tool.description,
+            parameters: entry.tool.parameters.clone(),
+            grant: entry.tool.grant,
+        })
+        .collect::<Vec<_>>();
+    dispatch_extension_with_arguments_for_turn(
+        session,
+        task_id,
+        turn_id,
+        &tools,
+        context,
+        name,
+        arguments,
+        selected.execute,
+    )
+}
+
 /// Dispatch a host-registered extension only for an active task-owned turn.
 ///
 /// The caller supplies the registered descriptor, host-issued grant and handler;
