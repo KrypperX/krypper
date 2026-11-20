@@ -27,6 +27,7 @@ pub(crate) enum BridgeError {
     InvalidSchema,
     InvalidArguments,
     UnknownTool,
+    NameCollision,
 }
 
 /// Reject unsupported JSON Schema constructs before advertising a tool.
@@ -125,6 +126,23 @@ fn validate_value(schema: &Value, value: &Value) -> bool {
     }
 }
 
+/// Reject an extension name that could shadow a built-in tool or another extension. 
+fn validate_extension_names(tools: &[ExtensionTool<'_>]) -> Result<(), BridgeError> {
+    let mut seen = std::collections::HashSet::new();
+    for tool in tools {
+        let name = format!("{}_{}", tool.descriptor.namespace, tool.descriptor.name);
+        if name == "complete_task"
+            || crate::tools::registry::workspace_operations()
+                .iter()
+                .any(|operation| operation.name() == name)
+            || !seen.insert(name)
+        {
+            return Err(BridgeError::NameCollision);
+        }
+    }
+    Ok(())
+}
+
 /// Build declarations in the existing OpenAI-function shape used by Brain.
 ///
 /// An advertised tool is not executable until Harness separately validates
@@ -138,6 +156,7 @@ pub(crate) fn authorized_declarations(
         .map(|tool| tool.descriptor.clone())
         .collect::<Vec<_>>();
     validate_descriptors(&descriptors).map_err(BridgeError::InvalidContract)?;
+    validate_extension_names(tools)?;
     let mut declarations = Vec::with_capacity(tools.len());
     for tool in tools {
         evaluate(&tool.descriptor, context, Some(tool.grant)).map_err(BridgeError::Denied)?;
@@ -170,6 +189,7 @@ pub(crate) fn authorize_dispatch(
         .map(|tool| tool.descriptor.clone())
         .collect::<Vec<_>>();
     validate_descriptors(&descriptors).map_err(BridgeError::InvalidContract)?;
+    validate_extension_names(tools)?;
     let tool = tools
         .iter()
         .find(|tool| format!("{}_{}", tool.descriptor.namespace, tool.descriptor.name) == name)
