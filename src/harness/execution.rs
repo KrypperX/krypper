@@ -50,6 +50,38 @@ pub(crate) fn dispatch_authorized_extension<T>(
     Ok(execute())
 }
 
+/// Dispatch a host-registered extension only for an active task-owned turn.
+///
+/// The caller supplies the registered descriptor, host-issued grant and handler;
+/// model output supplies only the tool name. Turn ownership is verified before
+/// capability evaluation, and the handler is never called after either denial.
+pub(crate) fn dispatch_extension_for_turn<T>(
+    session: &crate::task_lifecycle::TaskSession,
+    task_id: uuid::Uuid,
+    turn_id: uuid::Uuid,
+    tools: &[crate::brain::provider_bridge::ExtensionTool<'_>],
+    context: crate::tools::capability_policy::CapabilityContext,
+    name: &str,
+    execute: impl FnOnce() -> T,
+) -> Result<T, ExtensionDispatchError> {
+    session
+        .validate_running_turn(task_id, turn_id)
+        .map_err(ExtensionDispatchError::Turn)?;
+    if context.task_id != task_id {
+        return Err(ExtensionDispatchError::TaskMismatch);
+    }
+    dispatch_authorized_extension(tools, context, name, execute)
+        .map_err(ExtensionDispatchError::Bridge)
+}
+
+/// Distinguishes lifecycle failures from capability denials without executing a handler.
+#[derive(Debug)]
+pub(crate) enum ExtensionDispatchError {
+    Turn(crate::task_lifecycle::WorkspaceReadError),
+    TaskMismatch,
+    Bridge(crate::brain::provider_bridge::BridgeError),
+}
+
 #[cfg(test)]
 mod extension_gate_tests {
     use super::authorize_extension_at_harness;
