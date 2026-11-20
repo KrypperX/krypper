@@ -1,4 +1,5 @@
 pub mod process;
+pub mod extension_contract;
 pub(crate) mod registry;
 mod workspace_safety;
 
