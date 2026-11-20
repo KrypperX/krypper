@@ -25,6 +25,7 @@ pub(crate) enum BridgeError {
     InvalidContract(ExtensionContractError),
     Denied(CapabilityDenial),
     InvalidSchema,
+    UnknownTool,
 }
 
 /// Build declarations in the existing OpenAI-function shape used by Brain.
@@ -61,6 +62,29 @@ pub(crate) fn authorized_declarations(
         }));
     }
     Ok(declarations)
+}
+
+/// Revalidate an extension call at dispatch time, not just at advertisement.
+///
+/// This gate must be called by the existing Harness dispatch path before any
+/// extension executor runs. Model-supplied names never create grants.
+pub(crate) fn authorize_dispatch(
+    tools: &[ExtensionTool<'_>],
+    context: CapabilityContext,
+    name: &str,
+) -> Result<(), BridgeError> {
+    let descriptors = tools
+        .iter()
+        .map(|tool| tool.descriptor.clone())
+        .collect::<Vec<_>>();
+    validate_descriptors(&descriptors).map_err(BridgeError::InvalidContract)?;
+    let tool = tools
+        .iter()
+        .find(|tool| {
+            format!("{}_{}", tool.descriptor.namespace, tool.descriptor.name) == name
+        })
+        .ok_or(BridgeError::UnknownTool)?;
+    evaluate(&tool.descriptor, context, Some(tool.grant)).map_err(BridgeError::Denied)
 }
 
 #[cfg(test)]
