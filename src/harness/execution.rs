@@ -128,7 +128,15 @@ pub(crate) fn dispatch_registered_extension_for_turn<T>(
             grant: entry.tool.grant,
         })
         .collect::<Vec<_>>();
-    dispatch_extension_for_turn(session, task_id, turn_id, &tools, context, name, selected.execute)
+    dispatch_extension_for_turn(
+        session,
+        task_id,
+        turn_id,
+        &tools,
+        context,
+        name,
+        selected.execute,
+    )
 }
 
 /// Dispatch a host-registered extension only for an active task-owned turn.
