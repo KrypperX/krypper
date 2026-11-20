@@ -130,7 +130,7 @@ fn validate_value(schema: &Value, value: &Value) -> bool {
 fn validate_extension_names(tools: &[ExtensionTool<'_>]) -> Result<(), BridgeError> {
     let mut seen = std::collections::HashSet::new();
     for tool in tools {
-        let name = format!("{}_{}", tool.descriptor.namespace, tool.descriptor.name);
+        let name = tool.descriptor.qualified_name();
         if name == "complete_task"
             || crate::tools::registry::workspace_operations()
                 .iter()
@@ -166,13 +166,35 @@ pub(crate) fn authorized_declarations(
         declarations.push(json!({
             "type": "function",
             "function": {
-                "name": format!("{}_{}", tool.descriptor.namespace, tool.descriptor.name),
+                "name": tool.descriptor.qualified_name(),
                 "description": tool.description,
                 "parameters": tool.parameters
             }
         }));
     }
     Ok(declarations)
+}
+
+fn authorize_tool<'a, 'b>(
+    tools: &'a [ExtensionTool<'b>],
+    context: CapabilityContext,
+    name: &str,
+) -> Result<&'a ExtensionTool<'b>, BridgeError> {
+    let descriptors = tools
+        .iter()
+        .map(|tool| tool.descriptor.clone())
+        .collect::<Vec<_>>();
+    validate_descriptors(&descriptors).map_err(BridgeError::InvalidContract)?;
+    validate_extension_names(tools)?;
+    let tool = tools
+        .iter()
+        .find(|tool| tool.descriptor.qualified_name() == name)
+        .ok_or(BridgeError::UnknownTool)?;
+    evaluate(&tool.descriptor, context, Some(tool.grant)).map_err(BridgeError::Denied)?;
+    if !valid_parameters(&tool.parameters) {
+        return Err(BridgeError::InvalidSchema);
+    }
+    Ok(tool)
 }
 
 /// Revalidate an extension call at dispatch time, not just at advertisement.
@@ -184,21 +206,7 @@ pub(crate) fn authorize_dispatch(
     context: CapabilityContext,
     name: &str,
 ) -> Result<(), BridgeError> {
-    let descriptors = tools
-        .iter()
-        .map(|tool| tool.descriptor.clone())
-        .collect::<Vec<_>>();
-    validate_descriptors(&descriptors).map_err(BridgeError::InvalidContract)?;
-    validate_extension_names(tools)?;
-    let tool = tools
-        .iter()
-        .find(|tool| format!("{}_{}", tool.descriptor.namespace, tool.descriptor.name) == name)
-        .ok_or(BridgeError::UnknownTool)?;
-    evaluate(&tool.descriptor, context, Some(tool.grant)).map_err(BridgeError::Denied)?;
-    if !valid_parameters(&tool.parameters) {
-        return Err(BridgeError::InvalidSchema);
-    }
-    Ok(())
+    authorize_tool(tools, context, name).map(|_| ())
 }
 
 /// Validate model-supplied arguments against the registered object's declared
@@ -211,14 +219,7 @@ pub(crate) fn authorize_dispatch_with_arguments(
     name: &str,
     arguments: &Value,
 ) -> Result<(), BridgeError> {
-    authorize_dispatch(tools, context, name)?;
-    let tool = tools
-        .iter()
-        .find(|tool| format!("{}_{}", tool.descriptor.namespace, tool.descriptor.name) == name)
-        .ok_or(BridgeError::UnknownTool)?;
-    if !valid_parameters(&tool.parameters) {
-        return Err(BridgeError::InvalidSchema);
-    }
+    let tool = authorize_tool(tools, context, name)?;
     if !validate_value(&tool.parameters, arguments) {
         return Err(BridgeError::InvalidArguments);
     }

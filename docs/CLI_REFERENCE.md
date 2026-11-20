@@ -349,10 +349,14 @@ completion evidence. With no nested guidance, the existing prompt and action
 flow are preserved. Invalid target paths, symlinks, oversized or invalid UTF-8
 files, and guidance changed during a safe read fail before a write.
 
-The adapter exposes only the existing task workspace actions and task
-completion. Every selected action still passes through Krypper's existing
-workspace containment, symlink, UTF-8, size, lifecycle, and action-budget
+The adapter exposes the existing task workspace actions and task completion.
+When an embedding host registers extension tools, the adapter can also advertise
+those host-authorized declarations; the CLI itself registers none, so its default
+behaviour is unchanged. Every selected action still passes through Krypper's
+existing workspace containment, symlink, UTF-8, size, lifecycle, and action-budget
 checks; model output cannot request arbitrary shell or process execution.
+See [extension bridge safety](extension-bridge-safety.md) for the threat-model
+and backward-compatibility notes.
 The registered `offline_cargo_test` profile is denied unless trusted embedding
 code explicitly grants it to the task; the CLI grants no such permission.
 See [the opt-in Linux profile](offline-cargo-profile.md). See Ollama's
