@@ -40,9 +40,7 @@ pub(crate) fn authorize_extension_at_harness(
 mod extension_gate_tests {
     use super::authorize_extension_at_harness;
     use crate::brain::provider_bridge::{BridgeError, ExtensionTool};
-    use crate::tools::capability_policy::{
-        CapabilityContext, CapabilityDenial, CapabilityGrant,
-    };
+    use crate::tools::capability_policy::{CapabilityContext, CapabilityDenial, CapabilityGrant};
     use crate::tools::extension_contract::{
         ExtensionAuthority, ExtensionDescriptor, ExtensionEffect, EXTENSION_CONTRACT_VERSION,
     };
@@ -88,7 +86,10 @@ mod extension_gate_tests {
         assert_eq!(
             authorize_extension_at_harness(
                 &tools,
-                CapabilityContext { generation: 5, ..context },
+                CapabilityContext {
+                    generation: 5,
+                    ..context
+                },
                 "external_read"
             ),
             Err(BridgeError::Denied(CapabilityDenial::StaleGrant))
@@ -96,7 +97,10 @@ mod extension_gate_tests {
         assert_eq!(
             authorize_extension_at_harness(
                 &tools,
-                CapabilityContext { task_authorized: false, ..context },
+                CapabilityContext {
+                    task_authorized: false,
+                    ..context
+                },
                 "external_read"
             ),
             Err(BridgeError::Denied(CapabilityDenial::TaskUnauthorized))
