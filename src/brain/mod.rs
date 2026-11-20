@@ -13,6 +13,7 @@ mod parse;
 mod parse_anthropic;
 mod parse_gemini;
 mod plan;
+pub mod provider_bridge;
 mod providers;
 mod reflection;
 mod request;
@@ -25,10 +26,10 @@ pub use decision::OllamaDecisionSource;
 pub use plan::{WorkspacePlan, WorkspacePlanError};
 pub use reflection::BrainReflectionError;
 
-pub(crate) use action::action_from_provider_call;
+pub(crate) use action::{action_from_error, action_from_provider_call};
 pub(crate) use decision::consume_decision_budget;
 pub(crate) use dto::{OllamaChatResponse, OllamaMessageRole};
-pub(crate) use errors::ModelError;
+pub use errors::ModelError;
 pub(crate) use http::{
     model_agent, post_chat, post_hosted, post_hosted_sse, post_responses_text_stream,
 };
@@ -37,15 +38,20 @@ pub(crate) use parse::{parse_model_plan_response, parse_responses_response};
 pub(crate) use parse_anthropic::parse_anthropic_response;
 pub(crate) use parse_gemini::parse_gemini_response;
 pub(crate) use plan::MAX_PLAN_OPERATIONS;
-pub(crate) use providers::{
-    AnthropicDecisionSource, CloudflareAccountId, GeminiDecisionSource, ModelDecisionSource,
-    ModelProvider, OpenAiCompatibleCredentials, OpenAiCompatibleDecisionSource,
-    OpenAiCompatibleProvider, ResponsesDecisionSource, ResponsesProvider,
+pub use providers::{
+    build_compatible_chat_request_with_extensions, AnthropicDecisionSource, GeminiDecisionSource,
+    ModelProvider, OpenAiCompatibleDecisionSource, OpenAiCompatibleProvider,
+    ResponsesDecisionSource, ResponsesProvider,
 };
+pub(crate) use providers::{CloudflareAccountId, ModelDecisionSource, OpenAiCompatibleCredentials};
 pub(crate) use request::{
     build_anthropic_request, build_gemini_request, build_responses_request,
     enable_responses_streaming, encode_model_request, gemini_generate_content_endpoint,
     validate_model_name_for_provider,
+};
+pub use request::{
+    build_anthropic_request_with_extensions, build_chat_request_with_extensions,
+    build_gemini_request_with_extensions, build_responses_request_with_extensions,
 };
 pub(crate) use tools_schema::{tool_definitions, workspace_tool_definitions};
 

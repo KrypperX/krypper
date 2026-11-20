@@ -77,6 +77,7 @@ pub(crate) fn summarize_observation(observation: &WorkspaceObservation) -> TurnA
         WorkspaceObservation::TreeTextSearchFailed { .. } => TurnActivitySummary::ActionFailed {
             action: TurnActivityAction::SearchTreeText,
         },
+        WorkspaceObservation::ExtensionCompleted { .. } => TurnActivitySummary::Completed,
         WorkspaceObservation::ActionFailed { action, .. } => {
             let action = match action {
                 WorkspaceAction::OfflineCargoTest { .. } => TurnActivityAction::OfflineCargoTest,
@@ -92,6 +93,7 @@ pub(crate) fn summarize_observation(observation: &WorkspaceObservation) -> TurnA
                 WorkspaceAction::Complete { .. }
                 | WorkspaceAction::Continue
                 | WorkspaceAction::Cancel
+                | WorkspaceAction::Extension { .. }
                 | WorkspaceAction::Unsupported { .. } => TurnActivityAction::Unsupported,
             };
             TurnActivitySummary::ActionFailed { action }
@@ -331,7 +333,23 @@ pub(super) fn execute_action(
         WorkspaceAction::Complete { result } => Ok(ActionExecution::Complete(result.clone())),
         WorkspaceAction::Continue => Ok(ActionExecution::Continue),
         WorkspaceAction::Cancel => Ok(ActionExecution::Cancel),
+        WorkspaceAction::Extension { name, .. } => {
+            let error = GoalTurnError::UnsupportedAction {
+                action: name.clone(),
+            };
+            Ok(ActionExecution::Failed {
+                observation: WorkspaceObservation::ActionFailed {
+                    action: WorkspaceAction::Unsupported {
+                        action: name.clone(),
+                    },
+                    error: error.clone(),
+                },
+                error,
+            })
+        }
         WorkspaceAction::Unsupported { action: name } => {
+            // Registered extensions use the argument-aware variant before this
+            // dispatcher. Plain unsupported actions must never gain authority.
             let error = GoalTurnError::UnsupportedAction {
                 action: name.clone(),
             };

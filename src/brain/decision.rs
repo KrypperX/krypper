@@ -16,6 +16,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use ureq::Agent;
 
+use super::action::action_from_error;
 use super::errors::*;
 use super::http::*;
 use super::limits::*;
@@ -30,6 +31,7 @@ pub struct OllamaDecisionSource {
     pub(super) address: SocketAddr,
     pub(super) agent: Agent,
     pub(super) remaining_decisions: usize,
+    pub(super) extension_declarations: Vec<serde_json::Value>,
 }
 
 impl OllamaDecisionSource {
@@ -42,6 +44,22 @@ impl OllamaDecisionSource {
     /// number of decisions available to the turn.
     pub fn new(model: impl Into<String>, action_budget: usize) -> Self {
         Self::with_endpoint(model, action_budget, OLLAMA_ADDRESS)
+    }
+
+    /// Create a source that advertises host-authorized extension declarations.
+    pub fn with_endpoint_and_extensions(
+        model: impl Into<String>,
+        action_budget: usize,
+        address: SocketAddr,
+        extension_declarations: &[serde_json::Value],
+    ) -> Self {
+        Self {
+            model: model.into(),
+            address,
+            agent: model_agent(),
+            remaining_decisions: action_budget,
+            extension_declarations: extension_declarations.to_vec(),
+        }
     }
 
     /// Requests one bounded, ordered set of workspace operations from the local model.
@@ -319,12 +337,7 @@ impl OllamaDecisionSource {
         action_budget: usize,
         address: SocketAddr,
     ) -> Self {
-        Self {
-            model: model.into(),
-            address,
-            agent: model_agent(),
-            remaining_decisions: action_budget,
-        }
+        Self::with_endpoint_and_extensions(model, action_budget, address, &[])
     }
 
     fn choose(
@@ -339,8 +352,14 @@ impl OllamaDecisionSource {
         let remaining = self.remaining_decisions;
         self.remaining_decisions -= 1;
 
-        let request =
-            build_chat_request(&self.model, goal, observations, remaining, project_guidance)?;
+        let request = build_chat_request_with_extensions(
+            &self.model,
+            goal,
+            observations,
+            remaining,
+            project_guidance,
+            &self.extension_declarations,
+        )?;
         let response = post_chat(&self.agent, self.address, &request)?;
         parse_model_response(&response)
     }
@@ -353,9 +372,7 @@ impl BoundedDecisionSource for OllamaDecisionSource {
         observations: &[WorkspaceObservation],
     ) -> WorkspaceAction {
         self.choose(goal, observations, None)
-            .unwrap_or_else(|error| WorkspaceAction::Unsupported {
-                action: error.to_string(),
-            })
+            .unwrap_or_else(action_from_error)
     }
 
     fn needs_root_project_guidance(&self) -> bool {
@@ -369,9 +386,7 @@ impl BoundedDecisionSource for OllamaDecisionSource {
         guidance: Option<&str>,
     ) -> WorkspaceAction {
         self.choose(goal, observations, guidance)
-            .unwrap_or_else(|error| WorkspaceAction::Unsupported {
-                action: error.to_string(),
-            })
+            .unwrap_or_else(action_from_error)
     }
 }
 

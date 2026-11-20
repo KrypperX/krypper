@@ -203,6 +203,9 @@ fn observation_size(observation: &WorkspaceObservation) -> usize {
             directory.to_string_lossy().len()
         }
         WorkspaceObservation::ActionFailed { error, .. } => error.to_string().len(),
+        WorkspaceObservation::ExtensionCompleted { name, result } => {
+            name.len().saturating_add(result.len())
+        }
     }
 }
 
@@ -312,6 +315,11 @@ fn observation_value(observation: &WorkspaceObservation) -> Value {
             "type":"action_failed",
             "action":workspace_action_name(action),
             "error":error.to_string()
+        }),
+        WorkspaceObservation::ExtensionCompleted { name, result } => json!({
+            "type":"extension_completed",
+            "name":name,
+            "result":result
         }),
     }
 }

@@ -1,0 +1,43 @@
+# Extension bridge safety
+
+PR 3 exposes host-registered extension tools through the existing Brain schema
+adapters and Harness dispatch. The `krypper::extensions` module provides the
+host-facing declaration and turn APIs. A provider supplies only a registered
+tool name and a JSON argument object. The provider cannot install a handler,
+mint a grant, or choose an arbitrary executor.
+
+## Threat model
+
+- Only host-validated descriptors may be advertised. Names that collide with a
+  built-in action or another extension are rejected before advertisement.
+- Capability grants, turn ownership and JSON schemas are rechecked at dispatch,
+  not only when a tool is advertised. Denials fail closed.
+- Raw argument values are never persisted in observations or logs. Successful
+  observations retain the tool name and the host handler's result; denials
+  retain only the tool name, matching existing unsupported-tool behaviour.
+- This bridge admits only `ReadWorkspace` and `MutateWorkspace` effects.
+  `ExecuteProcess`, `Network` and `ExternalService` effects require the separate
+  verified-supervisor/sandbox path and are rejected here.
+- Extensions use the existing task lifecycle and capability boundary. No
+  extension-owned execution loop or provider-issued authority is introduced.
+  Executors are trusted host code selected by registration name, never by
+  model-supplied code or paths; the host must implement each declared effect.
+- A successful extension produces an ordinary observation and does not complete
+  the turn by itself; the model still decides when to complete or continue.
+- The CLI currently registers no extension handlers, so default CLI behaviour
+  remains built-in-only. The production host registry is a separate concern.
+
+## Backward compatibility
+
+- Adding `WorkspaceAction::Extension` and
+  `WorkspaceObservation::ExtensionCompleted` is an explicitly scoped public API
+  migration. Downstream exhaustive matches must add a wildcard arm or the new
+  variants.
+- The `krypper::extensions` module adds host-facing declaration, request-builder,
+  decision-source and dispatch APIs; these are additive and require no changes
+  to built-in provider configuration.
+- With an empty host registry, existing built-in turn flows and observations are
+  unchanged.
+- Unsupported provider tool calls that carry JSON arguments now map to the new
+  extension action instead of a generic error string, so a handler can receive
+  them only when the host has explicitly registered and granted that name.

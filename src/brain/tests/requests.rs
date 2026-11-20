@@ -2,8 +2,13 @@
 
 use super::*;
 use crate::agent_loop::WorkspaceObservation;
+use crate::extensions::{
+    authorized_declarations, CapabilityContext, CapabilityGrant, ExtensionAuthority,
+    ExtensionDescriptor, ExtensionEffect, ExtensionTool, EXTENSION_CONTRACT_VERSION,
+};
 use serde_json::Value;
 use std::path::PathBuf;
+use uuid::Uuid;
 #[test]
 fn model_name_validation_rejects_cloud_models() {
     assert!(validate_model_name_for_provider("qwen3", ModelProvider::Ollama).is_ok());
@@ -153,5 +158,127 @@ fn every_model_provider_keeps_root_guidance_in_the_same_separate_section() {
             "Root AGENTS.md project guidance (lower priority):\nUse the project's existing error style."
         ));
         assert_eq!(prompt.matches(guidance).count(), 1);
+    }
+}
+
+#[test]
+fn extension_request_builders_advertise_authorized_declarations() {
+    let task_id = Uuid::new_v4();
+    let grant = CapabilityGrant {
+        task_id,
+        namespace: "external".into(),
+        operation: "read".into(),
+        effect: ExtensionEffect::ReadWorkspace,
+        generation: 1,
+        host_approved: false,
+    };
+    let tools = [ExtensionTool {
+        descriptor: ExtensionDescriptor {
+            version: EXTENSION_CONTRACT_VERSION,
+            namespace: "external",
+            name: "read",
+            effect: ExtensionEffect::ReadWorkspace,
+            authority: ExtensionAuthority::Task,
+        },
+        description: "Read an external path",
+        parameters: serde_json::json!({"type":"object","properties":{}}),
+        grant: &grant,
+    }];
+    let declarations = authorized_declarations(
+        &tools,
+        CapabilityContext {
+            task_id,
+            generation: 1,
+            task_authorized: true,
+        },
+    )
+    .expect("authorized declaration");
+    let observations = [];
+    let requests = [
+        build_chat_request_with_extensions(
+            "test-model",
+            "goal",
+            &observations,
+            3,
+            None,
+            &declarations,
+        )
+        .expect("chat request"),
+        build_responses_request_with_extensions(
+            "test-model",
+            ModelProvider::OpenAi,
+            "goal",
+            &observations,
+            3,
+            None,
+            &declarations,
+        )
+        .expect("responses request"),
+        build_anthropic_request_with_extensions(
+            "test-model",
+            "goal",
+            &observations,
+            3,
+            None,
+            &declarations,
+        )
+        .expect("anthropic request"),
+        build_gemini_request_with_extensions(
+            "gemini-2.5-flash",
+            "goal",
+            &observations,
+            3,
+            None,
+            &declarations,
+        )
+        .expect("gemini request"),
+        build_compatible_chat_request_with_extensions(
+            "test-model",
+            OpenAiCompatibleProvider::Groq,
+            "goal",
+            &observations,
+            3,
+            None,
+            &declarations,
+        )
+        .expect("compatible request"),
+    ];
+    let parsed = requests.map(|request| {
+        serde_json::from_slice::<Value>(&request).expect("decode extension request")
+    });
+    let names = [
+        parsed[0]["tools"]
+            .as_array()
+            .expect("chat tools")
+            .iter()
+            .filter_map(|tool| tool["function"]["name"].as_str())
+            .collect::<Vec<_>>(),
+        parsed[1]["tools"]
+            .as_array()
+            .expect("responses tools")
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect::<Vec<_>>(),
+        parsed[2]["tools"]
+            .as_array()
+            .expect("anthropic tools")
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect::<Vec<_>>(),
+        parsed[3]["tools"][0]["functionDeclarations"]
+            .as_array()
+            .expect("gemini declarations")
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect::<Vec<_>>(),
+        parsed[4]["tools"]
+            .as_array()
+            .expect("compatible tools")
+            .iter()
+            .filter_map(|tool| tool["function"]["name"].as_str())
+            .collect::<Vec<_>>(),
+    ];
+    for names in names {
+        assert!(names.contains(&"external_read"));
     }
 }

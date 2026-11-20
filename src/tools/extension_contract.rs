@@ -37,6 +37,13 @@ pub struct ExtensionDescriptor<'a> {
     pub authority: ExtensionAuthority,
 }
 
+impl ExtensionDescriptor<'_> {
+    /// Return the namespaced tool name used in provider calls.
+    pub fn qualified_name(&self) -> String {
+        format!("{}_{}", self.namespace, self.name)
+    }
+}
+
 /// Rejection reasons for malformed or ambiguous descriptors.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExtensionContractError {

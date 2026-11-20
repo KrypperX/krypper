@@ -255,6 +255,13 @@ pub(super) fn write_observation(
         WorkspaceObservation::ActionFailed { error, .. } => {
             writeln!(output, "Observation {number}: action failed: {error}")?;
         }
+        WorkspaceObservation::ExtensionCompleted { name, result } => {
+            writeln!(output, "Observation {number}: extension {name} completed")?;
+            output.write_all(result.as_bytes())?;
+            if !result.ends_with('\n') {
+                output.write_all(b"\n")?;
+            }
+        }
     }
     Ok(())
 }

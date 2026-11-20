@@ -18,7 +18,11 @@ pub(crate) fn action_from_provider_call(
         ModelError::InvalidToolCall(message) => {
             ModelError::ProviderInvalidToolCall(provider, message)
         }
-        ModelError::UnsupportedTool => ModelError::ProviderUnsupportedTool(provider),
+        ModelError::UnsupportedTool { name, arguments } => ModelError::ProviderUnsupportedTool {
+            provider,
+            name,
+            arguments,
+        },
         ModelError::InvalidArguments(message) => {
             ModelError::ProviderInvalidArguments(provider, message)
         }
@@ -149,7 +153,27 @@ pub(crate) fn action_from_call(
                 result: result.to_owned(),
             })
         }
-        _ => Err(ModelError::UnsupportedTool),
+        _ => Err(ModelError::UnsupportedTool {
+            name: name.to_owned(),
+            arguments: arguments.clone(),
+        }),
+    }
+}
+
+/// Map a provider decision error back to the bounded action vocabulary.
+///
+/// Unsupported tool calls keep their host-requested name and JSON arguments so
+/// the Harness can apply its own registry and capability checks. All other
+/// failures remain ordinary failed actions.
+pub(crate) fn action_from_error(error: ModelError) -> WorkspaceAction {
+    match error {
+        ModelError::UnsupportedTool { name, arguments }
+        | ModelError::ProviderUnsupportedTool {
+            name, arguments, ..
+        } => WorkspaceAction::Extension { name, arguments },
+        error => WorkspaceAction::Unsupported {
+            action: error.to_string(),
+        },
     }
 }
 

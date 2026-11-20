@@ -50,6 +50,11 @@ pub enum WorkspaceAction {
     Continue,
     /// Cancel the active task and turn.
     Cancel,
+    /// A host-registered extension requested by a provider with JSON arguments.
+    Extension {
+        name: String,
+        arguments: serde_json::Value,
+    },
     /// An unsupported action, returned as a clear failed observation.
     Unsupported { action: String },
 }
@@ -69,6 +74,7 @@ pub(crate) fn workspace_action_name(action: &WorkspaceAction) -> &'static str {
         WorkspaceAction::Complete { .. } => "complete_task",
         WorkspaceAction::Continue => "continue",
         WorkspaceAction::Cancel => "cancel",
+        WorkspaceAction::Extension { .. } => "extension",
         WorkspaceAction::Unsupported { .. } => "unsupported",
     }
 }
@@ -148,6 +154,8 @@ pub enum WorkspaceObservation {
         action: WorkspaceAction,
         error: GoalTurnError,
     },
+    /// A host-owned extension completed and returned a bounded, host-supplied result.
+    ExtensionCompleted { name: String, result: String },
 }
 
 /// Why a task-owned turn stopped running its action loop.
