@@ -349,6 +349,29 @@ completion evidence. With no nested guidance, the existing prompt and action
 flow are preserved. Invalid target paths, symlinks, oversized or invalid UTF-8
 files, and guidance changed during a safe read fail before a write.
 
+### Opt-in repository context
+
+Embedding code may call
+`krypper::harness::execution::create_plan_with_repository_context` to add one
+bounded retrieval step before that existing planning flow. Retrieval derives at
+most three literal goal queries, reuses `TaskSession` tree search and safe file
+reads, and includes at most four snippets, three lines each. Every snippet
+carries its workspace-relative path, line range, query and a short SHA-256
+content revision. Stale matches and oversized sources are skipped and counted;
+directive-like lines are neutralized. The prompt labels all excerpts untrusted
+and advisory. This context cannot change tool authorization, workspace
+confinement, budgets, completion evidence, or the executor; without the opt-in
+call, prompts and behavior are unchanged.
+
+To inspect the same retrieval offline, run:
+
+```sh
+cargo run -- context --goal "Locate parse_goal in src/parser.rs" --workspace "task workspace"
+```
+
+`context` makes no model request, changes no file, and prints bounded JSON with
+the queries, attributed snippets, counters and truncation flag.
+
 The adapter exposes the existing task workspace actions and task completion.
 When an embedding host registers extension tools, the adapter can also advertise
 those host-authorized declarations; the CLI itself registers none, so its default

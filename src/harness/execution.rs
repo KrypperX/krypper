@@ -22,10 +22,11 @@ mod types;
 mod extension_tests;
 
 pub use self::planned::{
-    create_plan_with_workspace_context, run_goal_turn_with_completion_correction,
-    run_goal_turn_with_plan, run_goal_turn_with_process_failure_correction,
-    CompletionCorrectionError, CompletionCorrectionResult, ProcessFailureCorrectionError,
-    ProcessFailureCorrectionResult, ProcessTestVerificationStatus,
+    create_plan_with_repository_context, create_plan_with_workspace_context,
+    run_goal_turn_with_completion_correction, run_goal_turn_with_plan,
+    run_goal_turn_with_process_failure_correction, CompletionCorrectionError,
+    CompletionCorrectionResult, ProcessFailureCorrectionError, ProcessFailureCorrectionResult,
+    ProcessTestVerificationStatus,
 };
 pub use self::turn::{run_goal_turn, run_goal_turn_with_budget};
 pub use self::turn::{

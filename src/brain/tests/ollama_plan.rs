@@ -84,9 +84,15 @@ fn ollama_plan_fixtures_reject_malformed_unsupported_and_over_limit_calls() {
 
 #[test]
 fn ollama_plan_request_exposes_only_registered_workspace_tools() {
-    let request =
-        build_plan_request_with_project_guidance("fixture-model", "read then create", &[], 2, None)
-            .expect("build plan request");
+    let request = build_plan_request_with_project_guidance(
+        "fixture-model",
+        "read then create",
+        &[],
+        2,
+        None,
+        None,
+    )
+    .expect("build plan request");
     let request: Value = serde_json::from_slice(&request).expect("decode plan request");
     let tools = request["tools"].as_array().expect("workspace tool list");
 

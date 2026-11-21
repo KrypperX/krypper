@@ -2,8 +2,9 @@
 
 use crate::agent_loop::WorkspaceObservation;
 use crate::harness::context::{
-    build_plan_prompt_with_project_guidance, build_plan_prompt_with_project_guidance_and_targets,
-    build_task_prompt_with_project_guidance,
+    build_plan_prompt_with_repository_context,
+    build_plan_prompt_with_targets_and_repository_context, build_task_prompt_with_project_guidance,
+    RepositoryContext,
 };
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -124,6 +125,7 @@ pub(crate) fn build_plan_request_with_project_guidance(
     observations: &[WorkspaceObservation],
     maximum_operations: usize,
     project_guidance: Option<&str>,
+    repository_context: Option<&RepositoryContext>,
 ) -> Result<Vec<u8>, ModelError> {
     build_plan_request_with_project_guidance_and_targets(
         model,
@@ -132,6 +134,7 @@ pub(crate) fn build_plan_request_with_project_guidance(
         maximum_operations,
         project_guidance,
         None,
+        repository_context,
     )
 }
 
@@ -142,22 +145,25 @@ pub(crate) fn build_plan_request_with_project_guidance_and_targets(
     maximum_operations: usize,
     project_guidance: Option<&str>,
     proposed_targets: Option<&[PathBuf]>,
+    repository_context: Option<&RepositoryContext>,
 ) -> Result<Vec<u8>, ModelError> {
     validate_model_name_for_provider(model, ModelProvider::Ollama)
         .map_err(ModelError::InvalidModelName)?;
     let prompt = match proposed_targets {
-        Some(targets) => build_plan_prompt_with_project_guidance_and_targets(
+        Some(targets) => build_plan_prompt_with_targets_and_repository_context(
             goal,
             observations,
             maximum_operations,
             project_guidance,
             targets,
+            repository_context,
         )?,
-        None => build_plan_prompt_with_project_guidance(
+        None => build_plan_prompt_with_repository_context(
             goal,
             observations,
             maximum_operations,
             project_guidance,
+            repository_context,
         )?,
     };
     let request = json!({
