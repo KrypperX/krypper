@@ -55,6 +55,12 @@ impl ManagedChild {
         if unsafe { libc::kill(-pgid, libc::SIGKILL) } != 0
             && io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
         {
+            let _ = child.kill();
+            if !reap(&mut child) {
+                thread::spawn(move || {
+                    let _ = child.wait();
+                });
+            }
             return Err(McpLifecycleError::CleanupFailed);
         }
         if !reap(&mut child) {
