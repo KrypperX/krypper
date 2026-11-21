@@ -41,6 +41,8 @@ pub enum ModelError {
     },
     /// The local model supplied invalid arguments.
     InvalidArguments(&'static str),
+    /// The hosted endpoint is malformed or insecure for credentials.
+    InvalidProviderEndpoint,
     /// A hosted model request failed in transit.
     ProviderTransport(ModelProvider),
     /// A hosted model returned an error status.
@@ -103,6 +105,7 @@ impl fmt::Display for ModelError {
                     "Ollama tool call has invalid arguments: {message}"
                 )
             }
+            Self::InvalidProviderEndpoint => formatter.write_str("hosted endpoint requires HTTPS or HTTP loopback without userinfo"),
             Self::ProviderTransport(provider) => {
                 write!(formatter, "{} request failed", provider.label())
             }
