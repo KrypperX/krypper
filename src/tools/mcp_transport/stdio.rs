@@ -230,7 +230,7 @@ fn drain(
     limit: usize,
 ) -> Result<(bool, usize, usize), McpLifecycleError> {
     let mut buffer = [0; 8192];
-    let writable = limit.min(buffer.len());
+    let writable = limit.saturating_sub(bytes.len()).min(buffer.len());
     match pipe.read(&mut buffer[..writable.max(1)]) {
         Ok(0) => Ok((true, 0, 0)),
         Ok(read) => {
