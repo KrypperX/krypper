@@ -4,6 +4,7 @@ pub mod mcp_transport;
 pub mod process;
 pub mod process_profile;
 pub(crate) mod registry;
+pub(crate) mod skills;
 mod workspace_safety;
 
 pub(crate) use workspace_safety::{

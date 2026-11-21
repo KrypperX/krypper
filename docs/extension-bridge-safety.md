@@ -122,3 +122,22 @@ mint a grant, or choose an arbitrary executor.
   connect behavior, the built-in registry, provider schemas, CLI defaults and
   all other tool effects are unchanged when the host makes no discovery or
   invocation call.
+
+## Skills manifest loading (PR 6)
+
+- `tools::skills` reads explicit JSON manifests from `.krypper/skills/*.json` and
+  host-supplied workspace-relative paths. It is crate-private and read-only, with
+  no CLI default and no tool registration.
+- Bounds: 64 manifests per load, 16 KiB per manifest, 8 KiB of instructions,
+  512 B of description, 4 KiB per path and 16 path components. Names are bounded
+  ASCII identifiers. Duplicate names, file-name/content mismatches and unknown
+  JSON fields fail closed. Results are sorted by name, then manifest path.
+- Discovery and reads use the existing workspace containment walk. Absolute
+  paths, parent components, symlinks, escapes, oversize inputs, invalid UTF-8 and
+  malformed manifests are rejected before use.
+- Instructions are inert, untrusted text. Manifests cannot declare tools,
+  commands, grants or policy; loading never activates a skill, injects context,
+  downloads content or changes authority. Bounded selection and injection are a
+  separate later subtask.
+- Backward compatibility: additive crate-private module with no new dependency,
+  grant, registry entry, provider schema or CLI change.
