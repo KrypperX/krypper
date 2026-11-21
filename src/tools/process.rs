@@ -4,6 +4,7 @@
 //! command, `supervisor` owns leases, pipes, reaping and the run entry points. This file is a
 //! facade so every existing `crate::tools::process::*` path keeps working.
 
+mod outcome;
 mod policy;
 mod sandbox;
 mod supervisor;
@@ -20,7 +21,8 @@ pub use self::supervisor::{ProcessOutcome, ProcessResource, ProcessResult};
 use self::policy::cargo_command_args;
 #[cfg(test)]
 use self::supervisor::{
-    record_test_evidence, run_with_bounds, run_without_containment, Supervisor,
+    record_raw_output, record_test_evidence, run_with_bounds, run_without_containment,
+    settle_before_launch, Supervisor,
 };
 #[cfg(test)]
 use crate::tools::capture_workspace_root_at;

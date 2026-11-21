@@ -1,3 +1,4 @@
+use super::outcome::{record_event, resolve_outcome, StopReason};
 use super::*;
 use crate::brain::OllamaDecisionSource;
 use crate::task_lifecycle::{TaskSession, TaskState, TurnOutcome, TurnState};
@@ -146,6 +147,10 @@ fn profile_is_denied_without_explicit_task_authority() {
         .unwrap();
     assert_eq!(result.outcome, ProcessOutcome::Denied);
     assert_eq!(result.test_filter.as_deref(), Some("works"));
+    assert_eq!(result.elapsed_ms, 0);
+    assert_eq!(result.output_bytes, 0);
+    assert!(result.resource_events.is_empty());
+    assert!(!result.recovery_hold);
     assert_eq!(
         session
             .get_task(task)
@@ -548,6 +553,160 @@ fn resource_readback_rejects_missing_and_unlimited_controls() {
         fs::write(path.join(name), original).unwrap();
     }
     fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn outcome_resolution_is_deterministic_for_limits_cancellation_and_cleanup() {
+    use ProcessOutcome::*;
+    let cases = [
+        (StopReason::OutputLimit, vec![], true, OutputLimitExceeded),
+        (StopReason::Cancelled, vec![], true, Cancelled),
+        (StopReason::WallTimeout, vec![], true, TimedOut),
+        (
+            StopReason::CpuBudget,
+            vec![],
+            true,
+            ResourceLimitExceeded {
+                resource: ProcessResource::Cpu,
+            },
+        ),
+        (StopReason::Exited(0), vec![], true, Exited(0)),
+        (StopReason::Exited(101), vec![], true, Exited(101)),
+        (StopReason::Signaled(9), vec![], true, Signaled(9)),
+        (StopReason::Unknown, vec![], true, OutcomeUnknown),
+        (
+            StopReason::WallTimeout,
+            vec![ProcessResource::Memory],
+            true,
+            ResourceLimitExceeded {
+                resource: ProcessResource::Memory,
+            },
+        ),
+        (
+            StopReason::Cancelled,
+            vec![ProcessResource::Processes],
+            true,
+            ResourceLimitExceeded {
+                resource: ProcessResource::Processes,
+            },
+        ),
+        (
+            StopReason::Exited(0),
+            vec![ProcessResource::FileSize],
+            true,
+            ResourceLimitExceeded {
+                resource: ProcessResource::FileSize,
+            },
+        ),
+        (StopReason::Exited(0), vec![], false, OutcomeUnknown),
+        (
+            StopReason::Cancelled,
+            vec![ProcessResource::Cpu],
+            false,
+            OutcomeUnknown,
+        ),
+    ];
+    for (stop, events, cleanup_confirmed, expected) in cases {
+        assert_eq!(
+            resolve_outcome(stop, &events, cleanup_confirmed),
+            expected,
+            "{stop:?} {events:?} cleanup={cleanup_confirmed}"
+        );
+    }
+}
+
+#[test]
+fn kernel_limit_events_are_deduplicated_and_ordered() {
+    let mut events = Vec::new();
+    for resource in [
+        ProcessResource::FileSize,
+        ProcessResource::Processes,
+        ProcessResource::Memory,
+        ProcessResource::Cpu,
+        ProcessResource::Memory,
+    ] {
+        record_event(&mut events, resource);
+    }
+    assert_eq!(
+        events,
+        [
+            ProcessResource::Processes,
+            ProcessResource::Memory,
+            ProcessResource::Cpu,
+            ProcessResource::FileSize,
+        ]
+    );
+    assert_eq!(
+        resolve_outcome(StopReason::Exited(0), &events, true),
+        ProcessOutcome::ResourceLimitExceeded {
+            resource: ProcessResource::Processes,
+        }
+    );
+}
+
+#[test]
+fn audit_metadata_is_bounded_and_a_recovery_hold_blocks_success() {
+    let mut result = ProcessResult::empty(ProcessOutcome::Exited(0));
+    result.stdout = "x".repeat(64);
+    result.stderr = "y".repeat(36);
+    result.elapsed_ms = 2_000;
+    result.output_bytes = 100;
+    result.output_limit = 8_192;
+    result.resource_events = vec![ProcessResource::Cpu, ProcessResource::Memory];
+    assert!(result.succeeded());
+    result.recovery_hold = true;
+    assert!(!result.succeeded(), "a recovery hold must fail closed");
+    assert!(result.output_bytes <= result.output_limit);
+    assert_eq!(result.resource_events.len(), 2);
+}
+
+#[test]
+fn process_result_serializes_bounded_audit_metadata() {
+    let mut result = ProcessResult::empty(ProcessOutcome::Cancelled);
+    result.elapsed_ms = 1_234;
+    result.output_bytes = 16;
+    result.output_limit = 8_192;
+    result.resource_events = vec![ProcessResource::Memory];
+    result.recovery_hold = true;
+    let value = serde_json::to_value(&result).unwrap();
+    assert_eq!(value["outcome"], "cancelled");
+    assert_eq!(value["elapsed_ms"], 1_234);
+    assert_eq!(value["output_bytes"], 16);
+    assert_eq!(value["output_limit"], 8_192);
+    assert_eq!(value["resource_events"], json!(["memory"]));
+    assert_eq!(value["recovery_hold"], true);
+}
+
+#[test]
+fn cancellation_after_probe_resolves_to_cancelled() {
+    let path = fixture();
+    let limits = ProcessProfile::offline_cargo_test().unwrap().limits();
+    let mut supervisor = Supervisor {
+        unit: "unused".into(),
+        group: path.clone(),
+        cleaned: true,
+        limits,
+    };
+    let mut result = ProcessResult::empty_with_filter(ProcessOutcome::SandboxUnavailable, None);
+    settle_before_launch(&mut result, &mut supervisor, StopReason::Cancelled);
+    assert_eq!(result.outcome, ProcessOutcome::Cancelled);
+    assert!(result.cleanup_confirmed);
+    assert_eq!(result.output_bytes, 0);
+    assert!(result.resource_events.is_empty());
+    fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn audit_metadata_counts_raw_output_bytes_not_lossy_text() {
+    let mut result = ProcessResult::empty(ProcessOutcome::Exited(0));
+    result.output_limit = 2;
+    record_raw_output(&mut result, vec![0xff], vec![0xfe]);
+    assert_eq!(result.output_bytes, 2);
+    assert_eq!(result.stdout, "\u{fffd}");
+    assert_eq!(result.stderr, "\u{fffd}");
+    assert_eq!(result.stdout.len() + result.stderr.len(), 6);
+    assert!(result.output_bytes <= result.output_limit);
+    assert!(result.stdout.len() + result.stderr.len() > result.output_limit);
 }
 
 #[test]

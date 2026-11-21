@@ -1,7 +1,7 @@
 //! Opt-in MCP client lifecycle and error mapping.
 
 use super::config::McpConfigError;
-use super::stdio::{self, StdioChild};
+use super::stdio;
 use std::io;
 use std::process::{ChildStderr, ChildStdin, ChildStdout};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -81,7 +81,7 @@ pub(super) fn connect_stdio(
     let mut stdio = stdio::spawn(config, deadline, cancel)?;
     let protocol_version = match super::handshake::initialize(&mut stdio, deadline, cancel) {
         Ok(version) => version,
-        Err(error) => return Err(cleanup_on_error(stdio, error)),
+        Err(error) => return Err(cleanup_on_error(error, || stdio.child.terminate())),
     };
     Ok(McpSession {
         child: stdio.child,
@@ -90,8 +90,11 @@ pub(super) fn connect_stdio(
     })
 }
 
-fn cleanup_on_error(mut stdio: StdioChild, error: McpLifecycleError) -> McpLifecycleError {
-    match stdio.child.terminate() {
+pub(super) fn cleanup_on_error(
+    error: McpLifecycleError,
+    cleanup: impl FnOnce() -> Result<(), McpLifecycleError>,
+) -> McpLifecycleError {
+    match cleanup() {
         Ok(()) => error,
         Err(_) => McpLifecycleError::CleanupFailed,
     }

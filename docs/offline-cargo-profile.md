@@ -38,6 +38,15 @@ confirmed. A zero-match filter has the typed `no_tests_matched` outcome even
 when Cargo itself exits zero. Incomplete output does not provide successful
 execution evidence.
 
+Each process result also carries bounded audit metadata in the typed
+observation: observed elapsed milliseconds, retained and enforced output byte
+counts, kernel limit events in a fixed precedence order, and a recovery-hold
+flag. It contains no paths, host identities, raw output, or authorization data.
+Outcome selection is deterministic: unconfirmed cleanup wins, then kernel limit
+events, then the observed stop condition (output cap, cancellation, wall or CPU
+budget, exit, or signal). A recovery hold is a non-success state and blocks the
+next run until host cleanup is established.
+
 ## Authorization and dispatch
 
 ```text
