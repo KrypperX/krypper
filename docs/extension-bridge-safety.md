@@ -141,3 +141,27 @@ mint a grant, or choose an arbitrary executor.
   separate later subtask.
 - Backward compatibility: additive crate-private module with no new dependency,
   grant, registry entry, provider schema or CLI change.
+
+## Skills activation and context (PR 7)
+
+- Activation is host-owned. `tools::skills::activate_skills` loads the PR 6
+  manifests and activates only the skill names the host supplies, in the host's
+  order. Task text, model output, repository excerpts and manifest content never
+  select or add a skill, so activation cannot expand authority.
+- Bounds: at most 4 active skills per request and at most 2 KiB of instruction
+  text in total, split evenly across the selected skills. Unused share is not
+  redistributed. Truncation happens on a character boundary, is marked in the
+  text and is reported as `truncated`. An unknown name or an over-limit request
+  fails closed instead of activating a partial set; an empty request activates
+  nothing.
+- Instruction lines are trimmed, control characters replaced and
+  directive-like lines neutralized (`neutralized_lines`). The injected block is
+  labeled as untrusted advisory text, not a command, tool grant or policy.
+- Precedence is explicit and tested: the task goal and Harness bounds stay
+  highest, then root/AGENTS.md project guidance, then activated skills, then
+  bounded repository excerpts. Injection reuses the existing plan and task
+  prompt builders; there is no new agent loop, verification path or executor.
+- Compatibility: `cargo`/CLI defaults, the registry, provider schemas and
+  existing prompts are unchanged. When no skill context is supplied (or the
+  context is empty) prompts are byte-identical to the current builders. No new
+  dependency, grant or tool is introduced.
