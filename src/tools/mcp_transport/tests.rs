@@ -297,7 +297,7 @@ fn spawn_timeout_waits_for_worker_cleanup() {
     let dir = temp_dir("spawn-timeout-cleanup");
     let marker = dir.0.join("marker");
     let config = config(
-        &format!("sleep 0.2\nprintf alive > \"$1\"\n"),
+        "sleep 0.5\nprintf alive > \"$1\"\n",
         &marker,
         Duration::from_nanos(1),
     );

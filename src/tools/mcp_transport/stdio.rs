@@ -6,7 +6,7 @@ use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::mpsc::{self, RecvTimeoutError, TryRecvError};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -120,9 +120,8 @@ where
                 .map_err(|_| McpLifecycleError::CleanupFailed)
                 .and_then(|_| match receiver.try_recv() {
                     Ok(Ok(mut stdio)) => stdio.child.terminate(),
-                    Ok(Err(_)) | Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => {
-                        Ok(())
-                    }
+                    Ok(Err(_)) => Ok(()),
+                    Err(_) => Err(McpLifecycleError::CleanupFailed),
                 })
                 .map_err(|_| McpLifecycleError::CleanupFailed)?;
             Err(McpLifecycleError::Timeout)
