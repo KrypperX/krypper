@@ -558,6 +558,38 @@ pub(super) fn run_with_bounds(
     output: usize,
     cpu_budget: u64,
 ) -> ProcessResult {
+    run_with_containment(
+        root,
+        policy,
+        test_filter,
+        wall,
+        output,
+        cpu_budget,
+        cfg!(target_os = "linux") && unsafe { libc::geteuid() } != 0,
+    )
+}
+
+#[cfg(test)]
+pub(super) fn run_without_containment(
+    root: &WorkspaceRoot,
+    policy: &OfflineCargoPolicy,
+    test_filter: Option<&str>,
+    wall: Duration,
+    output: usize,
+    cpu_budget: u64,
+) -> ProcessResult {
+    run_with_containment(root, policy, test_filter, wall, output, cpu_budget, false)
+}
+
+fn run_with_containment(
+    root: &WorkspaceRoot,
+    policy: &OfflineCargoPolicy,
+    test_filter: Option<&str>,
+    wall: Duration,
+    output: usize,
+    cpu_budget: u64,
+    contained: bool,
+) -> ProcessResult {
     if validate_test_filter(test_filter).is_err() {
         return ProcessResult::invalid_test_filter();
     }
@@ -567,7 +599,7 @@ pub(super) fn run_with_bounds(
     let cpu_budget = cpu_budget.min(limits.cpu_ms.saturating_mul(1_000));
     let mut result =
         ProcessResult::empty_with_filter(ProcessOutcome::SandboxUnavailable, test_filter);
-    if !cfg!(target_os = "linux") || unsafe { libc::geteuid() } == 0 {
+    if !contained {
         return result;
     }
     if UNCERTAIN_CLEANUP.load(Ordering::SeqCst) {

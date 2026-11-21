@@ -215,6 +215,110 @@ fn registered_plan_reaches_process_authorization_through_harness() {
 }
 
 #[test]
+fn approved_profile_reaches_process_dispatch_through_task_session_and_harness() {
+    use crate::agent_loop::{
+        run_goal_turn_with_plan, GoalTurnStopReason, WorkspaceAction, WorkspaceObservation,
+    };
+    let path = fixture();
+    let runtime = path.with_extension("runtime");
+    fs::create_dir_all(runtime.join("bin")).unwrap();
+    for binary in ["cargo", "rustc"] {
+        fs::copy("/usr/bin/true", runtime.join("bin").join(binary)).unwrap();
+    }
+    let policy = OfflineCargoPolicy::new(&runtime, &runtime).unwrap();
+    assert_eq!(
+        policy.profile(),
+        &ProcessProfile::offline_cargo_test().unwrap()
+    );
+
+    let mut session = TaskSession::new_in_workspace(&path).unwrap();
+    let task = session.create_task("approved process profile").id();
+    let owner = session.get_task_mut(task).unwrap();
+    owner.transition(TaskState::Running).unwrap();
+    let turn = owner.create_turn().unwrap();
+    owner.transition_turn(turn, TurnState::Running).unwrap();
+    session.authorize_offline_cargo_tests(task, policy).unwrap();
+
+    let mut passed = ProcessResult::empty(ProcessOutcome::Exited(0));
+    passed.test_filter = Some("works".into());
+    passed.stdout = "test works ... ok\n".into();
+    passed.tests_ran = true;
+    passed.executed_tests = Some(1);
+    session.queue_offline_cargo_results_for_test(task, [passed]);
+    let plan = crate::WorkspacePlan::try_from_actions(
+        vec![WorkspaceAction::OfflineCargoTest {
+            test_filter: Some("works".into()),
+        }],
+        2,
+    );
+    let mut control = |_: &str, observations: &[WorkspaceObservation]| {
+        assert!(matches!(
+            observations,
+            [WorkspaceObservation::ProcessFinished { result }]
+                if result.succeeded()
+                    && result.test_filter.as_deref() == Some("works")
+                    && result.executed_tests == Some(1)
+        ));
+        WorkspaceAction::Complete {
+            result: "profile dispatched".into(),
+        }
+    };
+    let execution = run_goal_turn_with_plan(
+        &mut session,
+        task,
+        turn,
+        "approved process profile",
+        2,
+        plan,
+        &mut control,
+    )
+    .unwrap();
+    assert_eq!(execution.stop_reason(), GoalTurnStopReason::Completed);
+    assert_eq!(
+        session.offline_cargo_filters_for_test(task),
+        vec![Some("works".to_owned())]
+    );
+    fs::remove_dir_all(path).unwrap();
+    fs::remove_dir_all(runtime).unwrap();
+}
+
+#[test]
+fn missing_containment_never_launches_workspace_code() {
+    let path = fixture();
+    let marker = path.with_extension("launched");
+    fs::write(
+        path.join("build.rs"),
+        format!(
+            "fn main() {{ std::fs::write({:?}, b\"launched\").unwrap(); }}",
+            marker
+        ),
+    )
+    .unwrap();
+    let runtime = path.with_extension("runtime");
+    fs::create_dir_all(runtime.join("bin")).unwrap();
+    for binary in ["cargo", "rustc"] {
+        fs::copy("/usr/bin/true", runtime.join("bin").join(binary)).unwrap();
+    }
+    let policy = OfflineCargoPolicy::new(&runtime, &runtime).unwrap();
+    let root = capture_workspace_root_at(&path).unwrap();
+
+    let result = run_without_containment(
+        &root,
+        &policy,
+        None,
+        Duration::from_secs(2),
+        8192,
+        10_000_000,
+    );
+
+    assert_eq!(result.outcome, ProcessOutcome::SandboxUnavailable);
+    assert!(result.cleanup_confirmed);
+    assert!(!marker.exists(), "no workspace code may launch");
+    fs::remove_dir_all(path).unwrap();
+    fs::remove_dir_all(runtime).unwrap();
+}
+
+#[test]
 fn zero_exit_alone_is_not_success() {
     let mut result = ProcessResult::empty(ProcessOutcome::Exited(0));
     assert!(result.succeeded());

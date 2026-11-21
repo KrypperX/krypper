@@ -32,6 +32,7 @@ Registry effect descriptions, tool metadata and model output are descriptive inp
 
 ### Implemented boundaries
 
+- **Dispatch:** the validated fixed profile is held by a host-built policy, granted to one task by `TaskSession`, and reached only through the registered `offline_cargo_test` Harness action. A task without that grant, or a run without containment, denies before any workspace code is launched.
 - **Request:** only an optional literal `test_filter` is accepted. Empty, control-character, option-like and over-limit values are rejected before setup. Requests cannot choose an executable, other argv, cwd, environment, sandbox flags or higher limits.
 - **Environment:** host helper commands receive a minimal service environment; the payload starts with `--clearenv` and receives only eight fixed non-secret variables. No parent credentials, proxy variables, control sockets or arbitrary `PATH` are forwarded. Absence of secrets is asserted by an ignored host fixture, not by ordinary CI.
 - **Filesystem and network:** the workspace and selected trusted runtime directories are mounted read-only; private `/tmp` and `/cargo` tmpfs areas provide bounded writable space. Bubblewrap unshares the network namespace. There is no direct-spawn fallback.
@@ -41,7 +42,7 @@ Registry effect descriptions, tool metadata and model output are descriptive inp
 
 ### Evidence classes
 
-- **Ordinary CI verifies** request-schema and filter denial, missing-grant denial, lifecycle/ownership gates, required cgroup readback with fake files, grant loss on checkpoint restore, fixed argv placement, per-test execution evidence and zero-match retyping, synthetic correction flow, and observation/CLI rendering. It does not exercise real namespaces.
+- **Ordinary CI verifies** request-schema and filter denial, missing-grant denial, approved-profile dispatch through TaskSession and Harness, deterministic missing-containment denial, lifecycle/ownership gates, required cgroup readback with fake files, grant loss on checkpoint restore, fixed argv placement, per-test execution evidence and zero-match retyping, synthetic correction flow, and observation/CLI rendering. It does not exercise real namespaces.
 - **Ignored host fixtures** exercise the actual sandbox, supervisor, canaries, absent secrets and sockets, loopback denial, escape denial, nonzero exit, timeout, output/resource ceilings, cancellation and cleanup. They require a preprovisioned toolchain/registry, delegated cgroup v2 and a user systemd manager, so their results are local host evidence, not required CI.
 - **Source review only:** Bubblewrap flag semantics, namespace isolation from inside the payload, `pre_exec` cgroup attachment, `close_range` descriptor hygiene, delegated-subtree checks, crash-time lease recovery and cross-process cleanup holds are read from code but not proven by ordinary tests on a generic runner.
 
