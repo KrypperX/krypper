@@ -55,14 +55,21 @@ mint a grant, or choose an arbitrary executor.
   more than 16 notifications before the response fails closed.
 - stdout is bounded to 64 KiB per response and stderr to 4 KiB per session across
   all handshake reads. The host timeout starts before spawn and bounds the spawn
-  result plus later read, write and wait; after a spawn timeout, cleanup
-  confirmation may add a bounded grace. The transport waits for the spawn
-  worker, terminates any child it created and confirms cleanup before returning
-  `Timeout`; an unconfirmed cleanup returns `CleanupFailed`. Cancellation is
-  checked on each loop iteration.
+  result plus later read, write and wait; after an aborted spawn, cleanup
+  confirmation may add a bounded grace. Cancellation is checked on each loop
+  iteration and inside the spawn worker before launch. Timeout or cancellation
+  waits for the worker, terminates any child it created and confirms cleanup
+  before returning `Timeout` or `Cancelled`; an unconfirmed cleanup returns
+  `CleanupFailed`. A `Command::spawn()` call that never returns remains a bounded
+  residual.
 - The server runs in its own process group. Cleanup, including a failed
-  handshake, kills the whole group, reaps the direct child and reports
-  `CleanupFailed` rather than leaving descendants or hiding a failed reap.
+  handshake, checks the group signal result, kills the whole group, reaps the
+  direct child and polls until the group is empty within the bounded grace;
+  otherwise it reports `CleanupFailed`. Descendants that deliberately leave the
+  group are outside this guarantee.
+- Config validation is not execution authorization. Host callers must only pass
+  executables and configurations they are already authorized to launch; this
+  module creates no task grant or capability path.
 - The transport uses no shell, no network permission and no new dependency. It
   is a separate crate-private module with no CLI, provider or registry changes.
 

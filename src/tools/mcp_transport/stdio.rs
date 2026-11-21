@@ -51,21 +51,38 @@ impl ManagedChild {
         let Some(mut child) = self.0.take() else {
             return Ok(());
         };
-        unsafe {
-            libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
+        let pgid = child.id() as libc::pid_t;
+        if unsafe { libc::kill(-pgid, libc::SIGKILL) } != 0
+            && io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+        {
+            let _ = child.kill();
+            if !reap(&mut child) {
+                thread::spawn(move || {
+                    let _ = child.wait();
+                });
+            }
+            return Err(McpLifecycleError::CleanupFailed);
         }
-        let _ = child.kill();
-        if matches!(child.try_wait(), Ok(Some(_))) {
-            return Ok(());
-        }
-        if reap(&mut child) {
-            Ok(())
-        } else {
+        if !reap(&mut child) {
             thread::spawn(move || {
                 let _ = child.wait();
             });
-            Err(McpLifecycleError::CleanupFailed)
+            return Err(McpLifecycleError::CleanupFailed);
         }
+        let start = Instant::now();
+        loop {
+            if unsafe { libc::kill(-pgid, 0) } == -1 {
+                if io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
+                    return Err(McpLifecycleError::CleanupFailed);
+                }
+                break;
+            }
+            if start.elapsed() >= REAP_TIMEOUT {
+                return Err(McpLifecycleError::CleanupFailed);
+            }
+            thread::sleep(POLL_INTERVAL);
+        }
+        Ok(())
     }
 }
 
@@ -91,35 +108,54 @@ fn reap(child: &mut Child) -> bool {
 pub(super) fn spawn(
     config: &McpStdioConfig,
     deadline: Instant,
+    cancel: &McpCancellation,
 ) -> Result<StdioChild, McpLifecycleError> {
     let config = config.clone();
+    let worker_cancel = cancel.clone();
     let (sender, receiver) = mpsc::sync_channel(1);
     let (done_sender, done_receiver) = mpsc::sync_channel(1);
     thread::spawn(move || {
-        let result = spawn_inner(&config);
+        let result = spawn_inner(&config, &worker_cancel);
         let _ = sender.send(result);
         let _ = done_sender.send(());
     });
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    match receiver.recv_timeout(remaining) {
-        Ok(result) => result,
-        Err(RecvTimeoutError::Timeout) => {
-            done_receiver
-                .recv_timeout(REAP_TIMEOUT)
-                .map_err(|_| McpLifecycleError::CleanupFailed)
-                .and_then(|_| match receiver.try_recv() {
-                    Ok(Ok(mut stdio)) => stdio.child.terminate(),
-                    Ok(Err(_)) => Ok(()),
-                    Err(_) => Err(McpLifecycleError::CleanupFailed),
-                })
-                .map_err(|_| McpLifecycleError::CleanupFailed)?;
-            Err(McpLifecycleError::Timeout)
+    let cleanup_aborted = || -> Result<(), McpLifecycleError> {
+        done_receiver
+            .recv_timeout(REAP_TIMEOUT)
+            .map_err(|_| McpLifecycleError::CleanupFailed)
+            .and_then(|_| match receiver.try_recv() {
+                Ok(Ok(mut stdio)) => stdio.child.terminate(),
+                Ok(Err(_)) => Ok(()),
+                Err(_) => Err(McpLifecycleError::CleanupFailed),
+            })
+    };
+    loop {
+        if cancel.is_cancelled() {
+            cleanup_aborted()?;
+            return Err(McpLifecycleError::Cancelled);
         }
-        Err(RecvTimeoutError::Disconnected) => Err(McpLifecycleError::SpawnFailed),
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            cleanup_aborted()?;
+            return Err(McpLifecycleError::Timeout);
+        }
+        match receiver.recv_timeout(remaining.min(POLL_INTERVAL)) {
+            Ok(Ok(mut stdio)) if cancel.is_cancelled() => {
+                stdio.child.terminate()?;
+                return Err(McpLifecycleError::Cancelled);
+            }
+            Ok(Err(_)) if cancel.is_cancelled() => return Err(McpLifecycleError::Cancelled),
+            Ok(result) => return result,
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return Err(McpLifecycleError::SpawnFailed),
+        }
     }
 }
 
-fn spawn_inner(config: &McpStdioConfig) -> Result<StdioChild, McpLifecycleError> {
+fn spawn_inner(
+    config: &McpStdioConfig,
+    cancel: &McpCancellation,
+) -> Result<StdioChild, McpLifecycleError> {
     #[cfg(test)]
     if config
         .args
@@ -127,6 +163,9 @@ fn spawn_inner(config: &McpStdioConfig) -> Result<StdioChild, McpLifecycleError>
         .any(|arg| arg.contains("krypper-spawn-delay"))
     {
         thread::sleep(Duration::from_millis(50));
+    }
+    if cancel.is_cancelled() {
+        return Err(McpLifecycleError::Cancelled);
     }
     let mut command = Command::new(&config.executable);
     command

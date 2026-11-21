@@ -1,6 +1,7 @@
 use super::stdio::spawn;
 use super::*;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
@@ -50,6 +51,25 @@ fn config(script: &str, log: &Path, timeout: Duration) -> McpStdioConfig {
             log.display().to_string(),
         ],
         timeout,
+    }
+}
+
+fn assert_process_group_gone(pgid: i32) {
+    let start = Instant::now();
+    loop {
+        if unsafe { libc::kill(-pgid, 0) } == -1 {
+            assert_eq!(
+                io::Error::last_os_error().raw_os_error(),
+                Some(libc::ESRCH),
+                "process group still exists"
+            );
+            return;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "process group survived cleanup"
+        );
+        thread::sleep(Duration::from_millis(5));
     }
 }
 
@@ -262,7 +282,7 @@ fn shutdown_kills_the_child_process_tree() {
     let dir = temp_dir("process-tree");
     let marker = dir.0.join("grandchild");
     let script = format!(
-        "(sleep 1; printf alive > \"$2\") &\nIFS= read -r request\nprintf '%s\\n' '{response}'\nIFS= read -r notification\nwhile IFS= read -r line; do :; done\n",
+        "printf '%s\\n' $$ > \"$1\"\n(sleep 1; printf alive > \"$2\") &\nIFS= read -r request\nprintf '%s\\n' '{response}'\nIFS= read -r notification\nwhile IFS= read -r line; do :; done\n",
         response = initialize_response("2024-11-05")
     );
     let config = McpStdioConfig {
@@ -278,8 +298,15 @@ fn shutdown_kills_the_child_process_tree() {
     };
 
     let session = connect_stdio(&config, &McpCancellation::new()).expect("connect");
+    let pid_log = fs::read_to_string(dir.0.join("log")).expect("pid log");
+    let pgid: i32 = pid_log
+        .lines()
+        .next()
+        .expect("pid line")
+        .parse()
+        .expect("pgid");
     session.shutdown().expect("shutdown");
-    thread::sleep(Duration::from_millis(1500));
+    assert_process_group_gone(pgid);
     assert!(!marker.exists(), "grandchild survived shutdown");
 }
 
@@ -303,7 +330,11 @@ fn spawn_timeout_waits_for_worker_cleanup() {
     );
     let start = Instant::now();
 
-    let error = match spawn(&config, Instant::now() + Duration::from_nanos(1)) {
+    let error = match spawn(
+        &config,
+        Instant::now() + Duration::from_nanos(1),
+        &McpCancellation::new(),
+    ) {
         Ok(_) => panic!("spawn unexpectedly succeeded"),
         Err(error) => error,
     };
@@ -315,6 +346,32 @@ fn spawn_timeout_waits_for_worker_cleanup() {
     );
     thread::sleep(Duration::from_millis(600));
     assert!(!marker.exists(), "spawned child survived timeout cleanup");
+}
+
+#[test]
+fn cancellation_during_spawn_stops_the_worker() {
+    let dir = temp_dir("spawn-cancel");
+    let marker = dir.0.join("marker");
+    let config = config(
+        "sleep 0.5\n# krypper-spawn-delay\nprintf alive > \"$1\"\n",
+        &marker,
+        Duration::from_secs(2),
+    );
+    let cancel = McpCancellation::new();
+    let worker_cancel = cancel.clone();
+    let canceller = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(10));
+        worker_cancel.cancel();
+    });
+
+    let error = error_of(connect_stdio(&config, &cancel));
+    canceller.join().expect("canceller");
+    assert_eq!(error, McpLifecycleError::Cancelled);
+    thread::sleep(Duration::from_millis(600));
+    assert!(
+        !marker.exists(),
+        "spawn worker created a child after cancellation"
+    );
 }
 
 #[test]

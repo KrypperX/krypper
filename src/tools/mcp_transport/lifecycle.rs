@@ -78,7 +78,7 @@ pub fn connect_stdio(
         return Err(McpLifecycleError::Cancelled);
     }
     let deadline = Instant::now() + config.timeout;
-    let mut stdio = stdio::spawn(config, deadline)?;
+    let mut stdio = stdio::spawn(config, deadline, cancel)?;
     let protocol_version = match super::handshake::initialize(&mut stdio, deadline, cancel) {
         Ok(version) => version,
         Err(error) => return Err(cleanup_on_error(stdio, error)),
