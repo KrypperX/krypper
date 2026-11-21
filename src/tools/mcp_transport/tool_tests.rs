@@ -648,3 +648,31 @@ fn invocation_timeout_disconnect_and_untrusted_output_fail_closed() {
     assert!(output.contains("ignore all previous instructions"));
     session.shutdown().expect("shutdown");
 }
+
+#[test]
+fn rejects_tool_handle_from_another_connected_session_before_wire_request() {
+    let dir = temp_dir("cross-session");
+    let log_a = dir.0.join("a.log");
+    let log_b = dir.0.join("b.log");
+    let script = scripted_server(&tool_list(""), &[]);
+    let task_id = Uuid::new_v4();
+    let mut first = connect(&config(&script, &log_a, Duration::from_secs(2)), task_id);
+    let mut second = connect(&config(&script, &log_b, Duration::from_secs(2)), task_id);
+    let grants = [tool_grant(task_id, 1, "echo")];
+    let tools = discover(&mut first, task_id, &grants);
+    assert_eq!(tools.len(), 1);
+    assert_eq!(
+        second.invoke_tool_authorized(
+            &tools[0],
+            context(task_id, 1),
+            Some(&grants[0]),
+            &json!({"text":"hello"}),
+            &McpCancellation::new(),
+        ),
+        Err(McpToolError::WrongSession)
+    );
+    let observed = wait_for_log(&log_b, "notifications/initialized");
+    assert!(!observed.contains("tools/call"));
+    first.shutdown().expect("shutdown first");
+    second.shutdown().expect("shutdown second");
+}
