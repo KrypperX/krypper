@@ -4,7 +4,9 @@ use super::config::McpStdioConfig;
 use super::lifecycle::{McpCancellation, McpLifecycleError};
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
+use std::os::unix::process::CommandExt;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -19,6 +21,7 @@ pub(super) struct StdioChild {
     pub stdout: ChildStdout,
     pub stderr: ChildStderr,
     pub pending: Vec<u8>,
+    pub stderr_used: usize,
 }
 
 pub(super) struct ManagedChild(Option<Child>);
@@ -48,10 +51,13 @@ impl ManagedChild {
         let Some(mut child) = self.0.take() else {
             return Ok(());
         };
+        unsafe {
+            libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
+        }
+        let _ = child.kill();
         if matches!(child.try_wait(), Ok(Some(_))) {
             return Ok(());
         }
-        let _ = child.kill();
         if reap(&mut child) {
             Ok(())
         } else {
@@ -82,13 +88,32 @@ fn reap(child: &mut Child) -> bool {
     false
 }
 
-pub(super) fn spawn(config: &McpStdioConfig) -> Result<StdioChild, McpLifecycleError> {
+pub(super) fn spawn(
+    config: &McpStdioConfig,
+    deadline: Instant,
+) -> Result<StdioChild, McpLifecycleError> {
+    let config = config.clone();
+    let (sender, receiver) = mpsc::sync_channel(1);
+    thread::spawn(move || {
+        let result = spawn_inner(&config);
+        let _ = sender.send(result);
+    });
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    match receiver.recv_timeout(remaining) {
+        Ok(result) => result,
+        Err(RecvTimeoutError::Timeout) => Err(McpLifecycleError::Timeout),
+        Err(RecvTimeoutError::Disconnected) => Err(McpLifecycleError::SpawnFailed),
+    }
+}
+
+fn spawn_inner(config: &McpStdioConfig) -> Result<StdioChild, McpLifecycleError> {
     let mut command = Command::new(&config.executable);
     command
         .args(&config.args)
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env("LANG", "C")
+        .process_group(0)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -109,6 +134,7 @@ pub(super) fn spawn(config: &McpStdioConfig) -> Result<StdioChild, McpLifecycleE
         stdout,
         stderr,
         pending: Vec::new(),
+        stderr_used: 0,
     })
 }
 
@@ -145,6 +171,7 @@ pub(super) fn read_line(
     child: &mut ManagedChild,
     stdout: &mut ChildStdout,
     stderr: &mut ChildStderr,
+    stderr_used: &mut usize,
     pending: &mut Vec<u8>,
     deadline: Instant,
     cancel: &McpCancellation,
@@ -154,9 +181,14 @@ pub(super) fn read_line(
     loop {
         check(deadline, cancel)?;
         let before = response.len();
-        let stdout_eof = drain(stdout, &mut response, MAX_RESPONSE_BYTES)?;
+        let (stdout_eof, _, _) = drain(stdout, &mut response, MAX_RESPONSE_BYTES)?;
         let progressed = response.len() > before;
-        let _ = drain(stderr, &mut errors, MAX_STDERR_BYTES)?;
+        let stderr_budget = MAX_STDERR_BYTES.saturating_sub(*stderr_used);
+        let (_, stored, read) = drain(stderr, &mut errors, stderr_budget)?;
+        *stderr_used += stored;
+        if read > stderr_budget {
+            return Err(McpLifecycleError::OutputLimitExceeded);
+        }
         if let Some(position) = response.iter().position(|byte| *byte == b'\n') {
             let line: Vec<u8> = response.drain(..=position).collect();
             *pending = response;
@@ -196,16 +228,17 @@ fn drain(
     pipe: &mut impl Read,
     bytes: &mut Vec<u8>,
     limit: usize,
-) -> Result<bool, McpLifecycleError> {
+) -> Result<(bool, usize, usize), McpLifecycleError> {
     let mut buffer = [0; 8192];
-    let count = limit.saturating_sub(bytes.len()).min(buffer.len());
-    match pipe.read(&mut buffer[..count.max(1)]) {
-        Ok(0) => Ok(true),
+    let writable = limit.saturating_sub(bytes.len()).min(buffer.len());
+    match pipe.read(&mut buffer[..writable.max(1)]) {
+        Ok(0) => Ok((true, 0, 0)),
         Ok(read) => {
-            if count > 0 {
-                bytes.extend_from_slice(&buffer[..read]);
+            let stored = read.min(writable);
+            if stored > 0 {
+                bytes.extend_from_slice(&buffer[..stored]);
             }
-            Ok(false)
+            Ok((false, stored, read))
         }
         Err(error)
             if matches!(
@@ -213,7 +246,7 @@ fn drain(
                 io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
             ) =>
         {
-            Ok(false)
+            Ok((false, 0, 0))
         }
         Err(error) => Err(McpLifecycleError::Io(error.kind())),
     }

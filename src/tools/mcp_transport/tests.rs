@@ -156,6 +156,12 @@ fn malformed_or_mismatched_responses_are_protocol_violations() {
         r#"{"jsonrpc":"2.0","id":2,"result":{}}"#,
         r#"{"jsonrpc":"1.0","id":1,"result":{}}"#,
         r#"{"jsonrpc":"2.0","id":1}"#,
+        r#"{"jsonrpc":"2.0","id":1,"result":"ok"}"#,
+        r#"{"jsonrpc":"2.0","id":1,"result":{"capabilities":{},"serverInfo":{"name":"fake","version":"1"}}}"#,
+        r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","serverInfo":{"name":"fake","version":"1"}}}"#,
+        r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{}}}"#,
+        r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"version":"1"}}}"#,
+        r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"fake"}}}"#,
     ] {
         let config = config(
             &responding_server(response),
@@ -235,4 +241,129 @@ fn oversized_response_is_rejected_without_buffering_without_bound() {
 
     let error = error_of(connect_stdio(&config, &McpCancellation::new()));
     assert_eq!(error, McpLifecycleError::OutputLimitExceeded);
+}
+
+#[test]
+fn cumulative_stderr_limit_is_enforced_across_notifications() {
+    let dir = temp_dir("stderr");
+    let script = format!(
+        "IFS= read -r request\nprintf '%05000d\\n' 0 >&2\nprintf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\"}}'\nprintf '%05000d\\n' 0 >&2\nprintf '%s\\n' '{response}'\nIFS= read -r notification\nwhile IFS= read -r line; do :; done\n",
+        response = initialize_response("2024-11-05")
+    );
+    let config = config(&script, &dir.0.join("log"), Duration::from_secs(2));
+
+    let error = error_of(connect_stdio(&config, &McpCancellation::new()));
+    assert_eq!(error, McpLifecycleError::OutputLimitExceeded);
+}
+
+#[test]
+fn shutdown_kills_the_child_process_tree() {
+    let dir = temp_dir("process-tree");
+    let marker = dir.0.join("grandchild");
+    let script = format!(
+        "(sleep 1; printf alive > \"$2\") &\nIFS= read -r request\nprintf '%s\\n' '{response}'\nIFS= read -r notification\nwhile IFS= read -r line; do :; done\n",
+        response = initialize_response("2024-11-05")
+    );
+    let config = McpStdioConfig {
+        executable: PathBuf::from("/bin/sh"),
+        args: vec![
+            "-c".into(),
+            script,
+            "fake-mcp-server".into(),
+            dir.0.join("log").display().to_string(),
+            marker.display().to_string(),
+        ],
+        timeout: Duration::from_secs(2),
+    };
+
+    let session = connect_stdio(&config, &McpCancellation::new()).expect("connect");
+    session.shutdown().expect("shutdown");
+    thread::sleep(Duration::from_millis(1500));
+    assert!(!marker.exists(), "grandchild survived shutdown");
+}
+
+#[test]
+fn spawn_time_is_included_in_the_handshake_timeout() {
+    let dir = temp_dir("spawn-timeout");
+    let config = config("exit 0\n", &dir.0.join("log"), Duration::from_nanos(1));
+
+    let error = error_of(connect_stdio(&config, &McpCancellation::new()));
+    assert_eq!(error, McpLifecycleError::Timeout);
+}
+
+#[test]
+fn excessive_notifications_before_response_are_rejected() {
+    let dir = temp_dir("notification-flood");
+    let script = format!(
+        "i=0\nwhile [ $i -lt 17 ]; do printf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\"}}'\ni=$((i + 1))\ndone\nprintf '%s\\n' '{response}'\nIFS= read -r notification\nwhile IFS= read -r line; do :; done\n",
+        response = initialize_response("2025-06-18")
+    );
+    let config = config(&script, &dir.0.join("log"), Duration::from_secs(2));
+
+    let error = error_of(connect_stdio(&config, &McpCancellation::new()));
+    assert_eq!(error, McpLifecycleError::ProtocolViolation);
+}
+
+#[test]
+fn handshake_error_terminates_server_before_returning() {
+    let dir = temp_dir("cleanup-error-path");
+    let pid_log = dir.0.join("pid.log");
+    let script = format!(
+        "printf '%s\\n' $$ > \"$1\"\nprintf '%s\\n' '{response}'\nwhile IFS= read -r line; do :; done\n",
+        response = initialize_response("9999-01-01")
+    );
+    let config = config(&script, &pid_log, Duration::from_secs(2));
+
+    let error = error_of(connect_stdio(&config, &McpCancellation::new()));
+    assert_eq!(error, McpLifecycleError::UnsupportedProtocolVersion);
+    let pid_text = fs::read_to_string(&pid_log).expect("pid log");
+    let pid: i32 = pid_text
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("bad pid log: {pid_text:?}"));
+    assert_ne!(
+        unsafe { libc::kill(pid, 0) },
+        0,
+        "server survived failed handshake"
+    );
+}
+
+#[test]
+fn response_limit_includes_already_buffered_notification_bytes() {
+    let dir = temp_dir("response-limit-pending");
+    let script = format!(
+        "printf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\"}}'\nhead -c 70000 /dev/zero | tr '\\000' 'A'\nprintf '%s\\n' '{response}'\nIFS= read -r notification\nwhile IFS= read -r line; do :; done\n",
+        response = initialize_response("2024-11-05")
+    );
+    let config = config(&script, &dir.0.join("log"), Duration::from_secs(2));
+
+    let error = error_of(connect_stdio(&config, &McpCancellation::new()));
+    assert_eq!(error, McpLifecycleError::OutputLimitExceeded);
+}
+
+#[test]
+fn shutdown_kills_descendants_after_parent_exits() {
+    let dir = temp_dir("orphan-tree");
+    let marker = dir.0.join("grandchild");
+    let script = format!(
+        "(sleep 1; printf alive > \"$2\") &\nIFS= read -r request\nprintf '%s\\n' '{response}'\nIFS= read -r notification\nsleep 0.2\nexit 0\n",
+        response = initialize_response("2024-11-05")
+    );
+    let config = McpStdioConfig {
+        executable: PathBuf::from("/bin/sh"),
+        args: vec![
+            "-c".into(),
+            script,
+            "fake-mcp-server".into(),
+            dir.0.join("log").display().to_string(),
+            marker.display().to_string(),
+        ],
+        timeout: Duration::from_secs(2),
+    };
+
+    let session = connect_stdio(&config, &McpCancellation::new()).expect("connect");
+    thread::sleep(Duration::from_millis(400));
+    session.shutdown().expect("shutdown");
+    thread::sleep(Duration::from_millis(800));
+    assert!(!marker.exists(), "descendant survived parent exit");
 }

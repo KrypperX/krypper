@@ -51,15 +51,14 @@ mint a grant, or choose an arbitrary executor.
   `notifications/initialized`. It never issues `tools/list` or `tools/call`,
   never creates capability grants, and never registers an executable handler.
 - Only `2025-06-18` and `2024-11-05` are accepted. An unknown version, malformed
-  JSON-RPC envelope, mismatched id or server error fails closed before the
-  session is returned.
-- stdout is bounded to 64 KiB per response, stderr is drained with a 4 KiB cap,
-  and every read, write and wait obeys the host timeout. Cancellation is checked
-  on each loop iteration and terminates the child on every failure path.
-- Spawn failure, I/O failure, timeout, cancellation, disconnect, protocol
-  violation, unsupported version, server error, output-limit breach and failed
-  cleanup are mapped to distinct lifecycle outcomes. Cleanup is confirmed or
-  reported as `CleanupFailed`; it is never silently claimed.
+  JSON-RPC envelope, mismatched id, server error, malformed Initialize Result, or
+  more than 16 notifications before the response fails closed.
+- stdout is bounded to 64 KiB per response and stderr to 4 KiB per session across
+  all handshake reads. The host timeout starts before spawn and covers spawn,
+  read, write and wait. Cancellation is checked on each loop iteration.
+- The server runs in its own process group. Cleanup, including a failed
+  handshake, kills the whole group, reaps the direct child and reports
+  `CleanupFailed` rather than leaving descendants or hiding a failed reap.
 - The transport uses no shell, no network permission and no new dependency. It
   is a separate crate-private module with no CLI, provider or registry changes.
 

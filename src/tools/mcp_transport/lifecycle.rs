@@ -77,12 +77,22 @@ pub fn connect_stdio(
     if cancel.is_cancelled() {
         return Err(McpLifecycleError::Cancelled);
     }
-    let mut stdio: StdioChild = stdio::spawn(config)?;
     let deadline = Instant::now() + config.timeout;
-    let protocol_version = super::handshake::initialize(&mut stdio, deadline, cancel)?;
+    let mut stdio = stdio::spawn(config, deadline)?;
+    let protocol_version = match super::handshake::initialize(&mut stdio, deadline, cancel) {
+        Ok(version) => version,
+        Err(error) => return Err(cleanup_on_error(stdio, error)),
+    };
     Ok(McpSession {
         child: stdio.child,
         _stdio: (stdio.stdin, stdio.stdout, stdio.stderr),
         protocol_version,
     })
+}
+
+fn cleanup_on_error(mut stdio: StdioChild, error: McpLifecycleError) -> McpLifecycleError {
+    match stdio.child.terminate() {
+        Ok(()) => error,
+        Err(_) => McpLifecycleError::CleanupFailed,
+    }
 }

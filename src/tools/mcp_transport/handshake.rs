@@ -7,6 +7,7 @@ use std::time::Instant;
 
 /// Protocol versions understood by this client, newest first.
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2024-11-05"];
+const MAX_NOTIFICATIONS: usize = 16;
 
 pub(super) fn initialize(
     stdio: &mut StdioChild,
@@ -30,11 +31,13 @@ pub(super) fn initialize(
     line.push('\n');
     stdio::write_all(&mut stdio.stdin, line.as_bytes(), deadline, cancel)?;
 
+    let mut notifications = 0;
     let result = loop {
         let response = stdio::read_line(
             &mut stdio.child,
             &mut stdio.stdout,
             &mut stdio.stderr,
+            &mut stdio.stderr_used,
             &mut stdio.pending,
             deadline,
             cancel,
@@ -47,6 +50,10 @@ pub(super) fn initialize(
             return Err(McpLifecycleError::ProtocolViolation);
         }
         if value.get("id").is_none() && value.get("method").is_some() {
+            notifications += 1;
+            if notifications > MAX_NOTIFICATIONS {
+                return Err(McpLifecycleError::ProtocolViolation);
+            }
             continue;
         }
         break parse_response(value)?;
@@ -78,8 +85,29 @@ fn parse_response(value: Value) -> Result<Value, McpLifecycleError> {
     if value.get("error").is_some() {
         return Err(McpLifecycleError::ServerError);
     }
-    value
+    let result = value
         .get("result")
-        .cloned()
-        .ok_or(McpLifecycleError::ProtocolViolation)
+        .and_then(Value::as_object)
+        .ok_or(McpLifecycleError::ProtocolViolation)?;
+    if result
+        .get("protocolVersion")
+        .and_then(Value::as_str)
+        .is_none()
+        || !result.get("capabilities").is_some_and(Value::is_object)
+        || !result
+            .get("serverInfo")
+            .and_then(Value::as_object)
+            .and_then(|info| info.get("name"))
+            .and_then(Value::as_str)
+            .is_some()
+        || !result
+            .get("serverInfo")
+            .and_then(Value::as_object)
+            .and_then(|info| info.get("version"))
+            .and_then(Value::as_str)
+            .is_some()
+    {
+        return Err(McpLifecycleError::ProtocolViolation);
+    }
+    Ok(Value::Object(result.clone()))
 }
