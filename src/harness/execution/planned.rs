@@ -784,6 +784,11 @@ mod tests {
             test_filter: test_filter.map(str::to_owned),
             tests_ran,
             executed_tests,
+            elapsed_ms: 0,
+            output_bytes: stdout.len().saturating_add(stderr.len()),
+            output_limit: 0,
+            resource_events: Vec::new(),
+            recovery_hold: false,
         }
     }
 

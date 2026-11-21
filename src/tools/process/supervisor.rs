@@ -1,5 +1,7 @@
 //! Process supervision: leases, bounded pipes, reaping and the two run entry points.
 
+use super::outcome::{record_event, resolve_outcome, StopReason};
+pub use super::outcome::{ProcessOutcome, ProcessResource};
 use super::policy::{cargo_command_args, validate_test_filter, OfflineCargoPolicy};
 use super::sandbox::{host_command, sandbox};
 use crate::tools::process_profile::ProfileLimits;
@@ -21,34 +23,6 @@ use uuid::Uuid;
 static ACTIVE: Mutex<()> = Mutex::new(());
 static UNCERTAIN_CLEANUP: AtomicBool = AtomicBool::new(false);
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProcessOutcome {
-    Denied,
-    InvalidTestFilter,
-    NoTestsMatched,
-    SandboxUnavailable,
-    SandboxSetupFailed,
-    SpawnFailed,
-    Exited(i32),
-    Signaled(i32),
-    TimedOut,
-    Cancelled,
-    ResourceLimitExceeded { resource: ProcessResource },
-    OutputLimitExceeded,
-    OutcomeUnknown,
-}
-
-/// The kernel-enforced resource whose limit prevented normal completion.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProcessResource {
-    Cpu,
-    Memory,
-    Processes,
-    FileSize,
-}
-
 /// Bounded bytes are decoded lossily. Renderers must escape terminal controls and treat
 /// the text as untrusted evidence, never as instructions. No output is checkpointed.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -64,6 +38,16 @@ pub struct ProcessResult {
     pub test_filter: Option<String>,
     pub tests_ran: bool,
     pub executed_tests: Option<usize>,
+    /// Observed wall time of the attempt in milliseconds.
+    pub elapsed_ms: u64,
+    /// Retained stdout and stderr bytes; never exceeds `output_limit` for a launched run.
+    pub output_bytes: usize,
+    /// Combined raw output ceiling enforced for this run.
+    pub output_limit: usize,
+    /// Kernel limit events observed before cleanup, in fixed precedence order.
+    pub resource_events: Vec<ProcessResource>,
+    /// True when an earlier run left cleanup unconfirmed and this run was held.
+    pub recovery_hold: bool,
 }
 
 fn serialize_run_id<S: serde::Serializer>(id: &Uuid, serializer: S) -> Result<S::Ok, S::Error> {
@@ -94,10 +78,18 @@ impl ProcessResult {
             test_filter: test_filter.map(str::to_owned),
             tests_ran: false,
             executed_tests: None,
+            elapsed_ms: 0,
+            output_bytes: 0,
+            output_limit: 0,
+            resource_events: Vec::new(),
+            recovery_hold: false,
         }
     }
     pub fn succeeded(&self) -> bool {
-        self.outcome == ProcessOutcome::Exited(0) && !self.truncated && self.cleanup_confirmed
+        self.outcome == ProcessOutcome::Exited(0)
+            && !self.truncated
+            && self.cleanup_confirmed
+            && !self.recovery_hold
     }
 }
 
@@ -533,6 +525,21 @@ pub(super) fn record_test_evidence(result: &mut ProcessResult) {
     }
 }
 
+pub(super) fn record_raw_output(result: &mut ProcessResult, stdout: Vec<u8>, stderr: Vec<u8>) {
+    result.output_bytes = stdout.len().saturating_add(stderr.len());
+    result.stdout = String::from_utf8_lossy(&stdout).into_owned();
+    result.stderr = String::from_utf8_lossy(&stderr).into_owned();
+}
+
+pub(super) fn settle_before_launch(
+    result: &mut ProcessResult,
+    supervisor: &mut Supervisor,
+    stop: StopReason,
+) {
+    result.cleanup_confirmed = supervisor.clean();
+    result.outcome = resolve_outcome(stop, &[], result.cleanup_confirmed);
+}
+
 pub(crate) fn run(
     root: &WorkspaceRoot,
     policy: &OfflineCargoPolicy,
@@ -604,6 +611,9 @@ fn run_with_containment(
     }
     if UNCERTAIN_CLEANUP.load(Ordering::SeqCst) {
         result.outcome = ProcessOutcome::OutcomeUnknown;
+        result.cleanup_confirmed = false;
+        result.recovery_hold = true;
+        result.diagnostic = Some("previous process cleanup is unconfirmed".into());
         return result;
     }
     let Ok(_guard) = ACTIVE.try_lock() else {
@@ -639,11 +649,14 @@ fn run_with_containment(
                 let _ = lease.record("");
             } else {
                 result.outcome = ProcessOutcome::OutcomeUnknown;
+                result.recovery_hold = true;
             }
             return result;
         }
     };
     let mut launched = false;
+    let mut stop = StopReason::Unknown;
+    let started = Instant::now();
     let execution = (|| -> io::Result<()> {
         lease.record(&format!(
             "{}\n{}\n",
@@ -657,7 +670,7 @@ fn run_with_containment(
         }
         supervisor.verify()?;
         if policy.cancelled.load(Ordering::SeqCst) {
-            result.outcome = ProcessOutcome::Cancelled;
+            settle_before_launch(&mut result, &mut supervisor, StopReason::Cancelled);
             return Ok(());
         }
         let mut command = sandbox(root, policy, &supervisor.group)?;
@@ -677,7 +690,6 @@ fn run_with_containment(
         nonblocking(&err)?;
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let start = Instant::now();
         let mut status: Option<ExitStatus> = None;
         let mut out_eof = false;
         let mut err_eof = false;
@@ -688,15 +700,15 @@ fn run_with_containment(
             err_eof |= drain(&mut err, &mut stderr, remaining)?;
             if stdout.len() + stderr.len() >= output {
                 result.truncated = true;
-                result.outcome = ProcessOutcome::OutputLimitExceeded;
+                stop = StopReason::OutputLimit;
                 break;
             }
             if policy.cancelled.load(Ordering::SeqCst) {
-                result.outcome = ProcessOutcome::Cancelled;
+                stop = StopReason::Cancelled;
                 break;
             }
-            if start.elapsed() >= wall {
-                result.outcome = ProcessOutcome::TimedOut;
+            if started.elapsed() >= wall {
+                stop = StopReason::WallTimeout;
                 break;
             }
             let cpu = fs::read_to_string(supervisor.group.join("cpu.stat"))?;
@@ -708,9 +720,7 @@ fn run_with_containment(
                 })
                 .ok_or_else(|| io::Error::other("CPU accounting unavailable"))?;
             if usage >= cpu_budget {
-                result.outcome = ProcessOutcome::ResourceLimitExceeded {
-                    resource: ProcessResource::Cpu,
-                };
+                stop = StopReason::CpuBudget;
                 break;
             }
             if status.is_none() {
@@ -718,10 +728,10 @@ fn run_with_containment(
             }
             if let Some(exit) = status {
                 if out_eof && err_eof {
-                    result.outcome = if let Some(code) = exit.code() {
-                        ProcessOutcome::Exited(code)
+                    stop = if let Some(code) = exit.code() {
+                        StopReason::Exited(code)
                     } else {
-                        ProcessOutcome::Signaled(exit.signal().unwrap_or(0))
+                        StopReason::Signaled(exit.signal().unwrap_or(0))
                     };
                     break;
                 }
@@ -730,6 +740,7 @@ fn run_with_containment(
         }
         // Check kernel counters before removing the group. A killed process with a quota event
         // must not be confused with an ordinary exit or an invented successful result.
+        let mut events = Vec::new();
         for (name, field, resource) in [
             ("memory.events", "max", ProcessResource::Memory),
             ("pids.events", "max", ProcessResource::Processes),
@@ -740,26 +751,23 @@ fn run_with_containment(
                         .is_some_and(|(k, v)| k == field && v.parse::<u64>().is_ok_and(|n| n > 0))
                 })
             }) {
-                result.outcome = ProcessOutcome::ResourceLimitExceeded { resource };
+                record_event(&mut events, resource);
             }
         }
-        if matches!(result.outcome, ProcessOutcome::Signaled(libc::SIGXCPU)) {
-            result.outcome = ProcessOutcome::ResourceLimitExceeded {
-                resource: ProcessResource::Cpu,
-            };
+        if matches!(stop, StopReason::Signaled(libc::SIGXCPU)) {
+            record_event(&mut events, ProcessResource::Cpu);
         }
-        if matches!(result.outcome, ProcessOutcome::Signaled(libc::SIGXFSZ)) {
-            result.outcome = ProcessOutcome::ResourceLimitExceeded {
-                resource: ProcessResource::FileSize,
-            };
+        if matches!(stop, StopReason::Signaled(libc::SIGXFSZ)) {
+            record_event(&mut events, ProcessResource::FileSize);
         }
         result.cleanup_confirmed = supervisor.clean();
         // cgroup.kill terminates bwrap as well as descendants; reap our direct child.
         if !reap(&mut child) {
             result.cleanup_confirmed = false;
         }
-        result.stdout = String::from_utf8_lossy(&stdout).into_owned();
-        result.stderr = String::from_utf8_lossy(&stderr).into_owned();
+        result.outcome = resolve_outcome(stop, &events, result.cleanup_confirmed);
+        record_raw_output(&mut result, stdout, stderr);
+        result.resource_events = events;
         record_test_evidence(&mut result);
         Ok(())
     })();
@@ -772,9 +780,12 @@ fn run_with_containment(
         }
     }
     result.cleanup_confirmed &= supervisor.clean();
+    result.elapsed_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    result.output_limit = output;
     if !result.cleanup_confirmed {
         UNCERTAIN_CLEANUP.store(true, Ordering::SeqCst);
         result.outcome = ProcessOutcome::OutcomeUnknown;
+        result.recovery_hold = true;
     }
     if result.cleanup_confirmed {
         let _ = lease.record("");
