@@ -10,6 +10,9 @@ mod sandbox;
 mod supervisor;
 
 #[cfg(test)]
+mod host_fixtures;
+
+#[cfg(test)]
 mod tests;
 
 pub use self::policy::OfflineCargoPolicy;
