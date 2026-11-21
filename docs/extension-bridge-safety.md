@@ -83,7 +83,45 @@ mint a grant, or choose an arbitrary executor.
   behaviour is unchanged. The raw handshake is crate-module-private, so callers
   cannot bypass the authorized entry point.
 - The transport is not re-exported through `krypper::extensions`; discovery and
-  invocation remain later subtasks with their own grants and schemas.
+  invocation are separate opt-in host calls with their own grants and schemas.
+
+## MCP tool discovery and invocation (PR 5)
+
+- A connected session stays inert. Discovery requires its own host-issued,
+  task-scoped `mcp/discover_tools` grant with `ExecuteProcess`; invocation
+  requires a current per-tool grant with `ReadWorkspace` or `MutateWorkspace`.
+  A connection grant never authorizes either operation. Missing, wrong-task,
+  stale-generation, wrong-operation, wrong-effect and unauthorized-task grants
+  deny before any request is written.
+- The host supplies a validated scope. Advertised names are deterministic
+  `mcp_<scope>_<name>` identifiers; invalid identifiers, duplicate qualified
+  names and collisions with built-in registry names are rejected before a tool
+  can be advertised. Only tools with a matching host grant are returned, so an
+  ungranted tool has no callable name.
+- Server metadata is untrusted data. Names must be short ASCII identifiers;
+  schemas must pass the existing provider-bridge JSON Schema subset; descriptions
+  are bounded to 512 bytes, have control characters removed, and are prefixed as
+  untrusted data that must not be followed as instructions.
+- Invocation arguments are revalidated against the discovered schema through
+  the existing extension authorization gate before any `tools/call` request.
+  The wire request uses only the remote tool name, never the provider-facing
+  qualified name. The resulting `content` must be bounded text blocks (at most
+  32 blocks and 16 KiB); control characters are removed, the output is prefixed
+  as untrusted data, and error results, non-text content and malformed results
+  fail closed.
+- Both operations reuse the same bounded stdio transport with correlated ids,
+  a 16-notification cap, the existing 64 KiB response bound and the host
+  timeout and cancellation signal. Malformed JSON-RPC, mismatched ids,
+  timeouts, cancellation and disconnects fail closed without retries or
+  fallback execution. No second executor, permission model, CLI default,
+  dependency or network transport is introduced.
+
+### Backward compatibility
+
+- Discovery and invocation add crate-internal MCP transport APIs only. Existing
+  connect behavior, the built-in registry, provider schemas, CLI defaults and
+  all other tool effects are unchanged when the host makes no discovery or
+  invocation call.
 
 ## Skills manifest loading (PR 6)
 
