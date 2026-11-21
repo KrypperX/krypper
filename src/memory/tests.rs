@@ -154,9 +154,12 @@ fn provenance_and_retention_are_consistent() {
         Err(MemoryError::MissingProvenance)
     );
     assert_eq!(
-        MemoryProvenance::new(MemorySource::ToolOutcome {
-            tool: String::new()
-        }, 10),
+        MemoryProvenance::new(
+            MemorySource::ToolOutcome {
+                tool: String::new()
+            },
+            10,
+        ),
         Err(MemoryError::MissingProvenance)
     );
     let future_provenance = MemoryProvenance::new(MemorySource::HostNote, 2_000).unwrap();
@@ -180,7 +183,9 @@ fn provenance_and_retention_are_consistent() {
             "fact",
             Vec::new(),
             provenance(),
-            Retention::Until { unix_seconds: 1_000 },
+            Retention::Until {
+                unix_seconds: 1_000
+            },
             MemorySensitivity::Normal,
             1_000,
         ),
@@ -197,7 +202,9 @@ fn visibility_is_workspace_scoped_and_expiry_aware() {
         "run tests offline",
         Vec::new(),
         provenance(),
-        Retention::Until { unix_seconds: 2_000 },
+        Retention::Until {
+            unix_seconds: 2_000,
+        },
         MemorySensitivity::Normal,
         1_000,
     )
