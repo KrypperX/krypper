@@ -1,3 +1,4 @@
+use super::stdio::{spawn_inner, spawn_with};
 use super::*;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -289,6 +290,38 @@ fn spawn_time_is_included_in_the_handshake_timeout() {
 
     let error = error_of(connect_stdio(&config, &McpCancellation::new()));
     assert_eq!(error, McpLifecycleError::Timeout);
+}
+
+#[test]
+fn spawn_timeout_waits_for_worker_cleanup() {
+    let dir = temp_dir("spawn-timeout-cleanup");
+    let marker = dir.0.join("marker");
+    let config = config(
+        &format!("sleep 0.2\nprintf alive > \"$1\"\n"),
+        &marker,
+        Duration::from_nanos(1),
+    );
+    let start = Instant::now();
+
+    let error = match spawn_with(
+        &config,
+        Instant::now() + Duration::from_nanos(1),
+        move |config| {
+            thread::sleep(Duration::from_millis(50));
+            spawn_inner(config)
+        },
+    ) {
+        Ok(_) => panic!("spawn unexpectedly succeeded"),
+        Err(error) => error,
+    };
+
+    assert_eq!(error, McpLifecycleError::Timeout);
+    assert!(
+        start.elapsed() >= Duration::from_millis(40),
+        "spawn returned before the worker finished"
+    );
+    thread::sleep(Duration::from_millis(200));
+    assert!(!marker.exists(), "spawned child survived timeout cleanup");
 }
 
 #[test]

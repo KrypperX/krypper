@@ -6,7 +6,7 @@ use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::mpsc::{self, RecvTimeoutError, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -92,21 +92,46 @@ pub(super) fn spawn(
     config: &McpStdioConfig,
     deadline: Instant,
 ) -> Result<StdioChild, McpLifecycleError> {
+    spawn_with(config, deadline, spawn_inner)
+}
+
+pub(super) fn spawn_with<F>(
+    config: &McpStdioConfig,
+    deadline: Instant,
+    spawn: F,
+) -> Result<StdioChild, McpLifecycleError>
+where
+    F: FnOnce(&McpStdioConfig) -> Result<StdioChild, McpLifecycleError> + Send + 'static,
+{
     let config = config.clone();
     let (sender, receiver) = mpsc::sync_channel(1);
+    let (done_sender, done_receiver) = mpsc::sync_channel(1);
     thread::spawn(move || {
-        let result = spawn_inner(&config);
+        let result = spawn(&config);
         let _ = sender.send(result);
+        let _ = done_sender.send(());
     });
     let remaining = deadline.saturating_duration_since(Instant::now());
     match receiver.recv_timeout(remaining) {
         Ok(result) => result,
-        Err(RecvTimeoutError::Timeout) => Err(McpLifecycleError::Timeout),
+        Err(RecvTimeoutError::Timeout) => {
+            done_receiver
+                .recv_timeout(REAP_TIMEOUT)
+                .map_err(|_| McpLifecycleError::CleanupFailed)
+                .and_then(|_| match receiver.try_recv() {
+                    Ok(Ok(mut stdio)) => stdio.child.terminate(),
+                    Ok(Err(_)) | Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => {
+                        Ok(())
+                    }
+                })
+                .map_err(|_| McpLifecycleError::CleanupFailed)?;
+            Err(McpLifecycleError::Timeout)
+        }
         Err(RecvTimeoutError::Disconnected) => Err(McpLifecycleError::SpawnFailed),
     }
 }
 
-fn spawn_inner(config: &McpStdioConfig) -> Result<StdioChild, McpLifecycleError> {
+pub(super) fn spawn_inner(config: &McpStdioConfig) -> Result<StdioChild, McpLifecycleError> {
     let mut command = Command::new(&config.executable);
     command
         .args(&config.args)
