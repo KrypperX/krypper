@@ -1,7 +1,8 @@
 //! HTTP transport for model requests, including streaming helpers.
 
 use std::io::Read;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
+use ureq::http::Uri;
 use ureq::Agent;
 
 use super::errors::*;
@@ -9,6 +10,25 @@ use super::limits::*;
 use super::providers;
 use super::providers::*;
 use super::request::*;
+
+fn validate_hosted_endpoint(endpoint: &str) -> Result<(), ModelError> {
+    let uri: Uri = endpoint.parse().map_err(|_| ModelError::InvalidProviderEndpoint)?;
+    let authority = uri.authority().ok_or(ModelError::InvalidProviderEndpoint)?;
+    let host = authority.host();
+    if host.is_empty() || authority.as_str().contains('@') {
+        return Err(ModelError::InvalidProviderEndpoint);
+    }
+    match uri.scheme_str() {
+        Some("https") => Ok(()),
+        Some("http") => {
+            let bare_host = host.trim_start_matches('[').trim_end_matches(']');
+            let loopback = bare_host.eq_ignore_ascii_case("localhost")
+                || bare_host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback());
+            if loopback { Ok(()) } else { Err(ModelError::InvalidProviderEndpoint) }
+        }
+        _ => Err(ModelError::InvalidProviderEndpoint),
+    }
+}
 
 pub(crate) fn model_agent() -> Agent {
     let config = Agent::config_builder()
@@ -66,6 +86,7 @@ where
     if body.len() > MAX_MODEL_REQUEST_BYTES {
         return Err(ModelError::RequestTooLarge);
     }
+    validate_hosted_endpoint(endpoint)?;
     let authorization = format!("Bearer {api_key}");
     let request = agent
         .post(endpoint)
@@ -150,6 +171,7 @@ pub(crate) fn post_hosted(
     if body.len() > MAX_MODEL_REQUEST_BYTES {
         return Err(ModelError::RequestTooLarge);
     }
+    validate_hosted_endpoint(endpoint)?;
     let request = agent
         .post(endpoint)
         .header("Content-Type", "application/json");
@@ -178,4 +200,21 @@ pub(crate) fn post_hosted(
         return Err(ModelError::ProviderResponseTooLarge(provider));
     }
     Ok(response_body)
+}
+
+#[cfg(test)]
+mod endpoint_tests {
+    use super::validate_hosted_endpoint;
+    #[test]
+    fn accepts_https_and_loopback() {
+        for url in ["https://api.example.com/v1", "http://127.0.0.1:1234/v1", "http://[::1]:1234/v1", "http://localhost:1234/v1"] {
+            assert!(validate_hosted_endpoint(url).is_ok(), "{url}");
+        }
+    }
+    #[test]
+    fn rejects_insecure_endpoints() {
+        for url in ["http://example.com/v1", "http://192.168.1.2/v1", "https://user:pw@example.com/v1", "http://user:pw@localhost/v1", "ftp://example.com/v1", "file:///etc/passwd", "/relative/path"] {
+            assert!(validate_hosted_endpoint(url).is_err(), "{url}");
+        }
+    }
 }
