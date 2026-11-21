@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "fixture_revision": "0000000000000000000000000000000000000000",
+  "fixture_revision": "c69b604cb34a536546c2cc4212fa862b8b5b9ce3",
   "repeat_runs": 3,
   "fixtures": [
     "artifact_creation",

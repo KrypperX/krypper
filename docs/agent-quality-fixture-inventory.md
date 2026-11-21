@@ -6,7 +6,7 @@ or add a required CI check. The fixture revision is pinned by
 `tests/agent_quality/benchmark.json` and must resolve to the source revision recorded
 below.
 
-Fixture revision: `PENDING_FIXTURE_REVISION`
+Fixture revision: `c69b604cb34a536546c2cc4212fa862b8b5b9ce3`
 
 ## Reused offline evidence
 
