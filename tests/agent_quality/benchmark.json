@@ -1,21 +1,40 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
+  "fixture_revision": "0000000000000000000000000000000000000000",
+  "repeat_runs": 3,
   "fixtures": [
     "artifact_creation",
-    "denied_escape",
-    "cancelled_turn"
+    "bug_fix",
+    "cross_file_edit",
+    "failed_test",
+    "interrupted_execution",
+    "denied_operation",
+    "timeout",
+    "malformed_provider_output",
+    "truncated_evidence",
+    "cancellation",
+    "checkpoint_restart",
+    "sandbox_unavailable",
+    "reflection_correction"
   ],
   "baseline": {
     "sha": "a5ba8e938ef73d3ceec25f6ab01ff309716803b6",
     "config": {
       "mode": "reactive",
-      "action_budget": 2,
+      "action_budget": 5,
       "cost_per_action": 1,
-      "tool_grants": ["read_file", "create_file"],
-      "runtime": "offline-local",
-      "provider": "none",
-      "model": "scripted-fixture-v1",
-      "prompt_policy": "fixed-script",
+      "max_attempts": 2,
+      "tool_grants": [
+        "read_file",
+        "create_file",
+        "replace_text",
+        "cancel",
+        "checkpoint"
+      ],
+      "runtime": "offline_local",
+      "provider": "scripted",
+      "model": "fixture_v1",
+      "prompt_policy": "fixed_script",
       "secrets": ["fixture-only-secret-3f9a2b"]
     }
   },
@@ -23,14 +42,88 @@
     "sha": "a5ba8e938ef73d3ceec25f6ab01ff309716803b6",
     "config": {
       "mode": "planned",
-      "action_budget": 3,
+      "action_budget": 5,
       "cost_per_action": 1,
-      "tool_grants": ["read_file", "create_file"],
-      "runtime": "offline-local",
-      "provider": "none",
-      "model": "scripted-fixture-v1",
-      "prompt_policy": "fixed-script",
+      "max_attempts": 2,
+      "tool_grants": [
+        "read_file",
+        "create_file",
+        "replace_text",
+        "cancel",
+        "checkpoint"
+      ],
+      "runtime": "offline_local",
+      "provider": "scripted",
+      "model": "fixture_v1",
+      "prompt_policy": "fixed_script",
       "secrets": ["fixture-only-secret-3f9a2b"]
     }
-  }
+  },
+  "follow_ups": [
+    {
+      "fixture": "artifact_creation",
+      "reference": "tests/agent_quality/fixture.rs::artifact_creation",
+      "action": "Investigate the independently checked artifact script for this fixture."
+    },
+    {
+      "fixture": "bug_fix",
+      "reference": "tests/agent_quality/fixture.rs::bug_fix",
+      "action": "Investigate the bounded replacement script for this fixture."
+    },
+    {
+      "fixture": "cross_file_edit",
+      "reference": "tests/agent_quality/fixture.rs::cross_file_edit",
+      "action": "Investigate the multi-artifact edit script for this fixture."
+    },
+    {
+      "fixture": "failed_test",
+      "reference": "tests/agent_quality/fixture.rs::failed_test",
+      "action": "Investigate the scripted failed-test terminal outcome."
+    },
+    {
+      "fixture": "interrupted_execution",
+      "reference": "tests/agent_quality/fixture.rs::interrupted_execution",
+      "action": "Investigate the partial-mutation cancellation path."
+    },
+    {
+      "fixture": "denied_operation",
+      "reference": "tests/agent_quality/fixture.rs::denied_operation",
+      "action": "Investigate workspace containment for the denied write."
+    },
+    {
+      "fixture": "timeout",
+      "reference": "tests/agent_quality/fixture.rs::timeout",
+      "action": "Investigate the scripted timeout retry path."
+    },
+    {
+      "fixture": "malformed_provider_output",
+      "reference": "tests/agent_quality/fixture.rs::malformed_provider_output",
+      "action": "Investigate the scripted malformed-output retry path."
+    },
+    {
+      "fixture": "truncated_evidence",
+      "reference": "tests/agent_quality/fixture.rs::truncated_evidence",
+      "action": "Investigate bounded evidence verification for this fixture."
+    },
+    {
+      "fixture": "cancellation",
+      "reference": "tests/agent_quality/fixture.rs::cancellation",
+      "action": "Investigate the no-mutation cancellation path."
+    },
+    {
+      "fixture": "checkpoint_restart",
+      "reference": "tests/agent_quality/fixture.rs::checkpoint_restart",
+      "action": "Investigate checkpoint export and restored-turn behavior."
+    },
+    {
+      "fixture": "sandbox_unavailable",
+      "reference": "tests/agent_quality/fixture.rs::sandbox_unavailable",
+      "action": "Investigate the scripted sandbox-unavailable terminal outcome."
+    },
+    {
+      "fixture": "reflection_correction",
+      "reference": "tests/agent_quality/fixture.rs::reflection_correction",
+      "action": "Investigate the single bounded correction path."
+    }
+  ]
 }

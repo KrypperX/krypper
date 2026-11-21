@@ -2,43 +2,23 @@
 mod agent_quality;
 
 use agent_quality::harness::{
-    self, ArmResult, FixtureRequest, FixtureResult, HarnessProvenance, Spec, EXIT_GATE, EXIT_OK,
-    EXIT_USAGE,
+    self, fixture_request, merge_runs, ArmKind, ArmResult, HarnessProvenance, MeasurementScope,
+    Spec, EXIT_GATE, EXIT_OK, EXIT_USAGE,
 };
+use agent_quality::support::{git, git_bytes, run_command, TempRoot};
+use ring::digest;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use uuid::Uuid;
 
-static COUNTER: AtomicUsize = AtomicUsize::new(0);
-const FIXTURE_EXAMPLE: &str = "examples/agent_quality_fixture.rs";
-const HARNESS_TESTS: &str = "tests/agent_quality";
-
-struct TempRoot {
-    path: PathBuf,
-}
-
-impl TempRoot {
-    fn new() -> Result<Self, String> {
-        let path = std::env::temp_dir().join(format!(
-            "krypper-aqb-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir_all(&path).map_err(|error| format!("create benchmark root: {error}"))?;
-        Ok(Self { path })
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for TempRoot {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
-    }
-}
+const FIXTURE_FILES: &[&str] = &[
+    "examples/agent_quality_fixture.rs",
+    "tests/agent_quality/fixture.rs",
+    "tests/agent_quality/harness.rs",
+    "tests/agent_quality/mod.rs",
+    "tests/agent_quality/support.rs",
+];
 
 struct Worktree {
     repo: PathBuf,
@@ -48,52 +28,20 @@ struct Worktree {
 impl Drop for Worktree {
     fn drop(&mut self) {
         let path = self.path.to_string_lossy();
-        let _ = Command::new("git")
-            .arg("-C")
-            .arg(&self.repo)
-            .args(["worktree", "remove", "--force"])
-            .arg(path.as_ref())
-            .output();
+        let _ = git(
+            &self.repo,
+            &["worktree", "remove", "--force", path.as_ref()],
+        );
     }
-}
-
-fn run_command(command: &mut Command) -> Result<String, String> {
-    let output = command
-        .output()
-        .map_err(|error| format!("run command: {error}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "command failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
-}
-
-fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .output()
-        .map_err(|error| format!("run git: {error}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "git {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
 fn canonical_sha(repo: &Path, sha: &str) -> Result<String, String> {
-    if sha.len() != 40 || !sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if !harness::is_full_sha(sha) {
         return Err("spec SHAs must be full 40-character commit hashes".to_owned());
     }
     let revision = format!("{sha}^{{commit}}");
     let resolved = git(repo, &["rev-parse", "--verify", &revision])?;
-    if resolved.len() != 40 || !resolved.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if !harness::is_full_sha(&resolved) {
         return Err("git did not resolve a commit SHA".to_owned());
     }
     Ok(resolved)
@@ -105,33 +53,53 @@ fn tool_version() -> Result<String, String> {
     Ok(format!("{rustc} | {cargo}"))
 }
 
-fn copy_dir_all(source: &Path, destination: &Path) -> Result<(), String> {
-    fs::create_dir_all(destination).map_err(|error| format!("create harness copy: {error}"))?;
-    for entry in fs::read_dir(source).map_err(|error| format!("read harness source: {error}"))? {
-        let entry = entry.map_err(|error| format!("read harness entry: {error}"))?;
-        let target = destination.join(entry.file_name());
-        if entry
-            .file_type()
-            .map_err(|error| format!("inspect harness entry: {error}"))?
-            .is_dir()
-        {
-            copy_dir_all(&entry.path(), &target)?;
-        } else {
-            fs::copy(entry.path(), &target)
-                .map_err(|error| format!("copy harness entry: {error}"))?;
+fn write_pinned_fixture_bundle(
+    repo: &Path,
+    fixture_revision: &str,
+    worktree: &Path,
+) -> Result<String, String> {
+    let revision = canonical_sha(repo, fixture_revision)?;
+    let mut context = digest::Context::new(&digest::SHA256);
+    for path in FIXTURE_FILES {
+        let object = format!("{revision}:{path}");
+        let bytes = git_bytes(repo, &["show", &object])?;
+        context.update(path.as_bytes());
+        context.update(&[0]);
+        context.update(&bytes);
+        let target = worktree.join(path);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("create pinned fixture directory: {error}"))?;
         }
+        fs::write(&target, &bytes)
+            .map_err(|error| format!("write pinned fixture file: {error}"))?;
     }
-    Ok(())
+    Ok(context
+        .finish()
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+fn parse_fixture_results(path: &Path) -> Result<Vec<harness::FixtureResult>, String> {
+    let bytes = fs::read(path).map_err(|error| format!("read fixture results: {error}"))?;
+    serde_json::from_slice(&bytes).map_err(|error| format!("parse fixture results: {error}"))
 }
 
 fn execute_arm(
     repo: &Path,
     root: &Path,
-    arm: &str,
-    request: &FixtureRequest,
-) -> Result<ArmResult, String> {
-    let sha = canonical_sha(repo, &request.sha)?;
-    let worktree_path = root.join(format!("{arm}-{}", COUNTER.fetch_add(1, Ordering::Relaxed)));
+    spec: &Spec,
+    arm: ArmKind,
+    tool_version: &str,
+) -> Result<(ArmResult, String), String> {
+    let arm_spec = match arm {
+        ArmKind::Baseline => &spec.baseline,
+        ArmKind::Candidate => &spec.candidate,
+    };
+    let sha = canonical_sha(repo, &arm_spec.sha)?;
+    let worktree_path = root.join(format!("{arm:?}-{}", Uuid::new_v4()));
     let worktree_arg = worktree_path.to_string_lossy();
     git(
         repo,
@@ -141,55 +109,59 @@ fn execute_arm(
         repo: repo.to_path_buf(),
         path: worktree_path,
     };
+    let fixture_digest = write_pinned_fixture_bundle(repo, &spec.fixture_revision, &worktree.path)?;
 
-    let source_root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    copy_dir_all(
-        &source_root.join(HARNESS_TESTS),
-        &worktree.path.join(HARNESS_TESTS),
-    )?;
-    fs::create_dir_all(worktree.path.join("examples"))
-        .map_err(|error| format!("create fixture example directory: {error}"))?;
-    fs::copy(
-        source_root.join(FIXTURE_EXAMPLE),
-        worktree.path.join(FIXTURE_EXAMPLE),
-    )
-    .map_err(|error| format!("copy fixture example: {error}"))?;
+    let mut arm_result = None;
+    for run in 0..spec.repeat_runs {
+        let request = fixture_request(
+            arm,
+            arm_spec,
+            tool_version,
+            &spec.fixture_revision,
+            run,
+            &spec.fixtures,
+        );
+        let request_path = root.join(format!("{arm:?}-{run}-request.json"));
+        let output_path = root.join(format!("{arm:?}-{run}-fixtures.json"));
+        let request_bytes = serde_json::to_vec_pretty(&request)
+            .map_err(|error| format!("encode fixture request: {error}"))?;
+        fs::write(&request_path, request_bytes)
+            .map_err(|error| format!("write fixture request: {error}"))?;
 
-    let request_path = root.join(format!("{arm}-request.json"));
-    let output_path = root.join(format!("{arm}-fixtures.json"));
-    let request_bytes = serde_json::to_vec_pretty(request)
-        .map_err(|error| format!("encode fixture request: {error}"))?;
-    fs::write(&request_path, request_bytes)
-        .map_err(|error| format!("write fixture request: {error}"))?;
+        let config_arg = request_path.to_string_lossy();
+        let output_arg = output_path.to_string_lossy();
+        run_command(
+            Command::new("cargo")
+                .args([
+                    "run",
+                    "--quiet",
+                    "--offline",
+                    "--locked",
+                    "--example",
+                    "agent_quality_fixture",
+                    "--",
+                    "--config",
+                    config_arg.as_ref(),
+                    "--out",
+                    output_arg.as_ref(),
+                ])
+                .current_dir(&worktree.path)
+                .env("CARGO_NET_OFFLINE", "true")
+                .env("CARGO_TERM_COLOR", "never"),
+        )?;
 
-    let config_arg = request_path.to_string_lossy();
-    let output_arg = output_path.to_string_lossy();
-    run_command(
-        Command::new("cargo")
-            .args([
-                "run",
-                "--quiet",
-                "--offline",
-                "--locked",
-                "--example",
-                "agent_quality_fixture",
-                "--",
-                "--config",
-                config_arg.as_ref(),
-                "--out",
-                output_arg.as_ref(),
-            ])
-            .current_dir(&worktree.path)
-            .env("CARGO_NET_OFFLINE", "true")
-            .env("CARGO_TERM_COLOR", "never"),
-    )?;
+        let fixtures = parse_fixture_results(&output_path)?;
+        let run_result = harness::arm_result(&request, fixtures);
+        match &mut arm_result {
+            Some(existing) => merge_runs(existing, run_result)?,
+            None => arm_result = Some(run_result),
+        }
+    }
 
-    let bytes = fs::read(&output_path).map_err(|error| format!("read fixture results: {error}"))?;
-    let fixtures: Vec<FixtureResult> = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("parse fixture results: {error}"))?;
-    let mut provenance = request.clone();
-    provenance.sha = sha;
-    Ok(harness::arm_result(&provenance, fixtures))
+    Ok((
+        arm_result.ok_or_else(|| "no fixture runs recorded".to_owned())?,
+        fixture_digest,
+    ))
 }
 
 fn main() -> ExitCode {
@@ -203,17 +175,22 @@ fn main() -> ExitCode {
         let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let spec = Spec::load(&spec_path)?;
         let tool_version = tool_version()?;
-        let root = TempRoot::new()?;
-        let baseline_request =
-            harness::fixture_request("baseline", &spec.baseline, &tool_version, &spec.fixtures);
-        let candidate_request =
-            harness::fixture_request("candidate", &spec.candidate, &tool_version, &spec.fixtures);
-        let baseline = execute_arm(&repo, root.path(), "baseline", &baseline_request)?;
-        let candidate = execute_arm(&repo, root.path(), "candidate", &candidate_request)?;
+        let root = TempRoot::new("benchmark")?;
+        let (baseline, baseline_digest) =
+            execute_arm(&repo, root.path(), &spec, ArmKind::Baseline, &tool_version)?;
+        let (candidate, candidate_digest) =
+            execute_arm(&repo, root.path(), &spec, ArmKind::Candidate, &tool_version)?;
+        if baseline_digest != candidate_digest {
+            return Err("pinned fixture bundle differed between arms".to_owned());
+        }
         let provenance = HarnessProvenance {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             sha: git(&repo, &["rev-parse", "HEAD"])?,
             tool_version,
+            fixture_revision: spec.fixture_revision.clone(),
+            fixture_digest: baseline_digest,
+            scope: MeasurementScope::ScriptedFixtures,
+            repeat_runs: spec.repeat_runs,
             offline: true,
             provider_calls: 0,
         };
