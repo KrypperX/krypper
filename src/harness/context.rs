@@ -427,6 +427,11 @@ mod tests {
                 test_filter: Some("missing_test".to_owned()),
                 tests_ran: false,
                 executed_tests: Some(0),
+                elapsed_ms: 0,
+                output_bytes: 0,
+                output_limit: 0,
+                resource_events: Vec::new(),
+                recovery_hold: false,
             },
         };
 

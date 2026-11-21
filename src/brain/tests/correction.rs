@@ -45,6 +45,11 @@ fn process_failure_correction_reflection_receives_the_typed_bounded_result() {
             test_filter: Some("focused_test".to_owned()),
             tests_ran: true,
             executed_tests: Some(1),
+            elapsed_ms: 0,
+            output_bytes: 0,
+            output_limit: 0,
+            resource_events: Vec::new(),
+            recovery_hold: false,
         }],
     );
     let mut decisions = |_: &str, _: &[WorkspaceObservation]| WorkspaceAction::OfflineCargoTest {
