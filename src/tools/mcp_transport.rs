@@ -47,6 +47,8 @@ pub enum McpToolError {
     InvalidToolList,
     /// A tool result is malformed or not representable as untrusted text.
     InvalidResult,
+    /// The tool was discovered through a different MCP connection.
+    WrongSession,
     /// The existing extension contract, schema or capability check denied the operation.
     Bridge(BridgeError),
     /// The transport failed, timed out, was cancelled or was disconnected.
