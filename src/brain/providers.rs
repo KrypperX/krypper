@@ -10,6 +10,35 @@ use crate::agent_loop::{BoundedDecisionSource, WorkspaceAction, WorkspaceObserva
 use serde_json::{json, Value};
 use ureq::Agent;
 
+/// Only explicit opt-in values enable experimental native streaming.
+fn stream_flag_enabled(value: Option<&std::ffi::OsStr>) -> bool {
+    matches!(value.and_then(|value| value.to_str()), Some(value) if value == "1" || value.eq_ignore_ascii_case("true"))
+}
+
+#[cfg(test)]
+mod stream_flag_tests {
+    use super::stream_flag_enabled;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn streaming_requires_explicit_opt_in() {
+        for value in ["", "0", "false", "FALSE", "yes", "on", "2", " true "] {
+            assert!(!stream_flag_enabled(Some(OsStr::new(value))), "{value:?}");
+        }
+        assert!(!stream_flag_enabled(None));
+        for value in ["1", "true", "TRUE", "TrUe"] {
+            assert!(stream_flag_enabled(Some(OsStr::new(value))), "{value:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_flag_is_disabled() {
+        use std::os::unix::ffi::OsStrExt;
+        assert!(!stream_flag_enabled(Some(OsStr::from_bytes(b"true\xff"))));
+    }
+}
+
 const OPENAI_RESPONSES_URL: &str = "https://api.openai.com/v1/responses";
 const XAI_RESPONSES_URL: &str = "https://api.x.ai/v1/responses";
 const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
@@ -855,7 +884,7 @@ impl ResponsesDecisionSource {
                 .model_provider()
                 .capabilities()
                 .native_sse_decisions
-                && std::env::var_os("KRYPPER_RESPONSES_STREAM").is_some(),
+                && stream_flag_enabled(std::env::var_os("KRYPPER_RESPONSES_STREAM").as_deref()),
         )
     }
 
@@ -1170,7 +1199,7 @@ impl AnthropicDecisionSource {
             observations,
             project_guidance,
             ModelProvider::Anthropic.capabilities().native_sse_decisions
-                && std::env::var_os("KRYPPER_ANTHROPIC_STREAM").is_some(),
+                && stream_flag_enabled(std::env::var_os("KRYPPER_ANTHROPIC_STREAM").as_deref()),
         )
     }
 
