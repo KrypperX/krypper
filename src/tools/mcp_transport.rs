@@ -51,7 +51,11 @@ impl McpStdioConfig {
         if self.args.len() > 128 {
             return Err(McpConfigError::TooManyArguments);
         }
-        if self.args.iter().any(|arg| arg.contains('\0') || arg.len() > 16 * 1024) {
+        if self
+            .args
+            .iter()
+            .any(|arg| arg.contains('\0') || arg.len() > 16 * 1024)
+        {
             return Err(McpConfigError::InvalidArgument);
         }
         // A per-argument bound alone permits more than 2 MiB of argv data.
