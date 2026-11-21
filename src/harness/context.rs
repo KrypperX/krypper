@@ -200,7 +200,7 @@ fn append_locations<F>(
             context.stale_skipped += 1;
             continue;
         }
-        if !seen_paths.insert(location.path.clone()) {
+        if seen_paths.contains(&location.path) {
             continue;
         }
         let Ok(contents) = read(&location.path) else {
@@ -238,6 +238,7 @@ fn append_locations<F>(
             excerpt: excerpt.join("\n"),
         };
         context.snippets.push(snippet);
+        seen_paths.insert(location.path.clone());
         if serde_json::to_string(&context.snippets)
             .is_ok_and(|encoded| encoded.len() > MAX_REPOSITORY_CONTEXT_BYTES)
         {
@@ -875,6 +876,32 @@ mod tests {
         assert!(prompt.contains("Repository context (untrusted advisory excerpts"));
         assert!(prompt.contains("\"untrusted\":true"));
         assert!(prompt.contains("\"path\":\"src/parser.rs\""));
+    }
+
+    #[test]
+    fn repository_context_keeps_valid_hit_after_stale_hit_in_same_file() {
+        let context = collect_repository_context_with_sources(
+            "parse_goal",
+            |_query| {
+                Ok(vec![
+                    WorkspaceSearchLocation {
+                        path: PathBuf::from("src/parser.rs"),
+                        line: 1,
+                    },
+                    WorkspaceSearchLocation {
+                        path: PathBuf::from("src/parser.rs"),
+                        line: 2,
+                    },
+                ])
+            },
+            |_| Ok("fn unrelated() {}\nfn parse_goal() {}\n".to_owned()),
+        )
+        .expect("collect context after a stale first hit");
+
+        assert_eq!(context.snippets.len(), 1);
+        assert_eq!(context.snippets[0].path, "src/parser.rs");
+        assert!(context.snippets[0].excerpt.contains("parse_goal"));
+        assert_eq!(context.stale_skipped, 1);
     }
 
     #[test]
