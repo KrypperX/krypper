@@ -67,7 +67,7 @@ impl McpSession {
 }
 
 /// Validate host configuration, launch the stdio server and complete the MCP handshake.
-pub fn connect_stdio(
+pub(super) fn connect_stdio(
     config: &super::config::McpStdioConfig,
     cancel: &McpCancellation,
 ) -> Result<McpSession, McpLifecycleError> {

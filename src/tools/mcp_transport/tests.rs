@@ -1,3 +1,4 @@
+use super::lifecycle::connect_stdio;
 use super::stdio::spawn;
 use super::*;
 use std::fs;

@@ -3,7 +3,8 @@
 //! An MCP handshake is a process launch, not a capability grant. Reuse the
 //! existing task-scoped extension policy before crossing that boundary.
 
-use super::{connect_stdio, McpCancellation, McpLifecycleError, McpSession, McpStdioConfig};
+use super::lifecycle::connect_stdio;
+use super::{McpCancellation, McpLifecycleError, McpSession, McpStdioConfig};
 use crate::tools::capability_policy::{self, CapabilityContext, CapabilityDenial, CapabilityGrant};
 use crate::tools::extension_contract::{
     ExtensionAuthority, ExtensionDescriptor, ExtensionEffect, EXTENSION_CONTRACT_VERSION,
@@ -17,11 +18,14 @@ pub enum AuthorizedConnectError {
 }
 
 /// Connect to an MCP server only after the host's task-scoped process grant
-/// has been validated. This does not grant access to discovered MCP tools:
-/// each tool invocation must still pass its own policy and sandbox checks.
+/// has been validated. This is the only exported connection path; the raw
+/// handshake is module-private so callers cannot skip the grant check. This
+/// does not grant access to discovered MCP tools: each tool invocation must
+/// still pass its own policy and sandbox checks.
 ///
-/// The host owns `context` and `grant`; never deserialize them from model
-/// output or untrusted MCP server metadata.
+/// The host owns `config`, `context` and `grant` as one authorized launch
+/// decision; never deserialize them from model output or untrusted MCP server
+/// metadata.
 pub fn connect_stdio_authorized(
     config: &McpStdioConfig,
     cancel: &McpCancellation,
@@ -42,6 +46,8 @@ pub fn connect_stdio_authorized(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::thread;
     use std::time::Duration;
     use uuid::Uuid;
 
@@ -49,6 +55,14 @@ mod tests {
         McpStdioConfig {
             executable: "/definitely/not/a/real/mcp-server".into(),
             args: vec![],
+            timeout: Duration::from_secs(1),
+        }
+    }
+
+    fn script_config(script: String) -> McpStdioConfig {
+        McpStdioConfig {
+            executable: "/bin/sh".into(),
+            args: vec!["-c".into(), script],
             timeout: Duration::from_secs(1),
         }
     }
@@ -111,7 +125,71 @@ mod tests {
     }
 
     #[test]
-    fn approved_grant_reaches_transport_without_granting_tools() {
+    fn denies_unauthorized_task_wrong_operation_and_effect() {
+        let task_id = Uuid::new_v4();
+        let authorized = CapabilityContext {
+            task_id,
+            generation: 3,
+            task_authorized: true,
+        };
+        let unauthorized = CapabilityContext {
+            task_id,
+            generation: 3,
+            task_authorized: false,
+        };
+        let cancel = McpCancellation::new();
+        assert!(matches!(
+            connect_stdio_authorized(&config(), &cancel, unauthorized, Some(&grant(task_id))),
+            Err(AuthorizedConnectError::Denied(
+                CapabilityDenial::TaskUnauthorized
+            ))
+        ));
+        let mut wrong_operation = grant(task_id);
+        wrong_operation.operation = "other".into();
+        assert!(matches!(
+            connect_stdio_authorized(&config(), &cancel, authorized, Some(&wrong_operation)),
+            Err(AuthorizedConnectError::Denied(
+                CapabilityDenial::WrongOperation
+            ))
+        ));
+        let mut wrong_effect = grant(task_id);
+        wrong_effect.effect = ExtensionEffect::ReadWorkspace;
+        assert!(matches!(
+            connect_stdio_authorized(&config(), &cancel, authorized, Some(&wrong_effect)),
+            Err(AuthorizedConnectError::Denied(
+                CapabilityDenial::WrongEffect
+            ))
+        ));
+    }
+
+    #[test]
+    fn denied_grant_never_launches_the_server() {
+        let task_id = Uuid::new_v4();
+        let context = CapabilityContext {
+            task_id: Uuid::new_v4(),
+            generation: 3,
+            task_authorized: true,
+        };
+        let marker = std::env::temp_dir().join(format!("krypper-mcp-authorized-{task_id}"));
+        let _ = fs::remove_file(&marker);
+        let script = format!("printf spawned > '{}'\n", marker.display());
+        let result = connect_stdio_authorized(
+            &script_config(script),
+            &McpCancellation::new(),
+            context,
+            Some(&grant(task_id)),
+        );
+        assert!(matches!(
+            result,
+            Err(AuthorizedConnectError::Denied(CapabilityDenial::WrongTask))
+        ));
+        thread::sleep(Duration::from_millis(50));
+        assert!(!marker.exists());
+        let _ = fs::remove_file(&marker);
+    }
+
+    #[test]
+    fn failure_injection_reports_transport_failure_after_authorization() {
         let task_id = Uuid::new_v4();
         let context = CapabilityContext {
             task_id,

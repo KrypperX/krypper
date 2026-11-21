@@ -67,16 +67,20 @@ mint a grant, or choose an arbitrary executor.
   direct child and polls until the group is empty within the bounded grace;
   otherwise it reports `CleanupFailed`. Descendants that deliberately leave the
   group are outside this guarantee.
-- Config validation is not execution authorization. Host callers must only pass
-  executables and configurations they are already authorized to launch; this
-  module creates no task grant or capability path.
+- Config validation is not execution authorization. The only exported connect
+  entry point is `connect_stdio_authorized`; it requires a host-owned,
+  task-scoped `mcp/connect_stdio` grant with `ExecuteProcess` before validation
+  or spawn, and the raw handshake is module-private. The host must bind each
+  grant to the exact executable and configuration it supplies. A connection
+  grant never authorizes discovered MCP tools.
 - The transport uses no shell, no network permission and no new dependency. It
   is a separate crate-private module with no CLI, provider or registry changes.
 
 ### Backward compatibility
 
 - Adding `tools::mcp_transport` is additive. With no host call to
-  `connect_stdio`, no child process is launched and all existing behaviour is
-  unchanged.
+  `connect_stdio_authorized`, no child process is launched and all existing
+  behaviour is unchanged. The raw handshake is crate-module-private, so callers
+  cannot bypass the authorized entry point.
 - The transport is not re-exported through `krypper::extensions`; discovery and
   invocation remain later subtasks with their own grants and schemas.
