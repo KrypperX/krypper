@@ -102,6 +102,8 @@ pub enum WorkspacePlanError {
     RootGuidanceRead(WorkspaceGuidanceReadError),
     /// The target paths changed after their applicable project guidance was supplied.
     GuidanceTargetsChanged,
+    /// Opt-in repository context could not be collected safely from the task workspace.
+    RepositoryContextFailed,
 }
 
 impl fmt::Display for WorkspacePlanError {
@@ -133,6 +135,9 @@ impl fmt::Display for WorkspacePlanError {
             Self::GuidanceTargetsChanged => formatter.write_str(
                 "workspace plan targets changed after applicable project guidance was supplied",
             ),
+            Self::RepositoryContextFailed => {
+                formatter.write_str("repository context could not be collected safely")
+            }
         }
     }
 }

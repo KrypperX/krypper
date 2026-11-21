@@ -4,6 +4,7 @@ use super::{
     WorkspaceObservation,
 };
 use crate::brain::{OllamaDecisionSource, WorkspacePlan, WorkspacePlanError};
+use crate::harness::context::collect_repository_context;
 use crate::harness::verification::{
     reconcile_task_state_with_checks, verify_completion_checks, CompletionCheckEvidence,
     CompletionVerification, CompletionVerificationStatus, RequiredCompletionCheck,
@@ -78,6 +79,35 @@ pub fn create_plan_with_workspace_context(
     }
 
     decision_source.accept_plan_with_project_guidance(final_plan, action_budget, final_guidance)
+}
+
+/// Opt-in bounded repository retrieval followed by the existing guidance-aware planner.
+///
+/// Retrieval uses the running turn and is advisory only: it never changes workspace state or
+/// execution authority. Stale and oversized sources are skipped and recorded in the bounded
+/// context; unsafe task/turn or search failures fail before a plan is requested.
+pub fn create_plan_with_repository_context(
+    session: &TaskSession,
+    task_id: Uuid,
+    turn_id: Uuid,
+    decision_source: &mut OllamaDecisionSource,
+    goal: &str,
+    observations: &[WorkspaceObservation],
+    action_budget: usize,
+) -> Result<WorkspacePlan, WorkspacePlanError> {
+    let context = collect_repository_context(session, task_id, turn_id, goal)
+        .map_err(|_| WorkspacePlanError::RepositoryContextFailed)?;
+    decision_source.set_repository_context(context);
+    let plan = create_plan_with_workspace_context(
+        session,
+        task_id,
+        decision_source,
+        goal,
+        observations,
+        action_budget,
+    );
+    decision_source.clear_repository_context();
+    plan
 }
 
 fn plan_mutation_targets(plan: &WorkspacePlan) -> Vec<std::path::PathBuf> {

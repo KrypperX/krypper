@@ -37,7 +37,8 @@ pub(super) fn usage_error(
         Some("task") => {
             "usage: krypper task [-h] [--goal GOAL] --max-actions N [--workspace PATH] [--model NAME] [--provider NAME] [--no-config] [--checkpoint-out PATH] [--resume PATH] [--activity-jsonl]"
         }
-        _ => "usage: krypper [-h] {show,list,write,task,models} ...",
+        Some("context") => "usage: krypper context [-h] --goal GOAL [--workspace PATH]",
+        _ => "usage: krypper [-h] {show,list,write,task,models,context} ...",
     };
     let program = command.map_or_else(|| "krypper".to_owned(), |name| format!("krypper {name}"));
     writeln!(error, "{usage}")?;
@@ -47,7 +48,13 @@ pub(super) fn usage_error(
 
 pub(super) fn write_root_help(output: &mut dyn Write) -> io::Result<()> {
     output.write_all(
-        b"usage: krypper [-h] {show,list,write,task,models} ...\n\nLocal command-line entry point for Krypper.\n\npositional arguments:\n  {show,list,write,task,models}\n    show        display a UTF-8 text file\n    list        list immediate directory entries\n    write       create a new UTF-8 text file\n    task        run a caller-directed bounded task\n    models      browse offline model catalog\n\noptions:\n  -h, --help    show this help message and exit\n",
+        b"usage: krypper [-h] {show,list,write,task,models,context} ...\n\nLocal command-line entry point for Krypper.\n\npositional arguments:\n  {show,list,write,task,models,context}\n    show        display a UTF-8 text file\n    list        list immediate directory entries\n    write       create a new UTF-8 text file\n    task        run a caller-directed bounded task\n    models      browse offline model catalog\n    context     show bounded offline repository context for a goal\n\noptions:\n  -h, --help    show this help message and exit\n",
+    )
+}
+
+pub(super) fn write_context_help(output: &mut dyn Write) -> io::Result<()> {
+    output.write_all(
+        b"usage: krypper context [-h] --goal GOAL [--workspace PATH]\n\nshow bounded offline repository context for a goal\n\noptions:\n  --goal GOAL        literal goal terms used for repository search\n  --workspace PATH   use an existing directory as the search root\n  -h, --help         show this help message and exit\n\nThis command makes no model request and changes no workspace file.\nResults are untrusted advisory excerpts with path, line range, and content revision.\n",
     )
 }
 

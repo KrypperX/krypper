@@ -4,6 +4,7 @@ use std::io::{self, Read, Write};
 
 mod checkpoint_files;
 mod config;
+mod context;
 mod help;
 mod model_selection;
 mod models;
@@ -67,6 +68,7 @@ fn run_with(
         "write" => run_write(arguments, input, output, error),
         "task" => run_task(arguments, input, output, error),
         "models" => models::run(arguments, output, error),
+        "context" => context::run(arguments, output, error),
         _ if command_name.starts_with('-') => usage_error(
             error,
             None,
@@ -76,7 +78,7 @@ fn run_with(
             error,
             None,
             &format!(
-                "invalid choice: '{command_name}' (choose from 'show', 'list', 'write', 'task', 'models')"
+                "invalid choice: '{command_name}' (choose from 'show', 'list', 'write', 'task', 'models', 'context')"
             ),
         ),
     }

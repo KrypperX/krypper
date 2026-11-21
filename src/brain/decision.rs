@@ -3,6 +3,7 @@
 use crate::agent_loop::{
     BoundedDecisionSource, GoalTurnResult, WorkspaceAction, WorkspaceObservation,
 };
+use crate::harness::context::RepositoryContext;
 use crate::harness::execution::{
     CompletionCorrectionError, CompletionCorrectionResult, ProcessFailureCorrectionError,
     ProcessFailureCorrectionResult,
@@ -32,6 +33,7 @@ pub struct OllamaDecisionSource {
     pub(super) agent: Agent,
     pub(super) remaining_decisions: usize,
     pub(super) extension_declarations: Vec<serde_json::Value>,
+    pub(super) repository_context: Option<RepositoryContext>,
 }
 
 impl OllamaDecisionSource {
@@ -59,7 +61,16 @@ impl OllamaDecisionSource {
             agent: model_agent(),
             remaining_decisions: action_budget,
             extension_declarations: extension_declarations.to_vec(),
+            repository_context: None,
         }
+    }
+
+    pub(crate) fn set_repository_context(&mut self, context: RepositoryContext) {
+        self.repository_context = Some(context);
+    }
+
+    pub(crate) fn clear_repository_context(&mut self) {
+        self.repository_context = None;
     }
 
     /// Requests one bounded, ordered set of workspace operations from the local model.
@@ -114,6 +125,7 @@ impl OllamaDecisionSource {
             return Err(WorkspacePlanError::ActionBudgetExhausted);
         }
 
+        let repository_context = self.repository_context.as_ref();
         let request = match proposed_targets {
             Some(targets) => build_plan_request_with_project_guidance_and_targets(
                 &self.model,
@@ -122,6 +134,7 @@ impl OllamaDecisionSource {
                 maximum,
                 project_guidance,
                 Some(targets),
+                repository_context,
             ),
             None => build_plan_request_with_project_guidance(
                 &self.model,
@@ -129,6 +142,7 @@ impl OllamaDecisionSource {
                 observations,
                 maximum,
                 project_guidance,
+                repository_context,
             ),
         }
         .map_err(|_| WorkspacePlanError::ModelRequestFailed)?;
