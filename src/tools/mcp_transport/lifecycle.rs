@@ -10,6 +10,7 @@ use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use uuid::Uuid;
 
 /// Fail-closed outcomes for a connection or handshake attempt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -56,6 +57,8 @@ pub struct McpSession {
     protocol_version: String,
     timeout: Duration,
     next_id: u64,
+    session_id: Uuid,
+    usable: bool,
 }
 
 impl McpSession {
@@ -79,9 +82,12 @@ impl McpSession {
         tool_grants: &[CapabilityGrant],
         cancel: &McpCancellation,
     ) -> Result<Vec<McpTool>, McpToolError> {
+        if !self.usable {
+            return Err(McpLifecycleError::ProtocolViolation.into());
+        }
         let id = self.next_request_id();
         let deadline = Instant::now() + self.timeout;
-        super::discovery::list_tools(
+        let result = super::discovery::list_tools(
             &mut self.io,
             id,
             deadline,
@@ -90,7 +96,12 @@ impl McpSession {
             context,
             discovery_grant,
             tool_grants,
-        )
+            self.session_id,
+        );
+        if matches!(result, Err(McpToolError::Transport(_))) {
+            self.usable = false;
+        }
+        result
     }
 
     /// Invoke one discovered tool after rechecking the current host grant.
@@ -105,9 +116,15 @@ impl McpSession {
         arguments: &Value,
         cancel: &McpCancellation,
     ) -> Result<String, McpToolError> {
+        if !self.usable {
+            return Err(McpLifecycleError::ProtocolViolation.into());
+        }
+        if tool.session_id != self.session_id {
+            return Err(McpToolError::WrongSession);
+        }
         let id = self.next_request_id();
         let deadline = Instant::now() + self.timeout;
-        super::invocation::call_tool(
+        let result = super::invocation::call_tool(
             &mut self.io,
             id,
             deadline,
@@ -116,7 +133,11 @@ impl McpSession {
             context,
             grant,
             arguments,
-        )
+        );
+        if matches!(result, Err(McpToolError::Transport(_))) {
+            self.usable = false;
+        }
+        result
     }
 
     fn next_request_id(&mut self) -> u64 {
@@ -153,6 +174,8 @@ pub(super) fn connect_stdio(
         protocol_version,
         timeout: config.timeout,
         next_id: 2,
+        session_id: Uuid::new_v4(),
+        usable: true,
     })
 }
 
