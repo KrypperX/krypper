@@ -3,7 +3,7 @@
 //! A profile descriptor is descriptive metadata only. It does not register a
 //! tool, grant an authority, select a sandbox backend or launch a process.
 //! The fixed offline Cargo policy validates the `offline_cargo_test` descriptor
-//! and uses its executable and argument prefix. Runtime authorization stays with
+//! and uses its executable, argument prefix and limits. Runtime authorization stays with
 //! TaskSession and the existing Tools boundary. Construction validates the
 //! contract, so an unvalidated descriptor cannot exist.
 
@@ -98,8 +98,11 @@ impl ProcessProfile<'static> {
 impl<'a> ProcessProfile<'a> {
     /// Validate and construct a descriptor from typed host-owned fields.
     ///
-    /// Validation is fail closed: unrepresentable or unknown metadata is rejected,
-    /// never defaulted or silently allowed. It does not claim sandbox confinement.
+    /// The `offline_cargo_test` identifier is reserved for the exact profile
+    /// returned by [`ProcessProfile::offline_cargo_test`]; mismatched fields for
+    /// that identifier are rejected. Validation is fail closed: unrepresentable
+    /// or unknown metadata is rejected, never defaulted or silently allowed. It
+    /// does not claim sandbox confinement.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         version: u32,
@@ -132,6 +135,14 @@ impl<'a> ProcessProfile<'a> {
         if !valid_identifier(self.id) {
             return Err(ProfileContractError::InvalidIdentifier);
         }
+        if self.executable.len() > MAX_EXECUTABLE_BYTES
+            || !ALLOWED_EXECUTABLES.contains(&self.executable)
+        {
+            return Err(ProfileContractError::InvalidExecutable);
+        }
+        if !valid_limits(&self.limits) {
+            return Err(ProfileContractError::InvalidLimits);
+        }
         if self.id == OFFLINE_CARGO_TEST_ID {
             if self.executable != OFFLINE_CARGO_TEST_EXECUTABLE {
                 return Err(ProfileContractError::InvalidExecutable);
@@ -149,11 +160,6 @@ impl<'a> ProcessProfile<'a> {
                 return Err(ProfileContractError::InvalidLimits);
             }
         } else {
-            if self.executable.len() > MAX_EXECUTABLE_BYTES
-                || !ALLOWED_EXECUTABLES.contains(&self.executable)
-            {
-                return Err(ProfileContractError::InvalidExecutable);
-            }
             if self.arguments.len() > MAX_ARGUMENTS
                 || self
                     .arguments
@@ -171,9 +177,6 @@ impl<'a> ProcessProfile<'a> {
                 .any(|name| !ALLOWED_ENVIRONMENT_NAMES.contains(name))
             {
                 return Err(ProfileContractError::InvalidEnvironmentAllowlist);
-            }
-            if !valid_limits(&self.limits) {
-                return Err(ProfileContractError::InvalidLimits);
             }
         }
         if !self.extra_fields.is_empty() {
@@ -573,5 +576,65 @@ mod tests {
             ),
             Err(ProfileContractError::InvalidArgument)
         );
+    }
+
+    #[test]
+    fn fixed_profile_rejects_every_non_exact_field() {
+        let cases: [(
+            &str,
+            &[&str],
+            &str,
+            &[&str],
+            ProfileLimits,
+            ProfileContractError,
+        ); 4] = [
+            (
+                "/toolchain/bin/rustc",
+                OFFLINE_CARGO_TEST_ARGUMENTS,
+                OFFLINE_CARGO_TEST_CWD,
+                ALLOWED_ENVIRONMENT_NAMES,
+                OFFLINE_CARGO_TEST_LIMITS,
+                ProfileContractError::InvalidExecutable,
+            ),
+            (
+                OFFLINE_CARGO_TEST_EXECUTABLE,
+                OFFLINE_CARGO_TEST_ARGUMENTS,
+                "src",
+                ALLOWED_ENVIRONMENT_NAMES,
+                OFFLINE_CARGO_TEST_LIMITS,
+                ProfileContractError::InvalidCwd,
+            ),
+            (
+                OFFLINE_CARGO_TEST_EXECUTABLE,
+                OFFLINE_CARGO_TEST_ARGUMENTS,
+                OFFLINE_CARGO_TEST_CWD,
+                &["LANG"][..],
+                OFFLINE_CARGO_TEST_LIMITS,
+                ProfileContractError::InvalidEnvironmentAllowlist,
+            ),
+            (
+                OFFLINE_CARGO_TEST_EXECUTABLE,
+                OFFLINE_CARGO_TEST_ARGUMENTS,
+                OFFLINE_CARGO_TEST_CWD,
+                ALLOWED_ENVIRONMENT_NAMES,
+                limits(),
+                ProfileContractError::InvalidLimits,
+            ),
+        ];
+        for (executable, arguments, cwd, environment, bounds, expected) in cases {
+            assert_eq!(
+                ProcessProfile::new(
+                    PROFILE_CONTRACT_VERSION,
+                    OFFLINE_CARGO_TEST_ID,
+                    executable,
+                    arguments,
+                    cwd,
+                    environment,
+                    bounds,
+                    &[],
+                ),
+                Err(expected)
+            );
+        }
     }
 }

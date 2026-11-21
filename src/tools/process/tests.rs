@@ -304,16 +304,6 @@ fn cargo_filter_is_one_literal_argument_after_the_fixed_separator() {
 }
 
 #[test]
-fn fixed_profile_matches_the_live_process_bounds() {
-    let profile = ProcessProfile::offline_cargo_test().unwrap();
-    assert_eq!(profile.limits().wall_secs, WALL.as_secs());
-    assert_eq!(profile.limits().cpu_ms * 1_000, CPU_BUDGET);
-    assert_eq!(profile.limits().memory_bytes, MEMORY);
-    assert_eq!(profile.limits().output_bytes, OUTPUT);
-    assert_eq!(profile.limits().processes, TASKS);
-}
-
-#[test]
 fn test_harness_summaries_report_executed_tests_and_reject_zero_matches() {
     let mut result = ProcessResult::empty(ProcessOutcome::Exited(0));
     result.test_filter = Some("selected_test".into());
@@ -428,16 +418,18 @@ fn cargo_build_script_warning_cannot_fake_a_filtered_test_result() {
 #[test]
 fn resource_readback_rejects_missing_and_unlimited_controls() {
     let path = fixture();
+    let limits = ProcessProfile::offline_cargo_test().unwrap().limits();
     let supervisor = std::mem::ManuallyDrop::new(Supervisor {
         unit: "unused".into(),
         group: path.clone(),
         cleaned: true,
+        limits,
     });
     assert!(supervisor.verify().is_err());
     for (name, value) in [
-        ("memory.max", MEMORY.to_string()),
+        ("memory.max", limits.memory_bytes.to_string()),
         ("memory.swap.max", "0".into()),
-        ("pids.max", TASKS.to_string()),
+        ("pids.max", limits.processes.to_string()),
         ("cpu.max", "100000 100000".into()),
         ("cgroup.procs", "".into()),
         ("cgroup.kill", "".into()),
@@ -812,6 +804,7 @@ assert_eq!(std::env::current_dir().unwrap().to_str().unwrap(), "/workspace");
     assert!(!result.stdout.is_empty());
     // Use the actual sandbox/supervisor for failure cases, with lower-only test bounds.
     let policy = OfflineCargoPolicy::new(Path::new(&toolchain), Path::new(&registry)).unwrap();
+    let limits = policy.profile().limits();
     let root = capture_workspace_root_at(&path).unwrap();
     let no_match = run(&root, &policy, Some("test_name_that_does_not_exist"));
     assert_eq!(
@@ -827,12 +820,19 @@ assert_eq!(std::env::current_dir().unwrap().to_str().unwrap(), "/workspace");
     assert_eq!(no_match.executed_tests, Some(0));
     assert!(!no_match.succeeded());
     for (source, wall, cap, expected) in [
-        ("#[test] fn fails() { panic!(\"fixture failure\"); }", Duration::from_secs(10), OUTPUT, ProcessOutcome::Exited(101)),
-        ("#[test] fn spins() { loop { std::hint::spin_loop(); } }", Duration::from_secs(2), OUTPUT, ProcessOutcome::TimedOut),
+        ("#[test] fn fails() { panic!(\"fixture failure\"); }", Duration::from_secs(10), limits.output_bytes, ProcessOutcome::Exited(101)),
+        ("#[test] fn spins() { loop { std::hint::spin_loop(); } }", Duration::from_secs(2), limits.output_bytes, ProcessOutcome::TimedOut),
         ("#[test] fn floods() { use std::io::Write; for _ in 0..4096 { std::io::stdout().write_all(&[b'x';1024]).unwrap(); } }", Duration::from_secs(10), 8192, ProcessOutcome::OutputLimitExceeded),
     ] {
         fs::write(path.join("src/lib.rs"), source).unwrap();
-        let result = run_with_bounds(&root, &policy, None, wall, cap, CPU_BUDGET);
+        let result = run_with_bounds(
+            &root,
+            &policy,
+            None,
+            wall,
+            cap,
+            limits.cpu_ms.saturating_mul(1_000),
+        );
         assert_eq!(result.outcome, expected, "{result:?}");
         assert!(result.cleanup_confirmed, "{result:?}");
         assert!(!result.succeeded());
@@ -844,7 +844,18 @@ assert_eq!(std::env::current_dir().unwrap().to_str().unwrap(), "/workspace");
         ("#[test] fn processes() { let mut children = Vec::new(); for _ in 0..256 { match std::process::Command::new(\"/usr/bin/sleep\").arg(\"20\").spawn() { Ok(child) => children.push(child), Err(_) => break, } } std::process::exit(0); }", ProcessResource::Processes),
     ] {
         fs::write(path.join("src/lib.rs"), source).unwrap();
-        let result = run_with_bounds(&root, &policy, None, WALL, OUTPUT, if resource == ProcessResource::Cpu { 10_000_000 } else { CPU_BUDGET });
+        let result = run_with_bounds(
+            &root,
+            &policy,
+            None,
+            Duration::from_secs(limits.wall_secs),
+            limits.output_bytes,
+            if resource == ProcessResource::Cpu {
+                10_000_000
+            } else {
+                limits.cpu_ms.saturating_mul(1_000)
+            },
+        );
         assert_eq!(result.outcome, ProcessOutcome::ResourceLimitExceeded { resource }, "{result:?}");
         assert!(result.cleanup_confirmed, "{result:?}");
         assert!(!result.succeeded());

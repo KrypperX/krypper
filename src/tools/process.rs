@@ -17,7 +17,7 @@ pub(crate) use self::supervisor::run;
 pub use self::supervisor::{ProcessOutcome, ProcessResource, ProcessResult};
 
 #[cfg(test)]
-use self::policy::{cargo_command_args, CPU_BUDGET, MEMORY, OUTPUT, TASKS, WALL};
+use self::policy::cargo_command_args;
 #[cfg(test)]
 use self::supervisor::{record_test_evidence, run_with_bounds, Supervisor};
 #[cfg(test)]

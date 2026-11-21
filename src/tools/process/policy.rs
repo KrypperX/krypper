@@ -8,14 +8,8 @@ use std::io::Read;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use std::time::Duration;
 
-pub(super) const WALL: Duration = Duration::from_secs(180);
-pub(super) const CPU_BUDGET: u64 = 120_000_000;
-pub(super) const OUTPUT: usize = 256 * 1024;
 pub(crate) const MAX_TEST_FILTER_BYTES: usize = 256;
-pub(super) const MEMORY: u64 = 3 * 1024 * 1024 * 1024;
-pub(super) const TASKS: u64 = 128;
 
 /// Trusted host-selected read-only Rust toolchain and registry. Not a model request.
 /// The directories must be provisioned outside every untrusted task workspace. System

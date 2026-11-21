@@ -1,10 +1,8 @@
 //! Process supervision: leases, bounded pipes, reaping and the two run entry points.
 
-use super::policy::{
-    cargo_command_args, validate_test_filter, OfflineCargoPolicy, CPU_BUDGET, MEMORY, OUTPUT,
-    TASKS, WALL,
-};
+use super::policy::{cargo_command_args, validate_test_filter, OfflineCargoPolicy};
 use super::sandbox::{host_command, sandbox};
+use crate::tools::process_profile::ProfileLimits;
 use crate::tools::WorkspaceRoot;
 use serde::Serialize;
 use std::fs::{self, File, OpenOptions};
@@ -359,12 +357,19 @@ pub(super) struct Supervisor {
     pub(super) unit: String,
     pub(super) group: PathBuf,
     pub(super) cleaned: bool,
+    pub(super) limits: ProfileLimits,
 }
 impl Supervisor {
-    fn create(id: Uuid) -> io::Result<Self> {
+    fn create(id: Uuid, limits: ProfileLimits) -> io::Result<Self> {
         let unit = format!("krypper-test-{}.service", id.simple());
+        let memory = format!("MemoryMax={}", limits.memory_bytes);
+        let tasks = format!("TasksMax={}", limits.processes);
+        let runtime_secs = limits.wall_secs.saturating_add(15);
+        let runtime = format!("RuntimeMaxSec={runtime_secs}");
+        let keepalive = runtime_secs.to_string();
         // Only a trusted inert keeper starts here. No workspace code runs until verification.
-        let creation = bounded_host(host_command("/usr/bin/systemd-run").args([
+        let mut command = host_command("/usr/bin/systemd-run");
+        command.args([
             "--user",
             "--quiet",
             "--collect",
@@ -372,16 +377,14 @@ impl Supervisor {
             &unit,
             "-p",
             "Delegate=yes",
-            "-p",
-            "MemoryMax=3221225472",
-            "-p",
-            "MemorySwapMax=0",
-            "-p",
-            "TasksMax=128",
+        ]);
+        command.args(["-p", memory.as_str(), "-p", "MemorySwapMax=0"]);
+        command.args(["-p", tasks.as_str()]);
+        let creation = bounded_host(command.args([
             "-p",
             "CPUQuota=100%",
             "-p",
-            "RuntimeMaxSec=195",
+            runtime.as_str(),
             "-p",
             "KillMode=control-group",
             "-p",
@@ -390,12 +393,13 @@ impl Supervisor {
             "SendSIGKILL=yes",
             "--",
             "/usr/bin/sleep",
-            "195",
+            keepalive.as_str(),
         ]));
         let mut supervisor = Self {
             unit,
             group: PathBuf::new(),
             cleaned: false,
+            limits,
         };
         creation?;
         let group = bounded_host(host_command("/usr/bin/systemctl").args([
@@ -445,8 +449,8 @@ impl Supervisor {
             .split_whitespace()
             .map(str::parse::<u64>)
             .collect::<Result<Vec<_>, _>>();
-        if memory != Some(MEMORY)
-            || tasks != Some(TASKS)
+        if memory != Some(self.limits.memory_bytes)
+            || tasks != Some(self.limits.processes)
             || read("memory.swap.max")?.trim() != "0"
             || !matches!(fields, Ok(ref v) if v.len() == 2 && v[0] > 0 && v[1] > 0 && v[0] <= v[1])
         {
@@ -534,7 +538,15 @@ pub(crate) fn run(
     policy: &OfflineCargoPolicy,
     test_filter: Option<&str>,
 ) -> ProcessResult {
-    run_with_bounds(root, policy, test_filter, WALL, OUTPUT, CPU_BUDGET)
+    let limits = policy.profile().limits();
+    run_with_bounds(
+        root,
+        policy,
+        test_filter,
+        Duration::from_secs(limits.wall_secs),
+        limits.output_bytes,
+        limits.cpu_ms.saturating_mul(1_000),
+    )
 }
 
 // Private lower-only bounds let host fixtures exercise failures without minute-long waits.
@@ -549,9 +561,10 @@ pub(super) fn run_with_bounds(
     if validate_test_filter(test_filter).is_err() {
         return ProcessResult::invalid_test_filter();
     }
-    let wall = wall.min(WALL);
-    let output = output.min(OUTPUT);
-    let cpu_budget = cpu_budget.min(CPU_BUDGET);
+    let limits = policy.profile().limits();
+    let wall = wall.min(Duration::from_secs(limits.wall_secs));
+    let output = output.min(limits.output_bytes);
+    let cpu_budget = cpu_budget.min(limits.cpu_ms.saturating_mul(1_000));
     let mut result =
         ProcessResult::empty_with_filter(ProcessOutcome::SandboxUnavailable, test_filter);
     if !cfg!(target_os = "linux") || unsafe { libc::geteuid() } == 0 {
@@ -585,7 +598,7 @@ pub(super) fn run_with_bounds(
     if lease.record(&format!("{unit}\n")).is_err() {
         return result;
     }
-    let mut supervisor = match Supervisor::create(result.run_id) {
+    let mut supervisor = match Supervisor::create(result.run_id, policy.profile().limits()) {
         Ok(s) => s,
         Err(e) => {
             result.diagnostic = Some(e.to_string());

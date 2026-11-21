@@ -51,8 +51,9 @@ Trusted embedding code creates `OfflineCargoPolicy::new(toolchain, registry)`
 and grants it to one existing task with
 `TaskSession::authorize_offline_cargo_tests(task_id, policy)`. Policy
 construction validates the fixed `ProcessProfile::offline_cargo_test()`
-descriptor and uses its executable and fixed argument prefix; cwd, environment,
-sandbox flags and runtime limits remain owned by the policy and supervisor. The toolchain
+descriptor and uses its executable, fixed argument prefix and limits; cwd,
+environment values, sandbox flags and enforcement remain owned by the policy and
+supervisor. The toolchain
 must contain real ELF `bin/cargo` and `bin/rustc`, their libraries, and any
 native compiler/linker needed by the workload (in `bin/` or the trusted system
 runtime). These are preprovisioned, trusted directories outside task
@@ -135,8 +136,9 @@ There is no optional namespace flag or direct-spawn fallback.
   stdout/stderr. Aggregate CPU accounting stops the job at 120 CPU seconds
   (poll-based accounting can overshoot slightly; the kernel quota, per-process
   CPU limit and finite supervisor lifetime remain enforced independently).
-- The transient unit independently expires after 195 seconds, including setup,
-  and uses control-group termination with a one-second stop grace and SIGKILL.
+- The transient unit independently expires 15 seconds after the payload wall
+  timeout, including setup, and uses control-group termination with a one-second
+  stop grace and SIGKILL.
   It cannot outlive that bound merely because the caller crashes.
 
 Both pipes are drained without blocking and retain stream identity. Reaching
