@@ -1,5 +1,6 @@
 use super::{
-    activate_skills, select_skills, SkillActivationError, MAX_ACTIVE_SKILLS, MAX_SKILL_CONTEXT_BYTES,
+    activate_skills, select_skills, SkillActivationError, MAX_ACTIVE_SKILLS,
+    MAX_SKILL_CONTEXT_BYTES,
 };
 use crate::tools::skills::discovery::LoadedSkill;
 use crate::tools::skills::manifest::{SkillInstructions, SKILL_MANIFEST_SCHEMA};
