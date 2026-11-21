@@ -246,7 +246,7 @@ fallible synchronous event sink, stream-local sequence counter, and JSONL
 writer adapter. It does **not** subscribe to the runtime or expose a CLI flag.
 OpenAI Responses, xAI Responses, and Anthropic Messages have opt-in native
 SSE decision-source paths (via `KRYPPER_RESPONSES_STREAM` for OpenAI/xAI and
-`KRYPPER_ANTHROPIC_STREAM` for Anthropic). These paths assemble and validate
+`KRYPPER_ANTHROPIC_STREAM` for Anthropic). Set either variable to `1` or `true` (case-insensitive) to enable streaming; unset, empty, `0`, `false`, and other values disable it. Previously any present value enabled streaming, so existing `yes`/`on` configurations must be changed to `1` or `true`. These paths assemble and validate
 one complete tool action before returning it; they do not execute the action.
 Their text-delta callbacks are internal and the normal `choose` entry point
 discards text deltas. Therefore this is **not** end-to-end CLI streaming.
