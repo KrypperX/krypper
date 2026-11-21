@@ -1,4 +1,4 @@
-use super::stdio::{spawn_inner, spawn_with};
+use super::stdio::spawn;
 use super::*;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -297,20 +297,13 @@ fn spawn_timeout_waits_for_worker_cleanup() {
     let dir = temp_dir("spawn-timeout-cleanup");
     let marker = dir.0.join("marker");
     let config = config(
-        "sleep 0.5\nprintf alive > \"$1\"\n",
+        "sleep 0.5\n# krypper-spawn-delay\nprintf alive > \"$1\"\n",
         &marker,
         Duration::from_nanos(1),
     );
     let start = Instant::now();
 
-    let error = match spawn_with(
-        &config,
-        Instant::now() + Duration::from_nanos(1),
-        move |config| {
-            thread::sleep(Duration::from_millis(50));
-            spawn_inner(config)
-        },
-    ) {
+    let error = match spawn(&config, Instant::now() + Duration::from_nanos(1)) {
         Ok(_) => panic!("spawn unexpectedly succeeded"),
         Err(error) => error,
     };
@@ -320,7 +313,7 @@ fn spawn_timeout_waits_for_worker_cleanup() {
         start.elapsed() >= Duration::from_millis(40),
         "spawn returned before the worker finished"
     );
-    thread::sleep(Duration::from_millis(200));
+    thread::sleep(Duration::from_millis(600));
     assert!(!marker.exists(), "spawned child survived timeout cleanup");
 }
 

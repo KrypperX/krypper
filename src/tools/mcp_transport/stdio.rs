@@ -92,22 +92,11 @@ pub(super) fn spawn(
     config: &McpStdioConfig,
     deadline: Instant,
 ) -> Result<StdioChild, McpLifecycleError> {
-    spawn_with(config, deadline, spawn_inner)
-}
-
-pub(super) fn spawn_with<F>(
-    config: &McpStdioConfig,
-    deadline: Instant,
-    spawn: F,
-) -> Result<StdioChild, McpLifecycleError>
-where
-    F: FnOnce(&McpStdioConfig) -> Result<StdioChild, McpLifecycleError> + Send + 'static,
-{
     let config = config.clone();
     let (sender, receiver) = mpsc::sync_channel(1);
     let (done_sender, done_receiver) = mpsc::sync_channel(1);
     thread::spawn(move || {
-        let result = spawn(&config);
+        let result = spawn_inner(&config);
         let _ = sender.send(result);
         let _ = done_sender.send(());
     });
@@ -130,7 +119,15 @@ where
     }
 }
 
-pub(super) fn spawn_inner(config: &McpStdioConfig) -> Result<StdioChild, McpLifecycleError> {
+fn spawn_inner(config: &McpStdioConfig) -> Result<StdioChild, McpLifecycleError> {
+    #[cfg(test)]
+    if config
+        .args
+        .iter()
+        .any(|arg| arg.contains("krypper-spawn-delay"))
+    {
+        thread::sleep(Duration::from_millis(50));
+    }
     let mut command = Command::new(&config.executable);
     command
         .args(&config.args)
