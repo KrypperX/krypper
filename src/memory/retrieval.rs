@@ -33,7 +33,7 @@ pub struct MemoryContext {
     pub bytes: usize,
     /// Records in this workspace that were expired at query time.
     pub skipped_expired: usize,
-    /// True when the budget stopped recall before every admitted record was rendered.
+    /// True when a query bound or the byte budget dropped eligible records.
     pub truncated: bool,
 }
 
@@ -45,11 +45,20 @@ pub fn collect_memory_context(records: &[MemoryRecord], query: &MemoryQuery) -> 
             record.workspace() == &query.workspace && !record.is_live_at(query.now_unix)
         })
         .count();
+    let eligible = records
+        .iter()
+        .filter(|record| {
+            record.is_visible_to(&query.workspace, query.now_unix)
+                && (query.kinds.is_empty() || query.kinds.contains(&record.kind()))
+        })
+        .count();
     let mut context = MemoryContext {
         skipped_expired,
         ..MemoryContext::default()
     };
-    for record in query.admit(records) {
+    let admitted = query.admit(records);
+    context.truncated = eligible > admitted.len();
+    for record in admitted {
         let excerpt = MemoryExcerpt {
             id: record.id().to_string(),
             kind: record.kind(),
