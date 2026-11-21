@@ -145,6 +145,22 @@ mod tests {
     }
 
     #[test]
+    fn enforces_argument_limits_in_utf8_bytes() {
+        let mut config = valid();
+        // Each symbol occupies four UTF-8 bytes, not one byte.
+        config.args = vec!["🦀".repeat(4096)];
+        assert_eq!(config.validate(), Ok(()));
+        config.args[0].push('🦀');
+        assert_eq!(config.validate(), Err(McpConfigError::InvalidArgument));
+
+        // Four individually valid arguments fit the aggregate byte budget.
+        config.args = vec!["🦀".repeat(4096); 4];
+        assert_eq!(config.validate(), Ok(()));
+        config.args.push("🦀".into());
+        assert_eq!(config.validate(), Err(McpConfigError::ArgumentsTooLarge));
+    }
+
+    #[test]
     fn accepts_maximum_timeout_and_rejects_longer_timeout() {
         let mut config = valid();
         config.timeout = MAX_MCP_TIMEOUT;
