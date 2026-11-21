@@ -79,7 +79,12 @@ mod tests {
             Err(AuthorizedConnectError::Denied(CapabilityDenial::MissingGrant))
         ));
         assert!(matches!(
-            connect_stdio_authorized(&config(), &cancel, context, Some(&grant(Uuid::new_v4()))),
+            connect_stdio_authorized(
+                &config(),
+                &cancel,
+                context,
+                Some(&grant(Uuid::new_v4()))
+            ),
             Err(AuthorizedConnectError::Denied(CapabilityDenial::WrongTask))
         ));
     }
@@ -116,7 +121,12 @@ mod tests {
             task_authorized: true,
         };
         assert!(matches!(
-            connect_stdio_authorized(&config(), &McpCancellation::new(), context, Some(&grant(task_id))),
+            connect_stdio_authorized(
+                &config(),
+                &McpCancellation::new(),
+                context,
+                Some(&grant(task_id))
+            ),
             Err(AuthorizedConnectError::Transport(McpLifecycleError::SpawnFailed))
         ));
     }
