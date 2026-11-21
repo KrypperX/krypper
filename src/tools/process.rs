@@ -4,6 +4,7 @@
 //! command, `supervisor` owns leases, pipes, reaping and the run entry points. This file is a
 //! facade so every existing `crate::tools::process::*` path keeps working.
 
+mod outcome;
 mod policy;
 mod sandbox;
 mod supervisor;
