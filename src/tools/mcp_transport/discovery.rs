@@ -14,6 +14,7 @@ use crate::tools::extension_contract::{
 };
 use serde_json::{json, Value};
 use std::time::Instant;
+use uuid::Uuid;
 
 const MAX_DISCOVERED_TOOLS: usize = 64;
 
@@ -25,6 +26,7 @@ pub struct McpTool {
     pub(super) description: String,
     pub(super) schema: Value,
     pub(super) grant: CapabilityGrant,
+    pub(super) session_id: Uuid,
 }
 
 impl McpTool {
@@ -85,6 +87,7 @@ pub(super) fn list_tools(
     context: CapabilityContext,
     discovery_grant: Option<&CapabilityGrant>,
     tool_grants: &[CapabilityGrant],
+    session_id: Uuid,
 ) -> Result<Vec<McpTool>, McpToolError> {
     let launch = ExtensionDescriptor {
         version: EXTENSION_CONTRACT_VERSION,
@@ -197,6 +200,7 @@ pub(super) fn list_tools(
                 description: candidate.description,
                 schema: candidate.schema,
                 grant,
+                session_id,
             })
         })
         .collect::<Vec<_>>();
