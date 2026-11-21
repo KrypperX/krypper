@@ -51,13 +51,13 @@ impl ManagedChild {
         let Some(mut child) = self.0.take() else {
             return Ok(());
         };
-        if matches!(child.try_wait(), Ok(Some(_))) {
-            return Ok(());
-        }
         unsafe {
             libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
         }
         let _ = child.kill();
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return Ok(());
+        }
         if reap(&mut child) {
             Ok(())
         } else {
