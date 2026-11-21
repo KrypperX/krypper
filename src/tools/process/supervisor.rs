@@ -525,6 +525,21 @@ pub(super) fn record_test_evidence(result: &mut ProcessResult) {
     }
 }
 
+pub(super) fn record_raw_output(result: &mut ProcessResult, stdout: Vec<u8>, stderr: Vec<u8>) {
+    result.output_bytes = stdout.len().saturating_add(stderr.len());
+    result.stdout = String::from_utf8_lossy(&stdout).into_owned();
+    result.stderr = String::from_utf8_lossy(&stderr).into_owned();
+}
+
+pub(super) fn settle_before_launch(
+    result: &mut ProcessResult,
+    supervisor: &mut Supervisor,
+    stop: StopReason,
+) {
+    result.cleanup_confirmed = supervisor.clean();
+    result.outcome = resolve_outcome(stop, &[], result.cleanup_confirmed);
+}
+
 pub(crate) fn run(
     root: &WorkspaceRoot,
     policy: &OfflineCargoPolicy,
@@ -655,7 +670,7 @@ fn run_with_containment(
         }
         supervisor.verify()?;
         if policy.cancelled.load(Ordering::SeqCst) {
-            stop = StopReason::Cancelled;
+            settle_before_launch(&mut result, &mut supervisor, StopReason::Cancelled);
             return Ok(());
         }
         let mut command = sandbox(root, policy, &supervisor.group)?;
@@ -751,8 +766,7 @@ fn run_with_containment(
             result.cleanup_confirmed = false;
         }
         result.outcome = resolve_outcome(stop, &events, result.cleanup_confirmed);
-        result.stdout = String::from_utf8_lossy(&stdout).into_owned();
-        result.stderr = String::from_utf8_lossy(&stderr).into_owned();
+        record_raw_output(&mut result, stdout, stderr);
         result.resource_events = events;
         record_test_evidence(&mut result);
         Ok(())
@@ -767,7 +781,6 @@ fn run_with_containment(
     }
     result.cleanup_confirmed &= supervisor.clean();
     result.elapsed_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-    result.output_bytes = result.stdout.len().saturating_add(result.stderr.len());
     result.output_limit = output;
     if !result.cleanup_confirmed {
         UNCERTAIN_CLEANUP.store(true, Ordering::SeqCst);

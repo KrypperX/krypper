@@ -678,6 +678,38 @@ fn process_result_serializes_bounded_audit_metadata() {
 }
 
 #[test]
+fn cancellation_after_probe_resolves_to_cancelled() {
+    let path = fixture();
+    let limits = ProcessProfile::offline_cargo_test().unwrap().limits();
+    let mut supervisor = Supervisor {
+        unit: "unused".into(),
+        group: path.clone(),
+        cleaned: true,
+        limits,
+    };
+    let mut result = ProcessResult::empty_with_filter(ProcessOutcome::SandboxUnavailable, None);
+    settle_before_launch(&mut result, &mut supervisor, StopReason::Cancelled);
+    assert_eq!(result.outcome, ProcessOutcome::Cancelled);
+    assert!(result.cleanup_confirmed);
+    assert_eq!(result.output_bytes, 0);
+    assert!(result.resource_events.is_empty());
+    fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn audit_metadata_counts_raw_output_bytes_not_lossy_text() {
+    let mut result = ProcessResult::empty(ProcessOutcome::Exited(0));
+    result.output_limit = 2;
+    record_raw_output(&mut result, vec![0xff], vec![0xfe]);
+    assert_eq!(result.output_bytes, 2);
+    assert_eq!(result.stdout, "\u{fffd}");
+    assert_eq!(result.stderr, "\u{fffd}");
+    assert_eq!(result.stdout.len() + result.stderr.len(), 6);
+    assert!(result.output_bytes <= result.output_limit);
+    assert!(result.stdout.len() + result.stderr.len() > result.output_limit);
+}
+
+#[test]
 fn process_grants_do_not_survive_a_checkpoint_restore() {
     let path = fixture();
     let runtime = fixture();
