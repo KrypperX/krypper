@@ -1,6 +1,7 @@
 use super::*;
 use crate::brain::OllamaDecisionSource;
 use crate::task_lifecycle::{TaskSession, TaskState, TurnOutcome, TurnState};
+use crate::tools::process_profile::ProcessProfile;
 use serde_json::{json, Value};
 use std::ffi::OsString;
 use std::io::{Read, Write};
@@ -214,6 +215,110 @@ fn registered_plan_reaches_process_authorization_through_harness() {
 }
 
 #[test]
+fn approved_profile_reaches_process_dispatch_through_task_session_and_harness() {
+    use crate::agent_loop::{
+        run_goal_turn_with_plan, GoalTurnStopReason, WorkspaceAction, WorkspaceObservation,
+    };
+    let path = fixture();
+    let runtime = path.with_extension("runtime");
+    fs::create_dir_all(runtime.join("bin")).unwrap();
+    for binary in ["cargo", "rustc"] {
+        fs::copy("/usr/bin/true", runtime.join("bin").join(binary)).unwrap();
+    }
+    let policy = OfflineCargoPolicy::new(&runtime, &runtime).unwrap();
+    assert_eq!(
+        policy.profile(),
+        &ProcessProfile::offline_cargo_test().unwrap()
+    );
+
+    let mut session = TaskSession::new_in_workspace(&path).unwrap();
+    let task = session.create_task("approved process profile").id();
+    let owner = session.get_task_mut(task).unwrap();
+    owner.transition(TaskState::Running).unwrap();
+    let turn = owner.create_turn().unwrap();
+    owner.transition_turn(turn, TurnState::Running).unwrap();
+    session.authorize_offline_cargo_tests(task, policy).unwrap();
+
+    let mut passed = ProcessResult::empty(ProcessOutcome::Exited(0));
+    passed.test_filter = Some("works".into());
+    passed.stdout = "test works ... ok\n".into();
+    passed.tests_ran = true;
+    passed.executed_tests = Some(1);
+    session.queue_offline_cargo_results_for_test(task, [passed]);
+    let plan = crate::WorkspacePlan::try_from_actions(
+        vec![WorkspaceAction::OfflineCargoTest {
+            test_filter: Some("works".into()),
+        }],
+        2,
+    );
+    let mut control = |_: &str, observations: &[WorkspaceObservation]| {
+        assert!(matches!(
+            observations,
+            [WorkspaceObservation::ProcessFinished { result }]
+                if result.succeeded()
+                    && result.test_filter.as_deref() == Some("works")
+                    && result.executed_tests == Some(1)
+        ));
+        WorkspaceAction::Complete {
+            result: "profile dispatched".into(),
+        }
+    };
+    let execution = run_goal_turn_with_plan(
+        &mut session,
+        task,
+        turn,
+        "approved process profile",
+        2,
+        plan,
+        &mut control,
+    )
+    .unwrap();
+    assert_eq!(execution.stop_reason(), GoalTurnStopReason::Completed);
+    assert_eq!(
+        session.offline_cargo_filters_for_test(task),
+        vec![Some("works".to_owned())]
+    );
+    fs::remove_dir_all(path).unwrap();
+    fs::remove_dir_all(runtime).unwrap();
+}
+
+#[test]
+fn missing_containment_never_launches_workspace_code() {
+    let path = fixture();
+    let marker = path.with_extension("launched");
+    fs::write(
+        path.join("build.rs"),
+        format!(
+            "fn main() {{ std::fs::write({:?}, b\"launched\").unwrap(); }}",
+            marker
+        ),
+    )
+    .unwrap();
+    let runtime = path.with_extension("runtime");
+    fs::create_dir_all(runtime.join("bin")).unwrap();
+    for binary in ["cargo", "rustc"] {
+        fs::copy("/usr/bin/true", runtime.join("bin").join(binary)).unwrap();
+    }
+    let policy = OfflineCargoPolicy::new(&runtime, &runtime).unwrap();
+    let root = capture_workspace_root_at(&path).unwrap();
+
+    let result = run_without_containment(
+        &root,
+        &policy,
+        None,
+        Duration::from_secs(2),
+        8192,
+        10_000_000,
+    );
+
+    assert_eq!(result.outcome, ProcessOutcome::SandboxUnavailable);
+    assert!(result.cleanup_confirmed);
+    assert!(!marker.exists(), "no workspace code may launch");
+    fs::remove_dir_all(path).unwrap();
+    fs::remove_dir_all(runtime).unwrap();
+}
+
+#[test]
 fn zero_exit_alone_is_not_success() {
     let mut result = ProcessResult::empty(ProcessOutcome::Exited(0));
     assert!(result.succeeded());
@@ -270,7 +375,8 @@ fn invalid_filter_returns_before_workspace_process_launch() {
 
 #[test]
 fn cargo_filter_is_one_literal_argument_after_the_fixed_separator() {
-    let fixed = cargo_command_args(None);
+    let profile = ProcessProfile::offline_cargo_test().unwrap();
+    let fixed = cargo_command_args(&profile, None);
     assert_eq!(
         fixed,
         [
@@ -284,7 +390,7 @@ fn cargo_filter_is_one_literal_argument_after_the_fixed_separator() {
         .map(OsString::from)
     );
 
-    let filtered = cargo_command_args(Some("module::selected test"));
+    let filtered = cargo_command_args(&profile, Some("module::selected test"));
     assert_eq!(
         filtered,
         [
@@ -416,16 +522,18 @@ fn cargo_build_script_warning_cannot_fake_a_filtered_test_result() {
 #[test]
 fn resource_readback_rejects_missing_and_unlimited_controls() {
     let path = fixture();
+    let limits = ProcessProfile::offline_cargo_test().unwrap().limits();
     let supervisor = std::mem::ManuallyDrop::new(Supervisor {
         unit: "unused".into(),
         group: path.clone(),
         cleaned: true,
+        limits,
     });
     assert!(supervisor.verify().is_err());
     for (name, value) in [
-        ("memory.max", MEMORY.to_string()),
+        ("memory.max", limits.memory_bytes.to_string()),
         ("memory.swap.max", "0".into()),
-        ("pids.max", TASKS.to_string()),
+        ("pids.max", limits.processes.to_string()),
         ("cpu.max", "100000 100000".into()),
         ("cgroup.procs", "".into()),
         ("cgroup.kill", "".into()),
@@ -800,6 +908,7 @@ assert_eq!(std::env::current_dir().unwrap().to_str().unwrap(), "/workspace");
     assert!(!result.stdout.is_empty());
     // Use the actual sandbox/supervisor for failure cases, with lower-only test bounds.
     let policy = OfflineCargoPolicy::new(Path::new(&toolchain), Path::new(&registry)).unwrap();
+    let limits = policy.profile().limits();
     let root = capture_workspace_root_at(&path).unwrap();
     let no_match = run(&root, &policy, Some("test_name_that_does_not_exist"));
     assert_eq!(
@@ -815,12 +924,19 @@ assert_eq!(std::env::current_dir().unwrap().to_str().unwrap(), "/workspace");
     assert_eq!(no_match.executed_tests, Some(0));
     assert!(!no_match.succeeded());
     for (source, wall, cap, expected) in [
-        ("#[test] fn fails() { panic!(\"fixture failure\"); }", Duration::from_secs(10), OUTPUT, ProcessOutcome::Exited(101)),
-        ("#[test] fn spins() { loop { std::hint::spin_loop(); } }", Duration::from_secs(2), OUTPUT, ProcessOutcome::TimedOut),
+        ("#[test] fn fails() { panic!(\"fixture failure\"); }", Duration::from_secs(10), limits.output_bytes, ProcessOutcome::Exited(101)),
+        ("#[test] fn spins() { loop { std::hint::spin_loop(); } }", Duration::from_secs(2), limits.output_bytes, ProcessOutcome::TimedOut),
         ("#[test] fn floods() { use std::io::Write; for _ in 0..4096 { std::io::stdout().write_all(&[b'x';1024]).unwrap(); } }", Duration::from_secs(10), 8192, ProcessOutcome::OutputLimitExceeded),
     ] {
         fs::write(path.join("src/lib.rs"), source).unwrap();
-        let result = run_with_bounds(&root, &policy, None, wall, cap, CPU_BUDGET);
+        let result = run_with_bounds(
+            &root,
+            &policy,
+            None,
+            wall,
+            cap,
+            limits.cpu_ms.saturating_mul(1_000),
+        );
         assert_eq!(result.outcome, expected, "{result:?}");
         assert!(result.cleanup_confirmed, "{result:?}");
         assert!(!result.succeeded());
@@ -832,7 +948,18 @@ assert_eq!(std::env::current_dir().unwrap().to_str().unwrap(), "/workspace");
         ("#[test] fn processes() { let mut children = Vec::new(); for _ in 0..256 { match std::process::Command::new(\"/usr/bin/sleep\").arg(\"20\").spawn() { Ok(child) => children.push(child), Err(_) => break, } } std::process::exit(0); }", ProcessResource::Processes),
     ] {
         fs::write(path.join("src/lib.rs"), source).unwrap();
-        let result = run_with_bounds(&root, &policy, None, WALL, OUTPUT, if resource == ProcessResource::Cpu { 10_000_000 } else { CPU_BUDGET });
+        let result = run_with_bounds(
+            &root,
+            &policy,
+            None,
+            Duration::from_secs(limits.wall_secs),
+            limits.output_bytes,
+            if resource == ProcessResource::Cpu {
+                10_000_000
+            } else {
+                limits.cpu_ms.saturating_mul(1_000)
+            },
+        );
         assert_eq!(result.outcome, ProcessOutcome::ResourceLimitExceeded { resource }, "{result:?}");
         assert!(result.cleanup_confirmed, "{result:?}");
         assert!(!result.succeeded());

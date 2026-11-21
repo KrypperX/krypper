@@ -17,9 +17,11 @@ pub(crate) use self::supervisor::run;
 pub use self::supervisor::{ProcessOutcome, ProcessResource, ProcessResult};
 
 #[cfg(test)]
-use self::policy::{cargo_command_args, CPU_BUDGET, MEMORY, OUTPUT, TASKS, WALL};
+use self::policy::cargo_command_args;
 #[cfg(test)]
-use self::supervisor::{record_test_evidence, run_with_bounds, Supervisor};
+use self::supervisor::{
+    record_test_evidence, run_with_bounds, run_without_containment, Supervisor,
+};
 #[cfg(test)]
 use crate::tools::capture_workspace_root_at;
 #[cfg(test)]
