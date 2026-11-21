@@ -54,8 +54,12 @@ mint a grant, or choose an arbitrary executor.
   JSON-RPC envelope, mismatched id, server error, malformed Initialize Result, or
   more than 16 notifications before the response fails closed.
 - stdout is bounded to 64 KiB per response and stderr to 4 KiB per session across
-  all handshake reads. The host timeout starts before spawn and covers spawn,
-  read, write and wait. Cancellation is checked on each loop iteration.
+  all handshake reads. The host timeout starts before spawn and bounds the spawn
+  result plus later read, write and wait; after a spawn timeout, cleanup
+  confirmation may add a bounded grace. The transport waits for the spawn
+  worker, terminates any child it created and confirms cleanup before returning
+  `Timeout`; an unconfirmed cleanup returns `CleanupFailed`. Cancellation is
+  checked on each loop iteration.
 - The server runs in its own process group. Cleanup, including a failed
   handshake, kills the whole group, reaps the direct child and reports
   `CleanupFailed` rather than leaving descendants or hiding a failed reap.

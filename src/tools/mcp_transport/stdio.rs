@@ -94,19 +94,40 @@ pub(super) fn spawn(
 ) -> Result<StdioChild, McpLifecycleError> {
     let config = config.clone();
     let (sender, receiver) = mpsc::sync_channel(1);
+    let (done_sender, done_receiver) = mpsc::sync_channel(1);
     thread::spawn(move || {
         let result = spawn_inner(&config);
         let _ = sender.send(result);
+        let _ = done_sender.send(());
     });
     let remaining = deadline.saturating_duration_since(Instant::now());
     match receiver.recv_timeout(remaining) {
         Ok(result) => result,
-        Err(RecvTimeoutError::Timeout) => Err(McpLifecycleError::Timeout),
+        Err(RecvTimeoutError::Timeout) => {
+            done_receiver
+                .recv_timeout(REAP_TIMEOUT)
+                .map_err(|_| McpLifecycleError::CleanupFailed)
+                .and_then(|_| match receiver.try_recv() {
+                    Ok(Ok(mut stdio)) => stdio.child.terminate(),
+                    Ok(Err(_)) => Ok(()),
+                    Err(_) => Err(McpLifecycleError::CleanupFailed),
+                })
+                .map_err(|_| McpLifecycleError::CleanupFailed)?;
+            Err(McpLifecycleError::Timeout)
+        }
         Err(RecvTimeoutError::Disconnected) => Err(McpLifecycleError::SpawnFailed),
     }
 }
 
 fn spawn_inner(config: &McpStdioConfig) -> Result<StdioChild, McpLifecycleError> {
+    #[cfg(test)]
+    if config
+        .args
+        .iter()
+        .any(|arg| arg.contains("krypper-spawn-delay"))
+    {
+        thread::sleep(Duration::from_millis(50));
+    }
     let mut command = Command::new(&config.executable);
     command
         .args(&config.args)
