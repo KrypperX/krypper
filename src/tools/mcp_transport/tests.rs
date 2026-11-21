@@ -1,4 +1,4 @@
-use super::lifecycle::connect_stdio;
+use super::lifecycle::{cleanup_on_error, connect_stdio};
 use super::stdio::spawn;
 use super::*;
 use std::fs;
@@ -410,6 +410,33 @@ fn handshake_error_terminates_server_before_returning() {
         0,
         "server survived failed handshake"
     );
+}
+
+#[test]
+fn confirmed_cleanup_preserves_the_primary_handshake_error() {
+    for primary in [
+        McpLifecycleError::Cancelled,
+        McpLifecycleError::Timeout,
+        McpLifecycleError::Disconnected,
+        McpLifecycleError::ProtocolViolation,
+    ] {
+        assert_eq!(cleanup_on_error(primary, || Ok(())), primary);
+    }
+}
+
+#[test]
+fn unconfirmed_cleanup_fails_closed_over_the_primary_handshake_error() {
+    for primary in [
+        McpLifecycleError::Cancelled,
+        McpLifecycleError::Timeout,
+        McpLifecycleError::Disconnected,
+        McpLifecycleError::ProtocolViolation,
+    ] {
+        assert_eq!(
+            cleanup_on_error(primary, || Err(McpLifecycleError::CleanupFailed)),
+            McpLifecycleError::CleanupFailed
+        );
+    }
 }
 
 #[test]
