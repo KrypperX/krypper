@@ -24,11 +24,11 @@ The authoritative runtime checks are:
 - Task ownership, running-turn state, grant presence and workspace binding in `src/core/lifecycle/session.rs:440-472`.
 - The registered `offline_cargo_test` operation and closed request schema in `src/tools/registry.rs:280-289` and `src/tools/registry.rs:147-152`.
 - Harness action dispatch and typed process observation in `src/harness/execution/action.rs:102-121`.
-- Filter validation and fixed argv construction in `src/tools/process/policy.rs:59-95`.
+- Filter validation and fixed argv construction in `validate_test_filter` and `cargo_command_args` in `src/tools/process/policy.rs`.
 - Fail-closed platform, cleanup-latch, cancellation, lease, supervisor, probe and resource-readback gates in `src/tools/process/supervisor.rs:549-621` and `src/tools/process/supervisor.rs:439-465`.
 - Sandbox mounts, namespace flags, fixed payload environment and descriptor hygiene in `src/tools/process/sandbox.rs:32-135` and `src/tools/process/sandbox.rs:138-195`.
 
-Registry effect descriptions, tool metadata and model output are descriptive inputs only; they do not authorize a process. The versioned descriptor in `src/tools/process_profile.rs` is also descriptive: its own module contract says it registers no tool, grants no authority, selects no sandbox and launches no process (`src/tools/process_profile.rs:1-6`).
+Registry effect descriptions, tool metadata and model output are descriptive inputs only; they do not authorize a process. The versioned descriptor in `src/tools/process_profile.rs` is also descriptive: its own module contract says it registers no tool, grants no authority, selects no sandbox and launches no process. The fixed policy validates the `offline_cargo_test` descriptor and uses its executable and argument prefix; cwd, environment, sandbox flags and runtime limits remain owned by the policy and supervisor.
 
 ### Implemented boundaries
 
@@ -47,7 +47,7 @@ Registry effect descriptions, tool metadata and model output are descriptive inp
 
 ### Relation to the versioned profile descriptor
 
-`src/tools/process_profile.rs` defines a v1 descriptor with validating construction, a fixed executable allowlist, closed argument grammar, reviewed environment names and hard ceilings. It has no production caller. Its argument grammar rejects option-like values and spaces, while the live Cargo profile requires `--offline`, `--locked`, `--all-targets` and permits literal filters containing spaces (`src/tools/process/policy.rs:78-89`). Its 300-second wall and 240-second CPU ceilings are contract maxima, not runtime configuration; live execution clamps to the fixed policy values (`src/tools/process/supervisor.rs:552-554`). Do not describe this descriptor as the live launch contract.
+`src/tools/process_profile.rs` defines a v1 descriptor with validating construction, a fixed executable allowlist, closed argument grammar, reviewed environment names and hard ceilings. The fixed policy constructs and validates `ProcessProfile::offline_cargo_test()` and uses its executable and argument prefix to build the command. The generic argument grammar still rejects option-like values and spaces; only the exact fixed `offline_cargo_test` descriptor may carry `--offline`, `--locked` and `--all-targets`, and other profile IDs remain unsupported. Its 300-second wall and 240-second CPU ceilings are contract maxima, not runtime configuration; the fixed Cargo profile pins 180 seconds and 120 CPU seconds, and an ordinary test keeps those values aligned with the live policy. Do not describe this descriptor as a general launch contract or as owning cwd, environment, sandbox flags or runtime limits.
 
 ### Current unknowns
 

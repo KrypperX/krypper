@@ -616,7 +616,7 @@ pub(super) fn run_with_bounds(
             return Ok(());
         }
         let mut command = sandbox(root, policy, &supervisor.group)?;
-        command.args(cargo_command_args(test_filter));
+        command.args(cargo_command_args(policy.profile(), test_filter));
         result.outcome = ProcessOutcome::SpawnFailed;
         let mut child = ManagedChild(Some(command.spawn()?));
         launched = true;

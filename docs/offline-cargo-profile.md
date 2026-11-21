@@ -49,7 +49,10 @@ Brain / caller: OfflineCargoTest
 
 Trusted embedding code creates `OfflineCargoPolicy::new(toolchain, registry)`
 and grants it to one existing task with
-`TaskSession::authorize_offline_cargo_tests(task_id, policy)`. The toolchain
+`TaskSession::authorize_offline_cargo_tests(task_id, policy)`. Policy
+construction validates the fixed `ProcessProfile::offline_cargo_test()`
+descriptor and uses its executable and fixed argument prefix; cwd, environment,
+sandbox flags and runtime limits remain owned by the policy and supervisor. The toolchain
 must contain real ELF `bin/cargo` and `bin/rustc`, their libraries, and any
 native compiler/linker needed by the workload (in `bin/` or the trusted system
 runtime). These are preprovisioned, trusted directories outside task

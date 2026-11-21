@@ -1,5 +1,6 @@
 //! The fixed offline Cargo policy: limits, test filters and the trusted toolchain profile.
 
+use crate::tools::process_profile::ProcessProfile;
 use crate::tools::{capture_workspace_root_at, WorkspaceRoot};
 use std::ffi::OsString;
 use std::fs::File;
@@ -24,6 +25,7 @@ pub struct OfflineCargoPolicy {
     pub(super) toolchain: WorkspaceRoot,
     pub(super) registry: WorkspaceRoot,
     pub(super) cancelled: Arc<AtomicBool>,
+    pub(super) profile: ProcessProfile<'static>,
 }
 
 impl OfflineCargoPolicy {
@@ -45,12 +47,18 @@ impl OfflineCargoPolicy {
             toolchain,
             registry,
             cancelled: Arc::new(AtomicBool::new(false)),
+            profile: ProcessProfile::offline_cargo_test()
+                .map_err(|error| format!("invalid fixed process profile: {error:?}"))?,
         })
     }
 
     /// A trusted caller may cancel the current run. Cancellation never raises a limit.
     pub fn cancellation(&self) -> Arc<AtomicBool> {
         self.cancelled.clone()
+    }
+
+    pub(super) fn profile(&self) -> &ProcessProfile<'static> {
+        &self.profile
     }
 }
 
@@ -75,18 +83,12 @@ pub(crate) fn validate_test_filter(test_filter: Option<&str>) -> Result<(), &'st
     Ok(())
 }
 
-pub(super) fn cargo_command_args(test_filter: Option<&str>) -> Vec<OsString> {
-    let mut args = [
-        "--",
-        "/toolchain/bin/cargo",
-        "test",
-        "--offline",
-        "--locked",
-        "--all-targets",
-    ]
-    .into_iter()
-    .map(OsString::from)
-    .collect::<Vec<_>>();
+pub(super) fn cargo_command_args(
+    profile: &ProcessProfile<'_>,
+    test_filter: Option<&str>,
+) -> Vec<OsString> {
+    let mut args = vec![OsString::from("--"), OsString::from(profile.executable())];
+    args.extend(profile.arguments().iter().copied().map(OsString::from));
     if let Some(test_filter) = test_filter {
         args.push(OsString::from("--"));
         args.push(OsString::from(test_filter));

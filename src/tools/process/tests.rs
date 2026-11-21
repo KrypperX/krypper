@@ -1,6 +1,7 @@
 use super::*;
 use crate::brain::OllamaDecisionSource;
 use crate::task_lifecycle::{TaskSession, TaskState, TurnOutcome, TurnState};
+use crate::tools::process_profile::ProcessProfile;
 use serde_json::{json, Value};
 use std::ffi::OsString;
 use std::io::{Read, Write};
@@ -270,7 +271,8 @@ fn invalid_filter_returns_before_workspace_process_launch() {
 
 #[test]
 fn cargo_filter_is_one_literal_argument_after_the_fixed_separator() {
-    let fixed = cargo_command_args(None);
+    let profile = ProcessProfile::offline_cargo_test().unwrap();
+    let fixed = cargo_command_args(&profile, None);
     assert_eq!(
         fixed,
         [
@@ -284,7 +286,7 @@ fn cargo_filter_is_one_literal_argument_after_the_fixed_separator() {
         .map(OsString::from)
     );
 
-    let filtered = cargo_command_args(Some("module::selected test"));
+    let filtered = cargo_command_args(&profile, Some("module::selected test"));
     assert_eq!(
         filtered,
         [
@@ -299,6 +301,16 @@ fn cargo_filter_is_one_literal_argument_after_the_fixed_separator() {
         ]
         .map(OsString::from)
     );
+}
+
+#[test]
+fn fixed_profile_matches_the_live_process_bounds() {
+    let profile = ProcessProfile::offline_cargo_test().unwrap();
+    assert_eq!(profile.limits().wall_secs, WALL.as_secs());
+    assert_eq!(profile.limits().cpu_ms * 1_000, CPU_BUDGET);
+    assert_eq!(profile.limits().memory_bytes, MEMORY);
+    assert_eq!(profile.limits().output_bytes, OUTPUT);
+    assert_eq!(profile.limits().processes, TASKS);
 }
 
 #[test]

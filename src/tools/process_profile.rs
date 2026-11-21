@@ -2,8 +2,10 @@
 //!
 //! A profile descriptor is descriptive metadata only. It does not register a
 //! tool, grant an authority, select a sandbox backend or launch a process.
-//! Runtime authorization stays with TaskSession and the existing Tools boundary.
-//! Construction validates the contract, so an unvalidated descriptor cannot exist.
+//! The fixed offline Cargo policy validates the `offline_cargo_test` descriptor
+//! and uses its executable and argument prefix. Runtime authorization stays with
+//! TaskSession and the existing Tools boundary. Construction validates the
+//! contract, so an unvalidated descriptor cannot exist.
 
 /// The only profile contract format currently understood by Krypper.
 pub const PROFILE_CONTRACT_VERSION: u32 = 1;
@@ -29,6 +31,17 @@ const ALLOWED_ENVIRONMENT_NAMES: &[&str] = &[
     "RUSTC",
     "LANG",
 ];
+const OFFLINE_CARGO_TEST_ID: &str = "offline_cargo_test";
+const OFFLINE_CARGO_TEST_EXECUTABLE: &str = "/toolchain/bin/cargo";
+const OFFLINE_CARGO_TEST_ARGUMENTS: &[&str] = &["test", "--offline", "--locked", "--all-targets"];
+const OFFLINE_CARGO_TEST_CWD: &str = ".";
+const OFFLINE_CARGO_TEST_LIMITS: ProfileLimits = ProfileLimits {
+    wall_secs: 180,
+    cpu_ms: 120_000,
+    memory_bytes: 3 * 1024 * 1024 * 1024,
+    output_bytes: 256 * 1024,
+    processes: 128,
+};
 
 /// Hard ceilings for one profile run. Values must be finite and non-zero.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -64,6 +77,22 @@ pub enum ProfileContractError {
     InvalidEnvironmentAllowlist,
     InvalidLimits,
     UnknownField,
+}
+
+impl ProcessProfile<'static> {
+    /// The single approved offline Cargo test profile used by the host policy.
+    pub fn offline_cargo_test() -> Result<Self, ProfileContractError> {
+        Self::new(
+            PROFILE_CONTRACT_VERSION,
+            OFFLINE_CARGO_TEST_ID,
+            OFFLINE_CARGO_TEST_EXECUTABLE,
+            OFFLINE_CARGO_TEST_ARGUMENTS,
+            OFFLINE_CARGO_TEST_CWD,
+            ALLOWED_ENVIRONMENT_NAMES,
+            OFFLINE_CARGO_TEST_LIMITS,
+            &[],
+        )
+    }
 }
 
 impl<'a> ProcessProfile<'a> {
@@ -103,31 +132,49 @@ impl<'a> ProcessProfile<'a> {
         if !valid_identifier(self.id) {
             return Err(ProfileContractError::InvalidIdentifier);
         }
-        if self.executable.len() > MAX_EXECUTABLE_BYTES
-            || !ALLOWED_EXECUTABLES.contains(&self.executable)
-        {
-            return Err(ProfileContractError::InvalidExecutable);
-        }
-        if self.arguments.len() > MAX_ARGUMENTS
-            || self
-                .arguments
+        if self.id == OFFLINE_CARGO_TEST_ID {
+            if self.executable != OFFLINE_CARGO_TEST_EXECUTABLE {
+                return Err(ProfileContractError::InvalidExecutable);
+            }
+            if self.arguments != OFFLINE_CARGO_TEST_ARGUMENTS {
+                return Err(ProfileContractError::InvalidArgument);
+            }
+            if self.cwd != OFFLINE_CARGO_TEST_CWD {
+                return Err(ProfileContractError::InvalidCwd);
+            }
+            if self.environment_allowlist != ALLOWED_ENVIRONMENT_NAMES {
+                return Err(ProfileContractError::InvalidEnvironmentAllowlist);
+            }
+            if self.limits != OFFLINE_CARGO_TEST_LIMITS {
+                return Err(ProfileContractError::InvalidLimits);
+            }
+        } else {
+            if self.executable.len() > MAX_EXECUTABLE_BYTES
+                || !ALLOWED_EXECUTABLES.contains(&self.executable)
+            {
+                return Err(ProfileContractError::InvalidExecutable);
+            }
+            if self.arguments.len() > MAX_ARGUMENTS
+                || self
+                    .arguments
+                    .iter()
+                    .any(|argument| !valid_argument(argument))
+            {
+                return Err(ProfileContractError::InvalidArgument);
+            }
+            if !valid_cwd(self.cwd) {
+                return Err(ProfileContractError::InvalidCwd);
+            }
+            if self
+                .environment_allowlist
                 .iter()
-                .any(|argument| !valid_argument(argument))
-        {
-            return Err(ProfileContractError::InvalidArgument);
-        }
-        if !valid_cwd(self.cwd) {
-            return Err(ProfileContractError::InvalidCwd);
-        }
-        if self
-            .environment_allowlist
-            .iter()
-            .any(|name| !ALLOWED_ENVIRONMENT_NAMES.contains(name))
-        {
-            return Err(ProfileContractError::InvalidEnvironmentAllowlist);
-        }
-        if !valid_limits(&self.limits) {
-            return Err(ProfileContractError::InvalidLimits);
+                .any(|name| !ALLOWED_ENVIRONMENT_NAMES.contains(name))
+            {
+                return Err(ProfileContractError::InvalidEnvironmentAllowlist);
+            }
+            if !valid_limits(&self.limits) {
+                return Err(ProfileContractError::InvalidLimits);
+            }
         }
         if !self.extra_fields.is_empty() {
             return Err(ProfileContractError::UnknownField);
@@ -459,5 +506,72 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(item.id(), "offline-check");
         assert_eq!(before, after);
+    }
+
+    #[test]
+    fn fixed_offline_cargo_profile_has_the_live_command_shape() {
+        let item = ProcessProfile::offline_cargo_test().unwrap();
+        assert_eq!(item.version(), PROFILE_CONTRACT_VERSION);
+        assert_eq!(item.id(), "offline_cargo_test");
+        assert_eq!(item.executable(), "/toolchain/bin/cargo");
+        assert_eq!(
+            item.arguments(),
+            &["test", "--offline", "--locked", "--all-targets"]
+        );
+        assert_eq!(item.cwd(), ".");
+        assert_eq!(
+            item.environment_allowlist(),
+            &[
+                "PATH",
+                "HOME",
+                "TMPDIR",
+                "CARGO_HOME",
+                "CARGO_BUILD_JOBS",
+                "CARGO_TARGET_DIR",
+                "RUSTC",
+                "LANG"
+            ]
+        );
+        assert_eq!(
+            item.limits(),
+            ProfileLimits {
+                wall_secs: 180,
+                cpu_ms: 120_000,
+                memory_bytes: 3 * 1024 * 1024 * 1024,
+                output_bytes: 256 * 1024,
+                processes: 128,
+            }
+        );
+        assert!(item.extra_fields().is_empty());
+    }
+
+    #[test]
+    fn fixed_cargo_arguments_are_rejected_for_other_profile_ids() {
+        assert_eq!(
+            ProcessProfile::new(
+                PROFILE_CONTRACT_VERSION,
+                "offline-check",
+                "/toolchain/bin/cargo",
+                &["test", "--offline"],
+                ".",
+                &["LANG"],
+                limits(),
+                &[],
+            ),
+            Err(ProfileContractError::InvalidArgument)
+        );
+        assert_eq!(
+            ProcessProfile::new(
+                PROFILE_CONTRACT_VERSION,
+                "offline_cargo_test",
+                "/toolchain/bin/cargo",
+                &["test"],
+                ".",
+                &["LANG"],
+                limits(),
+                &[],
+            ),
+            Err(ProfileContractError::InvalidArgument)
+        );
     }
 }
