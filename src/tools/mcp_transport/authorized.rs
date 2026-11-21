@@ -35,8 +35,7 @@ pub fn connect_stdio_authorized(
         effect: ExtensionEffect::ExecuteProcess,
         authority: ExtensionAuthority::TaskAndHostGrant,
     };
-    capability_policy::evaluate(&launch, context, grant)
-        .map_err(AuthorizedConnectError::Denied)?;
+    capability_policy::evaluate(&launch, context, grant).map_err(AuthorizedConnectError::Denied)?;
     connect_stdio(config, cancel).map_err(AuthorizedConnectError::Transport)
 }
 
@@ -76,15 +75,12 @@ mod tests {
         let cancel = McpCancellation::new();
         assert!(matches!(
             connect_stdio_authorized(&config(), &cancel, context, None),
-            Err(AuthorizedConnectError::Denied(CapabilityDenial::MissingGrant))
+            Err(AuthorizedConnectError::Denied(
+                CapabilityDenial::MissingGrant
+            ))
         ));
         assert!(matches!(
-            connect_stdio_authorized(
-                &config(),
-                &cancel,
-                context,
-                Some(&grant(Uuid::new_v4()))
-            ),
+            connect_stdio_authorized(&config(), &cancel, context, Some(&grant(Uuid::new_v4()))),
             Err(AuthorizedConnectError::Denied(CapabilityDenial::WrongTask))
         ));
     }
@@ -108,7 +104,9 @@ mod tests {
         unapproved.host_approved = false;
         assert!(matches!(
             connect_stdio_authorized(&config(), &cancel, context, Some(&unapproved)),
-            Err(AuthorizedConnectError::Denied(CapabilityDenial::HostApprovalRequired))
+            Err(AuthorizedConnectError::Denied(
+                CapabilityDenial::HostApprovalRequired
+            ))
         ));
     }
 
@@ -127,7 +125,9 @@ mod tests {
                 context,
                 Some(&grant(task_id))
             ),
-            Err(AuthorizedConnectError::Transport(McpLifecycleError::SpawnFailed))
+            Err(AuthorizedConnectError::Transport(
+                McpLifecycleError::SpawnFailed
+            ))
         ));
     }
 }
