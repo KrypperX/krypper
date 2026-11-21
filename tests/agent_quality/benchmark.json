@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "fixtures": [
+    "artifact_creation",
+    "denied_escape",
+    "cancelled_turn"
+  ],
+  "baseline": {
+    "sha": "a5ba8e938ef73d3ceec25f6ab01ff309716803b6",
+    "config": {
+      "mode": "reactive",
+      "action_budget": 2,
+      "cost_per_action": 1,
+      "tool_grants": ["read_file", "create_file"],
+      "runtime": "offline-local",
+      "provider": "none",
+      "model": "scripted-fixture-v1",
+      "prompt_policy": "fixed-script",
+      "secrets": ["fixture-only-secret-3f9a2b"]
+    }
+  },
+  "candidate": {
+    "sha": "a5ba8e938ef73d3ceec25f6ab01ff309716803b6",
+    "config": {
+      "mode": "planned",
+      "action_budget": 3,
+      "cost_per_action": 1,
+      "tool_grants": ["read_file", "create_file"],
+      "runtime": "offline-local",
+      "provider": "none",
+      "model": "scripted-fixture-v1",
+      "prompt_policy": "fixed-script",
+      "secrets": ["fixture-only-secret-3f9a2b"]
+    }
+  }
+}
