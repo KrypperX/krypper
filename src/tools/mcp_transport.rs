@@ -125,4 +125,31 @@ mod tests {
         config.args = vec![String::new(); 129];
         assert_eq!(config.validate(), Err(McpConfigError::TooManyArguments));
     }
+
+    #[test]
+    fn accepts_maximum_argument_count_and_rejects_one_more() {
+        let mut config = valid();
+        config.args = vec![String::new(); 128];
+        assert_eq!(config.validate(), Ok(()));
+        config.args.push(String::new());
+        assert_eq!(config.validate(), Err(McpConfigError::TooManyArguments));
+    }
+
+    #[test]
+    fn enforces_individual_argument_byte_limit() {
+        let mut config = valid();
+        config.args = vec!["x".repeat(16 * 1024)];
+        assert_eq!(config.validate(), Ok(()));
+        config.args[0].push('x');
+        assert_eq!(config.validate(), Err(McpConfigError::InvalidArgument));
+    }
+
+    #[test]
+    fn accepts_maximum_timeout_and_rejects_longer_timeout() {
+        let mut config = valid();
+        config.timeout = MAX_MCP_TIMEOUT;
+        assert_eq!(config.validate(), Ok(()));
+        config.timeout += Duration::from_nanos(1);
+        assert_eq!(config.validate(), Err(McpConfigError::InvalidTimeout));
+    }
 }
