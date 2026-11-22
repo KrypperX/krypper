@@ -9,7 +9,7 @@ use crate::harness::verification::{
     reconcile_task_state_with_checks, verify_completion_checks, CompletionCheckEvidence,
     CompletionVerification, CompletionVerificationStatus, RequiredCompletionCheck,
 };
-use crate::task_lifecycle::{TaskSession, TurnState};
+use crate::task_lifecycle::{TaskSession, TaskState, TurnOutcome, TurnState};
 use crate::tools::registry::workspace_operations;
 use crate::{ProcessOutcome, ProcessResult};
 use std::collections::BTreeSet;
@@ -199,7 +199,7 @@ where
 /// budget is shared. The caller must pass the original total action budget; correction receives
 /// only the slots left after the initial turn. A correction is considered only after a completed
 /// initial turn whose checks are failed or unknown. TaskSession is transitioned to success only
-/// after the final independent checks pass on a completed turn.
+/// after the final independent checks pass on a completed turn. A correction-phase\n/// error fails the running task after closing any still-running correction turn.
 pub fn run_goal_turn_with_completion_correction<D, E, P, PE>(
     session: &mut TaskSession,
     task_id: Uuid,
@@ -301,9 +301,14 @@ where
         goal,
         remaining_actions,
     );
-    let correction_turn_id =
-        create_follow_up_turn(session, task_id).map_err(CompletionCorrectionError::Session)?;
-    let correction_result = run_goal_turn_with_plan_result(
+    let correction_turn_id = match create_follow_up_turn(session, task_id) {
+        Ok(id) => id,
+        Err(error) => {
+            fail_correction_task(session, task_id, None).map_err(CompletionCorrectionError::Session)?;
+            return Err(CompletionCorrectionError::Session(error));
+        }
+    };
+    let correction_result = match run_goal_turn_with_plan_result(
         session,
         task_id,
         correction_turn_id,
@@ -311,8 +316,14 @@ where
         remaining_actions,
         plan,
         decision_source,
-    )
-    .map_err(CompletionCorrectionError::Execution)?;
+    ) {
+        Ok(result) => result,
+        Err(error) => {
+            fail_correction_task(session, task_id, Some(correction_turn_id))
+                .map_err(CompletionCorrectionError::Session)?;
+            return Err(CompletionCorrectionError::Execution(error));
+        }
+    };
     let final_evidence = check_evidence(session, &correction_result);
     let final_verification = reconcile_task_state_with_checks(
         session,
@@ -340,7 +351,7 @@ const MIN_PROCESS_CORRECTION_ACTIONS: usize = 4;
 /// receives only the original action-budget slots left after the first attempt. A later test
 /// observation verifies tests only when it is complete, successful, ran at least one test, and
 /// followed the last workspace mutation. Existing independent completion checks remain required
-/// for task success.
+/// for task success. Correction-phase errors fail the running task after\n/// closing any still-running correction turn.
 pub fn run_goal_turn_with_process_failure_correction<D, E, P, PE>(
     session: &mut TaskSession,
     task_id: Uuid,
@@ -433,9 +444,14 @@ where
         goal,
         remaining_actions,
     );
-    let correction_turn_id =
-        create_follow_up_turn(session, task_id).map_err(ProcessFailureCorrectionError::Session)?;
-    let correction_result = run_goal_turn_with_plan_result(
+    let correction_turn_id = match create_follow_up_turn(session, task_id) {
+        Ok(id) => id,
+        Err(error) => {
+            fail_correction_task(session, task_id, None).map_err(ProcessFailureCorrectionError::Session)?;
+            return Err(ProcessFailureCorrectionError::Session(error));
+        }
+    };
+    let correction_result = match run_goal_turn_with_plan_result(
         session,
         task_id,
         correction_turn_id,
@@ -443,8 +459,14 @@ where
         remaining_actions,
         plan,
         decision_source,
-    )
-    .map_err(ProcessFailureCorrectionError::Execution)?;
+    ) {
+        Ok(result) => result,
+        Err(error) => {
+            fail_correction_task(session, task_id, Some(correction_turn_id))
+                .map_err(ProcessFailureCorrectionError::Session)?;
+            return Err(ProcessFailureCorrectionError::Execution(error));
+        }
+    };
     let test_verification = process_test_verification(&correction_result, true);
     let final_evidence = check_evidence(session, &correction_result);
     let final_stop_reason = if test_verification == ProcessTestVerificationStatus::Passed {
@@ -621,6 +643,38 @@ impl std::error::Error for ProcessFailureCorrectionError {
             Self::Session(error) => Some(error),
         }
     }
+}
+
+/// Fail a correction task only after closing an active follow-up turn. The original
+/// execution error remains the caller-visible error when cleanup succeeds.
+fn fail_correction_task(
+    session: &mut TaskSession,
+    task_id: Uuid,
+    correction_turn_id: Option<Uuid>,
+) -> io::Result<()> {
+    if let Some(turn_id) = correction_turn_id {
+        let task = session
+            .get_task(task_id)
+            .ok_or_else(|| io::Error::other("task was not found in its session"))?;
+        if task.get_turn(turn_id).is_some_and(|turn| turn.state() == TurnState::Running) {
+            session
+                .complete_turn(
+                    task_id,
+                    turn_id,
+                    TurnOutcome::Failure {
+                        detail: "correction execution failed".to_owned(),
+                    },
+                )
+                .map_err(io::Error::other)?;
+        }
+    }
+    let task = session
+        .get_task_mut(task_id)
+        .ok_or_else(|| io::Error::other("task was not found in its session"))?;
+    if task.state() == TaskState::Running {
+        task.transition(TaskState::Failed).map_err(io::Error::other)?;
+    }
+    Ok(())
 }
 
 fn create_follow_up_turn(session: &mut TaskSession, task_id: Uuid) -> io::Result<Uuid> {
