@@ -10,6 +10,77 @@ use super::providers;
 use super::providers::*;
 use super::request::*;
 
+/// Validates a provider endpoint before any credential header is attached.
+///
+/// Only `https` endpoints are accepted. Plaintext `http` is tolerated for
+/// loopback development servers (`127.0.0.0/8`, `::1` and `localhost`), which the
+/// test suite and local proxies rely on. Userinfo (`user:pass@host`) and
+/// non-http(s) schemes are always rejected.
+pub(crate) fn validate_endpoint(endpoint: &str) -> Result<(), ModelError> {
+    if endpoint
+        .chars()
+        .any(|character| character.is_whitespace() || character.is_control())
+    {
+        return Err(ModelError::InvalidEndpoint);
+    }
+    let (scheme, rest) = endpoint
+        .split_once("://")
+        .ok_or(ModelError::InvalidEndpoint)?;
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    if authority.is_empty() || authority.contains('@') {
+        return Err(ModelError::InvalidEndpoint);
+    }
+    let host = if let Some(bracketed) = authority.strip_prefix('[') {
+        let (host, remainder) = bracketed
+            .split_once(']')
+            .ok_or(ModelError::InvalidEndpoint)?;
+        if let Some(port) = remainder.strip_prefix(':') {
+            if !valid_endpoint_port(port) {
+                return Err(ModelError::InvalidEndpoint);
+            }
+        } else if !remainder.is_empty() {
+            return Err(ModelError::InvalidEndpoint);
+        }
+        host
+    } else {
+        let (host, port) = match authority.split_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (authority, None),
+        };
+        if let Some(port) = port {
+            if !valid_endpoint_port(port) {
+                return Err(ModelError::InvalidEndpoint);
+            }
+        }
+        host
+    };
+    if host.is_empty() {
+        return Err(ModelError::InvalidEndpoint);
+    }
+    if scheme.eq_ignore_ascii_case("https") {
+        return Ok(());
+    }
+    if scheme.eq_ignore_ascii_case("http") && is_loopback_endpoint_host(host) {
+        return Ok(());
+    }
+    Err(ModelError::InvalidEndpoint)
+}
+
+fn valid_endpoint_port(port: &str) -> bool {
+    !port.is_empty()
+        && port.bytes().all(|byte| byte.is_ascii_digit())
+        && port.parse::<u16>().is_ok()
+}
+
+fn is_loopback_endpoint_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .map(|address| address.is_loopback())
+            .unwrap_or(false)
+}
+
 pub(crate) fn model_agent() -> Agent {
     let config = Agent::config_builder()
         .proxy(None)
@@ -63,6 +134,7 @@ pub(crate) fn post_hosted_sse<F>(
 where
     F: FnMut(crate::streaming::SseFrame) -> Result<(), ModelError>,
 {
+    validate_endpoint(endpoint)?;
     if body.len() > MAX_MODEL_REQUEST_BYTES {
         return Err(ModelError::RequestTooLarge);
     }
@@ -147,6 +219,7 @@ pub(crate) fn post_hosted(
     api_version: Option<&str>,
     body: &[u8],
 ) -> Result<Vec<u8>, ModelError> {
+    validate_endpoint(endpoint)?;
     if body.len() > MAX_MODEL_REQUEST_BYTES {
         return Err(ModelError::RequestTooLarge);
     }

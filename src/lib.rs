@@ -20,6 +20,15 @@ pub use brain::{
 };
 
 /// Host-facing API for provider-authorized extensions and existing Harness dispatch.
+///
+/// The decision sources re-exported here (`GeminiDecisionSource`,
+/// `ResponsesDecisionSource`, `AnthropicDecisionSource` and
+/// `OpenAiCompatibleDecisionSource`) take a caller-supplied endpoint through their
+/// `with_endpoint_and_extensions` constructors. Endpoints must use `https`;
+/// plaintext `http` is accepted only for loopback development servers
+/// (`127.0.0.1`, `::1` and `localhost`). Any other origin, userinfo in the
+/// authority, or a non-http(s) scheme is rejected with `ModelError::InvalidEndpoint`
+/// before the API key is attached, so no request and no credential is sent.
 pub mod extensions {
     pub use crate::brain::provider_bridge::{
         anthropic_declarations, authorize_dispatch, authorized_declarations, gemini_declarations,

@@ -32,6 +32,7 @@ pub(crate) use dto::{OllamaChatResponse, OllamaMessageRole};
 pub use errors::ModelError;
 pub(crate) use http::{
     model_agent, post_chat, post_hosted, post_hosted_sse, post_responses_text_stream,
+    validate_endpoint,
 };
 pub(crate) use limits::{OLLAMA_ADDRESS, SYSTEM_INSTRUCTIONS};
 pub(crate) use parse::{parse_model_plan_response, parse_responses_response};

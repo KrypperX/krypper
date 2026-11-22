@@ -204,6 +204,7 @@ fn request_body(request: &[u8]) -> Value {
 
 mod completion;
 mod correction;
+mod endpoint;
 mod guidance;
 mod ollama_plan;
 mod parser;
