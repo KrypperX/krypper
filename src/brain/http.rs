@@ -134,6 +134,26 @@ pub(crate) fn post_hosted_sse<F>(
 where
     F: FnMut(crate::streaming::SseFrame) -> Result<(), ModelError>,
 {
+    post_hosted_sse_with_headers(agent, provider, endpoint, api_key, &[], body, on_frame)
+}
+
+/// Like [`post_hosted_sse`], with additional fixed request headers.
+///
+/// `extra_headers` must hold only non-secret, provider-defined header names
+/// and values that were validated by the caller (for example
+/// `anthropic-workspace-id`). Authentication headers are never taken from it.
+pub(crate) fn post_hosted_sse_with_headers<F>(
+    agent: &Agent,
+    provider: ModelProvider,
+    endpoint: &str,
+    api_key: &str,
+    extra_headers: &[(&str, &str)],
+    body: &[u8],
+    on_frame: F,
+) -> Result<(), ModelError>
+where
+    F: FnMut(crate::streaming::SseFrame) -> Result<(), ModelError>,
+{
     validate_endpoint(endpoint)?;
     if body.len() > MAX_MODEL_REQUEST_BYTES {
         return Err(ModelError::RequestTooLarge);
@@ -150,6 +170,11 @@ where
     } else {
         request.header("Authorization", &authorization)
     };
+    let request = extra_headers
+        .iter()
+        .fold(request, |request, (name, value)| {
+            request.header(*name, *value)
+        });
     let response = request.send(body).map_err(|error| match error {
         ureq::Error::StatusCode(status) => ModelError::ProviderHttpStatus(provider, status),
         _ => ModelError::ProviderTransport(provider),
@@ -219,6 +244,23 @@ pub(crate) fn post_hosted(
     api_version: Option<&str>,
     body: &[u8],
 ) -> Result<Vec<u8>, ModelError> {
+    post_hosted_with_headers(agent, provider, endpoint, api_key, api_version, &[], body)
+}
+
+/// Like [`post_hosted`], with additional fixed request headers.
+///
+/// `extra_headers` must hold only non-secret, provider-defined header names
+/// and values that were validated by the caller (for example
+/// `anthropic-workspace-id`). Authentication headers are never taken from it.
+pub(crate) fn post_hosted_with_headers(
+    agent: &Agent,
+    provider: ModelProvider,
+    endpoint: &str,
+    api_key: &str,
+    api_version: Option<&str>,
+    extra_headers: &[(&str, &str)],
+    body: &[u8],
+) -> Result<Vec<u8>, ModelError> {
     validate_endpoint(endpoint)?;
     if body.len() > MAX_MODEL_REQUEST_BYTES {
         return Err(ModelError::RequestTooLarge);
@@ -236,6 +278,11 @@ pub(crate) fn post_hosted(
         Some(version) => request.header("anthropic-version", version),
         None => request,
     };
+    let request = extra_headers
+        .iter()
+        .fold(request, |request, (name, value)| {
+            request.header(*name, *value)
+        });
     let response = request.send(body).map_err(|error| match error {
         ureq::Error::StatusCode(status) => ModelError::ProviderHttpStatus(provider, status),
         _ => ModelError::ProviderTransport(provider),

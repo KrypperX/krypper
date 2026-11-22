@@ -1089,6 +1089,50 @@ fn xai_credentials_are_loaded_only_for_explicit_selection() {
 }
 
 #[test]
+fn anthropic_workspace_id_environment_is_optional_and_validated() {
+    let _lock = PROVIDER_ENV_TEST_LOCK
+        .lock()
+        .expect("lock provider environment tests");
+    let _restore_key =
+        RestoreEnvironmentVariable::set("ANTHROPIC_API_KEY", "local-anthropic-test-key");
+    let provider = ModelProvider::parse("anthropic").expect("parse Anthropic provider");
+    let prepare = || {
+        prepare_model_source(
+            Some("claude-local-test".to_owned()),
+            Some(provider),
+            1,
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+        )
+    };
+
+    {
+        let _unset = RestoreEnvironmentVariable::remove("ANTHROPIC_WORKSPACE_ID");
+        assert!(matches!(
+            prepare(),
+            Ok(Some(ModelDecisionSource::Anthropic(_)))
+        ));
+    }
+    {
+        let _set = RestoreEnvironmentVariable::set(
+            "ANTHROPIC_WORKSPACE_ID",
+            "wrkspc_01JwQvzr7rXLA5AGx3HKfFUJ",
+        );
+        assert!(matches!(
+            prepare(),
+            Ok(Some(ModelDecisionSource::Anthropic(_)))
+        ));
+    }
+    for invalid in ["", "a b", "a\nb", "wrk/space"] {
+        let _set = RestoreEnvironmentVariable::set("ANTHROPIC_WORKSPACE_ID", invalid);
+        assert_eq!(
+            prepare().err(),
+            Some("ANTHROPIC_WORKSPACE_ID must be 1-128 ASCII letters, digits, '-', '_' or '.'"),
+            "{invalid:?}"
+        );
+    }
+}
+
+#[test]
 fn hosted_provider_credentials_are_required_before_task_lifecycle_creation() {
     let _lock = PROVIDER_ENV_TEST_LOCK
         .lock()
@@ -1355,6 +1399,7 @@ fn task_help_documents_provider_selection_and_network_disclosure() {
         );
     }
     assert!(help.contains("no custom API URL is accepted"));
+    assert!(help.contains("optional ANTHROPIC_WORKSPACE_ID"));
     assert!(help.contains(
         "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
     ));

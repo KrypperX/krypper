@@ -265,13 +265,22 @@ Krypper uses fixed HTTPS endpoints and does not accept custom API URLs:
 | Gemini | `GEMINI_API_KEY` | `https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent` |
 | OpenAI | `OPENAI_API_KEY` | `https://api.openai.com/v1/responses` |
 | xAI | `XAI_API_KEY` | `https://api.x.ai/v1/responses` |
-| Anthropic | `ANTHROPIC_API_KEY` | `https://api.anthropic.com/v1/messages` |
+| Anthropic | `ANTHROPIC_API_KEY` (optional: `ANTHROPIC_WORKSPACE_ID`) | `https://api.anthropic.com/v1/messages` |
 | Cloudflare Workers AI | `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN` | `https://api.cloudflare.com/client/v4/accounts/<account-id>/ai/v1/chat/completions` |
 | Groq | `GROQ_API_KEY` | `https://api.groq.com/openai/v1/chat/completions` |
 | OpenRouter | `OPENROUTER_API_KEY` | `https://openrouter.ai/api/v1/chat/completions` |
 | DeepSeek | `DEEPSEEK_API_KEY` | `https://api.deepseek.com/chat/completions` |
 | Z.AI Standard API | `ZAI_API_KEY` | `https://api.z.ai/api/paas/v4/chat/completions` |
 | Mistral | `MISTRAL_API_KEY` | `https://api.mistral.ai/v1/chat/completions` |
+
+Anthropic requires the `anthropic-workspace-id` request header for API keys that
+are not scoped to a workspace; it is optional for workspace-scoped keys. When
+`ANTHROPIC_WORKSPACE_ID` is set, Krypper sends it as that header on both
+streaming and non-streaming requests (for example `wrkspc_01JwQvzr7rXLA5AGx3HKfFUJ`).
+The value is validated before a task starts (1-128 ASCII letters, digits, `-`,
+`_` or `.`); an invalid or empty value is an error rather than being ignored.
+When the variable is unset, no such header is sent. See Anthropic's
+[API overview](https://platform.claude.com/docs/en/api/overview).
 
 The account ID is validated as one path component before a task starts. Krypper
 reads credentials only for the selected provider and does not write keys to

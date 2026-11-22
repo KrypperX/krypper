@@ -88,6 +88,7 @@ pub(super) fn write_task_help(output: &mut dyn Write) -> io::Result<()> {
             "  openai: OPENAI_API_KEY -> https://api.openai.com/v1/responses\n",
             "  xai: XAI_API_KEY -> https://api.x.ai/v1/responses\n",
             "  anthropic: ANTHROPIC_API_KEY -> https://api.anthropic.com/v1/messages\n",
+            "    optional ANTHROPIC_WORKSPACE_ID is sent as anthropic-workspace-id (required by Anthropic for keys not scoped to a workspace)\n",
             "  cloudflare: CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN ->\n",
             "    https://api.cloudflare.com/client/v4/accounts/<account-id>/ai/v1/chat/completions\n",
             "  groq: GROQ_API_KEY -> https://api.groq.com/openai/v1/chat/completions\n",
