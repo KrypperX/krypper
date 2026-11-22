@@ -282,7 +282,7 @@ fn ordering_key_is_newest_evidence_first_and_stable() {
         1_002,
     )
     .unwrap();
-    let mut keyed = vec![&older, &newer];
+    let mut keyed = [&older, &newer];
     keyed.sort_by_key(|record| std::cmp::Reverse(record.ordering_key()));
     assert_eq!(keyed[0].content(), "newer");
     assert_eq!(older.ordering_key(), (1_000, older.id()));

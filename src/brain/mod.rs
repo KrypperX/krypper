@@ -30,6 +30,7 @@ pub(crate) use action::{action_from_error, action_from_provider_call};
 pub(crate) use decision::consume_decision_budget;
 pub(crate) use dto::{OllamaChatResponse, OllamaMessageRole};
 pub use errors::ModelError;
+#[allow(unused_imports)] // some re-exports are used only by tests
 pub(crate) use http::{
     model_agent, post_chat, post_hosted, post_hosted_sse, post_hosted_sse_with_headers,
     post_hosted_with_headers, post_responses_text_stream, validate_endpoint,
@@ -45,6 +46,7 @@ pub use providers::{
     ResponsesDecisionSource, ResponsesProvider,
 };
 pub(crate) use providers::{CloudflareAccountId, ModelDecisionSource, OpenAiCompatibleCredentials};
+#[allow(unused_imports)] // some re-exports are used only by tests
 pub(crate) use request::{
     build_anthropic_request, build_gemini_request, build_responses_request,
     enable_responses_streaming, encode_model_request, gemini_generate_content_endpoint,

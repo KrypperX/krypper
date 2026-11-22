@@ -66,7 +66,7 @@ impl fmt::Display for RepositoryContextError {
 impl std::error::Error for RepositoryContextError {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ContextError {
+pub enum ContextError {
     RequestEncoding,
     ObservationsTooLarge,
 }

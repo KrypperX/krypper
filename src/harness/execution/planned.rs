@@ -191,6 +191,7 @@ where
     run_goal_turn_with_budget(session, task_id, turn_id, goal, max_actions, &mut source)
 }
 
+#[allow(clippy::too_many_arguments)]
 /// Runs the opt-in independent-check flow and permits at most one bounded correction.
 ///
 /// The initial turn and optional initial plan use the existing Harness path. `check_evidence`
@@ -346,6 +347,7 @@ where
 
 const MIN_PROCESS_CORRECTION_ACTIONS: usize = 4;
 
+#[allow(clippy::too_many_arguments)]
 /// Runs one task turn and permits a single correction for a complete offline Cargo failure.
 ///
 /// A correction is eligible only when the last observation is a complete, cleanup-confirmed

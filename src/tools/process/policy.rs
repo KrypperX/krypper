@@ -56,7 +56,7 @@ impl OfflineCargoPolicy {
     }
 }
 
-/// No outcome except `Exited(0)` with complete output and confirmed cleanup is success.
+// No outcome except `Exited(0)` with complete output and confirmed cleanup is success.
 
 pub(crate) fn validate_test_filter(test_filter: Option<&str>) -> Result<(), &'static str> {
     let Some(test_filter) = test_filter else {

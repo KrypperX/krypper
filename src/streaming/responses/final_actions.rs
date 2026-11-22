@@ -23,6 +23,7 @@ impl ResponsesFinalActions {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     /// Consume one frame in provider order, returning untrusted actions only
     /// after successful response completion and all per-call done events.
     pub fn consume(

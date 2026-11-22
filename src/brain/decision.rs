@@ -247,6 +247,7 @@ impl OllamaDecisionSource {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     /// Runs one bounded initial turn, independent checks, and at most one correction cycle.
     ///
     /// `check_evidence` must use TaskSession observations or deterministic local checks outside
@@ -301,6 +302,7 @@ impl OllamaDecisionSource {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     /// Runs a task turn with one bounded correction after a complete offline Cargo failure.
     ///
     /// Correction proposals use the same Brain decision budget and registered workspace tools.

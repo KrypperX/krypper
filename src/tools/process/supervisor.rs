@@ -93,8 +93,8 @@ impl ProcessResult {
     }
 }
 
-/// All system-manager commands have fixed executables, bounded output and a hard wait.
-/// No caller-provided command, bus address, environment, or shell is accepted.
+// All system-manager commands have fixed executables, bounded output and a hard wait.
+// No caller-provided command, bus address, environment, or shell is accepted.
 
 struct ManagedChild(Option<std::process::Child>);
 impl std::ops::Deref for ManagedChild {

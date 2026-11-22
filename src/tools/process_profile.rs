@@ -95,6 +95,7 @@ impl ProcessProfile<'static> {
     }
 }
 
+#[allow(dead_code)] // accessors for descriptor consumers that are not wired yet
 impl<'a> ProcessProfile<'a> {
     /// Validate and construct a descriptor from typed host-owned fields.
     ///
@@ -578,6 +579,7 @@ mod tests {
         );
     }
 
+    #[allow(clippy::type_complexity)]
     #[test]
     fn fixed_profile_rejects_every_non_exact_field() {
         let cases: [(

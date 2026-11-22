@@ -1,3 +1,6 @@
+// Shared by several test and example targets; each target uses a subset.
+#![allow(dead_code)]
+
 use super::harness::{
     Config, ExecutionMode, FixtureClass, FixtureRequest, FixtureResult, ToolGrant,
     VerificationObservation,
@@ -687,7 +690,7 @@ fn evaluate(
         }
         FixtureClass::FailedTest | FixtureClass::SandboxUnavailable => Evaluation {
             success: observed == GoalTurnStopReason::ActionFailed
-                && workspace.join(SUMMARY).exists() == false,
+                && !workspace.join(SUMMARY).exists(),
             expected: "stop=ActionFailed with no workspace mutation".to_owned(),
             verification: VerificationObservation::NotApplicable,
         },
