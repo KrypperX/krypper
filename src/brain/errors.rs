@@ -18,6 +18,8 @@ pub enum ModelError {
     RequestEncoding,
     /// The model request exceeded the allowed size.
     RequestTooLarge,
+    /// The provider endpoint is not a safe `https` (or loopback `http`) origin.
+    InvalidEndpoint,
     /// Prior observations exceeded the allowed context size.
     ObservationsTooLarge,
     /// The local model service is unavailable.
@@ -41,8 +43,6 @@ pub enum ModelError {
     },
     /// The local model supplied invalid arguments.
     InvalidArguments(&'static str),
-    /// The hosted endpoint is malformed or insecure for credentials.
-    InvalidProviderEndpoint,
     /// A hosted model request failed in transit.
     ProviderTransport(ModelProvider),
     /// A hosted model returned an error status.
@@ -82,6 +82,9 @@ impl fmt::Display for ModelError {
             Self::InvalidModelName(message) => formatter.write_str(message),
             Self::RequestEncoding => formatter.write_str("could not encode the model request"),
             Self::RequestTooLarge => formatter.write_str("model request exceeded 4 MiB"),
+            Self::InvalidEndpoint => formatter.write_str(
+                "model endpoint must use https, or http on a loopback host such as 127.0.0.1 or localhost",
+            ),
             Self::ObservationsTooLarge => {
                 formatter.write_str("task observations exceeded the 2 MiB model context limit")
             }
@@ -105,8 +108,6 @@ impl fmt::Display for ModelError {
                     "Ollama tool call has invalid arguments: {message}"
                 )
             }
-            Self::InvalidProviderEndpoint => formatter
-                .write_str("hosted endpoint requires HTTPS or HTTP loopback without userinfo"),
             Self::ProviderTransport(provider) => {
                 write!(formatter, "{} request failed", provider.label())
             }
