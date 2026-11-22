@@ -191,6 +191,9 @@ where
     run_goal_turn_with_budget(session, task_id, turn_id, goal, max_actions, &mut source)
 }
 
+// Reserve a reflection decision, one workspace operation, and task control.
+const MIN_COMPLETION_CORRECTION_ACTIONS: usize = 3;
+
 #[allow(clippy::too_many_arguments)]
 /// Runs the opt-in independent-check flow and permits at most one bounded correction.
 ///
@@ -276,9 +279,7 @@ where
     }
 
     let remaining_actions = max_actions.saturating_sub(initial_result.actions_taken());
-    // The existing Brain path reserves a reflection decision, one workspace operation, and
-    // task control before it can make a correction proposal.
-    if remaining_actions < 3 {
+    if remaining_actions < MIN_COMPLETION_CORRECTION_ACTIONS {
         let final_verification = reconcile_task_state_with_checks(
             session,
             task_id,
