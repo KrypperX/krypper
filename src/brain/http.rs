@@ -12,7 +12,9 @@ use super::providers::*;
 use super::request::*;
 
 fn validate_hosted_endpoint(endpoint: &str) -> Result<(), ModelError> {
-    let uri: Uri = endpoint.parse().map_err(|_| ModelError::InvalidProviderEndpoint)?;
+    let uri: Uri = endpoint
+        .parse()
+        .map_err(|_| ModelError::InvalidProviderEndpoint)?;
     let authority = uri.authority().ok_or(ModelError::InvalidProviderEndpoint)?;
     let host = authority.host();
     if host.is_empty() || authority.as_str().contains('@') {
@@ -24,7 +26,11 @@ fn validate_hosted_endpoint(endpoint: &str) -> Result<(), ModelError> {
             let bare_host = host.trim_start_matches('[').trim_end_matches(']');
             let loopback = bare_host.eq_ignore_ascii_case("localhost")
                 || bare_host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback());
-            if loopback { Ok(()) } else { Err(ModelError::InvalidProviderEndpoint) }
+            if loopback {
+                Ok(())
+            } else {
+                Err(ModelError::InvalidProviderEndpoint)
+            }
         }
         _ => Err(ModelError::InvalidProviderEndpoint),
     }
@@ -207,13 +213,26 @@ mod endpoint_tests {
     use super::validate_hosted_endpoint;
     #[test]
     fn accepts_https_and_loopback() {
-        for url in ["https://api.example.com/v1", "http://127.0.0.1:1234/v1", "http://[::1]:1234/v1", "http://localhost:1234/v1"] {
+        for url in [
+            "https://api.example.com/v1",
+            "http://127.0.0.1:1234/v1",
+            "http://[::1]:1234/v1",
+            "http://localhost:1234/v1",
+        ] {
             assert!(validate_hosted_endpoint(url).is_ok(), "{url}");
         }
     }
     #[test]
     fn rejects_insecure_endpoints() {
-        for url in ["http://example.com/v1", "http://192.168.1.2/v1", "https://user:pw@example.com/v1", "http://user:pw@localhost/v1", "ftp://example.com/v1", "file:///etc/passwd", "/relative/path"] {
+        for url in [
+            "http://example.com/v1",
+            "http://192.168.1.2/v1",
+            "https://user:pw@example.com/v1",
+            "http://user:pw@localhost/v1",
+            "ftp://example.com/v1",
+            "file:///etc/passwd",
+            "/relative/path",
+        ] {
             assert!(validate_hosted_endpoint(url).is_err(), "{url}");
         }
     }
