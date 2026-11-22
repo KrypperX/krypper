@@ -186,8 +186,8 @@ fn nonblocking(pipe: &impl AsRawFd) -> io::Result<()> {
     // SAFETY: `pipe` is borrowed for the whole function, so its descriptor stays open;
     // `F_GETFL`/`F_SETFL` take and return plain integers and touch no memory.
     let flags = unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_GETFL) };
-    // SAFETY: same descriptor and same reasoning as the `F_GETFL` call above.
     if flags < 0
+        // SAFETY: same descriptor and same reasoning as the `F_GETFL` call above.
         || unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
     {
         return Err(io::Error::last_os_error());
