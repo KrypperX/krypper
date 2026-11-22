@@ -11,7 +11,7 @@ use std::process::{Command, Stdio};
 
 pub(super) fn host_command(executable: &str) -> Command {
     let mut command = Command::new(executable);
-    let uid = unsafe { libc::geteuid() };
+    let uid = super::effective_uid();
     command
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
@@ -42,10 +42,14 @@ pub(super) fn sandbox(
     // Keep sources above destinations so dup2 cannot overwrite a later source descriptor.
     let mut pinned = Vec::new();
     for fd in roots {
+        // SAFETY: `fd` owns a live descriptor for the whole call, and `F_DUPFD_CLOEXEC`
+        // with a plain integer minimum has no other memory or ownership requirements.
         let duplicate = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 203) };
         if duplicate < 0 {
             return Err(io::Error::last_os_error());
         }
+        // SAFETY: `duplicate` was checked to be nonnegative just above, so it is a fresh
+        // descriptor that nothing else owns; the `OwnedFd` takes sole ownership.
         pinned.push(unsafe { OwnedFd::from_raw_fd(duplicate) });
     }
     let roots = pinned;
@@ -133,8 +137,15 @@ pub(super) fn sandbox(
         "--remount-ro",
         "/",
     ]);
-    // Only async-signal-safe libc calls between fork and exec. Pinned directory descriptors
-    // remove validation-to-mount pathname races; cgroup attachment precedes sandbox exec.
+    // Pinned directory descriptors remove validation-to-mount pathname races; cgroup
+    // attachment precedes sandbox exec.
+    //
+    // SAFETY: the closure runs between fork and exec, where only async-signal-safe calls are
+    // allowed. It calls only `getpid`, `write`, `syscall(SYS_close_range)`, `dup2`,
+    // `setrlimit` and `prctl`, all of which are async-signal-safe. It formats the pid into a
+    // stack buffer, performs no heap allocation, takes no locks, and builds errors with
+    // `io::Error::last_os_error`, which only reads `errno`. The descriptors it uses
+    // (`attach`, `roots`) are moved into the closure and stay open until exec.
     #[cfg(target_os = "linux")]
     unsafe {
         command.pre_exec(move || {

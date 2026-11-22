@@ -183,8 +183,11 @@ fn bounded_host(command: &mut Command) -> io::Result<String> {
 }
 
 fn nonblocking(pipe: &impl AsRawFd) -> io::Result<()> {
+    // SAFETY: `pipe` is borrowed for the whole function, so its descriptor stays open;
+    // `F_GETFL`/`F_SETFL` take and return plain integers and touch no memory.
     let flags = unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_GETFL) };
     if flags < 0
+        // SAFETY: same descriptor and same reasoning as the `F_GETFL` call above.
         || unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
     {
         return Err(io::Error::last_os_error());
@@ -222,7 +225,7 @@ struct HostLease {
 }
 impl HostLease {
     fn acquire() -> io::Result<Self> {
-        let uid = unsafe { libc::geteuid() };
+        let uid = super::effective_uid();
         let directory = PathBuf::from(format!("/run/user/{uid}"));
         let metadata = fs::symlink_metadata(&directory)?;
         if !metadata.is_dir() || metadata.uid() != uid || metadata.mode() & 0o022 != 0 {
@@ -244,6 +247,8 @@ impl HostLease {
         {
             return Err(io::Error::other("untrusted execution lease"));
         }
+        // SAFETY: `file` owns a live descriptor for the duration of the call, and `flock`
+        // takes only that descriptor and an integer operation.
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
             return Err(io::Error::other("another offline profile is active"));
         }
@@ -572,7 +577,7 @@ pub(super) fn run_with_bounds(
         wall,
         output,
         cpu_budget,
-        cfg!(target_os = "linux") && unsafe { libc::geteuid() } != 0,
+        cfg!(target_os = "linux") && super::effective_uid() != 0,
     )
 }
 

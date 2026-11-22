@@ -55,6 +55,9 @@ impl ManagedChild {
         // Send SIGKILL before reaping: while the child remains unreaped, its PID
         // cannot be recycled into an unrelated process group.
         let pgid = child.id() as libc::pid_t;
+        // SAFETY: `kill` takes only integers. `pgid` is the id of the child's own process
+        // group (set by `process_group(0)` at spawn), and the child has not been reaped yet,
+        // so the id cannot refer to an unrelated group.
         if unsafe { libc::kill(-pgid, libc::SIGKILL) } != 0
             && io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
         {
@@ -77,6 +80,8 @@ impl ManagedChild {
         // bounded timeout would only cause a spurious CleanupFailed in that case.
         let start = Instant::now();
         loop {
+            // SAFETY: signal 0 delivers nothing and only probes whether the group exists;
+            // `kill` takes only integers.
             if unsafe { libc::kill(-pgid, 0) } == -1 {
                 if io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
                     return Err(McpLifecycleError::CleanupFailed);
@@ -282,7 +287,10 @@ fn check(deadline: Instant, cancel: &McpCancellation) -> Result<(), McpLifecycle
 }
 
 fn set_nonblocking(fd: i32) -> Result<(), McpLifecycleError> {
+    // SAFETY: `F_GETFL`/`F_SETFL` take and return plain integers and touch no memory. The
+    // caller passes a descriptor it owns and keeps open for this call.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    // SAFETY: same descriptor and same reasoning as the `F_GETFL` call above.
     if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
         Err(McpLifecycleError::Io(io::Error::last_os_error().kind()))
     } else {

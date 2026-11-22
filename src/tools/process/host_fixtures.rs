@@ -38,7 +38,7 @@ pub(super) struct RealHost {
 /// Every prerequisite the fixed profile needs before workspace code may launch. Values are the
 /// evidence, so a failure names what the operator has to provision rather than a bare assert.
 pub(super) fn host_prerequisites() -> Vec<(&'static str, bool)> {
-    let uid = unsafe { libc::geteuid() };
+    let uid = super::effective_uid();
     vec![
         ("linux", cfg!(target_os = "linux")),
         ("non_root", uid != 0),
