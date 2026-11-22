@@ -58,6 +58,7 @@ fn config(script: &str, log: &Path, timeout: Duration) -> McpStdioConfig {
 fn assert_process_group_gone(pgid: i32) {
     let start = Instant::now();
     loop {
+        // SAFETY: signal 0 only probes whether the process group exists; `kill` takes only integers.
         if unsafe { libc::kill(-pgid, 0) } == -1 {
             assert_eq!(
                 io::Error::last_os_error().raw_os_error(),
@@ -405,11 +406,9 @@ fn handshake_error_terminates_server_before_returning() {
         .trim()
         .parse()
         .unwrap_or_else(|_| panic!("bad pid log: {pid_text:?}"));
-    assert_ne!(
-        unsafe { libc::kill(pid, 0) },
-        0,
-        "server survived failed handshake"
-    );
+    // SAFETY: signal 0 only probes whether the process exists; `kill` takes only integers.
+    let probe = unsafe { libc::kill(pid, 0) };
+    assert_ne!(probe, 0, "server survived failed handshake");
 }
 
 #[test]
