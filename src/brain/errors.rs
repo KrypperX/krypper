@@ -105,7 +105,8 @@ impl fmt::Display for ModelError {
                     "Ollama tool call has invalid arguments: {message}"
                 )
             }
-            Self::InvalidProviderEndpoint => formatter.write_str("hosted endpoint requires HTTPS or HTTP loopback without userinfo"),
+            Self::InvalidProviderEndpoint => formatter
+                .write_str("hosted endpoint requires HTTPS or HTTP loopback without userinfo"),
             Self::ProviderTransport(provider) => {
                 write!(formatter, "{} request failed", provider.label())
             }
