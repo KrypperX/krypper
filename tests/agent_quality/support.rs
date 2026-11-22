@@ -1,3 +1,6 @@
+// Shared by several test and example targets; each target uses a subset.
+#![allow(dead_code)]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;

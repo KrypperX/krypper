@@ -79,6 +79,7 @@ pub enum ProfileContractError {
     UnknownField,
 }
 
+#[allow(dead_code)] // accessors for descriptor consumers that are not wired yet
 impl ProcessProfile<'static> {
     /// The single approved offline Cargo test profile used by the host policy.
     pub fn offline_cargo_test() -> Result<Self, ProfileContractError> {
@@ -578,6 +579,7 @@ mod tests {
         );
     }
 
+    #[allow(clippy::type_complexity)]
     #[test]
     fn fixed_profile_rejects_every_non_exact_field() {
         let cases: [(

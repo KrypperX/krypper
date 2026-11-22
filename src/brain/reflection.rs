@@ -436,6 +436,7 @@ struct ReflectivePlanPromptOptions<'a> {
     project_guidance: Option<&'a str>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_reflective_plan_request(
     model: &str,
     goal: &str,

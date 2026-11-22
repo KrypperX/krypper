@@ -74,7 +74,7 @@ pub(crate) struct ActiveSkill {
 
 /// Bounded, deterministic activation result for the planning context.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
-pub(crate) struct SkillContext {
+pub struct SkillContext {
     pub(crate) skills: Vec<ActiveSkill>,
     pub(crate) bytes: usize,
     pub(crate) truncated: bool,

@@ -276,6 +276,7 @@ impl OpenAiCompatibleCredentials {
     }
 }
 
+#[allow(dead_code)] // convenience form without extensions; used by tests
 pub(crate) fn build_compatible_chat_request(
     model: &str,
     provider: OpenAiCompatibleProvider,
@@ -1717,7 +1718,7 @@ mod tests {
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .expect("set timeout");
             let mut request = [0_u8; 16384];
-            socket.read(&mut request).expect("read request");
+            let _read = socket.read(&mut request).expect("read request");
             let body = format!(
                 "event: response.output_item.added\ndata: {}\n\n",
                 serde_json::json!({

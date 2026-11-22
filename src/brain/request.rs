@@ -74,6 +74,7 @@ fn build_chat_request_with_tools(
     encode_model_request(&request)
 }
 
+#[allow(dead_code)] // convenience form without extensions; used by tests
 pub(crate) fn build_chat_request(
     model: &str,
     goal: &str,
@@ -207,6 +208,7 @@ fn build_responses_request_with_tools(
     encode_model_request(&request)
 }
 
+#[allow(dead_code)] // convenience form without extensions; used by tests
 pub(crate) fn build_responses_request(
     model: &str,
     provider: ModelProvider,
@@ -284,6 +286,7 @@ fn build_anthropic_request_with_tools(
     encode_model_request(&request)
 }
 
+#[allow(dead_code)] // convenience form without extensions; used by tests
 pub(crate) fn build_anthropic_request(
     model: &str,
     goal: &str,
@@ -364,6 +367,7 @@ fn build_gemini_request_with_declarations(
     encode_model_request(&request)
 }
 
+#[allow(dead_code)] // convenience form without extensions; used by tests
 pub(crate) fn build_gemini_request(
     model: &str,
     goal: &str,

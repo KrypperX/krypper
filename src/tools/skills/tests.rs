@@ -121,8 +121,7 @@ fn rejects_absolute_and_parent_paths() {
         load_skills(&fixture.root, &[PathBuf::from("../outside.json")]),
         Err(SkillLoadError::OutsideWorkspace)
     );
-    let deep = std::iter::repeat("deep")
-        .take(17)
+    let deep = std::iter::repeat_n("deep", 17)
         .collect::<Vec<_>>()
         .join("/");
     assert_eq!(

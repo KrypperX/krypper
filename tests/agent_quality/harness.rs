@@ -1,3 +1,6 @@
+// Shared by several test and example targets; each target uses a subset.
+#![allow(dead_code)]
+
 use ring::digest;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
