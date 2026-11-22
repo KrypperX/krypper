@@ -259,7 +259,10 @@ mod decision_error_mapping_tests {
             ModelError::InvalidArguments("invalid"),
         ] {
             assert!(
-                matches!(action_from_error(error), WorkspaceAction::Unsupported { .. }),
+                matches!(
+                    action_from_error(error),
+                    WorkspaceAction::Unsupported { .. }
+                ),
                 "decision failures must not become extension requests"
             );
         }
