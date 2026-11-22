@@ -1,0 +1,26 @@
+name: Audit
+
+on:
+  push:
+    branches: [main]
+    paths: ["Cargo.toml", "Cargo.lock", ".github/workflows/audit.yml"]
+  pull_request:
+    branches: [main]
+    paths: ["Cargo.toml", "Cargo.lock", ".github/workflows/audit.yml"]
+  schedule:
+    # Weekly, so new RustSec advisories surface without a code change.
+    - cron: "41 3 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Check Cargo.lock against the RustSec advisory database
+        run: cargo audit
