@@ -4,7 +4,8 @@ use super::{
     action_from_error, action_from_provider_call, build_anthropic_request_with_extensions,
     build_responses_request_with_extensions, consume_decision_budget, encode_model_request,
     model_agent, parse_anthropic_response, parse_responses_response, post_hosted,
-    post_responses_text_stream, tool_definitions, ModelError, OllamaDecisionSource,
+    post_hosted_with_headers, post_responses_text_stream, tool_definitions, ModelError,
+    OllamaDecisionSource,
 };
 use crate::agent_loop::{BoundedDecisionSource, WorkspaceAction, WorkspaceObservation};
 use serde_json::{json, Value};
@@ -45,6 +46,7 @@ const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
 pub(super) const GEMINI_GENERATE_CONTENT_URL: &str =
     "https://generativelanguage.googleapis.com/v1beta/models";
 pub(super) const ANTHROPIC_API_VERSION: &str = "2026-10-21";
+const ANTHROPIC_WORKSPACE_HEADER: &str = "anthropic-workspace-id";
 const GROQ_CHAT_COMPLETIONS_URL: &str = "https://api.groq.com/openai/v1/chat/completions";
 const OPENROUTER_CHAT_COMPLETIONS_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 const DEEPSEEK_CHAT_COMPLETIONS_URL: &str = "https://api.deepseek.com/chat/completions";
@@ -176,6 +178,37 @@ impl TryFrom<&str> for GeminiModelName {
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
         {
             return Err("Gemini model name must be one safe path component");
+        }
+        Ok(Self(value.to_owned()))
+    }
+}
+
+/// Identifier sent in the `anthropic-workspace-id` request header.
+///
+/// The value is restricted to a conservative ASCII set so it can never
+/// contain whitespace, control characters or header-injection sequences.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct AnthropicWorkspaceId(String);
+
+impl AnthropicWorkspaceId {
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<&str> for AnthropicWorkspaceId {
+    type Error = &'static str;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        if value.is_empty()
+            || value.len() > 128
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        {
+            return Err(
+                "ANTHROPIC_WORKSPACE_ID must be 1-128 ASCII letters, digits, '-', '_' or '.'",
+            );
         }
         Ok(Self(value.to_owned()))
     }
@@ -954,6 +987,7 @@ pub struct AnthropicDecisionSource {
     agent: Agent,
     remaining_decisions: usize,
     extension_declarations: Vec<Value>,
+    workspace_id: Option<AnthropicWorkspaceId>,
 }
 
 impl AnthropicDecisionSource {
@@ -1008,7 +1042,26 @@ impl AnthropicDecisionSource {
             agent: model_agent(),
             remaining_decisions: action_budget,
             extension_declarations: extension_declarations.to_vec(),
+            workspace_id: None,
         }
+    }
+
+    /// Send the `anthropic-workspace-id` header with every request.
+    ///
+    /// Anthropic requires this header for API keys that are not scoped to a
+    /// workspace; it is optional for workspace-scoped keys. Without this call
+    /// no such header is sent. Returns an error for an empty, over-long or
+    /// non-identifier value.
+    pub fn with_workspace_id(mut self, workspace_id: &str) -> Result<Self, &'static str> {
+        self.workspace_id = Some(AnthropicWorkspaceId::try_from(workspace_id)?);
+        Ok(self)
+    }
+
+    fn workspace_headers(&self) -> Vec<(&'static str, &str)> {
+        self.workspace_id
+            .iter()
+            .map(|id| (ANTHROPIC_WORKSPACE_HEADER, id.as_str()))
+            .collect()
     }
 
     fn choose_with_streaming(
@@ -1062,11 +1115,13 @@ impl AnthropicDecisionSource {
         let mut completed_blocks = std::collections::BTreeSet::<usize>::new();
         let mut completed = false;
         let mut tool_use_stop = false;
-        super::post_hosted_sse(
+        let workspace_headers = self.workspace_headers();
+        super::post_hosted_sse_with_headers(
             &self.agent,
             ModelProvider::Anthropic,
             &self.endpoint,
             &self.api_key,
+            &workspace_headers,
             &request,
             |frame| {
                 let provider = ModelProvider::Anthropic;
@@ -1218,12 +1273,14 @@ impl AnthropicDecisionSource {
             project_guidance,
             &self.extension_declarations,
         )?;
-        let response = post_hosted(
+        let workspace_headers = self.workspace_headers();
+        let response = post_hosted_with_headers(
             &self.agent,
             ModelProvider::Anthropic,
             &self.endpoint,
             &self.api_key,
             Some(ANTHROPIC_API_VERSION),
+            &workspace_headers,
             &request,
         )?;
         parse_anthropic_response(&response)
@@ -1807,6 +1864,60 @@ mod tests {
     #[test]
     fn anthropic_mismatched_event_type_never_yields_an_action() {
         assert_anthropic_stream_decision(false, false, true);
+    }
+
+    #[test]
+    fn anthropic_stream_sends_workspace_header_only_when_configured() {
+        use super::AnthropicDecisionSource;
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::time::Duration;
+
+        for workspace_id in [None, Some("wrkspc_stream_test")] {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+            let endpoint = format!("http://{}", listener.local_addr().expect("address"));
+            let server = std::thread::spawn(move || {
+                let (mut socket, _) = listener.accept().expect("accept");
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .expect("timeout");
+                let mut received = Vec::new();
+                let mut chunk = [0_u8; 4096];
+                while !received.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let count = socket.read(&mut chunk).expect("request");
+                    if count == 0 {
+                        break;
+                    }
+                    received.extend_from_slice(&chunk[..count]);
+                }
+                socket
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .expect("response");
+                String::from_utf8_lossy(&received).to_ascii_lowercase()
+            });
+            let mut source =
+                AnthropicDecisionSource::with_endpoint("test-model", "local-test-key", 1, endpoint);
+            if let Some(workspace_id) = workspace_id {
+                source = source
+                    .with_workspace_id(workspace_id)
+                    .expect("valid workspace id");
+            }
+            let result = source.choose_with_streaming("read README", &[], None, true);
+            assert!(result.is_err(), "an empty stream never yields an action");
+            let received = server.join().expect("server completed");
+
+            assert!(received.contains("x-api-key: local-test-key"));
+            assert!(received.contains("anthropic-version:"));
+            assert_eq!(
+                received.contains("anthropic-workspace-id:"),
+                workspace_id.is_some()
+            );
+            if let Some(workspace_id) = workspace_id {
+                assert!(received.contains(&format!("anthropic-workspace-id: {workspace_id}")));
+            }
+        }
     }
 
     #[test]
