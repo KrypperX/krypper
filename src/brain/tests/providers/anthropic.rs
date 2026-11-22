@@ -90,6 +90,86 @@ fn anthropic_messages_request_uses_fixed_contract_and_normalizes_one_action() {
 }
 
 #[test]
+fn anthropic_workspace_header_is_sent_only_when_configured() {
+    for workspace_id in [None, Some("wrkspc_01JwQvzr7rXLA5AGx3HKfFUJ")] {
+        let (address, server) = mock_server(vec![ok(json!({
+            "stop_reason":"tool_use",
+            "content":[anthropic_tool_use("read_file", json!({"path":"plan.md"}))]
+        })
+        .to_string())]);
+        let endpoint = format!("http://{address}/v1/messages");
+        let mut source = AnthropicDecisionSource::with_endpoint(
+            "test-model:cloud",
+            "local-anthropic-test-key",
+            1,
+            endpoint,
+        );
+        if let Some(workspace_id) = workspace_id {
+            source = source
+                .with_workspace_id(workspace_id)
+                .expect("valid workspace id");
+        }
+        let action = source.choose_action("Inspect the plan", &[]);
+        let request = server.join().expect("join Anthropic mock server");
+
+        assert_eq!(
+            request_header(&request[0], "anthropic-workspace-id").as_deref(),
+            workspace_id
+        );
+        // Authentication and version headers are unchanged by the option.
+        assert_eq!(
+            request_header(&request[0], "authorization").as_deref(),
+            Some("Bearer local-anthropic-test-key")
+        );
+        assert_eq!(
+            request_header(&request[0], "anthropic-version").as_deref(),
+            Some("2026-10-21")
+        );
+        assert!(matches!(action, WorkspaceAction::ReadFile { .. }));
+    }
+}
+
+#[test]
+fn anthropic_workspace_id_rejects_empty_oversized_and_unsafe_values() {
+    let source = || {
+        AnthropicDecisionSource::with_endpoint(
+            "test-model:cloud",
+            "local-anthropic-test-key",
+            1,
+            "http://127.0.0.1:9/v1/messages".to_owned(),
+        )
+    };
+    let longest_valid = "x".repeat(128);
+    for valid in [
+        "wrkspc_01JwQvzr7rXLA5AGx3HKfFUJ",
+        "a",
+        "A-b_c.d",
+        longest_valid.as_str(),
+    ] {
+        assert!(source().with_workspace_id(valid).is_ok(), "{valid:?}");
+    }
+    let too_long = "x".repeat(129);
+    for invalid in [
+        "",
+        " ",
+        "a b",
+        " abc",
+        "abc ",
+        "a\r\nX-Injected: 1",
+        "a\0b",
+        "wrk/space",
+        "ไทย",
+        too_long.as_str(),
+    ] {
+        assert_eq!(
+            source().with_workspace_id(invalid).err(),
+            Some("ANTHROPIC_WORKSPACE_ID must be 1-128 ASCII letters, digits, '-', '_' or '.'"),
+            "{invalid:?}"
+        );
+    }
+}
+
+#[test]
 fn anthropic_messages_parser_rejects_malformed_unsupported_and_multiple_calls() {
     let one_call = anthropic_tool_use("complete_task", json!({"result":"done"}));
     let invalid_responses = [

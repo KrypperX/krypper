@@ -156,7 +156,37 @@ pub(super) fn prepare_model_source(
             )?)
         }
     };
-    Ok(Some(source))
+    Ok(Some(apply_anthropic_workspace_id(source)?))
+}
+
+/// Applies the optional `ANTHROPIC_WORKSPACE_ID` to an Anthropic source.
+///
+/// Anthropic requires the workspace header only for API keys that are not
+/// scoped to a workspace, so the variable is optional. Other providers pass
+/// through untouched.
+fn apply_anthropic_workspace_id(
+    source: ModelDecisionSource,
+) -> Result<ModelDecisionSource, &'static str> {
+    let ModelDecisionSource::Anthropic(anthropic) = source else {
+        return Ok(source);
+    };
+    let anthropic = match optional_workspace_id(std::env::var("ANTHROPIC_WORKSPACE_ID"))? {
+        Some(workspace_id) => anthropic.with_workspace_id(&workspace_id)?,
+        None => anthropic,
+    };
+    Ok(ModelDecisionSource::Anthropic(anthropic))
+}
+
+/// An unset variable means "not configured"; a set value (even an empty one)
+/// is passed on for validation so a typo fails fast instead of being ignored.
+fn optional_workspace_id(
+    value: Result<String, std::env::VarError>,
+) -> Result<Option<String>, &'static str> {
+    match value {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err("ANTHROPIC_WORKSPACE_ID must be valid UTF-8"),
+    }
 }
 
 fn hosted_api_key(
@@ -168,4 +198,33 @@ fn hosted_api_key(
         return Err(missing_message);
     }
     Ok(key)
+}
+
+#[cfg(test)]
+mod workspace_id_tests {
+    use super::optional_workspace_id;
+    use std::env::VarError;
+    use std::ffi::OsString;
+
+    #[test]
+    fn unset_is_not_configured_and_set_values_are_passed_on() {
+        assert_eq!(optional_workspace_id(Err(VarError::NotPresent)), Ok(None));
+        assert_eq!(
+            optional_workspace_id(Ok("wrkspc_test".to_owned())),
+            Ok(Some("wrkspc_test".to_owned()))
+        );
+        // An empty value is configured-but-invalid, so it reaches validation.
+        assert_eq!(
+            optional_workspace_id(Ok(String::new())),
+            Ok(Some(String::new()))
+        );
+    }
+
+    #[test]
+    fn non_unicode_value_is_rejected() {
+        assert_eq!(
+            optional_workspace_id(Err(VarError::NotUnicode(OsString::from("x")))),
+            Err("ANTHROPIC_WORKSPACE_ID must be valid UTF-8")
+        );
+    }
 }
