@@ -236,3 +236,62 @@ pub(crate) fn positive_integer(
         ModelError::InvalidArguments("line number or count is outside the supported range")
     })
 }
+
+#[cfg(test)]
+mod decision_error_mapping_tests {
+    use super::{action_from_error, ModelError, WorkspaceAction};
+    use serde_json::json;
+
+    #[test]
+    fn provider_and_local_failures_remain_failed_actions() {
+        for error in [
+            ModelError::DecisionBudgetExhausted,
+            ModelError::RequestEncoding,
+            ModelError::RequestTooLarge,
+            ModelError::InvalidEndpoint,
+            ModelError::ObservationsTooLarge,
+            ModelError::ServiceUnavailable,
+            ModelError::Transport("connection refused".to_owned()),
+            ModelError::ResponseTooLarge,
+            ModelError::HttpStatus(429),
+            ModelError::InvalidJson,
+            ModelError::InvalidToolCall("invalid"),
+            ModelError::InvalidArguments("invalid"),
+        ] {
+            assert!(
+                matches!(
+                    action_from_error(error),
+                    WorkspaceAction::Unsupported { .. }
+                ),
+                "decision failures must not become extension requests"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_tools_preserve_extension_dispatch_arguments() {
+        let arguments = json!({"key": "value"});
+        let action = action_from_error(ModelError::UnsupportedTool {
+            name: "custom_tool".to_owned(),
+            arguments: arguments.clone(),
+        });
+        assert_eq!(
+            action,
+            WorkspaceAction::Extension {
+                name: "custom_tool".to_owned(),
+                arguments,
+            }
+        );
+    }
+
+    #[test]
+    fn transport_errors_currently_expose_unstructured_text() {
+        let action = action_from_error(ModelError::Transport("connection refused".to_owned()));
+        assert_eq!(
+            action,
+            WorkspaceAction::Unsupported {
+                action: "Ollama request failed: connection refused".to_owned(),
+            }
+        );
+    }
+}
