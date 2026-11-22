@@ -79,7 +79,6 @@ pub enum ProfileContractError {
     UnknownField,
 }
 
-#[allow(dead_code)] // accessors for descriptor consumers that are not wired yet
 impl ProcessProfile<'static> {
     /// The single approved offline Cargo test profile used by the host policy.
     pub fn offline_cargo_test() -> Result<Self, ProfileContractError> {
@@ -96,6 +95,7 @@ impl ProcessProfile<'static> {
     }
 }
 
+#[allow(dead_code)] // accessors for descriptor consumers that are not wired yet
 impl<'a> ProcessProfile<'a> {
     /// Validate and construct a descriptor from typed host-owned fields.
     ///

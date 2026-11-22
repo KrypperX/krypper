@@ -31,7 +31,7 @@ fn record(key: &str, content: &str, recorded_at: u64) -> MemoryRecord {
 }
 
 fn enabled_store(path: &std::path::Path) -> MemoryStore {
-    MemoryStore::open_opt_in(path.clone(), true).expect("enabled store")
+    MemoryStore::open_opt_in(path.to_path_buf(), true).expect("enabled store")
 }
 
 #[test]

@@ -57,6 +57,7 @@ pub(crate) fn read_root_agents_md_at(
     })
 }
 
+#[allow(dead_code)] // injectable reader used by tests
 pub(super) fn read_root_agents_md_at_with_reader(
     root: &WorkspaceRoot,
     read: impl FnMut(&mut File) -> io::Result<Vec<u8>>,
