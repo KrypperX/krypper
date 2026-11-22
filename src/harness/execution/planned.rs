@@ -1453,3 +1453,54 @@ mod tests {
         );
     }
 }
+
+
+#[cfg(test)]
+mod correction_error_lifecycle_tests {
+    use super::fail_correction_task;
+    use crate::task_lifecycle::{TaskSession, TaskState, TurnOutcome, TurnState};
+
+    #[test]
+    fn correction_error_closes_running_turn_before_failing_task() {
+        let mut session = TaskSession::new();
+        let task_id = session.create_task("correction").id();
+        let task = session.get_task_mut(task_id).unwrap();
+        task.transition(TaskState::Running).unwrap();
+        let turn_id = task.create_turn().unwrap();
+        task.transition_turn(turn_id, TurnState::Running).unwrap();
+
+        fail_correction_task(&mut session, task_id, Some(turn_id)).unwrap();
+
+        let task = session.get_task(task_id).unwrap();
+        assert_eq!(task.state(), TaskState::Failed);
+        assert_eq!(task.get_turn(turn_id).unwrap().state(), TurnState::Failed);
+    }
+
+    #[test]
+    fn correction_setup_error_fails_task_without_follow_up_turn() {
+        let mut session = TaskSession::new();
+        let task_id = session.create_task("correction").id();
+        session.get_task_mut(task_id).unwrap().transition(TaskState::Running).unwrap();
+
+        fail_correction_task(&mut session, task_id, None).unwrap();
+
+        assert_eq!(session.get_task(task_id).unwrap().state(), TaskState::Failed);
+    }
+
+    #[test]
+    fn correction_cleanup_preserves_already_completed_turn() {
+        let mut session = TaskSession::new();
+        let task_id = session.create_task("correction").id();
+        let task = session.get_task_mut(task_id).unwrap();
+        task.transition(TaskState::Running).unwrap();
+        let turn_id = task.create_turn().unwrap();
+        task.transition_turn(turn_id, TurnState::Running).unwrap();
+        task.complete_turn(turn_id, TurnOutcome::Failure { detail: "original".into() }).unwrap();
+
+        fail_correction_task(&mut session, task_id, Some(turn_id)).unwrap();
+
+        let task = session.get_task(task_id).unwrap();
+        assert_eq!(task.state(), TaskState::Failed);
+        assert_eq!(task.get_turn(turn_id).unwrap().state(), TurnState::Failed);
+    }
+}
