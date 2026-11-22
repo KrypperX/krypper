@@ -772,7 +772,8 @@ impl ResponsesDecisionSource {
             &self.extension_declarations,
         )?;
         let request = super::enable_responses_streaming(&request)?;
-        let mut assembly = crate::streaming::ResponsesFinalActions::new(1, MAX_STREAMED_TOOL_ARGUMENT_BYTES);
+        let mut assembly =
+            crate::streaming::ResponsesFinalActions::new(1, MAX_STREAMED_TOOL_ARGUMENT_BYTES);
         let mut final_calls = None;
         let mut transport_done = false;
         super::post_hosted_sse(
@@ -1179,7 +1180,8 @@ impl AnthropicDecisionSource {
                                 .ok_or_else(invalid)?;
                             let (_, arguments) = blocks.get_mut(&index).ok_or_else(invalid)?;
                             if completed_blocks.contains(&index)
-                                || arguments.len().saturating_add(chunk.len()) > MAX_STREAMED_TOOL_ARGUMENT_BYTES
+                                || arguments.len().saturating_add(chunk.len())
+                                    > MAX_STREAMED_TOOL_ARGUMENT_BYTES
                             {
                                 return Err(invalid());
                             }
