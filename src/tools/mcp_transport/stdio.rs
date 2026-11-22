@@ -51,6 +51,9 @@ impl ManagedChild {
         let Some(mut child) = self.0.take() else {
             return Ok(());
         };
+        // spawn_inner uses process_group(0), so the child's PID is also its PGID.
+        // Send SIGKILL before reaping: while the child remains unreaped, its PID
+        // cannot be recycled into an unrelated process group.
         let pgid = child.id() as libc::pid_t;
         if unsafe { libc::kill(-pgid, libc::SIGKILL) } != 0
             && io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
@@ -69,6 +72,9 @@ impl ManagedChild {
             });
             return Err(McpLifecycleError::CleanupFailed);
         }
+        // After reaping, a recycled PGID could theoretically make this signal-0
+        // existence probe report a different group. No signal is delivered; the
+        // bounded timeout would only cause a spurious CleanupFailed in that case.
         let start = Instant::now();
         loop {
             if unsafe { libc::kill(-pgid, 0) } == -1 {
