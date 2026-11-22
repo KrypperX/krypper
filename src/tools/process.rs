@@ -39,3 +39,9 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 #[cfg(test)]
 use uuid::Uuid;
+
+/// The effective user id of this process.
+fn effective_uid() -> u32 {
+    // SAFETY: `geteuid` takes no arguments, has no preconditions and cannot fail.
+    unsafe { libc::geteuid() }
+}
