@@ -1,8 +1,7 @@
 //! HTTP transport for model requests, including streaming helpers.
 
 use std::io::Read;
-use std::net::{IpAddr, SocketAddr};
-use ureq::http::Uri;
+use std::net::SocketAddr;
 use ureq::Agent;
 
 use super::errors::*;
@@ -11,29 +10,75 @@ use super::providers;
 use super::providers::*;
 use super::request::*;
 
-fn validate_hosted_endpoint(endpoint: &str) -> Result<(), ModelError> {
-    let uri: Uri = endpoint
-        .parse()
-        .map_err(|_| ModelError::InvalidProviderEndpoint)?;
-    let authority = uri.authority().ok_or(ModelError::InvalidProviderEndpoint)?;
-    let host = authority.host();
-    if host.is_empty() || authority.as_str().contains('@') {
-        return Err(ModelError::InvalidProviderEndpoint);
+/// Validates a provider endpoint before any credential header is attached.
+///
+/// Only `https` endpoints are accepted. Plaintext `http` is tolerated for
+/// loopback development servers (`127.0.0.0/8`, `::1` and `localhost`), which the
+/// test suite and local proxies rely on. Userinfo (`user:pass@host`) and
+/// non-http(s) schemes are always rejected.
+pub(crate) fn validate_endpoint(endpoint: &str) -> Result<(), ModelError> {
+    if endpoint
+        .chars()
+        .any(|character| character.is_whitespace() || character.is_control())
+    {
+        return Err(ModelError::InvalidEndpoint);
     }
-    match uri.scheme_str() {
-        Some("https") => Ok(()),
-        Some("http") => {
-            let bare_host = host.trim_start_matches('[').trim_end_matches(']');
-            let loopback = bare_host.eq_ignore_ascii_case("localhost")
-                || bare_host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback());
-            if loopback {
-                Ok(())
-            } else {
-                Err(ModelError::InvalidProviderEndpoint)
+    let (scheme, rest) = endpoint
+        .split_once("://")
+        .ok_or(ModelError::InvalidEndpoint)?;
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    if authority.is_empty() || authority.contains('@') {
+        return Err(ModelError::InvalidEndpoint);
+    }
+    let host = if let Some(bracketed) = authority.strip_prefix('[') {
+        let (host, remainder) = bracketed
+            .split_once(']')
+            .ok_or(ModelError::InvalidEndpoint)?;
+        if let Some(port) = remainder.strip_prefix(':') {
+            if !valid_endpoint_port(port) {
+                return Err(ModelError::InvalidEndpoint);
+            }
+        } else if !remainder.is_empty() {
+            return Err(ModelError::InvalidEndpoint);
+        }
+        host
+    } else {
+        let (host, port) = match authority.split_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (authority, None),
+        };
+        if let Some(port) = port {
+            if !valid_endpoint_port(port) {
+                return Err(ModelError::InvalidEndpoint);
             }
         }
-        _ => Err(ModelError::InvalidProviderEndpoint),
+        host
+    };
+    if host.is_empty() {
+        return Err(ModelError::InvalidEndpoint);
     }
+    if scheme.eq_ignore_ascii_case("https") {
+        return Ok(());
+    }
+    if scheme.eq_ignore_ascii_case("http") && is_loopback_endpoint_host(host) {
+        return Ok(());
+    }
+    Err(ModelError::InvalidEndpoint)
+}
+
+fn valid_endpoint_port(port: &str) -> bool {
+    !port.is_empty()
+        && port.bytes().all(|byte| byte.is_ascii_digit())
+        && port.parse::<u16>().is_ok()
+}
+
+fn is_loopback_endpoint_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .map(|address| address.is_loopback())
+            .unwrap_or(false)
 }
 
 pub(crate) fn model_agent() -> Agent {
@@ -89,10 +134,10 @@ pub(crate) fn post_hosted_sse<F>(
 where
     F: FnMut(crate::streaming::SseFrame) -> Result<(), ModelError>,
 {
+    validate_endpoint(endpoint)?;
     if body.len() > MAX_MODEL_REQUEST_BYTES {
         return Err(ModelError::RequestTooLarge);
     }
-    validate_hosted_endpoint(endpoint)?;
     let authorization = format!("Bearer {api_key}");
     let request = agent
         .post(endpoint)
@@ -174,10 +219,10 @@ pub(crate) fn post_hosted(
     api_version: Option<&str>,
     body: &[u8],
 ) -> Result<Vec<u8>, ModelError> {
+    validate_endpoint(endpoint)?;
     if body.len() > MAX_MODEL_REQUEST_BYTES {
         return Err(ModelError::RequestTooLarge);
     }
-    validate_hosted_endpoint(endpoint)?;
     let request = agent
         .post(endpoint)
         .header("Content-Type", "application/json");
@@ -209,22 +254,25 @@ pub(crate) fn post_hosted(
 }
 
 #[cfg(test)]
-mod endpoint_tests {
-    use super::validate_hosted_endpoint;
+mod endpoint_security_regression_tests {
+    use super::validate_endpoint;
+
     #[test]
-    fn accepts_https_and_loopback() {
-        for url in [
+    fn accepts_https_and_local_loopback() {
+        for endpoint in [
             "https://api.example.com/v1",
             "http://127.0.0.1:1234/v1",
+            "http://127.1.2.3:1234/v1",
             "http://[::1]:1234/v1",
             "http://localhost:1234/v1",
         ] {
-            assert!(validate_hosted_endpoint(url).is_ok(), "{url}");
+            assert!(validate_endpoint(endpoint).is_ok(), "{endpoint}");
         }
     }
+
     #[test]
-    fn rejects_insecure_endpoints() {
-        for url in [
+    fn rejects_insecure_or_malformed_endpoints() {
+        for endpoint in [
             "http://example.com/v1",
             "http://192.168.1.2/v1",
             "https://user:pw@example.com/v1",
@@ -232,8 +280,11 @@ mod endpoint_tests {
             "ftp://example.com/v1",
             "file:///etc/passwd",
             "/relative/path",
+            "http://localhost:99999/v1",
+            "https://example.com:abc/v1",
+            "https://example.com/\nheader",
         ] {
-            assert!(validate_hosted_endpoint(url).is_err(), "{url}");
+            assert!(validate_endpoint(endpoint).is_err(), "{endpoint:?}");
         }
     }
 }
