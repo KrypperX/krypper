@@ -1,3 +1,6 @@
+/// Maximum bytes accepted for a streamed tool-call argument payload.
+pub(crate) const MAX_STREAMED_TOOL_ARGUMENT_BYTES: usize = 256 * 1024;
+
 //! Limits, endpoint constants and system prompts shared by the adapters.
 
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
