@@ -679,7 +679,8 @@ fn fail_correction_task(
         .get_task_mut(task_id)
         .ok_or_else(|| io::Error::other("task was not found in its session"))?;
     if task.state() == TaskState::Running {
-        task.transition(TaskState::Failed).map_err(io::Error::other)?;
+        task.transition(TaskState::Failed)
+            .map_err(io::Error::other)?;
     }
     Ok(())
 }
@@ -1494,7 +1495,10 @@ mod correction_error_lifecycle_tests {
 
         fail_correction_task(&mut session, task_id, None).unwrap();
 
-        assert_eq!(session.get_task(task_id).unwrap().state(), TaskState::Failed);
+        assert_eq!(
+            session.get_task(task_id).unwrap().state(),
+            TaskState::Failed
+        );
     }
 
     #[test]
