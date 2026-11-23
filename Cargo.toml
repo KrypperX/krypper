@@ -7,6 +7,7 @@ description = "Local-first CLI and agent task runtime with bounded workspace ope
 repository = "https://github.com/KrypperX/krypper"
 readme = "README.md"
 license = "Apache-2.0"
+publish = false
 
 [dependencies]
 ignore = "0.4.34"

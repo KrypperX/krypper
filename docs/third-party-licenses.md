@@ -15,6 +15,8 @@ Krypper's own source is offered under Apache-2.0; see the root [LICENSE](../LICE
 
 Before a binary or source release, run a license inventory on the **exact locked dependency graph**, inspect any unknown/nonstandard licenses and bundled source, and retain applicable copyright and notice texts in the release distribution. For example, use a reviewed version of `cargo-license` or `cargo-deny` against `Cargo.lock`, and reconcile its output with actual crate manifests and source. Review project contribution provenance and any imported assets separately.
 
+Crates.io publication is intentionally disabled in `Cargo.toml` (`publish = false`) while the product is still in development. Revisit publication only after product readiness and the required release review.
+
 ## Distribution checklist
 
 - [x] Root Apache-2.0 license text present and package metadata declared.
