@@ -347,7 +347,7 @@ impl OpenAiCompatibleCredentials {
     }
 }
 
-#[allow(dead_code)] // convenience form without extensions; used by tests
+#[cfg(test)]
 pub(crate) fn build_compatible_chat_request(
     model: &str,
     provider: OpenAiCompatibleProvider,
@@ -815,7 +815,7 @@ pub struct ResponsesDecisionSource {
 impl ResponsesDecisionSource {
     /// Opt-in provider SSE text delivery. No action is selected or executed here.
     /// The normal bounded decision path remains authoritative.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // reserved for an opt-in text-only SSE caller; no CLI surface yet
     pub(crate) fn stream_text_deltas<F>(
         &self,
         goal: &str,
@@ -849,7 +849,6 @@ impl ResponsesDecisionSource {
     /// Opt-in native SSE decision. Provider calls are assembled before the
     /// existing schema validator selects an action; no tool is executed here.
     /// This does not replace the default bounded decision path.
-    #[allow(dead_code)]
     pub(crate) fn stream_validated_action<F>(
         &mut self,
         goal: &str,

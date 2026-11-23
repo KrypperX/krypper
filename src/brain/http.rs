@@ -206,7 +206,6 @@ where
     )
 }
 
-#[allow(dead_code)]
 pub(crate) fn post_hosted_text_stream<F>(
     agent: &Agent,
     provider: ModelProvider,

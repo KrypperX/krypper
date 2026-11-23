@@ -50,15 +50,15 @@ pub use providers::{
 pub(crate) use providers::{
     CloudflareAccountId, CloudflareGatewayId, ModelDecisionSource, OpenAiCompatibleCredentials,
 };
-#[allow(unused_imports)] // some re-exports are used only by tests
-pub(crate) use request::{
-    build_anthropic_request, build_gemini_request, build_responses_request,
-    enable_responses_streaming, encode_model_request, gemini_generate_content_endpoint,
-    validate_model_name_for_provider,
-};
+#[cfg(test)]
+pub(crate) use request::{build_anthropic_request, build_gemini_request, build_responses_request};
 pub use request::{
     build_anthropic_request_with_extensions, build_chat_request_with_extensions,
     build_gemini_request_with_extensions, build_responses_request_with_extensions,
+};
+pub(crate) use request::{
+    enable_responses_streaming, encode_model_request, gemini_generate_content_endpoint,
+    validate_model_name_for_provider,
 };
 pub(crate) use tools_schema::{tool_definitions, workspace_tool_definitions};
 

@@ -74,7 +74,7 @@ fn build_chat_request_with_tools(
     encode_model_request(&request)
 }
 
-#[allow(dead_code)] // convenience form without extensions; used by tests
+#[cfg(test)]
 pub(crate) fn build_chat_request(
     model: &str,
     goal: &str,
@@ -208,7 +208,7 @@ fn build_responses_request_with_tools(
     encode_model_request(&request)
 }
 
-#[allow(dead_code)] // convenience form without extensions; used by tests
+#[cfg(test)]
 pub(crate) fn build_responses_request(
     model: &str,
     provider: ModelProvider,
@@ -286,7 +286,7 @@ fn build_anthropic_request_with_tools(
     encode_model_request(&request)
 }
 
-#[allow(dead_code)] // convenience form without extensions; used by tests
+#[cfg(test)]
 pub(crate) fn build_anthropic_request(
     model: &str,
     goal: &str,
@@ -367,7 +367,7 @@ fn build_gemini_request_with_declarations(
     encode_model_request(&request)
 }
 
-#[allow(dead_code)] // convenience form without extensions; used by tests
+#[cfg(test)]
 pub(crate) fn build_gemini_request(
     model: &str,
     goal: &str,
@@ -428,7 +428,6 @@ pub(crate) fn encode_model_request(request: &Value) -> Result<Vec<u8>, ModelErro
     Ok(encoded)
 }
 
-#[allow(dead_code)]
 pub(crate) fn enable_responses_streaming(request: &[u8]) -> Result<Vec<u8>, ModelError> {
     let mut body: Value = serde_json::from_slice(request)
         .map_err(|error| ModelError::Transport(error.to_string()))?;
