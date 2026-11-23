@@ -98,10 +98,7 @@ fn anthropic_sse_request_preserves_auth_version_and_workspace_headers() {
         ModelProvider::Anthropic,
         &endpoint,
         "local-anthropic-stream-key",
-        &[(
-            "anthropic-workspace-id",
-            "wrkspc_01JwQvzr7rXLA5AGx3HKfFUJ",
-        )],
+        &[("anthropic-workspace-id", "wrkspc_01JwQvzr7rXLA5AGx3HKfFUJ")],
         br#"{}"#,
         |_| Ok(()),
     );
