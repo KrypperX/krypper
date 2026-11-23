@@ -36,7 +36,7 @@ pub(super) fn usage_error(
         Some("models") => "usage: krypper models [--provider NAME] [--id MODEL_ID] [--json]",
         Some("setup") => "usage: krypper setup [--status | --reset]",
         Some("task") => {
-            "usage: krypper task [-h] [--goal GOAL] --max-actions N [--workspace PATH] [--model NAME] [--provider NAME] [--no-config] [--checkpoint-out PATH] [--resume PATH] [--activity-jsonl] [--model-usage-jsonl]"
+            "usage: krypper task [-h] [--goal GOAL] --max-actions N [--workspace PATH] [--model NAME] [--provider NAME] [--verified --verify-file PATH ...] [--no-config] [--checkpoint-out PATH] [--resume PATH] [--activity-jsonl] [--stream-events-jsonl] [--model-usage-jsonl]"
         }
         Some("context") => {
             "usage: krypper context [-h] --goal GOAL [--workspace PATH] [--repository-map]"
@@ -70,13 +70,15 @@ pub(super) fn write_context_help(output: &mut dyn Write) -> io::Result<()> {
 pub(super) fn write_task_help(output: &mut dyn Write) -> io::Result<()> {
     output.write_all(
         concat!(
-            "usage: krypper task [-h] [--goal GOAL] --max-actions N [--workspace PATH] [--model NAME] [--provider NAME] [--no-config] [--checkpoint-out PATH] [--resume PATH] [--activity-jsonl] [--model-usage-jsonl]\n\n",
+            "usage: krypper task [-h] [--goal GOAL] --max-actions N [--workspace PATH] [--model NAME] [--provider NAME] [--verified --verify-file PATH ...] [--no-config] [--checkpoint-out PATH] [--resume PATH] [--activity-jsonl] [--stream-events-jsonl] [--model-usage-jsonl]\n\n",
             "run a bounded task in the selected workspace or current directory\n\n",
             "options:\n  --goal GOAL          task goal (required unless --resume is used)\n",
             "  --max-actions N      required positive action limit for this invocation\n",
             "  --workspace PATH     use an existing directory as the captured task workspace\n",
-            "  --model NAME         opt in to model-selected actions (defaults to local Ollama)\n",
+            "  --model NAME         opt in to model-selected actions or plans (defaults to local Ollama)\n",
             "  --provider NAME      choose ollama, gemini, openai, xai, anthropic, cloudflare, cloudflare-ai-gateway, groq, openrouter, deepseek, zai, or mistral; requires --model\n",
+            "  --verified           use a planned local Ollama task with independent file checks and one correction\n",
+            "  --verify-file PATH   workspace-relative file required for success; repeat with --verified (up to 32)\n",
             "  --no-config          ignore saved model defaults and credentials for this run\n",
             "  --checkpoint-out PATH write only when a completed turn reaches continue; file must be new\n",
             "  --resume PATH        restore one running task and start a fresh turn\n",
@@ -122,8 +124,24 @@ pub(super) fn write_task_help(output: &mut dyn Write) -> io::Result<()> {
             "checkpoint after such a turn.\n",
             "Checkpoint files retain lifecycle metadata, not prior observations or file contents.\n",
             "Resume from the newest checkpoint and use a new --checkpoint-out path for each pause.\n",
-            "Ollama sends the task description and current-turn observations to http://127.0.0.1:11434/api/chat.\n",
-            "Read observations can include workspace file text. Ollama must be running locally\n",
+            "Verified mode requires --model (or a saved model default) with the local Ollama provider,\n",
+            "--max-actions of at least 2, and one or more --verify-file paths (up to 192 UTF-8 bytes).\n",
+            "Paths must stay inside the task workspace. It plans through the\n",
+            "existing Harness and TaskSession; a check passes only after a successful operation on that exact path\n",
+            "in the current turn. It does not verify file contents. Missing evidence is unknown,\n",
+            "and model completion text is not proof.\n",
+            "After a plan, enter complete, continue, or cancel to control the task.\n",
+            "A completed turn with failed or unknown file checks may get one correction per invocation\n",
+            "when at least three Harness action slots remain. Continue or cancel do not trigger correction.\n",
+            "--max-actions counts Harness workspace and task-control actions, not Ollama requests.\n",
+            "Denied or failed operations, cancellation, and exhausted turns do not trigger correction.\n",
+            "With --checkpoint-out, continue after the initial turn defers correction. A correction already run uses this invocation's allowance.\n",
+            "Resume with --verified and repeat\n",
+            "all --verify-file paths and --max-actions. The new invocation gets a fresh action budget.\n",
+            "Ollama sends the task, current-turn observations, and applicable root/nested AGENTS.md guidance to\n",
+            "http://127.0.0.1:11434/api/chat. Read observations can include workspace file text. AGENTS.md guidance may include other workspace text.\n",
+            "Trust the local Ollama service receiving this data.\n",
+            "Ollama must be running locally\n",
             "with the named model available. Only supported task actions and completion are exposed.\n\n",
             "Enter one action per line on standard input:\n",
             "  read PATH\n  read-range PATH START_LINE MAX_LINES\n",

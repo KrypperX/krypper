@@ -120,11 +120,33 @@ Windows without running tests.
   and workspace observations. Its private
   [`checkpoint_files.rs`](src/cli/checkpoint_files.rs) module performs bounded
   checkpoint reads, output-path validation, and create-new writes.
+  Its private [`verified_task.rs`](src/cli/verified_task.rs) module owns the
+  opt-in planned workflow, TaskSession evidence aggregation, and caller task
+  controls without changing the default CLI path.
 
 The current CLI still drives task execution. The Tools module provides the
 workspace-safety implementation used by both task-turn operations and CLI
 filesystem commands, with the existing operations described by the typed
-registry. Moving CLI orchestration remains part of the staged direction below.
+registry. The opt-in `task --verified` path composes the existing Ollama planner,
+completion-correction Harness flow, TaskSession observations, and registered
+Tools without changing the default caller-directed or model-selected path. Its
+file checks use only current-turn TaskSession evidence to confirm a successful
+file operation on an exact path; failed file evidence takes precedence over
+success, and directory operations do not count. The checks do not validate
+file contents. Task control remains with the caller through `complete`,
+`continue`, or `cancel`. The CLI's
+`--max-actions` counts Harness workspace and task-control actions, not Ollama
+requests. A correction is eligible only after a normally completed turn with
+failed or unknown checks and at least three actions remaining. The threshold
+lets the bounded correction planner reserve two decision slots and still allow
+at least one planned operation; its model requests are not added to the
+displayed Harness action count. One correction is allowed per CLI invocation.
+With checkpoint output, continuing after the initial uncorrected turn pauses
+before correction; continuing after a correction saves the post-correction
+boundary and leaves the allowance used. Checkpoints do not retain the mode,
+check list, or previous observations, so callers repeat them and establish
+fresh evidence on resume.
+Moving more CLI orchestration remains part of the staged direction below.
 
 ## Bounded planning prototype
 
@@ -164,13 +186,18 @@ turn with independent completion checks and, when needed, one correction cycle.
 The initial turn may use the reactive decision source or an existing bounded
 plan. The check callback must use TaskSession observations or deterministic
 local checks outside Brain. Passing initial checks go directly through
-TaskSession reconciliation without requesting a correction. A failed or unknown
-result is supplied to `OllamaDecisionSource::create_completion_correction_plan`
-as bounded, untrusted advisory context. Harness runs that one returned plan
-through TaskSession and the existing Tools registry with only the original
-action-budget slots remaining. The same `OllamaDecisionSource` carries its
-existing decision counter across the initial turn, reflection, plan, and
-correction turn. Harness then invokes the independent check callback again.
+TaskSession reconciliation without requesting a correction. After a normally
+completed initial turn with failed or unknown checks, a correction is eligible
+only when at least three Harness action slots remain for the correction plan's
+workspace operation and task control. The failed or unknown result is supplied
+to `OllamaDecisionSource::create_completion_correction_plan` as bounded,
+untrusted advisory context. Harness runs that one returned plan through
+TaskSession and the existing Tools registry with only the original action-budget
+slots remaining. Harness action totals include workspace and task-control
+actions; Ollama model requests are outside that count, while each plan is
+individually bounded by the slots passed to it. The same `OllamaDecisionSource`
+carries its existing decision counter across the initial turn, reflection,
+plan, and correction turn. Harness then invokes the independent check callback again.
 Invalid plans, unsupported actions, denied workspace paths, failed
 operations, and exhausted budgets stop the cycle. TaskSession records success
 only after required checks pass on a completed initial turn or the single

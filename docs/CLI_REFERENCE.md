@@ -59,6 +59,78 @@ caller decision per line from standard input when `--model` is omitted. Enter `r
 `search <directory> <query>`, `search-tree <directory> <query>`, `continue`,
 `complete [result]`, or `cancel`.
 
+### Verified planning and correction
+
+Opt in to a local planned workflow by adding `--verified` and one or more
+`--verify-file PATH` values. Paths must be distinct, UTF-8, workspace-relative
+file paths no longer than 192 UTF-8 bytes, with no absolute or parent-traversal
+components or control characters; at most 32 are accepted. The mode requires a
+model from `--model` or saved model defaults, the Ollama provider, and at least
+two actions.
+Hosted providers are rejected before credentials are read. Without these flags,
+the existing task behavior is unchanged.
+
+The task description, current-turn observations, and applicable workspace
+guidance from root or nested `AGENTS.md` files go to the local Ollama service.
+These can include workspace text, so use a local Ollama service you trust.
+
+```sh
+cargo run -- task \
+  --goal "Create a short summary file" \
+  --max-actions 5 --model qwen3 --verified \
+  --verify-file "output/summary.txt"
+```
+
+The local model proposes an ordered plan. Harness runs it through the existing
+TaskSession and Tools boundary, then checks each required file against the
+current turn's TaskSession observations. A successful file read, range read,
+create, replace, or patch is evidence for that exact path; model completion text
+is not. This confirms that a file operation succeeded in the current turn, not
+that its contents match an expected value. A recorded failed file operation is
+`Failed`, while missing evidence is `Unknown`. Task success requires a completed
+turn and passing evidence for every required file.
+
+After the planned operations, the CLI prompts for task control. Enter
+`complete [result]` to run the checks, `continue` to start another bounded turn,
+or `cancel` to stop. These control actions still run through the existing
+Harness and TaskSession lifecycle.
+
+`--max-actions` caps Harness actions (planned workspace operations and caller
+task-control actions) across all turns in this invocation; Ollama requests are
+not included in the displayed action count. If a normally completed turn has
+failed or unknown checks and at least three action slots remain, Krypper may
+request one reflection-informed correction plan per CLI invocation. This
+three-slot threshold lets the bounded correction planner reserve two decision
+slots and still allow at least one planned operation; the model requests do not
+add to the displayed Harness action count. Krypper does not retry a denied or
+failed workspace action or a turn ended by cancellation,
+continuation, or insufficient budget. The correction uses the same local model
+source and only the remaining `--max-actions` slots. Output reports each check
+and evidence summary, whether correction ran or was skipped, the
+Harness stop reason, and remaining actions. If a turn records both successful
+and failed file operations for a required path, `Failed` takes precedence.
+Directory creation does not count as file evidence.
+
+With `--checkpoint-out`, entering `continue` after the initial, uncorrected
+turn saves a checkpoint at the existing safe turn boundary and defers
+correction. If a correction has already run and its turn ends with `continue`,
+the checkpoint saves after that correction and its one-correction allowance
+remains used. Resume with `--verified`, repeat
+each `--verify-file`, select the local Ollama model, and supply a fresh
+`--max-actions` value. Checkpoints retain lifecycle metadata but do not store
+verified-mode settings or prior observations, so the resumed turn must establish
+file evidence again through TaskSession.
+
+### Task activity and event JSONL
+
+`--activity-jsonl` writes the read-only TaskSession lifecycle and activity
+positions to stderr as JSONL after each turn. The records contain positions,
+not prompts, workspace paths, or tool arguments. `--stream-events-jsonl` writes
+versioned JSONL event envelopes to stderr after each turn, with monotonically
+increasing sequence numbers and deduplicated activity-position updates. This
+CLI option exports task metadata; it does not stream model response text or
+tool output. Use `--model-usage-jsonl` separately for provider usage records.
+
 The unquoted path forms remain supported. `read`, `list`, and `mkdir` take the
 remaining line as the path; `list` defaults to `.`. `read-range` treats the
 final two whitespace-separated fields as the start line and maximum line
