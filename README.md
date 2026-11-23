@@ -1,5 +1,9 @@
 # Krypper
 
+- **Created by:** Bom Thatchakorn
+- **Organization:** KrypperX
+- **Origin:** Thailand (TH) 🇹🇭
+
 A local-first Rust CLI and in-process agent task runtime. Work with files in a bounded workspace, run task turns, and optionally connect to supported AI model providers.
 
 ## Install
@@ -61,3 +65,9 @@ It prompts for the account ID, a hidden API token, and an optional AI Gateway ID
 ## Contributing
 
 See the repository's existing development guidance and pull requests before proposing changes. Run `cargo test` locally when changing Rust code.
+
+## License
+
+Krypper is licensed under the [Apache License, Version 2.0](LICENSE).
+
+Third-party components and vendored data retain their own licenses. In particular, the checked-in [models.dev snapshot](snapshots/models-dev/) is MIT-licensed; its upstream copyright and license notice are preserved in [`snapshots/models-dev/LICENSE`](snapshots/models-dev/LICENSE). See [third-party licensing notes](docs/third-party-licenses.md) for review scope and limitations.
