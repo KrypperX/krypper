@@ -1975,7 +1975,9 @@ mod tests {
             let mut request = [0_u8; 16384];
             let count = socket.read(&mut request).expect("request");
             let received = String::from_utf8_lossy(&request[..count]);
-            assert!(received.contains("x-api-key:") || received.contains("X-Api-Key:"));
+            assert!(received
+                .to_ascii_lowercase()
+                .contains("authorization: bearer local-test-key"));
             let frames = [
                 (
                     "content_block_start",
@@ -2104,7 +2106,8 @@ mod tests {
             assert!(result.is_err(), "an empty stream never yields an action");
             let received = server.join().expect("server completed");
 
-            assert!(received.contains("x-api-key: local-test-key"));
+            assert!(received.contains("authorization: bearer local-test-key"));
+            assert!(!received.contains("x-api-key: local-test-key"));
             assert!(received.contains("anthropic-version:"));
             assert_eq!(
                 received.contains("anthropic-workspace-id:"),
