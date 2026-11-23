@@ -98,19 +98,12 @@ fn file_status(status: &libc::stat) -> FileStatus {
         FileKind::Other
     };
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let (modified_seconds, modified_nanos, changed_seconds, changed_nanos) = (
         status.st_mtime,
         status.st_mtime_nsec,
         status.st_ctime,
         status.st_ctime_nsec,
-    );
-    #[cfg(target_os = "macos")]
-    let (modified_seconds, modified_nanos, changed_seconds, changed_nanos) = (
-        status.st_mtimespec.tv_sec,
-        status.st_mtimespec.tv_nsec,
-        status.st_ctimespec.tv_sec,
-        status.st_ctimespec.tv_nsec,
     );
 
     FileStatus {

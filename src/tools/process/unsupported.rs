@@ -25,7 +25,6 @@ mod tests {
     use crate::tools::capture_workspace_root_at;
     use crate::{OfflineCargoPolicy, ProcessOutcome};
     use std::fs;
-    use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);

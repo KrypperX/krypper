@@ -2,6 +2,7 @@
 
 use crate::tools::process_profile::ProcessProfile;
 use crate::tools::{capture_workspace_root_at, WorkspaceRoot};
+#[cfg(target_os = "linux")]
 use std::ffi::OsString;
 #[cfg(target_os = "linux")]
 use std::fs::File;
