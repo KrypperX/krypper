@@ -4,7 +4,7 @@ use super::checkpoint_files::{
     read_task_checkpoint, validate_checkpoint_output_path, write_task_checkpoint,
 };
 use super::help::{contains_help_before_terminator, usage_error, write_task_help};
-use super::model_selection::{configured_model_selection, prepare_model_source};
+use super::model_selection::{configured_model_selection, prepare_model_source_with_credentials};
 use super::outcome::{write_observation, write_turn_outcome};
 use super::task_args::parse_task_action;
 use super::MAX_FILE_SIZE;
@@ -313,8 +313,13 @@ fn run_task_with_options(
             Err(message) => return usage_error(error, Some("task"), &message),
         }
     }
-    let mut model_source = match prepare_model_source(model, provider, max_actions, model_endpoint)
-    {
+    let mut model_source = match prepare_model_source_with_credentials(
+        model,
+        provider,
+        max_actions,
+        model_endpoint,
+        use_config && !no_config,
+    ) {
         Ok(source) => source,
         Err(message) => return usage_error(error, Some("task"), message),
     };
