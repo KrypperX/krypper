@@ -684,14 +684,73 @@ impl BoundedDecisionSource for ModelDecisionSource {
     }
 }
 
-/// Bounded Gemini decision source with optional extension declarations.
-pub struct GeminiDecisionSource {
+/// State and common budget handling shared by hosted decision sources.
+struct HostedSourceCore {
     model: String,
     api_key: String,
     endpoint: String,
     agent: Agent,
     remaining_decisions: usize,
     extension_declarations: Vec<Value>,
+}
+
+impl HostedSourceCore {
+    fn new(
+        model: impl Into<String>,
+        api_key: impl Into<String>,
+        action_budget: usize,
+        endpoint: String,
+        extension_declarations: &[Value],
+    ) -> Self {
+        Self {
+            model: model.into(),
+            api_key: api_key.into(),
+            endpoint,
+            agent: model_agent(),
+            remaining_decisions: action_budget,
+            extension_declarations: extension_declarations.to_vec(),
+        }
+    }
+
+    fn consume_decision_budget(&mut self) -> Result<usize, ModelError> {
+        consume_decision_budget(&mut self.remaining_decisions)
+    }
+}
+
+macro_rules! impl_hosted_bounded_decision_source {
+    ($($source:ty),+ $(,)?) => {
+        $(
+        impl BoundedDecisionSource for $source {
+            fn choose_action(
+                &mut self,
+                goal: &str,
+                observations: &[WorkspaceObservation],
+            ) -> WorkspaceAction {
+                self.choose(goal, observations, None)
+                    .unwrap_or_else(action_from_error)
+            }
+
+            fn needs_root_project_guidance(&self) -> bool {
+                true
+            }
+
+            fn choose_action_with_root_project_guidance(
+                &mut self,
+                goal: &str,
+                observations: &[WorkspaceObservation],
+                guidance: Option<&str>,
+            ) -> WorkspaceAction {
+                self.choose(goal, observations, guidance)
+                    .unwrap_or_else(action_from_error)
+            }
+        }
+        )+
+    };
+}
+
+/// Bounded Gemini decision source with optional extension declarations.
+pub struct GeminiDecisionSource {
+    core: HostedSourceCore,
 }
 
 impl GeminiDecisionSource {
@@ -740,12 +799,13 @@ impl GeminiDecisionSource {
         extension_declarations: &[Value],
     ) -> Self {
         Self {
-            model: model.into(),
-            api_key,
-            endpoint,
-            agent: super::model_agent(),
-            remaining_decisions: action_budget,
-            extension_declarations: extension_declarations.to_vec(),
+            core: HostedSourceCore::new(
+                model,
+                api_key,
+                action_budget,
+                endpoint,
+                extension_declarations,
+            ),
         }
     }
 
@@ -755,20 +815,20 @@ impl GeminiDecisionSource {
         observations: &[WorkspaceObservation],
         project_guidance: Option<&str>,
     ) -> Result<WorkspaceAction, ModelError> {
-        let remaining = super::consume_decision_budget(&mut self.remaining_decisions)?;
+        let remaining = self.core.consume_decision_budget()?;
         let request = super::build_gemini_request_with_extensions(
-            &self.model,
+            &self.core.model,
             goal,
             observations,
             remaining,
             project_guidance,
-            &self.extension_declarations,
+            &self.core.extension_declarations,
         )?;
         let response = super::post_hosted(
-            &self.agent,
+            &self.core.agent,
             ModelProvider::Gemini,
-            &self.endpoint,
-            &self.api_key,
+            &self.core.endpoint,
+            &self.core.api_key,
             None,
             &request,
         )?;
@@ -776,40 +836,10 @@ impl GeminiDecisionSource {
     }
 }
 
-impl BoundedDecisionSource for GeminiDecisionSource {
-    fn choose_action(
-        &mut self,
-        goal: &str,
-        observations: &[WorkspaceObservation],
-    ) -> WorkspaceAction {
-        self.choose(goal, observations, None)
-            .unwrap_or_else(action_from_error)
-    }
-
-    fn needs_root_project_guidance(&self) -> bool {
-        true
-    }
-
-    fn choose_action_with_root_project_guidance(
-        &mut self,
-        goal: &str,
-        observations: &[WorkspaceObservation],
-        guidance: Option<&str>,
-    ) -> WorkspaceAction {
-        self.choose(goal, observations, guidance)
-            .unwrap_or_else(action_from_error)
-    }
-}
-
 /// Bounded OpenAI-compatible Responses decision source with extensions.
 pub struct ResponsesDecisionSource {
     provider: ResponsesProvider,
-    model: String,
-    api_key: String,
-    endpoint: String,
-    agent: Agent,
-    remaining_decisions: usize,
-    extension_declarations: Vec<Value>,
+    core: HostedSourceCore,
 }
 
 impl ResponsesDecisionSource {
@@ -828,19 +858,19 @@ impl ResponsesDecisionSource {
     {
         let provider = self.provider.model_provider();
         let request = build_responses_request_with_extensions(
-            &self.model,
+            &self.core.model,
             provider,
             goal,
             observations,
-            self.remaining_decisions,
+            self.core.remaining_decisions,
             project_guidance,
-            &self.extension_declarations,
+            &self.core.extension_declarations,
         )?;
         post_responses_text_stream(
-            &self.agent,
+            &self.core.agent,
             provider,
-            &self.endpoint,
-            &self.api_key,
+            &self.core.endpoint,
+            &self.core.api_key,
             &request,
             on_text,
         )
@@ -859,16 +889,16 @@ impl ResponsesDecisionSource {
     where
         F: FnMut(String) -> Result<(), ModelError>,
     {
-        let remaining = consume_decision_budget(&mut self.remaining_decisions)?;
+        let remaining = self.core.consume_decision_budget()?;
         let provider = self.provider.model_provider();
         let request = build_responses_request_with_extensions(
-            &self.model,
+            &self.core.model,
             provider,
             goal,
             observations,
             remaining,
             project_guidance,
-            &self.extension_declarations,
+            &self.core.extension_declarations,
         )?;
         let request = super::enable_responses_streaming(&request)?;
         let mut assembly =
@@ -876,10 +906,10 @@ impl ResponsesDecisionSource {
         let mut final_calls = None;
         let mut transport_done = false;
         super::post_hosted_sse(
-            &self.agent,
+            &self.core.agent,
             provider,
-            &self.endpoint,
-            &self.api_key,
+            &self.core.endpoint,
+            &self.core.api_key,
             &request,
             |frame| {
                 // The optional transport sentinel is only valid after the
@@ -996,12 +1026,13 @@ impl ResponsesDecisionSource {
     ) -> Self {
         Self {
             provider,
-            model: model.into(),
-            api_key: api_key.into(),
-            endpoint,
-            agent: model_agent(),
-            remaining_decisions: action_budget,
-            extension_declarations: extension_declarations.to_vec(),
+            core: HostedSourceCore::new(
+                model,
+                api_key,
+                action_budget,
+                endpoint,
+                extension_declarations,
+            ),
         }
     }
 
@@ -1033,22 +1064,22 @@ impl ResponsesDecisionSource {
         if streaming {
             return self.stream_validated_action(goal, observations, project_guidance, |_| Ok(()));
         }
-        let remaining = consume_decision_budget(&mut self.remaining_decisions)?;
+        let remaining = self.core.consume_decision_budget()?;
         let provider = self.provider.model_provider();
         let request = build_responses_request_with_extensions(
-            &self.model,
+            &self.core.model,
             provider,
             goal,
             observations,
             remaining,
             project_guidance,
-            &self.extension_declarations,
+            &self.core.extension_declarations,
         )?;
         let response = post_hosted(
-            &self.agent,
+            &self.core.agent,
             provider,
-            &self.endpoint,
-            &self.api_key,
+            &self.core.endpoint,
+            &self.core.api_key,
             None,
             &request,
         )?;
@@ -1056,39 +1087,9 @@ impl ResponsesDecisionSource {
     }
 }
 
-impl BoundedDecisionSource for ResponsesDecisionSource {
-    fn choose_action(
-        &mut self,
-        goal: &str,
-        observations: &[WorkspaceObservation],
-    ) -> WorkspaceAction {
-        self.choose(goal, observations, None)
-            .unwrap_or_else(action_from_error)
-    }
-
-    fn needs_root_project_guidance(&self) -> bool {
-        true
-    }
-
-    fn choose_action_with_root_project_guidance(
-        &mut self,
-        goal: &str,
-        observations: &[WorkspaceObservation],
-        guidance: Option<&str>,
-    ) -> WorkspaceAction {
-        self.choose(goal, observations, guidance)
-            .unwrap_or_else(action_from_error)
-    }
-}
-
 /// Bounded Anthropic decision source with optional extension declarations.
 pub struct AnthropicDecisionSource {
-    model: String,
-    api_key: String,
-    endpoint: String,
-    agent: Agent,
-    remaining_decisions: usize,
-    extension_declarations: Vec<Value>,
+    core: HostedSourceCore,
     workspace_id: Option<AnthropicWorkspaceId>,
 }
 
@@ -1138,12 +1139,13 @@ impl AnthropicDecisionSource {
         extension_declarations: &[Value],
     ) -> Self {
         Self {
-            model: model.into(),
-            api_key: api_key.into(),
-            endpoint,
-            agent: model_agent(),
-            remaining_decisions: action_budget,
-            extension_declarations: extension_declarations.to_vec(),
+            core: HostedSourceCore::new(
+                model,
+                api_key,
+                action_budget,
+                endpoint,
+                extension_declarations,
+            ),
             workspace_id: None,
         }
     }
@@ -1200,14 +1202,14 @@ impl AnthropicDecisionSource {
     where
         F: FnMut(String) -> Result<(), ModelError>,
     {
-        let remaining = consume_decision_budget(&mut self.remaining_decisions)?;
+        let remaining = self.core.consume_decision_budget()?;
         let request = build_anthropic_request_with_extensions(
-            &self.model,
+            &self.core.model,
             goal,
             observations,
             remaining,
             project_guidance,
-            &self.extension_declarations,
+            &self.core.extension_declarations,
         )?;
         let mut body: Value =
             serde_json::from_slice(&request).map_err(|_| ModelError::RequestEncoding)?;
@@ -1219,10 +1221,10 @@ impl AnthropicDecisionSource {
         let mut tool_use_stop = false;
         let workspace_headers = self.workspace_headers();
         super::post_hosted_sse_with_headers(
-            &self.agent,
+            &self.core.agent,
             ModelProvider::Anthropic,
-            &self.endpoint,
-            &self.api_key,
+            &self.core.endpoint,
+            &self.core.api_key,
             &workspace_headers,
             &request,
             |frame| {
@@ -1367,21 +1369,21 @@ impl AnthropicDecisionSource {
         observations: &[WorkspaceObservation],
         project_guidance: Option<&str>,
     ) -> Result<WorkspaceAction, ModelError> {
-        let remaining = consume_decision_budget(&mut self.remaining_decisions)?;
+        let remaining = self.core.consume_decision_budget()?;
         let request = build_anthropic_request_with_extensions(
-            &self.model,
+            &self.core.model,
             goal,
             observations,
             remaining,
             project_guidance,
-            &self.extension_declarations,
+            &self.core.extension_declarations,
         )?;
         let workspace_headers = self.workspace_headers();
         let response = post_hosted_with_headers(
-            &self.agent,
+            &self.core.agent,
             ModelProvider::Anthropic,
-            &self.endpoint,
-            &self.api_key,
+            &self.core.endpoint,
+            &self.core.api_key,
             Some(ANTHROPIC_API_VERSION),
             &workspace_headers,
             &request,
@@ -1390,41 +1392,11 @@ impl AnthropicDecisionSource {
     }
 }
 
-impl BoundedDecisionSource for AnthropicDecisionSource {
-    fn choose_action(
-        &mut self,
-        goal: &str,
-        observations: &[WorkspaceObservation],
-    ) -> WorkspaceAction {
-        self.choose(goal, observations, None)
-            .unwrap_or_else(action_from_error)
-    }
-
-    fn needs_root_project_guidance(&self) -> bool {
-        true
-    }
-
-    fn choose_action_with_root_project_guidance(
-        &mut self,
-        goal: &str,
-        observations: &[WorkspaceObservation],
-        guidance: Option<&str>,
-    ) -> WorkspaceAction {
-        self.choose(goal, observations, guidance)
-            .unwrap_or_else(action_from_error)
-    }
-}
-
 /// Bounded OpenAI-compatible chat decision source with extensions.
 pub struct OpenAiCompatibleDecisionSource {
-    model: String,
+    core: HostedSourceCore,
     provider: OpenAiCompatibleProvider,
-    api_key: String,
-    endpoint: String,
     extra_headers: Vec<(String, String)>,
-    agent: Agent,
-    remaining_decisions: usize,
-    extension_declarations: Vec<Value>,
     last_token_usage: Option<ModelTokenUsage>,
 }
 
@@ -1530,14 +1502,15 @@ impl OpenAiCompatibleDecisionSource {
         extra_headers: &[(String, String)],
     ) -> Self {
         Self {
-            model: model.into(),
+            core: HostedSourceCore::new(
+                model,
+                api_key,
+                action_budget,
+                endpoint,
+                extension_declarations,
+            ),
             provider,
-            api_key: api_key.into(),
-            endpoint,
             extra_headers: extra_headers.to_vec(),
-            agent: model_agent(),
-            remaining_decisions: action_budget,
-            extension_declarations: extension_declarations.to_vec(),
             last_token_usage: None,
         }
     }
@@ -1553,15 +1526,15 @@ impl OpenAiCompatibleDecisionSource {
         project_guidance: Option<&str>,
     ) -> Result<WorkspaceAction, ModelError> {
         self.last_token_usage = None;
-        let remaining = consume_decision_budget(&mut self.remaining_decisions)?;
+        let remaining = self.core.consume_decision_budget()?;
         let request = build_compatible_chat_request_with_extensions(
-            &self.model,
+            &self.core.model,
             self.provider,
             goal,
             observations,
             remaining,
             project_guidance,
-            &self.extension_declarations,
+            &self.core.extension_declarations,
         )?;
         let provider = ModelProvider::OpenAiCompatible(self.provider);
         let extra_headers = self
@@ -1570,10 +1543,10 @@ impl OpenAiCompatibleDecisionSource {
             .map(|(name, value)| (name.as_str(), value.as_str()))
             .collect::<Vec<_>>();
         let response = post_hosted_with_headers(
-            &self.agent,
+            &self.core.agent,
             provider,
-            &self.endpoint,
-            &self.api_key,
+            &self.core.endpoint,
+            &self.core.api_key,
             None,
             &extra_headers,
             &request,
@@ -1583,30 +1556,12 @@ impl OpenAiCompatibleDecisionSource {
     }
 }
 
-impl BoundedDecisionSource for OpenAiCompatibleDecisionSource {
-    fn choose_action(
-        &mut self,
-        goal: &str,
-        observations: &[WorkspaceObservation],
-    ) -> WorkspaceAction {
-        self.choose(goal, observations, None)
-            .unwrap_or_else(action_from_error)
-    }
-
-    fn needs_root_project_guidance(&self) -> bool {
-        true
-    }
-
-    fn choose_action_with_root_project_guidance(
-        &mut self,
-        goal: &str,
-        observations: &[WorkspaceObservation],
-        guidance: Option<&str>,
-    ) -> WorkspaceAction {
-        self.choose(goal, observations, guidance)
-            .unwrap_or_else(action_from_error)
-    }
-}
+impl_hosted_bounded_decision_source!(
+    GeminiDecisionSource,
+    ResponsesDecisionSource,
+    AnthropicDecisionSource,
+    OpenAiCompatibleDecisionSource,
+);
 
 #[cfg(test)]
 mod tests {
@@ -1731,7 +1686,7 @@ mod tests {
                 &[],
                 1,
                 None,
-                &gemini.extension_declarations,
+                &gemini.core.extension_declarations,
             ),
             crate::brain::build_responses_request_with_extensions(
                 "test-model",
@@ -1740,7 +1695,7 @@ mod tests {
                 &[],
                 1,
                 None,
-                &responses.extension_declarations,
+                &responses.core.extension_declarations,
             ),
             crate::brain::build_anthropic_request_with_extensions(
                 "test-model",
@@ -1748,7 +1703,7 @@ mod tests {
                 &[],
                 1,
                 None,
-                &anthropic.extension_declarations,
+                &anthropic.core.extension_declarations,
             ),
             super::build_compatible_chat_request_with_extensions(
                 "test-model",
@@ -1757,7 +1712,7 @@ mod tests {
                 &[],
                 1,
                 None,
-                &compatible.extension_declarations,
+                &compatible.core.extension_declarations,
             ),
         ];
         for request in requests {
