@@ -522,6 +522,8 @@ fn incomplete_initial_turn_does_not_request_correction() {
     };
     let planner_calls = Rc::new(Cell::new(0usize));
     let planner_calls_for_plan = Rc::clone(&planner_calls);
+    let evidence_calls = Rc::new(Cell::new(0usize));
+    let evidence_calls_for_check = Rc::clone(&evidence_calls);
 
     let result = run_goal_turn_with_completion_correction(
         &mut session,
@@ -531,7 +533,8 @@ fn incomplete_initial_turn_does_not_request_correction() {
         1,
         None,
         &[required_check()],
-        |_, _| {
+        move |_, _| {
+            evidence_calls_for_check.set(evidence_calls_for_check.get() + 1);
             evidence(
                 CompletionCheckEvidenceStatus::Passed,
                 "should not be collected",
@@ -546,14 +549,11 @@ fn incomplete_initial_turn_does_not_request_correction() {
     .expect("run correction flow");
 
     assert_eq!(planner_calls.get(), 0);
+    assert_eq!(evidence_calls.get(), 0);
     assert!(result.correction_result().is_none());
-    assert_ne!(
+    assert_eq!(
         result.initial_result().stop_reason(),
-        krypper::harness::execution::GoalTurnStopReason::Completed
-    );
-    assert_ne!(
-        result.initial_result().stop_reason(),
-        krypper::harness::execution::GoalTurnStopReason::ActionCompleted
+        krypper::harness::execution::GoalTurnStopReason::ActionBudgetExhausted
     );
     assert_eq!(
         result.final_verification().status,
