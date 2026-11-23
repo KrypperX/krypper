@@ -24,7 +24,6 @@ source scripts/cloudflare-workers-ai-env.sh
 Then run at least three repeats with the same Cloudflare model for both arms:
 
 ```sh
-# Use `krypper models --provider cloudflare` to find a model ID supported by this checkout.
 python3 scripts/context_model_evaluation.py \
   --live \
   --model '<cloudflare-model-id>' \
@@ -32,6 +31,8 @@ python3 scripts/context_model_evaluation.py \
   --action-budget 10 \
   --output /tmp/krypper-context-evaluation.json
 ```
+
+Choose a text-generation model ID from Cloudflare's [Workers AI model catalog](https://developers.cloudflare.com/workers-ai/models/).
 
 Live mode sends each fixture task and its retrieved repository context to Cloudflare Workers AI. With four tasks, two arms, three repeats, and a 10-action budget, it can make up to 240 model requests and incur provider charges; runs that finish early make fewer requests. The runner uses disposable workspaces, passes `--no-config`, and does not include credentials, raw prompts, or model responses in the report. Afterward, clear the variables from the current shell:
 
