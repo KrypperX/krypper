@@ -429,8 +429,8 @@ pub(crate) fn encode_model_request(request: &Value) -> Result<Vec<u8>, ModelErro
 }
 
 pub(crate) fn enable_responses_streaming(request: &[u8]) -> Result<Vec<u8>, ModelError> {
-    let mut body: Value = serde_json::from_slice(request)
-        .map_err(|error| ModelError::Transport(error.to_string()))?;
+    let mut body: Value =
+        serde_json::from_slice(request).map_err(|_| ModelError::RequestEncoding)?;
     body["stream"] = Value::Bool(true);
     encode_model_request(&body)
 }

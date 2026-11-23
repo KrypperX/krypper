@@ -33,8 +33,8 @@ pub use self::turn::{
     run_goal_turn_with_budget_and_extensions, run_goal_turn_with_extensions, TurnExtensions,
 };
 pub use self::types::{
-    BoundedDecisionSource, DecisionSource, GoalTurnError, GoalTurnResult, GoalTurnStopReason,
-    WorkspaceAction, WorkspaceObservation,
+    BoundedDecisionSource, DecisionFailureCode, DecisionSource, GoalTurnError, GoalTurnResult,
+    GoalTurnStopReason, WorkspaceAction, WorkspaceObservation,
 };
 
 pub(crate) use self::action::summarize_observation;
