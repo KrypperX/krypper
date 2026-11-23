@@ -5,10 +5,10 @@ use krypper::agent_loop::{
     run_goal_turn_with_budget, GoalTurnStopReason, WorkspaceAction, WorkspaceObservation,
 };
 use krypper::task_lifecycle::{
-    Task, TaskEvent, TaskHistoryEvent, TaskHistoryTransition, TaskSession, TaskState,
-    TurnActivitySummary, TurnCompletionError, TurnEvent, TurnOutcome, TurnState,
-    TurnTransitionError, WorkspaceListError, WorkspaceReadError, WorkspaceReplaceError,
-    WorkspaceSearchLocation, WorkspaceWriteError,
+    Task, TaskEvent, TaskHistoryEvent, TaskHistoryTransition, TaskSession,
+    TaskSessionWorkspaceErrorKind, TaskState, TurnActivitySummary, TurnCompletionError, TurnEvent,
+    TurnOutcome, TurnState, TurnTransitionError, WorkspaceListError, WorkspaceReadError,
+    WorkspaceReplaceError, WorkspaceSearchLocation, WorkspaceWriteError,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -308,8 +308,26 @@ fn explicit_workspace_session_rejects_missing_and_non_directory_paths() {
 
     assert!(missing_error.to_string().contains("workspace path"));
     assert!(file_error.to_string().contains("workspace path"));
+    assert_eq!(
+        missing_error.kind(),
+        TaskSessionWorkspaceErrorKind::CaptureFailed
+    );
+    assert_eq!(
+        file_error.kind(),
+        TaskSessionWorkspaceErrorKind::CaptureFailed
+    );
     assert!(!missing.exists());
     assert_eq!(fs::read_to_string(file).unwrap(), "not a directory");
+}
+
+#[cfg(windows)]
+#[test]
+fn unsupported_workspace_capture_has_a_typed_platform_error() {
+    let error = TaskSession::new_in_workspace(std::env::current_dir().unwrap()).unwrap_err();
+    assert_eq!(
+        error.kind(),
+        TaskSessionWorkspaceErrorKind::PlatformUnavailable
+    );
 }
 
 #[test]

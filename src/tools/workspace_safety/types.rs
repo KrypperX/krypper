@@ -15,7 +15,7 @@ pub(super) const MAX_TASK_DIRECTORY_ENTRIES: usize = 1024;
 #[derive(Debug)]
 pub(crate) enum CliError {
     Message(String),
-    PlatformUnavailable(&'static str),
+    PlatformUnavailable,
 }
 
 /// Stable, portable identity for a file-system object.
@@ -114,7 +114,7 @@ impl CliError {
 
     pub(super) fn from_io(error: &io::Error, fallback: &'static str) -> Self {
         if error.kind() == io::ErrorKind::Unsupported {
-            Self::PlatformUnavailable("workspace operations")
+            Self::PlatformUnavailable
         } else {
             Self::new(fallback)
         }
@@ -123,13 +123,7 @@ impl CliError {
     pub(crate) fn message(&self) -> &str {
         match self {
             Self::Message(message) => message,
-            Self::PlatformUnavailable("workspace operations") => {
-                "workspace operations are unavailable on this platform"
-            }
-            Self::PlatformUnavailable("process sandbox") => {
-                "process sandbox is unavailable on this platform"
-            }
-            Self::PlatformUnavailable(_) => "feature is unavailable on this platform",
+            Self::PlatformUnavailable => "workspace operations are unavailable on this platform",
         }
     }
 }

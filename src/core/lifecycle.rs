@@ -18,9 +18,9 @@ mod session;
 
 pub use checkpoint::{TaskSessionCheckpointError, MAX_TASK_SESSION_CHECKPOINT_BYTES};
 pub use errors::{
-    TaskSessionWorkspaceError, WorkspaceCreateDirectoryError, WorkspaceGuidanceReadError,
-    WorkspaceListError, WorkspaceReadError, WorkspaceReplaceError, WorkspaceSearchError,
-    WorkspaceSearchLocation, WorkspaceWriteError,
+    TaskSessionWorkspaceError, TaskSessionWorkspaceErrorKind, WorkspaceCreateDirectoryError,
+    WorkspaceGuidanceReadError, WorkspaceListError, WorkspaceReadError, WorkspaceReplaceError,
+    WorkspaceSearchError, WorkspaceSearchLocation, WorkspaceWriteError,
 };
 pub use session::{TaskSession, TaskSessionSnapshot, TaskSnapshot, TurnSnapshot};
 

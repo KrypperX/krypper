@@ -25,10 +25,12 @@ sandbox. macOS keeps that capability unavailable and returns
 POSIX process-group and nonblocking-pipe implementation.
 
 Windows is compile-checked only. Its workspace backend is a typed unavailable
-stub, and MCP stdio returns `McpLifecycleError::PlatformUnavailable` before a
-child process can be created. The Linux process sandbox and supervisor are not
-compiled there. Do not replace these failures with an unconfined implementation;
-native containment and process supervision require a separate reviewed port.
+stub; `TaskSession::new_in_workspace` reports
+`TaskSessionWorkspaceErrorKind::PlatformUnavailable`, and MCP stdio returns
+`McpLifecycleError::PlatformUnavailable` before a child process can be created.
+The Linux process sandbox and supervisor are not compiled there. Do not replace
+these failures with an unconfined implementation; native containment and process
+supervision require a separate reviewed port.
 The CI matrix runs the full suite on Linux and macOS and checks all targets on
 Windows without running tests.
 

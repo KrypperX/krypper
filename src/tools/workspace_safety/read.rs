@@ -33,15 +33,20 @@ pub(crate) fn capture_workspace_root() -> Result<WorkspaceRoot, String> {
 }
 
 pub(crate) fn capture_workspace_root_at(path: &Path) -> Result<WorkspaceRoot, String> {
+    capture_workspace_root_at_with_error(path).map_err(|error| error.message().to_owned())
+}
+
+pub(crate) fn capture_workspace_root_at_with_error(path: &Path) -> Result<WorkspaceRoot, CliError> {
     let path = fs::canonicalize(path)
-        .map_err(|error| format!("unable to resolve workspace path: {error}"))?;
-    let descriptor = open_directory_path(&path).map_err(|error| {
-        CliError::from_io(&error, "unable to open workspace path")
-            .message()
-            .to_owned()
+        .map_err(|error| CliError::new(format!("unable to resolve workspace path: {error}")))?;
+    let descriptor = open_directory_path(&path)
+        .map_err(|error| CliError::from_io(&error, "unable to open workspace path"))?;
+    verify_root_descriptor(&descriptor, &path).map_err(|error| {
+        CliError::new(format!(
+            "unable to verify workspace path: {}",
+            error.message()
+        ))
     })?;
-    verify_root_descriptor(&descriptor, &path)
-        .map_err(|error| format!("unable to verify workspace path: {}", error.message()))?;
     Ok(WorkspaceRoot { descriptor, path })
 }
 
