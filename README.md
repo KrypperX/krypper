@@ -1,5 +1,9 @@
 # Krypper
 
+**Created by:** Bom Thatchakorn  
+**Organization:** KrypperX  
+**Origin:** Thailand (TH) 🇹🇭
+
 A local-first Rust CLI and in-process agent task runtime. Work with files in a bounded workspace, run task turns, and optionally connect to supported AI model providers.
 
 ## Install
