@@ -23,6 +23,7 @@ use std::ffi::OsString;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Instant;
 
 // Leave room for the action command and path beside a maximum-size file body.
 const MAX_TASK_ACTION_LINE_BYTES: usize = MAX_FILE_SIZE + 4096;
@@ -72,6 +73,7 @@ fn run_task_with_options(
     let mut no_config = false;
     let mut activity_jsonl = false;
     let mut stream_events_jsonl = false;
+    let mut model_usage_jsonl = false;
     let mut position = 0;
     while let Some(argument) = arguments.get(position) {
         let Some(option) = argument.to_str() else {
@@ -165,7 +167,7 @@ fn run_task_with_options(
                         error,
                         Some("task"),
                         &format!(
-                            "unsupported provider '{value}' (choose from 'ollama', 'gemini', 'openai', 'xai', 'anthropic', 'cloudflare', 'groq', 'openrouter', 'deepseek', 'zai', 'mistral')"
+                            "unsupported provider '{value}' (choose from 'ollama', 'gemini', 'openai', 'xai', 'anthropic', 'cloudflare', 'cloudflare-ai-gateway', 'groq', 'openrouter', 'deepseek', 'zai', 'mistral')"
                         ),
                     );
                 };
@@ -242,6 +244,16 @@ fn run_task_with_options(
                 }
                 activity_jsonl = true;
             }
+            "--model-usage-jsonl" => {
+                if model_usage_jsonl {
+                    return usage_error(
+                        error,
+                        Some("task"),
+                        "--model-usage-jsonl may be provided only once",
+                    );
+                }
+                model_usage_jsonl = true;
+            }
             "--no-config" => {
                 if no_config {
                     return usage_error(
@@ -306,6 +318,25 @@ fn run_task_with_options(
         Ok(source) => source,
         Err(message) => return usage_error(error, Some("task"), message),
     };
+    if model_usage_jsonl {
+        match model_source.as_ref() {
+            None => {
+                return usage_error(
+                    error,
+                    Some("task"),
+                    "--model-usage-jsonl requires a model-backed compatible provider",
+                );
+            }
+            Some(source) if !source.supports_token_usage() => {
+                return usage_error(
+                    error,
+                    Some("task"),
+                    "--model-usage-jsonl is supported by OpenAI-compatible providers",
+                );
+            }
+            Some(_) => {}
+        }
+    }
 
     if let Some(path) = checkpoint_out.as_deref() {
         if let Err(cause) = validate_checkpoint_output_path(path) {
@@ -448,11 +479,32 @@ fn run_task_with_options(
                                 action: "unable to display model decision progress".to_owned(),
                             };
                         }
+                        let model_started = Instant::now();
                         let action = model_source.choose_action_with_root_project_guidance(
                             decision_goal,
                             observations,
                             project_guidance,
                         );
+                        if model_usage_jsonl {
+                            let elapsed_ms = model_started.elapsed().as_millis() as u64;
+                            let usage = model_source.take_token_usage();
+                            let event = serde_json::json!({
+                                "type": "model_token_usage",
+                                "decision": decisions,
+                                "elapsed_ms": elapsed_ms,
+                                "prompt_tokens": usage.and_then(|value| value.prompt_tokens),
+                                "completion_tokens": usage.and_then(|value| value.completion_tokens),
+                                "total_tokens": usage.and_then(|value| value.total_tokens),
+                            });
+                            if let Err(cause) = writeln!(error, "KRYPPER_MODEL_USAGE {event}")
+                                .and_then(|()| error.flush())
+                            {
+                                stream_error = Some(cause);
+                                return WorkspaceAction::Unsupported {
+                                    action: "unable to display model usage event".to_owned(),
+                                };
+                            }
+                        }
                         if let Err(cause) = writeln!(
                             output,
                             "Model selected action: {}",

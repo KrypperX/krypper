@@ -40,12 +40,16 @@ pub(crate) use parse::{parse_model_plan_response, parse_responses_response};
 pub(crate) use parse_anthropic::parse_anthropic_response;
 pub(crate) use parse_gemini::parse_gemini_response;
 pub(crate) use plan::MAX_PLAN_OPERATIONS;
+#[cfg(test)]
+pub(crate) use providers::ModelTokenUsage;
 pub use providers::{
     build_compatible_chat_request_with_extensions, AnthropicDecisionSource, GeminiDecisionSource,
     ModelProvider, OpenAiCompatibleDecisionSource, OpenAiCompatibleProvider,
     ResponsesDecisionSource, ResponsesProvider,
 };
-pub(crate) use providers::{CloudflareAccountId, ModelDecisionSource, OpenAiCompatibleCredentials};
+pub(crate) use providers::{
+    CloudflareAccountId, CloudflareGatewayId, ModelDecisionSource, OpenAiCompatibleCredentials,
+};
 #[allow(unused_imports)] // some re-exports are used only by tests
 pub(crate) use request::{
     build_anthropic_request, build_gemini_request, build_responses_request,

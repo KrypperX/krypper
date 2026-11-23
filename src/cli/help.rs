@@ -35,7 +35,7 @@ pub(super) fn usage_error(
         Some("write") => "usage: krypper write [-h] [--stdin] path ...",
         Some("models") => "usage: krypper models [--provider NAME] [--id MODEL_ID] [--json]",
         Some("task") => {
-            "usage: krypper task [-h] [--goal GOAL] --max-actions N [--workspace PATH] [--model NAME] [--provider NAME] [--no-config] [--checkpoint-out PATH] [--resume PATH] [--activity-jsonl]"
+            "usage: krypper task [-h] [--goal GOAL] --max-actions N [--workspace PATH] [--model NAME] [--provider NAME] [--no-config] [--checkpoint-out PATH] [--resume PATH] [--activity-jsonl] [--model-usage-jsonl]"
         }
         Some("context") => {
             "usage: krypper context [-h] --goal GOAL [--workspace PATH] [--repository-map]"
@@ -63,18 +63,19 @@ pub(super) fn write_context_help(output: &mut dyn Write) -> io::Result<()> {
 pub(super) fn write_task_help(output: &mut dyn Write) -> io::Result<()> {
     output.write_all(
         concat!(
-            "usage: krypper task [-h] [--goal GOAL] --max-actions N [--workspace PATH] [--model NAME] [--provider NAME] [--no-config] [--checkpoint-out PATH] [--resume PATH]\n\n",
+            "usage: krypper task [-h] [--goal GOAL] --max-actions N [--workspace PATH] [--model NAME] [--provider NAME] [--no-config] [--checkpoint-out PATH] [--resume PATH] [--activity-jsonl] [--model-usage-jsonl]\n\n",
             "run a bounded task in the selected workspace or current directory\n\n",
             "options:\n  --goal GOAL          task goal (required unless --resume is used)\n",
             "  --max-actions N      required positive action limit for this invocation\n",
             "  --workspace PATH     use an existing directory as the captured task workspace\n",
             "  --model NAME         opt in to model-selected actions (defaults to local Ollama)\n",
-            "  --provider NAME      choose ollama, gemini, openai, xai, anthropic, cloudflare, groq, openrouter, deepseek, zai, or mistral; requires --model\n",
+            "  --provider NAME      choose ollama, gemini, openai, xai, anthropic, cloudflare, cloudflare-ai-gateway, groq, openrouter, deepseek, zai, or mistral; requires --model\n",
             "  --no-config          ignore the user configuration file for this run\n",
             "  --checkpoint-out PATH write only when a completed turn reaches continue; file must be new\n",
             "  --resume PATH        restore one running task and start a fresh turn\n",
             "  --activity-jsonl    write read-only task activity positions as JSONL to stderr after each turn\n",
             "  --stream-events-jsonl  write versioned metadata-only stream events as JSONL to stderr after each turn\n",
+            "  --model-usage-jsonl emit provider token counts and decision latency as prefixed JSON records to stderr\n",
             "  -h, --help           show this help message and exit\n\n",
             "Without --workspace, task captures the current directory as its workspace.\n",
             "With --workspace, the selected directory is validated before task history starts;\n",
@@ -93,6 +94,7 @@ pub(super) fn write_task_help(output: &mut dyn Write) -> io::Result<()> {
             "    optional ANTHROPIC_WORKSPACE_ID is sent as anthropic-workspace-id (required by Anthropic for keys not scoped to a workspace)\n",
             "  cloudflare: CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN ->\n",
             "    https://api.cloudflare.com/client/v4/accounts/<account-id>/ai/v1/chat/completions\n",
+            "  cloudflare-ai-gateway: CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN + optional CLOUDFLARE_AI_GATEWAY_ID -> same endpoint with cf-aig-gateway-id (default: default)\n",
             "  groq: GROQ_API_KEY -> https://api.groq.com/openai/v1/chat/completions\n",
             "  openrouter: OPENROUTER_API_KEY -> https://openrouter.ai/api/v1/chat/completions\n",
             "  deepseek: DEEPSEEK_API_KEY -> https://api.deepseek.com/chat/completions\n",
