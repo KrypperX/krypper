@@ -40,11 +40,26 @@ impl std::ops::DerefMut for ManagedChild {
 }
 
 impl ManagedChild {
-    pub(super) fn try_wait(&mut self) -> io::Result<Option<std::process::ExitStatus>> {
-        match self.0.as_mut() {
-            Some(child) => child.try_wait(),
-            None => Ok(None),
+    pub(super) fn has_exited(&mut self) -> io::Result<bool> {
+        let Some(child) = self.0.as_ref() else {
+            return Ok(false);
+        };
+        let mut status = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+        // SAFETY: `child` is still owned and unreaped. `status` points to writable storage,
+        // and WNOWAIT observes its exit without releasing the PID used as its process-group ID.
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                child.id() as libc::id_t,
+                status.as_mut_ptr(),
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if result != 0 {
+            return Err(io::Error::last_os_error());
         }
+        // SAFETY: waitid succeeded and initialized the siginfo_t output.
+        Ok(unsafe { status.assume_init() }.si_signo != 0)
     }
 
     pub(super) fn terminate(&mut self) -> Result<(), McpLifecycleError> {
@@ -61,8 +76,6 @@ impl ManagedChild {
         if unsafe { libc::kill(-pgid, libc::SIGKILL) } != 0 {
             let error = io::Error::last_os_error();
             if error.raw_os_error() != Some(libc::ESRCH) {
-                #[cfg(all(test, target_os = "macos"))]
-                eprintln!("[mcp-cleanup] kill of process group {pgid} failed: {error}");
                 let _ = child.kill();
                 if !reap(&mut child) {
                     thread::spawn(move || {
@@ -73,55 +86,10 @@ impl ManagedChild {
             }
         }
         if !reap(&mut child) {
-            #[cfg(all(test, target_os = "macos"))]
-            eprintln!("[mcp-cleanup] direct child {pgid} did not reap before timeout");
             thread::spawn(move || {
                 let _ = child.wait();
             });
             return Err(McpLifecycleError::CleanupFailed);
-        }
-        // After reaping, a recycled PGID could theoretically make this signal-0
-        // existence probe report a different group. No signal is delivered; the
-        // bounded timeout would only cause a spurious CleanupFailed in that case.
-        let start = Instant::now();
-        loop {
-            // SAFETY: signal 0 delivers nothing and only probes whether the group exists;
-            // `kill` takes only integers.
-            if unsafe { libc::kill(-pgid, 0) } == -1 {
-                if io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
-                    #[cfg(all(test, target_os = "macos"))]
-                    eprintln!(
-                        "[mcp-cleanup] probe for process group {pgid} failed: {}",
-                        io::Error::last_os_error()
-                    );
-                    return Err(McpLifecycleError::CleanupFailed);
-                }
-                break;
-            }
-            if start.elapsed() >= REAP_TIMEOUT {
-                #[cfg(all(test, target_os = "macos"))]
-                {
-                    let process_group = pgid.to_string();
-                    let output = Command::new("ps")
-                        .args(["-A", "-o", "pid=,ppid=,pgid=,stat="])
-                        .output();
-                    let members = output
-                        .ok()
-                        .map(|output| {
-                            String::from_utf8_lossy(&output.stdout)
-                                .lines()
-                                .filter(|line| {
-                                    line.split_whitespace().nth(2) == Some(process_group.as_str())
-                                })
-                                .collect::<Vec<_>>()
-                                .join(" | ")
-                        })
-                        .unwrap_or_else(|| "ps unavailable".to_owned());
-                    eprintln!("[mcp-cleanup] process group {pgid} remained visible: {members}");
-                }
-                return Err(McpLifecycleError::CleanupFailed);
-            }
-            thread::sleep(POLL_INTERVAL);
         }
         Ok(())
     }
@@ -299,7 +267,7 @@ pub(super) fn read_line(
         if response.len() >= MAX_RESPONSE_BYTES {
             return Err(McpLifecycleError::OutputLimitExceeded);
         }
-        if stdout_eof && !progressed && matches!(child.try_wait(), Ok(Some(_))) {
+        if stdout_eof && !progressed && matches!(child.has_exited(), Ok(true)) {
             return Err(McpLifecycleError::Disconnected);
         }
         thread::sleep(POLL_INTERVAL);

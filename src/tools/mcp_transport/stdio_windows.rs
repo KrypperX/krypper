@@ -22,10 +22,10 @@ pub(super) struct StdioChild {
 pub(super) struct ManagedChild(Option<Child>);
 
 impl ManagedChild {
-    pub(super) fn try_wait(&mut self) -> io::Result<Option<std::process::ExitStatus>> {
+    pub(super) fn has_exited(&mut self) -> io::Result<bool> {
         match self.0.as_mut() {
-            Some(child) => child.try_wait(),
-            None => Ok(None),
+            Some(child) => child.try_wait().map(|status| status.is_some()),
+            None => Ok(false),
         }
     }
 
