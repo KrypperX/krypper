@@ -155,6 +155,7 @@ impl fmt::Display for RootGuidanceReadError {
 impl std::error::Error for RootGuidanceReadError {}
 
 impl WorkspaceRoot {
+    #[cfg(target_os = "linux")]
     pub(crate) fn process_descriptor(&self) -> io::Result<File> {
         super::syscalls::duplicate_directory_file(&self.descriptor)
     }

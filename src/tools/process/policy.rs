@@ -1,6 +1,8 @@
 //! The fixed offline Cargo policy: limits, test filters and the trusted toolchain profile.
 
+#[cfg(target_os = "linux")]
 use crate::tools::process_profile::ProcessProfile;
+#[cfg(target_os = "linux")]
 use crate::tools::{capture_workspace_root_at, WorkspaceRoot};
 #[cfg(target_os = "linux")]
 use std::ffi::OsString;
@@ -19,18 +21,24 @@ pub(crate) const MAX_TEST_FILTER_BYTES: usize = 256;
 /// `/usr`, `/lib` and `/lib64` are trusted read-only runtime inputs on supported Linux hosts.
 #[derive(Debug)]
 pub struct OfflineCargoPolicy {
+    #[cfg(target_os = "linux")]
     pub(super) toolchain: WorkspaceRoot,
+    #[cfg(target_os = "linux")]
     pub(super) registry: WorkspaceRoot,
     pub(super) cancelled: Arc<AtomicBool>,
+    #[cfg(target_os = "linux")]
     pub(super) profile: ProcessProfile<'static>,
 }
 
 impl OfflineCargoPolicy {
-    /// Capture preprovisioned toolchain/registry identities. Does not install or fetch anything.
+    /// Capture preprovisioned toolchain/registry identities on Linux. Does not install or fetch
+    /// anything. Other platforms retain only cancellation state because execution is unavailable.
     /// The toolchain contains real `bin/cargo` and `bin/rustc` executables (not rustup shims).
-    pub fn new(toolchain: &Path, registry: &Path) -> Result<Self, String> {
-        let toolchain = capture_workspace_root_at(toolchain)?;
-        let registry = capture_workspace_root_at(registry)?;
+    pub fn new(_toolchain: &Path, _registry: &Path) -> Result<Self, String> {
+        #[cfg(target_os = "linux")]
+        let toolchain = capture_workspace_root_at(_toolchain)?;
+        #[cfg(target_os = "linux")]
+        let registry = capture_workspace_root_at(_registry)?;
         #[cfg(target_os = "linux")]
         {
             for binary in ["cargo", "rustc"] {
@@ -44,9 +52,12 @@ impl OfflineCargoPolicy {
             }
         }
         Ok(Self {
+            #[cfg(target_os = "linux")]
             toolchain,
+            #[cfg(target_os = "linux")]
             registry,
             cancelled: Arc::new(AtomicBool::new(false)),
+            #[cfg(target_os = "linux")]
             profile: ProcessProfile::offline_cargo_test()
                 .map_err(|error| format!("invalid fixed process profile: {error:?}"))?,
         })
