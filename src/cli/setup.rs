@@ -412,7 +412,7 @@ fn choose_model(
         return prompt_model_id(input, output, provider);
     }
     let all_models = crate::catalog_data::models().map_err(io::Error::other)?;
-    if let Some(exact) = all_models.iter().find(|model| {
+    if all_models.iter().any(|model| {
         crate::catalog_data::provider_matches(provider.id, &model.provider)
             && model.id.eq_ignore_ascii_case(&query)
     }) {
@@ -521,7 +521,8 @@ fn collect_credentials(
             let token = prompt_required_secret(output, "Cloudflare API token: ")?;
             credentials.insert("CLOUDFLARE_API_TOKEN", token);
             if provider.id == "cloudflare-ai-gateway" {
-                let gateway_id = prompt_line(input, output, "AI Gateway ID [default]: ")?
+                let gateway_id = prompt_line(input, output, "AI Gateway ID [default]: ")
+                    .map_err(|_| "could not read interactive input".to_owned())?
                     .ok_or_else(|| "setup cancelled; no settings were changed".to_owned())?;
                 let gateway_id = if gateway_id.trim().is_empty() {
                     credentials.remove("CLOUDFLARE_AI_GATEWAY_ID");
@@ -545,7 +546,8 @@ fn collect_credentials(
                 input,
                 output,
                 "Anthropic Workspace ID (optional; Enter to skip): ",
-            )?
+            )
+            .map_err(|_| "could not read interactive input".to_owned())?
             .ok_or_else(|| "setup cancelled; no settings were changed".to_owned())?;
             if workspace_id.trim().is_empty() {
                 credentials.remove("ANTHROPIC_WORKSPACE_ID");
