@@ -393,20 +393,19 @@ fn choose_model(
     output: &mut dyn Write,
     provider: ProviderChoice,
 ) -> io::Result<Option<String>> {
-    let query = loop {
-        let Some(query) = prompt_line(
-            input,
-            output,
-            "Search the offline model catalog by name or ID (Enter to type an ID; q cancels): ",
-        )?
-        else {
-            return Ok(None);
-        };
-        if query.eq_ignore_ascii_case("q") {
-            return Ok(None);
-        }
-        break query.trim().to_owned();
+    let Some(query) = prompt_line(
+        input,
+        output,
+        "Search the offline model catalog by name or ID (Enter to type an ID; q cancels): ",
+    )?
+    else {
+        return Ok(None);
     };
+    let query = query.trim();
+    if query.eq_ignore_ascii_case("q") {
+        return Ok(None);
+    }
+    let query = query.to_owned();
 
     if query.is_empty() {
         return prompt_model_id(input, output, provider);

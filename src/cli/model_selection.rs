@@ -48,6 +48,7 @@ pub(super) fn configured_model_selection(
     Ok(Some((defaults.model, provider)))
 }
 
+#[cfg(test)]
 pub(super) fn prepare_model_source(
     model: Option<String>,
     provider: Option<ModelProvider>,
