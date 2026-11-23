@@ -514,6 +514,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn fixed_offline_cargo_profile_has_the_live_command_shape() {
         let item = ProcessProfile::offline_cargo_test().unwrap();
         assert_eq!(item.version(), PROFILE_CONTRACT_VERSION);
