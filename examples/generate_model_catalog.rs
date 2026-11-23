@@ -65,7 +65,15 @@ fn normalize(raw: &Value) -> Result<Vec<ModelRecord>, String> {
         let Some(models) = provider.get("models").and_then(Value::as_object) else {
             continue;
         };
+        if provider_id.is_empty() {
+            return Err("provider ID must not be empty".into());
+        }
         for (model_id, model) in models {
+            if model_id.is_empty() {
+                return Err(format!(
+                    "model ID for provider `{provider_id}` must not be empty"
+                ));
+            }
             let model = model.as_object();
             let limits = model
                 .and_then(|model| model.get("limit"))
@@ -291,6 +299,21 @@ mod tests {
         assert_eq!(
             validate_slim_snapshot(b"[]", &metadata).unwrap_err(),
             "Slim snapshot SHA-256 mismatch"
+        );
+    }
+
+    #[test]
+    fn normalization_rejects_empty_provider_and_model_ids() {
+        let empty_provider = json!({ "": { "models": { "model": {} } } });
+        assert_eq!(
+            normalize(&empty_provider).unwrap_err(),
+            "provider ID must not be empty"
+        );
+
+        let empty_model = json!({ "openai": { "models": { "": {} } } });
+        assert_eq!(
+            normalize(&empty_model).unwrap_err(),
+            "model ID for provider `openai` must not be empty"
         );
     }
 }
