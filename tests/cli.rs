@@ -41,7 +41,12 @@ fn command(cwd: Option<&Path>, args: &[&str]) -> Command {
     }
     // Keep every test independent of a configuration file on the machine that
     // runs it; tests that exercise configuration set their own path afterward.
-    command.env("KRYPPER_CONFIG", "/nonexistent/krypper-test/config.toml");
+    let isolated_config_root =
+        std::env::temp_dir().join(format!("krypper-cli-test-config-{}", std::process::id()));
+    command.env("KRYPPER_CONFIG", isolated_config_root.join("config.toml"));
+    command.env("XDG_CONFIG_HOME", isolated_config_root.join("xdg-config"));
+    command.env("HOME", isolated_config_root.join("home"));
+    command.env("USERPROFILE", isolated_config_root.join("home"));
     command.args(args);
     command
 }
@@ -227,7 +232,7 @@ fn help_prints_usage_and_succeeds() {
     let output = run(None, &["--help"]);
     assert!(output.status.success());
     assert!(stdout(&output).contains("usage: krypper"));
-    assert!(stdout(&output).contains("{show,list,write,task,models,context}"));
+    assert!(stdout(&output).contains("{show,list,write,task,models,context,setup}"));
 }
 
 #[test]
@@ -235,7 +240,66 @@ fn missing_command_prints_usage_and_fails() {
     let output = run(None, &[]);
     assert_eq!(output.status.code(), Some(2));
     assert!(stderr(&output).contains("usage: krypper"));
-    assert!(stderr(&output).contains("{show,list,write,task,models,context}"));
+    assert!(stderr(&output).contains("{show,list,write,task,models,context,setup}"));
+}
+
+#[test]
+fn setup_help_describes_local_configuration_and_masked_credentials() {
+    let output = run(None, &["setup", "--help"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let help = stdout(&output);
+    assert!(help.contains("offline model catalog"), "{help}");
+    assert!(help.contains("not encrypted"), "{help}");
+    assert!(help.contains("may incur provider charges"), "{help}");
+}
+
+#[test]
+fn setup_requires_a_terminal_for_interactive_changes() {
+    let directory = TempDir::new();
+    let output = run_with_input(directory.path(), &["setup"], b"1\nmodel\n");
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(stderr(&output).contains("requires an interactive terminal"));
+    assert!(!directory
+        .path()
+        .join(".config/krypper/config.toml")
+        .exists());
+}
+
+#[test]
+fn setup_status_redacts_saved_credentials_and_writes_nothing_to_the_workspace() {
+    let workspace = TempDir::new();
+    let xdg = TempDir::new();
+    let config_directory = xdg.path().join("krypper");
+    fs::create_dir_all(&config_directory).unwrap();
+    let model_config = config_directory.join("config.toml");
+    fs::write(
+        &model_config,
+        "provider = \"openai\"\nmodel = \"gpt-4.1\"\n",
+    )
+    .unwrap();
+    let secret = "status-secret-must-not-appear";
+    let credentials = config_directory.join("credentials.json");
+    fs::write(&credentials, format!("{{\"OPENAI_API_KEY\":\"{secret}\"}}")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&config_directory, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&credentials, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    let output = command(Some(workspace.path()), &["setup", "--status"])
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .output()
+        .expect("show setup status");
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let visible = format!("{}{}", stdout(&output), stderr(&output));
+    assert!(visible.contains("Provider: OpenAI"), "{visible}");
+    assert!(visible.contains("values hidden"), "{visible}");
+    assert!(!visible.contains(secret), "{visible}");
+    assert!(!workspace
+        .path()
+        .join(".config/krypper/config.toml")
+        .exists());
 }
 
 #[test]
