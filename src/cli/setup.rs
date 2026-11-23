@@ -411,11 +411,11 @@ fn choose_model(
         return prompt_model_id(input, output, provider);
     }
     let all_models = crate::catalog_data::models().map_err(io::Error::other)?;
-    if all_models.iter().any(|model| {
+    if let Some(exact) = all_models.iter().find(|model| {
         crate::catalog_data::provider_matches(provider.id, &model.provider)
             && model.id.eq_ignore_ascii_case(&query)
     }) {
-        return validate_model(provider.id, &query)
+        return validate_model(provider.id, &exact.id)
             .map(Some)
             .map_err(io::Error::other);
     }
