@@ -14,6 +14,8 @@ pub(super) const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 const MAX_STDERR_BYTES: usize = 4 * 1024;
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
 const REAP_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(target_os = "macos")]
+const MAX_PROCESS_GROUP_MEMBERS: usize = 65_536;
 
 pub(super) struct StdioChild {
     pub child: ManagedChild,
@@ -61,11 +63,11 @@ impl ManagedChild {
         if unsafe { libc::kill(-pgid, libc::SIGKILL) } != 0 {
             let error = io::Error::last_os_error();
             #[cfg(target_os = "macos")]
-            let group_contains_only_exited_processes = error.raw_os_error() == Some(libc::EPERM)
+            let macos_eperm_with_exited_leader = error.raw_os_error() == Some(libc::EPERM)
                 && child_has_exited(&child).unwrap_or(false);
             #[cfg(not(target_os = "macos"))]
-            let group_contains_only_exited_processes = false;
-            if error.raw_os_error() != Some(libc::ESRCH) && !group_contains_only_exited_processes {
+            let macos_eperm_with_exited_leader = false;
+            if error.raw_os_error() != Some(libc::ESRCH) && !macos_eperm_with_exited_leader {
                 let _ = child.kill();
                 if !reap(&mut child) {
                     thread::spawn(move || {
@@ -74,14 +76,17 @@ impl ManagedChild {
                 }
                 return Err(McpLifecycleError::CleanupFailed);
             }
-            // macOS returns EPERM if the process group contains only zombies. The unreaped
-            // child still pins this PGID, and any live descendant shares a UID that the caller
-            // can signal, so a confirmed exited leader means no live group member remains.
+            // On macOS, EPERM can mean either that the group contains only zombies or that it
+            // contains a live process this caller cannot signal. Reap the leader, then verify
+            // group emptiness below before reporting success.
         }
         if !reap(&mut child) {
             thread::spawn(move || {
                 let _ = child.wait();
             });
+            return Err(McpLifecycleError::CleanupFailed);
+        }
+        if !wait_for_process_group_empty(pgid) {
             return Err(McpLifecycleError::CleanupFailed);
         }
         Ok(())
@@ -124,6 +129,71 @@ fn reap(child: &mut Child) -> bool {
         thread::sleep(POLL_INTERVAL);
     }
     false
+}
+
+fn wait_for_process_group_empty(pgid: libc::pid_t) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < REAP_TIMEOUT {
+        match process_group_is_empty(pgid) {
+            Ok(true) => return true,
+            Ok(false) | Err(_) => thread::sleep(POLL_INTERVAL),
+        }
+    }
+    matches!(process_group_is_empty(pgid), Ok(true))
+}
+
+#[cfg(target_os = "macos")]
+fn process_group_is_empty(pgid: libc::pid_t) -> io::Result<bool> {
+    let mut pids = vec![0; 64];
+    loop {
+        let buffer_size = std::mem::size_of_val(pids.as_slice()) as libc::c_int;
+        // Clear errno so a zero result can be distinguished from libproc's error return.
+        // SAFETY: `__error` returns this thread's writable errno slot.
+        unsafe { *libc::__error() = 0 };
+        // SAFETY: `pids` is writable storage of `buffer_size` bytes and `pgid` was captured
+        // from the child created for this process group.
+        let count = unsafe { libc::proc_listpgrppids(pgid, pids.as_mut_ptr().cast(), buffer_size) };
+        // SAFETY: `__error` returns this thread's errno slot.
+        let errno = unsafe { *libc::__error() };
+        if errno != 0 {
+            return Err(io::Error::from_raw_os_error(errno));
+        }
+        if count < 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "libproc returned a negative process count",
+            ));
+        }
+
+        let count = count as usize;
+        if count == 0 {
+            return Ok(true);
+        }
+        if count < pids.len() {
+            return Ok(false);
+        }
+        if pids.len() >= MAX_PROCESS_GROUP_MEMBERS {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "process group is too large to verify completely",
+            ));
+        }
+        pids.resize((pids.len() * 2).min(MAX_PROCESS_GROUP_MEMBERS), 0);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn process_group_is_empty(pgid: libc::pid_t) -> io::Result<bool> {
+    // SAFETY: signal 0 probes the process group and does not deliver a signal.
+    if unsafe { libc::kill(-pgid, 0) } == 0 {
+        return Ok(false);
+    }
+    let error = io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::ESRCH) => Ok(true),
+        Some(libc::EPERM) => Ok(false),
+        _ => Err(error),
+    }
 }
 
 pub(super) fn spawn(

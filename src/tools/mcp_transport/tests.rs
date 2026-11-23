@@ -56,23 +56,13 @@ fn config(script: &str, log: &Path, timeout: Duration) -> McpStdioConfig {
 }
 
 fn assert_process_group_gone(pgid: i32) {
-    let start = Instant::now();
-    loop {
-        // SAFETY: signal 0 only probes whether the process group exists; `kill` takes only integers.
-        if unsafe { libc::kill(-pgid, 0) } == -1 {
-            assert_eq!(
-                io::Error::last_os_error().raw_os_error(),
-                Some(libc::ESRCH),
-                "process group still exists"
-            );
-            return;
-        }
-        assert!(
-            start.elapsed() < Duration::from_secs(2),
-            "process group survived cleanup"
-        );
-        thread::sleep(Duration::from_millis(5));
-    }
+    // SAFETY: signal 0 only probes whether the process group exists; `kill` takes only integers.
+    assert_eq!(unsafe { libc::kill(-pgid, 0) }, -1);
+    assert_eq!(
+        io::Error::last_os_error().raw_os_error(),
+        Some(libc::ESRCH),
+        "cleanup returned before the process group was empty"
+    );
 }
 
 fn error_of(result: Result<McpSession, McpLifecycleError>) -> McpLifecycleError {
