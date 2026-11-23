@@ -3,6 +3,9 @@ name = "krypper"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.89"
+description = "Local-first CLI and agent task runtime with bounded workspace operations"
+repository = "https://github.com/KrypperX/krypper"
+readme = "README.md"
 
 [dependencies]
 ignore = "0.4.34"
