@@ -2,6 +2,21 @@
 //! User configuration and provider routing remain authoritative.
 use serde_json::Value;
 
+/// Match a Krypper provider selector to provider IDs in the central catalog.
+/// The Cloudflare Gateway selector can use both its unified third-party models
+/// and Cloudflare-hosted Workers AI models.
+pub fn provider_matches(selector: &str, catalog_provider: &str) -> bool {
+    selector == catalog_provider
+        || match selector {
+            "cloudflare" => catalog_provider == "cloudflare-workers-ai",
+            "cloudflare-ai-gateway" => matches!(
+                catalog_provider,
+                "cloudflare-ai-gateway" | "cloudflare-workers-ai"
+            ),
+            _ => false,
+        }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelSpec {
     pub provider: String,
@@ -58,7 +73,7 @@ pub fn models() -> Result<Vec<ModelSpec>, serde_json::Error> {
 pub fn lookup(provider: &str, model_id: &str) -> Result<Option<ModelSpec>, serde_json::Error> {
     Ok(models()?
         .into_iter()
-        .find(|m| m.provider == provider && m.id == model_id))
+        .find(|m| provider_matches(provider, &m.provider) && m.id == model_id))
 }
 
 #[cfg(test)]
@@ -77,5 +92,20 @@ mod tests {
         assert!(lookup("unknown-provider", "custom-model")
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn cloudflare_selectors_match_workers_ai_and_gateway_catalogs() {
+        assert!(provider_matches("cloudflare", "cloudflare-workers-ai"));
+        assert!(!provider_matches("cloudflare", "cloudflare-ai-gateway"));
+        assert!(provider_matches(
+            "cloudflare-ai-gateway",
+            "cloudflare-ai-gateway"
+        ));
+        assert!(provider_matches(
+            "cloudflare-ai-gateway",
+            "cloudflare-workers-ai"
+        ));
+        assert!(!provider_matches("cloudflare-ai-gateway", "openai"));
     }
 }

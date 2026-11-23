@@ -1144,6 +1144,7 @@ fn hosted_provider_credentials_are_required_before_task_lifecycle_creation() {
         "ANTHROPIC_API_KEY",
         "CLOUDFLARE_ACCOUNT_ID",
         "CLOUDFLARE_API_TOKEN",
+        "CLOUDFLARE_AI_GATEWAY_ID",
         "GROQ_API_KEY",
         "OPENROUTER_API_KEY",
         "DEEPSEEK_API_KEY",
@@ -1162,6 +1163,16 @@ fn hosted_provider_credentials_are_required_before_task_lifecycle_creation() {
         ),
         (
             "cloudflare",
+            "CLOUDFLARE_API_TOKEN",
+            Some(("CLOUDFLARE_ACCOUNT_ID", "account-123")),
+        ),
+        (
+            "cloudflare-ai-gateway",
+            "CLOUDFLARE_ACCOUNT_ID",
+            Some(("CLOUDFLARE_API_TOKEN", "test-token")),
+        ),
+        (
+            "cloudflare-ai-gateway",
             "CLOUDFLARE_API_TOKEN",
             Some(("CLOUDFLARE_ACCOUNT_ID", "account-123")),
         ),
@@ -1218,6 +1229,46 @@ fn hosted_provider_credentials_are_required_before_task_lifecycle_creation() {
         assert!(!error.contains("model decision"));
         assert!(!checkpoint.exists());
         assert!(!workspace.path().join("should-not-exist.txt").exists());
+    }
+}
+
+#[test]
+fn cloudflare_ai_gateway_defaults_and_validates_gateway_id_before_task_lifecycle_creation() {
+    let _lock = PROVIDER_ENV_TEST_LOCK
+        .lock()
+        .expect("lock provider environment tests");
+    let _restore_account = RestoreEnvironmentVariable::set("CLOUDFLARE_ACCOUNT_ID", "account-123");
+    let _restore_token =
+        RestoreEnvironmentVariable::set("CLOUDFLARE_API_TOKEN", "local-test-token");
+    let provider = ModelProvider::parse("cloudflare-ai-gateway")
+        .expect("parse Cloudflare AI Gateway provider");
+
+    {
+        let _unset_gateway = RestoreEnvironmentVariable::remove("CLOUDFLARE_AI_GATEWAY_ID");
+        assert!(matches!(
+            prepare_model_source(
+                Some("openai/gpt-4.1".to_owned()),
+                Some(provider),
+                1,
+                SocketAddr::from(([127, 0, 0, 1], 0)),
+            ),
+            Ok(Some(ModelDecisionSource::OpenAiCompatible(_)))
+        ));
+    }
+
+    for invalid in ["", "gateway id", "gateway\nid", &"g".repeat(65)] {
+        let _gateway_id = RestoreEnvironmentVariable::set("CLOUDFLARE_AI_GATEWAY_ID", invalid);
+        assert_eq!(
+            prepare_model_source(
+                Some("openai/gpt-4.1".to_owned()),
+                Some(provider),
+                1,
+                SocketAddr::from(([127, 0, 0, 1], 0)),
+            )
+            .err(),
+            Some("CLOUDFLARE_AI_GATEWAY_ID must be 1-64 visible ASCII characters without spaces"),
+            "{invalid:?}"
+        );
     }
 }
 
@@ -1323,6 +1374,11 @@ fn provider_option_requires_a_model_and_rejects_unknown_names() {
         ("openai", None, "--model is required with --provider"),
         ("xai", None, "--model is required with --provider"),
         ("cloudflare", None, "--model is required with --provider"),
+        (
+            "cloudflare-ai-gateway",
+            None,
+            "--model is required with --provider",
+        ),
         ("groq", None, "--model is required with --provider"),
         ("openrouter", None, "--model is required with --provider"),
         ("deepseek", None, "--model is required with --provider"),
@@ -1377,9 +1433,11 @@ fn task_help_documents_provider_selection_and_network_disclosure() {
 
     assert_eq!(code, 0, "{}", String::from_utf8_lossy(&error));
     assert!(help.contains("--provider NAME"));
+    assert!(help.contains("--model-usage-jsonl"));
     assert!(help.contains(
-        "choose ollama, gemini, openai, xai, anthropic, cloudflare, groq, openrouter, deepseek, zai, or mistral"
+        "choose ollama, gemini, openai, xai, anthropic, cloudflare, cloudflare-ai-gateway, groq, openrouter, deepseek, zai, or mistral"
     ));
+    assert!(help.contains("cf-aig-gateway-id"));
     for credential in [
         "GEMINI_API_KEY",
         "OPENAI_API_KEY",
@@ -1387,6 +1445,7 @@ fn task_help_documents_provider_selection_and_network_disclosure() {
         "ANTHROPIC_API_KEY",
         "CLOUDFLARE_ACCOUNT_ID",
         "CLOUDFLARE_API_TOKEN",
+        "CLOUDFLARE_AI_GATEWAY_ID",
         "GROQ_API_KEY",
         "OPENROUTER_API_KEY",
         "DEEPSEEK_API_KEY",
@@ -1412,4 +1471,62 @@ fn task_help_documents_provider_selection_and_network_disclosure() {
     assert!(help.contains("https://api.deepseek.com/chat/completions"));
     assert!(help.contains("https://api.z.ai/api/paas/v4/chat/completions"));
     assert!(help.contains("https://api.mistral.ai/v1/chat/completions"));
+}
+
+#[test]
+fn model_usage_jsonl_requires_a_compatible_model_provider() {
+    let args = [
+        OsString::from("--goal"),
+        OsString::from("Read the brief"),
+        OsString::from("--max-actions"),
+        OsString::from("1"),
+        OsString::from("--no-config"),
+        OsString::from("--model-usage-jsonl"),
+    ];
+    let mut input = Cursor::new(Vec::<u8>::new());
+    let mut output = Vec::new();
+    let mut error = Vec::new();
+    let code = run_task_with_endpoint(
+        &args,
+        &mut input,
+        &mut output,
+        &mut error,
+        SocketAddr::from(([127, 0, 0, 1], 11434)),
+    )
+    .expect("reject usage output without a model provider");
+
+    assert_eq!(code, 2);
+    assert!(String::from_utf8_lossy(&error)
+        .contains("--model-usage-jsonl requires a model-backed compatible provider"));
+    assert!(output.is_empty());
+}
+
+#[test]
+fn model_usage_jsonl_rejects_local_ollama_sources_before_network_access() {
+    let args = [
+        OsString::from("--goal"),
+        OsString::from("Read the brief"),
+        OsString::from("--max-actions"),
+        OsString::from("1"),
+        OsString::from("--no-config"),
+        OsString::from("--model"),
+        OsString::from("qwen3"),
+        OsString::from("--model-usage-jsonl"),
+    ];
+    let mut input = Cursor::new(Vec::<u8>::new());
+    let mut output = Vec::new();
+    let mut error = Vec::new();
+    let code = run_task_with_endpoint(
+        &args,
+        &mut input,
+        &mut output,
+        &mut error,
+        SocketAddr::from(([127, 0, 0, 1], 0)),
+    )
+    .expect("reject unsupported token usage output");
+
+    assert_eq!(code, 2);
+    assert!(String::from_utf8_lossy(&error)
+        .contains("--model-usage-jsonl is supported by OpenAI-compatible providers"));
+    assert!(output.is_empty());
 }
