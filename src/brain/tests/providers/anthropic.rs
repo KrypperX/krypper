@@ -89,7 +89,6 @@ fn anthropic_messages_request_uses_fixed_contract_and_normalizes_one_action() {
     );
 }
 
-
 #[test]
 fn anthropic_sse_request_preserves_auth_version_and_workspace_headers() {
     let (address, server) = mock_server(vec![ok("event: ping\ndata: {}\n\n".to_owned())]);
@@ -99,7 +98,10 @@ fn anthropic_sse_request_preserves_auth_version_and_workspace_headers() {
         ModelProvider::Anthropic,
         &endpoint,
         "local-anthropic-stream-key",
-        &[("anthropic-workspace-id", "wrkspc_01JwQvzr7rXLA5AGx3HKfFUJ")],
+        &[(
+            "anthropic-workspace-id",
+            "wrkspc_01JwQvzr7rXLA5AGx3HKfFUJ",
+        )],
         br#"{}"#,
         |_| Ok(()),
     );
@@ -123,7 +125,9 @@ fn anthropic_sse_request_preserves_auth_version_and_workspace_headers() {
         request_header(request, "accept").as_deref(),
         Some("text/event-stream")
     );
-    assert!(!request_body(request).to_string().contains("local-anthropic-stream-key"));
+    assert!(!request_body(request)
+        .to_string()
+        .contains("local-anthropic-stream-key"));
 }
 
 #[test]
