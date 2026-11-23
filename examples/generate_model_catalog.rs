@@ -1,27 +1,64 @@
 //! Deterministic offline normalizer for the pinned models.dev snapshot.
-//! Run with `cargo run --example generate_model_catalog -- [--check]`.
+//! Default mode writes the optional normalized JSON artifact.
+//! Use --check to validate it, or --from-upstream <path> to refresh the slim snapshot.
 use ring::digest::{digest, SHA256};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::path::PathBuf;
 
-#[derive(Serialize)]
-struct ModelRecord<'a> {
-    provider: &'a str,
-    id: &'a str,
-    name: &'a str,
-    context_window: Option<&'a Value>,
-    max_output_tokens: Option<&'a Value>,
-    tool_calling: Option<&'a Value>,
-    reasoning: Option<&'a Value>,
-    modalities: Option<&'a Value>,
-    status: Option<&'a Value>,
+// Increment when the normalized record schema or field mapping changes.
+const GENERATOR_VERSION: &str = "1";
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ModelRecord {
+    provider: String,
+    id: String,
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_window: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_output_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calling: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<bool>,
+    // Preserve a present JSON null as Some(Value::Null), distinct from a missing field.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_value",
+        skip_serializing_if = "Option::is_none"
+    )]
+    modalities: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<String>,
 }
 
-/// Normalize without network access or changes to the runtime model router.
-fn normalize(raw: &Value) -> Result<Vec<Value>, String> {
+fn deserialize_present_value<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Value::deserialize(deserializer).map(Some)
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    digest(&SHA256, bytes)
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn pretty_json(value: &impl Serialize) -> Result<Vec<u8>, String> {
+    let mut output = serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?;
+    output.push(b'\n');
+    Ok(output)
+}
+
+/// Keep only the fields used by ModelSpec and preserve deterministic provider/model ordering.
+fn normalize(raw: &Value) -> Result<Vec<ModelRecord>, String> {
     let providers = raw.as_object().ok_or("snapshot root must be an object")?;
     let mut records = Vec::new();
     for (provider_id, provider) in providers {
@@ -29,143 +66,176 @@ fn normalize(raw: &Value) -> Result<Vec<Value>, String> {
             continue;
         };
         for (model_id, model) in models {
-            let Some(model) = model.as_object() else {
-                continue;
-            };
-            let limits = model.get("limit").and_then(Value::as_object);
+            let model = model.as_object();
+            let limits = model
+                .and_then(|model| model.get("limit"))
+                .and_then(Value::as_object);
             let record = ModelRecord {
-                provider: provider_id,
-                id: model_id,
+                provider: provider_id.clone(),
+                id: model_id.clone(),
                 name: model
-                    .get("name")
+                    .and_then(|model| model.get("name"))
                     .and_then(Value::as_str)
-                    .filter(|name| !name.is_empty())
-                    .unwrap_or(model_id),
-                context_window: limits.and_then(|limits| limits.get("context")),
-                max_output_tokens: limits.and_then(|limits| limits.get("output")),
-                tool_calling: model.get("tool_call"),
-                reasoning: model.get("reasoning"),
-                modalities: model.get("modalities"),
-                status: model.get("status"),
+                    .unwrap_or(model_id)
+                    .to_owned(),
+                context_window: limits
+                    .and_then(|limits| limits.get("context"))
+                    .and_then(Value::as_u64),
+                max_output_tokens: limits
+                    .and_then(|limits| limits.get("output"))
+                    .and_then(Value::as_u64),
+                tool_calling: model
+                    .and_then(|model| model.get("tool_call"))
+                    .and_then(Value::as_bool),
+                reasoning: model
+                    .and_then(|model| model.get("reasoning"))
+                    .and_then(Value::as_bool),
+                modalities: model.and_then(|model| model.get("modalities")).cloned(),
+                status: model
+                    .and_then(|model| model.get("status"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
             };
-            records.push(serde_json::to_value(record).map_err(|error| error.to_string())?);
+            records.push(record);
         }
     }
+    records.sort_by(|left, right| (&left.provider, &left.id).cmp(&(&right.provider, &right.id)));
     if records.is_empty() {
         return Err("No models found; verify upstream schema".into());
     }
     Ok(records)
 }
 
-fn generate(source: &[u8], metadata: &Value) -> Result<Vec<u8>, String> {
-    let expected_hash = metadata
+fn generate_from_upstream(source: &[u8], metadata: &mut Value) -> Result<Vec<u8>, String> {
+    let raw: Value = serde_json::from_slice(source).map_err(|error| error.to_string())?;
+    let records = normalize(&raw)?;
+    let snapshot = pretty_json(&records)?;
+    let providers = records
+        .iter()
+        .map(|record| record.provider.as_str())
+        .collect::<BTreeSet<_>>()
+        .len() as u64;
+
+    let fields = metadata
+        .as_object_mut()
+        .ok_or("metadata root must be an object")?;
+    fields.insert("sha256".into(), Value::String(sha256(source)));
+    fields.insert("snapshot_sha256".into(), Value::String(sha256(&snapshot)));
+    fields.insert(
+        "generator_version".into(),
+        Value::String(GENERATOR_VERSION.into()),
+    );
+    fields.insert("provider_count".into(), Value::from(providers));
+    fields.insert("model_count".into(), Value::from(records.len() as u64));
+    Ok(snapshot)
+}
+
+fn validate_slim_snapshot(source: &[u8], metadata: &Value) -> Result<Vec<ModelRecord>, String> {
+    metadata
         .get("sha256")
         .and_then(Value::as_str)
-        .ok_or("missing snapshot sha256")?;
-    let actual_hash = digest(&SHA256, source);
-    let actual_hash = actual_hash
-        .as_ref()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    if actual_hash != expected_hash {
-        return Err("Snapshot SHA-256 mismatch".into());
+        .ok_or("missing upstream sha256")?;
+    let expected_hash = metadata
+        .get("snapshot_sha256")
+        .and_then(Value::as_str)
+        .ok_or("missing snapshot_sha256")?;
+    if sha256(source) != expected_hash {
+        return Err("Slim snapshot SHA-256 mismatch".into());
     }
-    let raw: Value = serde_json::from_slice(source).map_err(|error| error.to_string())?;
-    let provider_count = metadata
-        .get("provider_count")
-        .and_then(Value::as_u64)
-        .ok_or("missing provider_count")?;
-    if raw.as_object().map(|providers| providers.len() as u64) != Some(provider_count) {
+    if metadata.get("generator_version").and_then(Value::as_str) != Some(GENERATOR_VERSION) {
+        return Err("Snapshot generator version mismatch".into());
+    }
+
+    let records: Vec<ModelRecord> =
+        serde_json::from_slice(source).map_err(|error| error.to_string())?;
+    if pretty_json(&records)? != source {
+        return Err("Snapshot is not a canonical slim artifact".into());
+    }
+    let providers = records
+        .iter()
+        .map(|record| record.provider.as_str())
+        .collect::<BTreeSet<_>>()
+        .len() as u64;
+    if metadata.get("provider_count").and_then(Value::as_u64) != Some(providers) {
         return Err("Snapshot provider count mismatch".into());
     }
-    let records = normalize(&raw)?;
-    // Serialize structs rather than JSON maps to preserve the Python generator's
-    // documented key order. The output is always UTF-8 with a trailing newline.
-    let mut output = String::from("[\n");
-    for (index, record) in records.iter().enumerate() {
-        let provider = record["provider"].as_str().ok_or("invalid provider")?;
-        let id = record["id"].as_str().ok_or("invalid model id")?;
-        let model = raw
-            .get(provider)
-            .and_then(|provider| provider.get("models"))
-            .and_then(|models| models.get(id))
-            .ok_or("missing model")?;
-        let limits = model.get("limit").and_then(Value::as_object);
-        let row = ModelRecord {
-            provider,
-            id,
-            name: model
-                .get("name")
-                .and_then(Value::as_str)
-                .filter(|name| !name.is_empty())
-                .unwrap_or(id),
-            context_window: limits.and_then(|limits| limits.get("context")),
-            max_output_tokens: limits.and_then(|limits| limits.get("output")),
-            tool_calling: model.get("tool_call"),
-            reasoning: model.get("reasoning"),
-            modalities: model.get("modalities"),
-            status: model.get("status"),
-        };
-        let pretty = serde_json::to_string_pretty(&row).map_err(|error| error.to_string())?;
-        for line in pretty.lines() {
-            output.push_str("  ");
-            output.push_str(line);
-            output.push('\n');
-        }
-        if index + 1 != records.len() {
-            // Move comma onto the closing brace line, matching Python json.dumps.
-            output.truncate(output.len() - 1);
-            output.push_str(",\n");
+    if metadata.get("model_count").and_then(Value::as_u64) != Some(records.len() as u64) {
+        return Err("Snapshot model count mismatch".into());
+    }
+    if records
+        .windows(2)
+        .any(|pair| (&pair[0].provider, &pair[0].id) > (&pair[1].provider, &pair[1].id))
+    {
+        return Err("Snapshot models are not sorted".into());
+    }
+    Ok(records)
+}
+
+fn verify_runtime(records: &[ModelRecord]) -> Result<(), String> {
+    let runtime = krypper::catalog_data::models().map_err(|error| error.to_string())?;
+    if records.len() != runtime.len() {
+        return Err("Catalog record count differs from the Rust runtime".into());
+    }
+    for (record, model) in records.iter().zip(runtime.iter()) {
+        if record.provider != model.provider
+            || record.id != model.id
+            || record.name != model.name
+            || record.context_window != model.context_window
+            || record.max_output_tokens != model.max_output_tokens
+            || record.tool_calling != model.tool_calling
+            || record.reasoning != model.reasoning
+            || record.modalities != model.modalities
+            || record.status != model.status
+        {
+            return Err("Catalog differs from the Rust runtime".into());
         }
     }
-    output.push_str("]\n");
-    Ok(output.into_bytes())
+    Ok(())
 }
 
 fn run() -> Result<(), String> {
     let args: Vec<String> = env::args().skip(1).collect();
-    let check = match args.as_slice() {
-        [] => false,
-        [arg] if arg == "--check" => true,
-        _ => return Err("usage: cargo run --example generate_model_catalog -- [--check]".into()),
+    let (check, upstream_path) = match args.as_slice() {
+        [] => (false, None),
+        [arg] if arg == "--check" => (true, None),
+        [flag, path] if flag == "--from-upstream" => (false, Some(PathBuf::from(path))),
+        _ => {
+            return Err(
+                "usage: cargo run --example generate_model_catalog -- [--check | --from-upstream <path>]"
+                    .into(),
+            )
+        }
     };
+
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let source =
-        fs::read(root.join("snapshots/models-dev/api.json")).map_err(|error| error.to_string())?;
-    let metadata: Value = serde_json::from_slice(
-        &fs::read(root.join("snapshots/models-dev/metadata.json"))
-            .map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| error.to_string())?;
-    let output = generate(&source, &metadata)?;
+    let snapshot_path = root.join("snapshots/models-dev/api.json");
+    let metadata_path = root.join("snapshots/models-dev/metadata.json");
+    let mut metadata: Value =
+        serde_json::from_slice(&fs::read(&metadata_path).map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+
+    if let Some(upstream_path) = upstream_path {
+        let source = fs::read(upstream_path).map_err(|error| error.to_string())?;
+        let source_hash = sha256(&source);
+        if metadata.get("snapshot_sha256").and_then(Value::as_str) == Some(source_hash.as_str()) {
+            return Err("input is the slim snapshot; provide original upstream bytes".into());
+        }
+        let snapshot = generate_from_upstream(&source, &mut metadata)?;
+        let metadata = pretty_json(&metadata)?;
+        fs::write(&snapshot_path, snapshot).map_err(|error| error.to_string())?;
+        fs::write(&metadata_path, metadata).map_err(|error| error.to_string())?;
+        println!("Slim model snapshot generated");
+        return Ok(());
+    }
+
+    let source = fs::read(&snapshot_path).map_err(|error| error.to_string())?;
+    let records = validate_slim_snapshot(&source, &metadata)?;
     let target = root.join("src/catalog_data.json");
     if check {
-        // The normalized JSON is optional and is not checked into this repo.
-        // Validate the generated records against the authoritative Rust reader.
-        let generated: Vec<Value> =
-            serde_json::from_slice(&output).map_err(|error| error.to_string())?;
-        let runtime = krypper::catalog_data::models().map_err(|error| error.to_string())?;
-        if generated.len() != runtime.len() {
-            return Err("Catalog record count differs from the Rust runtime".into());
-        }
-        for (record, model) in generated.iter().zip(runtime.iter()) {
-            if record["provider"] != model.provider
-                || record["id"] != model.id
-                || record["name"] != model.name
-                || record["context_window"].as_u64() != model.context_window
-                || record["max_output_tokens"].as_u64() != model.max_output_tokens
-                || record["tool_calling"].as_bool() != model.tool_calling
-                || record["reasoning"].as_bool() != model.reasoning
-                || record["modalities"] != model.modalities.clone().unwrap_or(Value::Null)
-                || record["status"].as_str() != model.status.as_deref()
-            {
-                return Err("Catalog differs from the Rust runtime".into());
-            }
-        }
-        println!("Verified {} catalog records", generated.len());
+        verify_runtime(&records)?;
+        println!("Verified {} catalog records", records.len());
     } else {
-        fs::write(target, output).map_err(|error| error.to_string())?;
+        fs::write(target, pretty_json(&records)?).map_err(|error| error.to_string())?;
         println!("Catalog generated");
     }
     Ok(())
@@ -181,12 +251,46 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
     #[test]
-    fn rejects_invalid_snapshot_hash() {
-        let metadata = serde_json::json!({"sha256": "bad", "provider_count": 1});
+    fn slim_snapshot_keeps_runtime_fields_and_tracks_upstream_provenance() {
+        let source = br#"{"provider":{"name":"Provider metadata","models":{"model":{"name":"Model","limit":{"context":64,"input":999,"output":16},"tool_call":true,"reasoning":false,"modalities":{"input":["text"]},"status":"active","pricing":{"input":1}},"null_modalities":{"modalities":null}}}}"#;
+        let mut metadata = json!({"source":"https://models.dev/api.json","license":"MIT"});
+
+        let snapshot = generate_from_upstream(source, &mut metadata).unwrap();
+        let records: Vec<ModelRecord> = serde_json::from_slice(&snapshot).unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].provider, "provider");
+        assert_eq!(records[0].id, "model");
+        assert_eq!(records[0].context_window, Some(64));
+        assert_eq!(records[0].max_output_tokens, Some(16));
+        assert_eq!(records[0].tool_calling, Some(true));
+        assert_eq!(records[0].reasoning, Some(false));
+        assert_eq!(records[0].status.as_deref(), Some("active"));
+        assert_eq!(records[0].modalities, Some(json!({"input": ["text"]})));
+        assert_eq!(records[1].name, "null_modalities");
+        assert_eq!(records[1].modalities, Some(Value::Null));
+        assert_eq!(metadata["sha256"], sha256(source));
+        assert_eq!(metadata["snapshot_sha256"], sha256(&snapshot));
+        assert_eq!(metadata["generator_version"], GENERATOR_VERSION);
+        assert_eq!(metadata["provider_count"], 1);
+        assert_eq!(metadata["model_count"], 2);
+        assert!(validate_slim_snapshot(&snapshot, &metadata).is_ok());
+    }
+
+    #[test]
+    fn check_rejects_a_changed_slim_snapshot() {
+        let metadata = json!({
+            "sha256": "recorded-upstream-hash",
+            "snapshot_sha256": "wrong",
+            "generator_version": GENERATOR_VERSION,
+            "provider_count": 1,
+            "model_count": 1
+        });
         assert_eq!(
-            generate(b"{}", &metadata).unwrap_err(),
-            "Snapshot SHA-256 mismatch"
+            validate_slim_snapshot(b"[]", &metadata).unwrap_err(),
+            "Slim snapshot SHA-256 mismatch"
         );
     }
 }
