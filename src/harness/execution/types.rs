@@ -13,6 +13,122 @@ use uuid::Uuid;
 pub(super) const MAX_READ_RANGE_LINES: usize = 200;
 pub(super) const MAX_READ_RANGE_BYTES: usize = 64 * 1024;
 
+/// Stable, secret-free classification for a model decision failure.
+///
+/// These codes are carried through the existing `WorkspaceAction::Unsupported` string contract
+/// with the reserved `decision_failure:` prefix, so existing public action variants stay intact.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DecisionFailureCode {
+    /// A decision source exhausted its bounded request budget.
+    DecisionBudgetExhausted,
+    /// The selected model name is invalid for its provider.
+    InvalidModelName,
+    /// A request could not be encoded.
+    RequestEncodingFailed,
+    /// A request exceeded the configured size limit.
+    RequestTooLarge,
+    /// A configured provider endpoint is invalid.
+    InvalidEndpoint,
+    /// The observations exceeded the model context limit.
+    ContextTooLarge,
+    /// A provider could not be reached or returned a server failure.
+    ProviderUnavailable,
+    /// A provider rate limited the request.
+    ProviderRateLimited,
+    /// A provider rejected the request with a non-rate-limit client status.
+    ProviderRejected,
+    /// A provider response exceeded the configured size limit.
+    ResponseTooLarge,
+    /// A provider response was not valid JSON.
+    InvalidProviderResponse,
+    /// The model response did not contain a valid supported tool call.
+    InvalidModelOutput,
+    /// The model supplied invalid arguments for a tool call.
+    InvalidActionArguments,
+    /// An unclassified decision failure; reserved for forward compatibility.
+    Unknown,
+}
+
+impl DecisionFailureCode {
+    /// Returns this code's stable machine-readable representation.
+    pub const fn as_code(self) -> &'static str {
+        match self {
+            Self::DecisionBudgetExhausted => "decision_budget_exhausted",
+            Self::InvalidModelName => "invalid_model_name",
+            Self::RequestEncodingFailed => "request_encoding_failed",
+            Self::RequestTooLarge => "request_too_large",
+            Self::InvalidEndpoint => "invalid_endpoint",
+            Self::ContextTooLarge => "context_too_large",
+            Self::ProviderUnavailable => "provider_unavailable",
+            Self::ProviderRateLimited => "provider_rate_limited",
+            Self::ProviderRejected => "provider_rejected",
+            Self::ResponseTooLarge => "response_too_large",
+            Self::InvalidProviderResponse => "invalid_provider_response",
+            Self::InvalidModelOutput => "invalid_model_output",
+            Self::InvalidActionArguments => "invalid_action_arguments",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// Parses a stable code returned by [`Self::as_code`].
+    pub fn from_code(code: &str) -> Option<Self> {
+        Some(match code {
+            "decision_budget_exhausted" => Self::DecisionBudgetExhausted,
+            "invalid_model_name" => Self::InvalidModelName,
+            "request_encoding_failed" => Self::RequestEncodingFailed,
+            "request_too_large" => Self::RequestTooLarge,
+            "invalid_endpoint" => Self::InvalidEndpoint,
+            "context_too_large" => Self::ContextTooLarge,
+            "provider_unavailable" => Self::ProviderUnavailable,
+            "provider_rate_limited" => Self::ProviderRateLimited,
+            "provider_rejected" => Self::ProviderRejected,
+            "response_too_large" => Self::ResponseTooLarge,
+            "invalid_provider_response" => Self::InvalidProviderResponse,
+            "invalid_model_output" => Self::InvalidModelOutput,
+            "invalid_action_arguments" => Self::InvalidActionArguments,
+            "unknown" => Self::Unknown,
+            _ => return None,
+        })
+    }
+
+    /// Parses the reserved action label used to carry a model decision failure.
+    pub fn from_action_label(action: &str) -> Option<Self> {
+        let mut parts = action.strip_prefix("decision_failure:")?.split(':');
+        let code = Self::from_code(parts.next()?)?;
+        match parts.next() {
+            None => Some(code),
+            Some(status)
+                if matches!(
+                    code,
+                    Self::ProviderUnavailable | Self::ProviderRateLimited | Self::ProviderRejected
+                ) && status.parse::<u16>().is_ok()
+                    && parts.next().is_none() =>
+            {
+                Some(code)
+            }
+            Some(_) => None,
+        }
+    }
+
+    /// Returns a safe HTTP status suffix carried by a classified provider failure label.
+    pub fn http_status_from_action_label(action: &str) -> Option<u16> {
+        let code = Self::from_action_label(action)?;
+        if !matches!(
+            code,
+            Self::ProviderUnavailable | Self::ProviderRateLimited | Self::ProviderRejected
+        ) {
+            return None;
+        }
+        action
+            .strip_prefix("decision_failure:")?
+            .split_once(':')?
+            .1
+            .parse()
+            .ok()
+    }
+}
+
 /// One action a task-owned turn can request from its workspace.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WorkspaceAction {
@@ -57,6 +173,16 @@ pub enum WorkspaceAction {
     },
     /// An unsupported action, returned as a clear failed observation.
     Unsupported { action: String },
+}
+
+impl WorkspaceAction {
+    /// Returns the stable decision-failure code when this is a classified Brain failure.
+    pub fn decision_failure_code(&self) -> Option<DecisionFailureCode> {
+        let Self::Unsupported { action } = self else {
+            return None;
+        };
+        DecisionFailureCode::from_action_label(action)
+    }
 }
 
 pub(crate) fn workspace_action_name(action: &WorkspaceAction) -> &'static str {
@@ -304,13 +430,31 @@ pub enum GoalTurnError {
     Lifecycle(TurnCompletionError),
 }
 
+impl GoalTurnError {
+    /// Returns the model decision failure code carried by this error, if any.
+    pub fn decision_failure_code(&self) -> Option<DecisionFailureCode> {
+        let Self::UnsupportedAction { action } = self else {
+            return None;
+        };
+        DecisionFailureCode::from_action_label(action)
+    }
+}
+
 impl fmt::Display for GoalTurnError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Process(outcome) => write!(formatter, "offline Cargo profile: {outcome:?}"),
-            Self::UnsupportedAction { action } => {
-                write!(formatter, "unsupported workspace action '{action}'")
-            }
+            Self::UnsupportedAction { action } => match self.decision_failure_code() {
+                Some(code) => match DecisionFailureCode::http_status_from_action_label(action) {
+                    Some(status) => write!(
+                        formatter,
+                        "model decision failed: {} (HTTP {status})",
+                        code.as_code()
+                    ),
+                    None => write!(formatter, "model decision failed: {}", code.as_code()),
+                },
+                None => write!(formatter, "unsupported workspace action '{action}'"),
+            },
             Self::WorkspaceRead(error) => error.fmt(formatter),
             Self::RootProjectGuidance(error) => {
                 write!(formatter, "project guidance read failed: {error}")
@@ -357,4 +501,62 @@ pub(super) struct TurnCompletionData {
     pub(super) actions_taken: usize,
     pub(super) stop_reason: GoalTurnStopReason,
     pub(super) outcome: TurnOutcome,
+}
+
+#[cfg(test)]
+mod decision_failure_code_tests {
+    use super::{DecisionFailureCode, GoalTurnError, WorkspaceAction};
+
+    #[test]
+    fn action_helper_parses_only_known_reserved_failure_codes() {
+        assert_eq!(
+            WorkspaceAction::Unsupported {
+                action: "decision_failure:provider_unavailable".to_owned(),
+            }
+            .decision_failure_code(),
+            Some(DecisionFailureCode::ProviderUnavailable)
+        );
+        let status_action = WorkspaceAction::Unsupported {
+            action: "decision_failure:provider_rejected:401".to_owned(),
+        };
+        assert_eq!(
+            status_action.decision_failure_code(),
+            Some(DecisionFailureCode::ProviderRejected)
+        );
+        assert_eq!(
+            DecisionFailureCode::http_status_from_action_label(
+                "decision_failure:provider_rejected:401"
+            ),
+            Some(401)
+        );
+        for action in [
+            "provider_unavailable",
+            "decision_failure:provider_unavailable:secret",
+            "decision_failure:request_too_large:401",
+            "decision_failure:future_code",
+        ] {
+            assert_eq!(
+                WorkspaceAction::Unsupported {
+                    action: action.to_owned(),
+                }
+                .decision_failure_code(),
+                None
+            );
+        }
+        assert_eq!(WorkspaceAction::Continue.decision_failure_code(), None);
+        assert_eq!(
+            GoalTurnError::UnsupportedAction {
+                action: "decision_failure:provider_unavailable:503".to_owned(),
+            }
+            .to_string(),
+            "model decision failed: provider_unavailable (HTTP 503)"
+        );
+        assert_eq!(
+            GoalTurnError::UnsupportedAction {
+                action: "unregistered_tool".to_owned(),
+            }
+            .to_string(),
+            "unsupported workspace action 'unregistered_tool'"
+        );
+    }
 }

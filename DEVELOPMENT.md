@@ -148,6 +148,31 @@ check list, or previous observations, so callers repeat them and establish
 fresh evidence on resume.
 Moving more CLI orchestration remains part of the staged direction below.
 
+## Decision failure reporting
+
+Brain maps request, provider, response and model-output errors to a stable
+`DecisionFailureCode` while preserving the existing
+`WorkspaceAction::Unsupported` variant. Classified action labels use the
+reserved `decision_failure:<code>` form; callers can use
+`WorkspaceAction::decision_failure_code()`,
+`GoalTurnError::decision_failure_code()` or
+`ModelError::decision_failure_code()` instead of parsing display text. Codes
+distinguish provider unavailability, rate limiting, request rejection,
+malformed responses, invalid model output, invalid arguments and local
+request/configuration failures. Unsupported tool calls keep the existing
+extension-dispatch path and return no failure code.
+When an HTTP response status is available, its numeric value is preserved as
+an additional safe suffix, such as `decision_failure:provider_rejected:401`;
+`DecisionFailureCode::http_status_from_action_label()` extracts it.
+
+The `Transport(String)` payload is internal diagnostic input only. Its
+`Display` output is fixed and omits that payload, and local transport creation
+sites store generic details, so provider text, endpoints or credentials cannot
+be copied into task outcomes through this path. Provider status codes are
+classified as rate limited for HTTP 429, unavailable for HTTP 408, 425 or 5xx,
+and rejected for other status codes. This classification does not add automatic
+retries.
+
 ## Bounded planning prototype
 
 Call `OllamaDecisionSource::create_plan` and pass its result to

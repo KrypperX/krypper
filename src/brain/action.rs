@@ -1,6 +1,6 @@
 //! Translation of provider tool calls into workspace actions.
 
-use crate::agent_loop::WorkspaceAction;
+use crate::agent_loop::{DecisionFailureCode, WorkspaceAction};
 use crate::tools::MAX_PATCH_BYTES;
 use serde_json::{Map, Value};
 use std::path::PathBuf;
@@ -171,9 +171,22 @@ pub(crate) fn action_from_error(error: ModelError) -> WorkspaceAction {
         | ModelError::ProviderUnsupportedTool {
             name, arguments, ..
         } => WorkspaceAction::Extension { name, arguments },
-        error => WorkspaceAction::Unsupported {
-            action: error.to_string(),
-        },
+        error => {
+            let status = match &error {
+                ModelError::HttpStatus(status) | ModelError::ProviderHttpStatus(_, status) => {
+                    Some(*status)
+                }
+                _ => None,
+            };
+            let code = error
+                .decision_failure_code()
+                .unwrap_or(DecisionFailureCode::Unknown);
+            let label = match status {
+                Some(status) => format!("decision_failure:{}:{status}", code.as_code()),
+                None => format!("decision_failure:{}", code.as_code()),
+            };
+            WorkspaceAction::Unsupported { action: label }
+        }
     }
 }
 
@@ -239,31 +252,111 @@ pub(crate) fn positive_integer(
 
 #[cfg(test)]
 mod decision_error_mapping_tests {
-    use super::{action_from_error, ModelError, WorkspaceAction};
+    use super::{
+        action_from_error, DecisionFailureCode, ModelError, ModelProvider, WorkspaceAction,
+    };
     use serde_json::json;
 
     #[test]
-    fn provider_and_local_failures_remain_failed_actions() {
-        for error in [
-            ModelError::DecisionBudgetExhausted,
-            ModelError::RequestEncoding,
-            ModelError::RequestTooLarge,
-            ModelError::InvalidEndpoint,
-            ModelError::ObservationsTooLarge,
-            ModelError::ServiceUnavailable,
-            ModelError::Transport("connection refused".to_owned()),
-            ModelError::ResponseTooLarge,
-            ModelError::HttpStatus(429),
-            ModelError::InvalidJson,
-            ModelError::InvalidToolCall("invalid"),
-            ModelError::InvalidArguments("invalid"),
-        ] {
-            assert!(
-                matches!(
-                    action_from_error(error),
-                    WorkspaceAction::Unsupported { .. }
-                ),
-                "decision failures must not become extension requests"
+    fn decision_failures_use_stable_machine_readable_codes() {
+        let cases = [
+            (
+                ModelError::DecisionBudgetExhausted,
+                "decision_budget_exhausted",
+            ),
+            (
+                ModelError::InvalidModelName("invalid model"),
+                "invalid_model_name",
+            ),
+            (ModelError::RequestEncoding, "request_encoding_failed"),
+            (ModelError::RequestTooLarge, "request_too_large"),
+            (ModelError::InvalidEndpoint, "invalid_endpoint"),
+            (ModelError::ObservationsTooLarge, "context_too_large"),
+            (ModelError::ServiceUnavailable, "provider_unavailable"),
+            (
+                ModelError::Transport("connection refused".to_owned()),
+                "provider_unavailable",
+            ),
+            (ModelError::ResponseTooLarge, "response_too_large"),
+            (ModelError::HttpStatus(429), "provider_rate_limited"),
+            (ModelError::HttpStatus(408), "provider_unavailable"),
+            (ModelError::HttpStatus(425), "provider_unavailable"),
+            (ModelError::HttpStatus(503), "provider_unavailable"),
+            (ModelError::HttpStatus(401), "provider_rejected"),
+            (ModelError::InvalidJson, "invalid_provider_response"),
+            (
+                ModelError::InvalidToolCall("invalid"),
+                "invalid_model_output",
+            ),
+            (
+                ModelError::InvalidArguments("invalid"),
+                "invalid_action_arguments",
+            ),
+            (
+                ModelError::ProviderTransport(ModelProvider::Anthropic),
+                "provider_unavailable",
+            ),
+            (
+                ModelError::ProviderHttpStatus(ModelProvider::Anthropic, 429),
+                "provider_rate_limited",
+            ),
+            (
+                ModelError::ProviderHttpStatus(ModelProvider::Anthropic, 408),
+                "provider_unavailable",
+            ),
+            (
+                ModelError::ProviderHttpStatus(ModelProvider::Anthropic, 425),
+                "provider_unavailable",
+            ),
+            (
+                ModelError::ProviderHttpStatus(ModelProvider::Anthropic, 503),
+                "provider_unavailable",
+            ),
+            (
+                ModelError::ProviderHttpStatus(ModelProvider::Anthropic, 401),
+                "provider_rejected",
+            ),
+            (
+                ModelError::ProviderResponseTooLarge(ModelProvider::Anthropic),
+                "response_too_large",
+            ),
+            (
+                ModelError::ProviderInvalidJson(ModelProvider::Anthropic),
+                "invalid_provider_response",
+            ),
+            (
+                ModelError::ProviderInvalidToolCall(ModelProvider::Anthropic, "invalid"),
+                "invalid_model_output",
+            ),
+            (
+                ModelError::ProviderInvalidArguments(ModelProvider::Anthropic, "invalid"),
+                "invalid_action_arguments",
+            ),
+        ];
+
+        for (error, code) in cases {
+            let expected_code = DecisionFailureCode::from_code(code).expect("known code");
+            let status = match &error {
+                ModelError::HttpStatus(status) | ModelError::ProviderHttpStatus(_, status) => {
+                    Some(*status)
+                }
+                _ => None,
+            };
+            let action = match status {
+                Some(status) => format!("decision_failure:{code}:{status}"),
+                None => format!("decision_failure:{code}"),
+            };
+            assert_eq!(
+                action_from_error(error),
+                WorkspaceAction::Unsupported {
+                    action: action.clone()
+                },
+                "decision failure should keep its stable class"
+            );
+            assert_eq!(expected_code.as_code(), code);
+            assert_eq!(
+                DecisionFailureCode::from_action_label(&action),
+                Some(expected_code)
             );
         }
     }
@@ -282,16 +375,77 @@ mod decision_error_mapping_tests {
                 arguments,
             }
         );
+
+        let provider_arguments = json!({"provider_key": "value"});
+        let provider_action = action_from_error(ModelError::ProviderUnsupportedTool {
+            provider: ModelProvider::Anthropic,
+            name: "custom_provider_tool".to_owned(),
+            arguments: provider_arguments.clone(),
+        });
+        assert_eq!(
+            provider_action,
+            WorkspaceAction::Extension {
+                name: "custom_provider_tool".to_owned(),
+                arguments: provider_arguments,
+            }
+        );
     }
 
     #[test]
-    fn transport_errors_currently_expose_unstructured_text() {
-        let action = action_from_error(ModelError::Transport("connection refused".to_owned()));
+    fn transport_error_details_are_redacted_from_display_and_action() {
+        let sentinel = "sk_test_do_not_expose_91f4";
         assert_eq!(
-            action,
+            action_from_error(ModelError::Transport(sentinel.to_owned())),
             WorkspaceAction::Unsupported {
-                action: "Ollama request failed: connection refused".to_owned(),
+                action: "decision_failure:provider_unavailable".to_owned(),
             }
+        );
+        let errors = [
+            ModelError::DecisionBudgetExhausted,
+            ModelError::InvalidModelName("invalid model"),
+            ModelError::RequestEncoding,
+            ModelError::RequestTooLarge,
+            ModelError::InvalidEndpoint,
+            ModelError::ObservationsTooLarge,
+            ModelError::ServiceUnavailable,
+            ModelError::Transport(sentinel.to_owned()),
+            ModelError::ResponseTooLarge,
+            ModelError::HttpStatus(401),
+            ModelError::InvalidJson,
+            ModelError::InvalidToolCall("invalid tool call"),
+            ModelError::UnsupportedTool {
+                name: sentinel.to_owned(),
+                arguments: json!({"token": sentinel}),
+            },
+            ModelError::InvalidArguments("invalid arguments"),
+            ModelError::ProviderTransport(ModelProvider::Anthropic),
+            ModelError::ProviderHttpStatus(ModelProvider::Anthropic, 401),
+            ModelError::ProviderResponseTooLarge(ModelProvider::Anthropic),
+            ModelError::ProviderInvalidJson(ModelProvider::Anthropic),
+            ModelError::ProviderInvalidToolCall(ModelProvider::Anthropic, "invalid tool call"),
+            ModelError::ProviderUnsupportedTool {
+                provider: ModelProvider::Anthropic,
+                name: sentinel.to_owned(),
+                arguments: json!({"token": sentinel}),
+            },
+            ModelError::ProviderInvalidArguments(ModelProvider::Anthropic, "invalid arguments"),
+        ];
+        for error in errors {
+            assert!(
+                !error.to_string().contains(sentinel),
+                "{} must not expose the sentinel",
+                error
+                    .decision_failure_code()
+                    .map_or("unsupported tool", |code| code.as_code())
+            );
+        }
+        assert_eq!(
+            ModelError::UnsupportedTool {
+                name: sentinel.to_owned(),
+                arguments: json!({}),
+            }
+            .decision_failure_code(),
+            None
         );
     }
 }

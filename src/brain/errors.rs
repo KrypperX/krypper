@@ -1,5 +1,6 @@
 //! Model error taxonomy and its formatting.
 
+use crate::agent_loop::DecisionFailureCode;
 use crate::harness::context::ContextError;
 use serde_json::Value;
 use std::fmt;
@@ -66,6 +67,44 @@ pub enum ModelError {
     ProviderInvalidArguments(ModelProvider, &'static str),
 }
 
+impl ModelError {
+    /// Classifies a decision error without returning provider text or transport details.
+    ///
+    /// Unsupported tool calls are not failures here: Brain preserves them for the host-owned
+    /// extension dispatch path.
+    pub fn decision_failure_code(&self) -> Option<DecisionFailureCode> {
+        Some(match self {
+            Self::DecisionBudgetExhausted => DecisionFailureCode::DecisionBudgetExhausted,
+            Self::InvalidModelName(_) => DecisionFailureCode::InvalidModelName,
+            Self::RequestEncoding => DecisionFailureCode::RequestEncodingFailed,
+            Self::RequestTooLarge => DecisionFailureCode::RequestTooLarge,
+            Self::InvalidEndpoint => DecisionFailureCode::InvalidEndpoint,
+            Self::ObservationsTooLarge => DecisionFailureCode::ContextTooLarge,
+            Self::ServiceUnavailable | Self::Transport(_) | Self::ProviderTransport(_) => {
+                DecisionFailureCode::ProviderUnavailable
+            }
+            Self::ResponseTooLarge | Self::ProviderResponseTooLarge(_) => {
+                DecisionFailureCode::ResponseTooLarge
+            }
+            Self::HttpStatus(status) | Self::ProviderHttpStatus(_, status) => match status {
+                429 => DecisionFailureCode::ProviderRateLimited,
+                408 | 425 | 500..=599 => DecisionFailureCode::ProviderUnavailable,
+                _ => DecisionFailureCode::ProviderRejected,
+            },
+            Self::InvalidJson | Self::ProviderInvalidJson(_) => {
+                DecisionFailureCode::InvalidProviderResponse
+            }
+            Self::InvalidToolCall(_) | Self::ProviderInvalidToolCall(_, _) => {
+                DecisionFailureCode::InvalidModelOutput
+            }
+            Self::InvalidArguments(_) | Self::ProviderInvalidArguments(_, _) => {
+                DecisionFailureCode::InvalidActionArguments
+            }
+            Self::UnsupportedTool { .. } | Self::ProviderUnsupportedTool { .. } => return None,
+        })
+    }
+}
+
 impl From<ContextError> for ModelError {
     fn from(error: ContextError) -> Self {
         match error {
@@ -92,7 +131,7 @@ impl fmt::Display for ModelError {
                 formatter,
                 "local Ollama service at {OLLAMA_ADDRESS} is unavailable"
             ),
-            Self::Transport(error) => write!(formatter, "Ollama request failed: {error}"),
+            Self::Transport(_) => formatter.write_str("Ollama request failed"),
             Self::ResponseTooLarge => formatter.write_str("Ollama response exceeded 2 MiB"),
             Self::HttpStatus(status) => write!(formatter, "Ollama returned HTTP {status}"),
             Self::InvalidJson => formatter.write_str("Ollama response was not valid JSON"),

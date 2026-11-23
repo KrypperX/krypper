@@ -1,6 +1,6 @@
 use krypper::agent_loop::{
-    run_goal_turn, run_goal_turn_with_budget, BoundedDecisionSource, GoalTurnError,
-    GoalTurnStopReason, WorkspaceAction, WorkspaceObservation,
+    run_goal_turn, run_goal_turn_with_budget, BoundedDecisionSource, DecisionFailureCode,
+    GoalTurnError, GoalTurnStopReason, WorkspaceAction, WorkspaceObservation,
 };
 use krypper::task_lifecycle::{
     TaskHistoryTransition, TaskSession, TaskState, TurnActivityAction, TurnActivitySummary,
@@ -724,6 +724,58 @@ fn unsupported_action_fails_the_turn_without_running_a_workspace_operation() {
             previous_state: TurnState::Running,
             new_state: TurnState::Failed,
         }
+    );
+    assert!(fs::read_dir(workspace.path()).unwrap().next().is_none());
+}
+
+#[test]
+fn classified_decision_failure_is_reported_separately_from_unsupported_action() {
+    let workspace = TempDir::new();
+    let mut session = TaskSession::new();
+    let (task_id, turn_id) = with_current_dir(workspace.path(), || {
+        running_turn(&mut session, "Read a file")
+    });
+    let action = WorkspaceAction::Unsupported {
+        action: "decision_failure:provider_unavailable".to_owned(),
+    };
+    assert_eq!(
+        action.decision_failure_code(),
+        Some(DecisionFailureCode::ProviderUnavailable)
+    );
+    let mut decisions = |_: &str| action.clone();
+
+    let error = run_goal_turn(
+        &mut session,
+        task_id,
+        turn_id,
+        "Read a file",
+        &mut decisions,
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        GoalTurnError::UnsupportedAction { ref action }
+            if action == "decision_failure:provider_unavailable"
+    ));
+    assert_eq!(
+        error.decision_failure_code(),
+        Some(DecisionFailureCode::ProviderUnavailable)
+    );
+    assert_eq!(
+        error.to_string(),
+        "model decision failed: provider_unavailable"
+    );
+    let turn = session
+        .get_task(task_id)
+        .unwrap()
+        .get_turn(turn_id)
+        .unwrap();
+    assert_eq!(
+        turn.outcome(),
+        Some(&TurnOutcome::Failure {
+            detail: "model decision failed: provider_unavailable".to_owned(),
+        })
     );
     assert!(fs::read_dir(workspace.path()).unwrap().next().is_none());
 }

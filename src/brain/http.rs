@@ -120,7 +120,7 @@ pub(crate) fn post_chat(
         .map_err(|error| match error {
             ureq::Error::StatusCode(status) => ModelError::HttpStatus(status),
             ureq::Error::ConnectionFailed => ModelError::ServiceUnavailable,
-            other => ModelError::Transport(other.to_string()),
+            _ => ModelError::Transport("local HTTP transport failure".to_owned()),
         })?;
     let mut body = Vec::new();
     response
@@ -128,7 +128,7 @@ pub(crate) fn post_chat(
         .as_reader()
         .take(MAX_MODEL_RESPONSE_BYTES.saturating_add(1) as u64)
         .read_to_end(&mut body)
-        .map_err(|error| ModelError::Transport(error.to_string()))?;
+        .map_err(|_| ModelError::Transport("local HTTP response read failed".to_owned()))?;
     if body.len() > MAX_MODEL_RESPONSE_BYTES {
         return Err(ModelError::ResponseTooLarge);
     }
