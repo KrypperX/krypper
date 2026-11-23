@@ -15,6 +15,23 @@ const MAX_STDERR_BYTES: usize = 4 * 1024;
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
 const REAP_TIMEOUT: Duration = Duration::from_secs(2);
 
+#[cfg(all(test, target_os = "macos"))]
+fn process_group_snapshot(pgid: libc::pid_t) -> String {
+    let process_group = pgid.to_string();
+    Command::new("ps")
+        .args(["-A", "-o", "pid=,ppid=,pgid=,stat="])
+        .output()
+        .ok()
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter(|line| line.split_whitespace().nth(2) == Some(process_group.as_str()))
+                .collect::<Vec<_>>()
+                .join(" | ")
+        })
+        .unwrap_or_else(|| "ps unavailable".to_owned())
+}
+
 pub(super) struct StdioChild {
     pub child: ManagedChild,
     pub stdin: ChildStdin,
@@ -76,8 +93,20 @@ impl ManagedChild {
         if unsafe { libc::kill(-pgid, libc::SIGKILL) } != 0 {
             let error = io::Error::last_os_error();
             if error.raw_os_error() != Some(libc::ESRCH) {
-                let _ = child.kill();
+                #[cfg(all(test, target_os = "macos"))]
+                eprintln!(
+                    "[mcp-cleanup] group kill {pgid} failed: {error}; members: {}",
+                    process_group_snapshot(pgid)
+                );
+                let child_kill = child.kill();
+                #[cfg(all(test, target_os = "macos"))]
+                eprintln!("[mcp-cleanup] direct child fallback kill: {child_kill:?}");
                 if !reap(&mut child) {
+                    #[cfg(all(test, target_os = "macos"))]
+                    eprintln!(
+                        "[mcp-cleanup] direct child reap after group kill error failed; members: {}",
+                        process_group_snapshot(pgid)
+                    );
                     thread::spawn(move || {
                         let _ = child.wait();
                     });
@@ -86,6 +115,11 @@ impl ManagedChild {
             }
         }
         if !reap(&mut child) {
+            #[cfg(all(test, target_os = "macos"))]
+            eprintln!(
+                "[mcp-cleanup] direct child reap after group kill failed; members: {}",
+                process_group_snapshot(pgid)
+            );
             thread::spawn(move || {
                 let _ = child.wait();
             });
@@ -106,7 +140,14 @@ fn reap(child: &mut Child) -> bool {
     while start.elapsed() < REAP_TIMEOUT {
         match child.try_wait() {
             Ok(Some(_)) => return true,
-            Err(_) => return false,
+            Err(error) => {
+                #[cfg(all(test, target_os = "macos"))]
+                eprintln!(
+                    "[mcp-cleanup] try_wait for child {} failed: {error}",
+                    child.id()
+                );
+                return false;
+            }
             _ => {}
         }
         thread::sleep(POLL_INTERVAL);
