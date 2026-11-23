@@ -81,6 +81,7 @@ pub enum ProfileContractError {
 
 impl ProcessProfile<'static> {
     /// The single approved offline Cargo test profile used by the host policy.
+    #[cfg(target_os = "linux")]
     pub fn offline_cargo_test() -> Result<Self, ProfileContractError> {
         Self::new(
             PROFILE_CONTRACT_VERSION,
