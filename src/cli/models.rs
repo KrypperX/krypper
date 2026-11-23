@@ -21,6 +21,10 @@ pub(super) fn run(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -
                     out,
                     "Read-only, offline model metadata; does not validate provider access."
                 )?;
+                writeln!(
+                    out,
+                    "Krypper provider 'cloudflare' selects the models.dev 'cloudflare-workers-ai' catalog."
+                )?;
                 return Ok(0);
             }
             "--json" if !json => json = true,
@@ -45,7 +49,10 @@ pub(super) fn run(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -
     let all = crate::catalog_data::models().map_err(io::Error::other)?;
     let selected: Vec<_> = all
         .into_iter()
-        .filter(|m| provider.is_none_or(|p| m.provider == p) && id.is_none_or(|v| m.id == v))
+        .filter(|m| {
+            provider.is_none_or(|p| crate::catalog_data::provider_matches(p, &m.provider))
+                && id.is_none_or(|v| m.id == v)
+        })
         .collect();
     if json {
         let values: Vec<_> = selected

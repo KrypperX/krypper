@@ -2,6 +2,17 @@
 //! User configuration and provider routing remain authoritative.
 use serde_json::Value;
 
+/// Match a Krypper provider selector to a provider ID in the central catalog.
+/// models.dev calls Cloudflare Workers AI `cloudflare-workers-ai`, while Krypper's
+/// provider selector is `cloudflare`.
+pub fn provider_matches(selector: &str, catalog_provider: &str) -> bool {
+    selector == catalog_provider
+        || matches!(
+            (selector, catalog_provider),
+            ("cloudflare", "cloudflare-workers-ai")
+        )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelSpec {
     pub provider: String,
@@ -58,7 +69,7 @@ pub fn models() -> Result<Vec<ModelSpec>, serde_json::Error> {
 pub fn lookup(provider: &str, model_id: &str) -> Result<Option<ModelSpec>, serde_json::Error> {
     Ok(models()?
         .into_iter()
-        .find(|m| m.provider == provider && m.id == model_id))
+        .find(|m| provider_matches(provider, &m.provider) && m.id == model_id))
 }
 
 #[cfg(test)]
