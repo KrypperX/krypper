@@ -24,6 +24,7 @@ The executable is `target/release/krypper`. Run it from the directory you want t
 | `krypper task --goal <goal> --max-actions <n>` | Run a bounded task |
 | `krypper models` | Browse the offline model catalog |
 | `krypper context --goal <goal>` | Show bounded offline repository context, or an opt-in Rust module map |
+| `krypper setup` | Choose a provider and model for this user |
 
 ## Quick start
 
@@ -40,7 +41,9 @@ The executable is `target/release/krypper`. Run it from the directory you want t
 
 Task actions can also be selected by an explicitly configured model. See the [CLI and runtime reference](docs/CLI_REFERENCE.md) for provider setup, task controls, and safety limits.
 
-To use Cloudflare Workers AI or AI Gateway without saving credentials to a file, source the Bash helper from the repository root:
+Run `krypper setup` from any directory to choose a provider, search the offline model catalog, review the selection, and save your default model. Credential input is hidden. On Unix, the local credential directory and file are restricted to your user; other platforms inherit permissions from the per-user config directory. The credential file is not encrypted; environment variables override saved credentials. Use `krypper setup --status` to inspect the selected model without showing credential values, or `krypper setup --reset` to remove the saved settings.
+
+For a temporary Cloudflare Workers AI or AI Gateway setup that keeps credentials only in the current shell, source the Bash helper from the repository root:
 
 ```sh
 source scripts/cloudflare-workers-ai-env.sh

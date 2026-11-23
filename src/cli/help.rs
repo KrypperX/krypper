@@ -34,13 +34,14 @@ pub(super) fn usage_error(
         Some("list") => "usage: krypper list [-h] [path]",
         Some("write") => "usage: krypper write [-h] [--stdin] path ...",
         Some("models") => "usage: krypper models [--provider NAME] [--id MODEL_ID] [--json]",
+        Some("setup") => "usage: krypper setup [--status | --reset]",
         Some("task") => {
             "usage: krypper task [-h] [--goal GOAL] --max-actions N [--workspace PATH] [--model NAME] [--provider NAME] [--no-config] [--checkpoint-out PATH] [--resume PATH] [--activity-jsonl] [--model-usage-jsonl]"
         }
         Some("context") => {
             "usage: krypper context [-h] --goal GOAL [--workspace PATH] [--repository-map]"
         }
-        _ => "usage: krypper [-h] {show,list,write,task,models,context} ...",
+        _ => "usage: krypper [-h] {show,list,write,task,models,context,setup} ...",
     };
     let program = command.map_or_else(|| "krypper".to_owned(), |name| format!("krypper {name}"));
     writeln!(error, "{usage}")?;
@@ -50,7 +51,13 @@ pub(super) fn usage_error(
 
 pub(super) fn write_root_help(output: &mut dyn Write) -> io::Result<()> {
     output.write_all(
-        b"usage: krypper [-h] {show,list,write,task,models,context} ...\n\nLocal command-line entry point for Krypper.\n\npositional arguments:\n  {show,list,write,task,models,context}\n    show        display a UTF-8 text file\n    list        list immediate directory entries\n    write       create a new UTF-8 text file\n    task        run a caller-directed bounded task\n    models      browse offline model catalog\n    context     show bounded offline repository context for a goal\n\noptions:\n  -h, --help    show this help message and exit\n",
+        b"usage: krypper [-h] {show,list,write,task,models,context,setup} ...\n\nLocal command-line entry point for Krypper.\n\npositional arguments:\n  {show,list,write,task,models,context,setup}\n    show        display a UTF-8 text file\n    list        list immediate directory entries\n    write       create a new UTF-8 text file\n    task        run a caller-directed bounded task\n    models      browse offline model catalog\n    context     show bounded offline repository context for a goal\n    setup       configure a provider and model for this user\n\noptions:\n  -h, --help    show this help message and exit\n",
+    )
+}
+
+pub(super) fn write_setup_help(output: &mut dyn Write) -> io::Result<()> {
+    output.write_all(
+        b"usage: krypper setup [--status | --reset]\n\nConfigure the default provider and model for this user. No TUI or project checkout is needed.\n\noptions:\n  --status    show the saved model and whether local credentials exist; never shows values\n  --reset     ask before removing saved model defaults and local credentials\n  -h, --help  show this help message and exit\n\nRun `krypper setup` in an interactive terminal to choose a provider and search the offline model catalog.\nHosted provider credentials are entered without echo and stored in the user's local Krypper config directory. Unix permissions are restricted; other platforms inherit permissions from that per-user directory. The file is not encrypted.\nEnvironment credential variables override saved values. `KRYPPER_CONFIG` overrides the saved model defaults.\nA connection test sends one short prompt only after you explicitly agree; it may incur provider charges.\n",
     )
 }
 
@@ -70,7 +77,7 @@ pub(super) fn write_task_help(output: &mut dyn Write) -> io::Result<()> {
             "  --workspace PATH     use an existing directory as the captured task workspace\n",
             "  --model NAME         opt in to model-selected actions (defaults to local Ollama)\n",
             "  --provider NAME      choose ollama, gemini, openai, xai, anthropic, cloudflare, cloudflare-ai-gateway, groq, openrouter, deepseek, zai, or mistral; requires --model\n",
-            "  --no-config          ignore the user configuration file for this run\n",
+            "  --no-config          ignore saved model defaults and credentials for this run\n",
             "  --checkpoint-out PATH write only when a completed turn reaches continue; file must be new\n",
             "  --resume PATH        restore one running task and start a fresh turn\n",
             "  --activity-jsonl    write read-only task activity positions as JSONL to stderr after each turn\n",
@@ -81,7 +88,7 @@ pub(super) fn write_task_help(output: &mut dyn Write) -> io::Result<()> {
             "With --workspace, the selected directory is validated before task history starts;\n",
             "the process current directory is not changed.\n",
             "Without --model or --provider, task remains caller-directed and makes no model requests,\n",
-            "unless the user configuration file (see README) sets a default model; --no-config ignores it.\n",
+            "unless the user configuration file (see README) sets a default model; --no-config ignores saved defaults and credentials.\n",
             "Without --model, task remains caller-directed if --provider is also omitted.\n",
             "--model NAME without --provider uses local Ollama at 127.0.0.1:11434. Ollama needs no API key.\n",
             "Each hosted provider requires explicit --provider selection and sends HTTPS requests only\n",

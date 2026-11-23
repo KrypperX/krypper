@@ -427,6 +427,41 @@ See [the opt-in Linux profile](offline-cargo-profile.md). See Ollama's
 [tool-calling API example](https://github.com/ollama/ollama/blob/main/docs/capabilities/tool-calling.mdx)
 for its local chat tool-call format.
 
+### Guided per-user setup
+
+Run `krypper setup` from any directory to choose a provider, search the offline
+model catalog, enter credentials, review the selection, and save a default
+model without a TUI.
+Cloudflare Workers AI direct and Cloudflare AI Gateway are separate choices.
+The catalog is informational and offline; a model ID can also be entered
+manually.
+
+Credential prompts do not echo the value. Krypper stores credentials separately
+from `config.toml`, in `credentials.json` in the user's Krypper configuration
+directory. On Unix, the directory is restricted to the current user (`0700`)
+and the file to the current user (`0600`). On other platforms the file inherits
+permissions from the per-user configuration directory. The file is local plain
+text, not encrypted. Credentials are never written to the project workspace,
+printed, or logged.
+
+Environment variables override each matching saved credential. A set but
+invalid environment value does not fall back to the saved value. `--no-config`
+ignores saved model defaults and saved credentials for one run; provider
+environment variables remain available. Explicit `--model` or `--provider`
+flags ignore the saved model/provider pair but can still use saved credentials.
+`KRYPPER_CONFIG` overrides the model defaults read by `task`; `krypper setup`
+always writes to the ordinary per-user configuration directory.
+
+Use `krypper setup --status` to show the saved provider/model and whether a
+credential file exists. It never displays credential values. Use
+`krypper setup --reset` to confirm and remove the per-user defaults and
+credential file. Removing a file does not erase copies retained by filesystem
+snapshots or backups.
+
+Setup offers a connection test only after saving the settings. If accepted, it
+sends one short request using an empty temporary workspace. Hosted requests may
+incur provider charges.
+
 ### Default model from a user configuration file (opt in)
 
 Creating the file below is your opt-in: when it exists and you pass neither
@@ -445,7 +480,7 @@ model = "qwen3"       # required when the file sets anything
   contents cannot choose where your task data is sent.
 - **Precedence:** passing `--model` or `--provider` (alone or together) ignores
   the file entirely; the file's provider is never combined with a flag.
-  `--no-config` ignores it for one run.
+  `--no-config` ignores model defaults and saved credentials for one run.
 - **Visibility:** when the file applies, Krypper prints
   `krypper: using model '...' (provider: ...) from <path>` to standard error
   before the task starts.
@@ -454,9 +489,10 @@ model = "qwen3"       # required when the file sets anything
   or unknown keys, files over 16 KiB, and non-UTF-8 files are rejected. A
   present but invalid file fails the command with status 2 instead of being
   skipped.
-- **Credentials:** never stored here. Hosted providers still read their API keys
-  from the environment, and a hosted provider in the file without its key fails
-  before any request.
+- **Credentials:** never stored in this TOML file. Hosted providers read each
+  required value from the environment first, then from the separate per-user
+  `credentials.json` written by `krypper setup`. A hosted provider without the
+  required values fails before any request.
 
 ## In-process local model decisions (opt in)
 
