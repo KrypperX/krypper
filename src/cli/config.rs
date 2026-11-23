@@ -1,9 +1,9 @@
 //! Optional user-level defaults for `krypper task`.
 //!
 //! The file uses a small TOML subset: `key = "value"` lines, blank lines, and
-//! `#` comments. Only `provider` and `model` are recognized. Credentials are
-//! never read from or written to this file; hosted providers still take their
-//! API keys from the environment.
+//! `#` comments. Only `provider` and `model` are recognized. Credentials are kept
+//! in a separate per-user credential store; environment variables override the
+//! stored values.
 //!
 //! Krypper reads the file only from the user's own configuration location, never
 //! from a task workspace, so repository contents cannot change which service
