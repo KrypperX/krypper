@@ -30,41 +30,57 @@ pub struct ModelSpec {
     pub modalities: Option<Value>,
 }
 
-/// Parse the checked-in snapshot; no network access occurs.
+/// Parse the checked-in slim snapshot; no network access occurs.
 pub fn models() -> Result<Vec<ModelSpec>, serde_json::Error> {
-    let root: Value = serde_json::from_str(include_str!("../snapshots/models-dev/api.json"))?;
-    let mut result = Vec::new();
-    if let Some(providers) = root.as_object() {
-        for (provider_id, provider) in providers {
-            if let Some(entries) = provider.get("models").and_then(Value::as_object) {
-                for (model_id, model) in entries {
-                    let limits = model.get("limit");
-                    result.push(ModelSpec {
-                        provider: provider_id.clone(),
-                        id: model_id.clone(),
-                        name: model
-                            .get("name")
-                            .and_then(Value::as_str)
-                            .unwrap_or(model_id)
-                            .to_owned(),
-                        context_window: limits
-                            .and_then(|v| v.get("context"))
-                            .and_then(Value::as_u64),
-                        max_output_tokens: limits
-                            .and_then(|v| v.get("output"))
-                            .and_then(Value::as_u64),
-                        tool_calling: model.get("tool_call").and_then(Value::as_bool),
-                        reasoning: model.get("reasoning").and_then(Value::as_bool),
-                        status: model
-                            .get("status")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned),
-                        modalities: model.get("modalities").cloned(),
-                    });
-                }
-            }
-        }
-    }
+    let records: Vec<Value> =
+        serde_json::from_str(include_str!("../snapshots/models-dev/api.json"))?;
+    parse_records(records)
+}
+
+fn parse_records(records: Vec<Value>) -> Result<Vec<ModelSpec>, serde_json::Error> {
+    let mut result: Vec<ModelSpec> = records
+        .into_iter()
+        .map(|record| {
+            let provider = record
+                .get("provider")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    <serde_json::Error as serde::de::Error>::custom(
+                        "catalog record requires a non-empty string `provider`",
+                    )
+                })?
+                .to_owned();
+            let id = record
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    <serde_json::Error as serde::de::Error>::custom(
+                        "catalog record requires a non-empty string `id`",
+                    )
+                })?
+                .to_owned();
+            Ok(ModelSpec {
+                provider,
+                name: record
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or(&id)
+                    .to_owned(),
+                context_window: record.get("context_window").and_then(Value::as_u64),
+                max_output_tokens: record.get("max_output_tokens").and_then(Value::as_u64),
+                tool_calling: record.get("tool_calling").and_then(Value::as_bool),
+                reasoning: record.get("reasoning").and_then(Value::as_bool),
+                status: record
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                modalities: record.get("modalities").cloned(),
+                id,
+            })
+        })
+        .collect::<Result<Vec<_>, serde_json::Error>>()?;
     result.sort_by(|a, b| (&a.provider, &a.id).cmp(&(&b.provider, &b.id)));
     Ok(result)
 }
@@ -92,6 +108,12 @@ mod tests {
         assert!(lookup("unknown-provider", "custom-model")
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn malformed_catalog_identity_is_rejected() {
+        let record = serde_json::json!({ "provider": "openai" });
+        assert!(parse_records(vec![record]).is_err());
     }
 
     #[test]
