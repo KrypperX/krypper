@@ -40,6 +40,7 @@ impl EventSink for FailOnceSink {
 
 /// Regression: accepted envelopes remain contiguous after a rejected send.
 /// This does not assert atomic writes or automatic replay by a real sink.
+mod anthropic;
 mod events;
 mod projection;
 mod provider;

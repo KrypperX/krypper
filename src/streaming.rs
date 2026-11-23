@@ -4,6 +4,7 @@
 //! project existing runtime observations into events and deliver them using
 //! their own transport. No event is persisted by this module.
 
+mod anthropic;
 mod emitter;
 mod events;
 mod projection;
@@ -11,6 +12,7 @@ mod responses;
 mod sink;
 mod sse;
 
+pub(crate) use anthropic::{AnthropicAssemblyError, AnthropicFinalActions};
 pub use emitter::{EmitError, EventSink, StreamEmitter};
 pub use events::{ItemKind, StreamEnvelope, StreamEvent};
 pub use projection::{

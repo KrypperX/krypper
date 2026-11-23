@@ -1093,6 +1093,17 @@ pub struct AnthropicDecisionSource {
     workspace_id: Option<AnthropicWorkspaceId>,
 }
 
+fn map_anthropic_assembly_error(error: crate::streaming::AnthropicAssemblyError) -> ModelError {
+    match error {
+        crate::streaming::AnthropicAssemblyError::InvalidJson => {
+            ModelError::ProviderInvalidJson(ModelProvider::Anthropic)
+        }
+        crate::streaming::AnthropicAssemblyError::InvalidToolCall(message) => {
+            ModelError::ProviderInvalidToolCall(ModelProvider::Anthropic, message)
+        }
+    }
+}
+
 impl AnthropicDecisionSource {
     pub(crate) fn new(model: impl Into<String>, api_key: String, action_budget: usize) -> Self {
         Self::with_url(
@@ -1181,6 +1192,17 @@ impl AnthropicDecisionSource {
         self.choose_nonstreaming(goal, observations, project_guidance)
     }
 
+    #[cfg(test)]
+    pub(crate) fn choose_with_streaming_for_test(
+        &mut self,
+        goal: &str,
+        observations: &[WorkspaceObservation],
+        project_guidance: Option<&str>,
+        streaming: bool,
+    ) -> Result<WorkspaceAction, ModelError> {
+        self.choose_with_streaming(goal, observations, project_guidance, streaming)
+    }
+
     fn stream_validated_action(
         &mut self,
         goal: &str,
@@ -1215,10 +1237,8 @@ impl AnthropicDecisionSource {
             serde_json::from_slice(&request).map_err(|_| ModelError::RequestEncoding)?;
         body["stream"] = Value::Bool(true);
         let request = encode_model_request(&body)?;
-        let mut blocks = std::collections::BTreeMap::<usize, (String, String)>::new();
-        let mut completed_blocks = std::collections::BTreeSet::<usize>::new();
-        let mut completed = false;
-        let mut tool_use_stop = false;
+        let mut assembly =
+            crate::streaming::AnthropicFinalActions::new(MAX_STREAMED_TOOL_ARGUMENT_BYTES);
         let workspace_headers = self.workspace_headers();
         super::post_hosted_sse_with_headers(
             &self.core.agent,
@@ -1228,124 +1248,17 @@ impl AnthropicDecisionSource {
             &workspace_headers,
             &request,
             |frame| {
-                let provider = ModelProvider::Anthropic;
-                let invalid = || {
-                    ModelError::ProviderInvalidToolCall(
-                        provider,
-                        "invalid Anthropic streaming tool call",
-                    )
-                };
-                // Never expose text from an invalid or post-completion frame.
-                if completed {
-                    return Err(invalid());
-                }
-                let event: Value = serde_json::from_str(&frame.data)
-                    .map_err(|_| ModelError::ProviderInvalidJson(provider))?;
-                // Anthropic repeats the event kind in the JSON payload. Reject
-                // contradictory framing before consuming arguments or text.
-                if frame.event.as_deref() != event["type"].as_str() {
-                    return Err(invalid());
-                }
-                // Once the provider has declared tool_use as the stop reason,
-                // no more content blocks or deltas may change the final action.
-                if tool_use_stop
-                    && matches!(
-                        frame.event.as_deref(),
-                        Some("content_block_start" | "content_block_delta" | "content_block_stop")
-                    )
-                {
-                    return Err(invalid());
-                }
-                match frame.event.as_deref() {
-                    Some("content_block_start") => {
-                        let index = usize::try_from(event["index"].as_u64().ok_or_else(invalid)?)
-                            .map_err(|_| invalid())?;
-                        let block = &event["content_block"];
-                        if block["type"] == "tool_use" {
-                            let name = block["name"].as_str().ok_or_else(invalid)?;
-                            // A decision selects exactly one action. Reject a
-                            // second tool before buffering its arguments.
-                            if !blocks.is_empty() || completed_blocks.contains(&index) {
-                                return Err(invalid());
-                            }
-                            blocks.insert(index, (name.to_owned(), String::new()));
-                        }
-                    }
-                    Some("content_block_delta") => {
-                        if event["delta"]["type"] == "input_json_delta" {
-                            let index =
-                                usize::try_from(event["index"].as_u64().ok_or_else(invalid)?)
-                                    .map_err(|_| invalid())?;
-                            let chunk = event["delta"]["partial_json"]
-                                .as_str()
-                                .ok_or_else(invalid)?;
-                            let (_, arguments) = blocks.get_mut(&index).ok_or_else(invalid)?;
-                            if completed_blocks.contains(&index)
-                                || arguments.len().saturating_add(chunk.len())
-                                    > MAX_STREAMED_TOOL_ARGUMENT_BYTES
-                            {
-                                return Err(invalid());
-                            }
-                            arguments.push_str(chunk);
-                        }
-                    }
-                    Some("content_block_stop") => {
-                        let index = usize::try_from(event["index"].as_u64().ok_or_else(invalid)?)
-                            .map_err(|_| invalid())?;
-                        if blocks.contains_key(&index) && !completed_blocks.insert(index) {
-                            return Err(invalid());
-                        }
-                    }
-                    Some("message_delta") => {
-                        if tool_use_stop
-                            || event["delta"]["stop_reason"] != "tool_use"
-                            || blocks.len() != 1
-                            || completed_blocks.len() != 1
-                        {
-                            return Err(invalid());
-                        }
-                        tool_use_stop = true;
-                    }
-                    Some("message_stop") => {
-                        if !tool_use_stop || blocks.len() != 1 || completed_blocks.len() != 1 {
-                            return Err(invalid());
-                        }
-                        completed = true;
-                    }
-                    Some("error") => return Err(invalid()),
-                    _ => {}
-                }
-                // Display text is never sourced from tool arguments.
-                let text = crate::streaming::provider_text_delta(&frame);
-                if frame.event.as_deref() == Some("content_block_delta")
-                    && event["delta"]["type"] == "text_delta"
-                    && text.is_none()
-                {
-                    return Err(ModelError::ProviderInvalidJson(provider));
-                }
+                let text = assembly
+                    .push(&frame)
+                    .map_err(map_anthropic_assembly_error)?;
                 if let Some(text) = text {
                     on_text(text)?;
                 }
                 Ok(())
             },
         )?;
-        if !completed || !tool_use_stop || blocks.len() != 1 || completed_blocks.len() != 1 {
-            return Err(ModelError::ProviderInvalidToolCall(
-                ModelProvider::Anthropic,
-                "stream ended without one complete tool call",
-            ));
-        }
-        let (_, (name, arguments)) =
-            blocks
-                .into_iter()
-                .next()
-                .ok_or(ModelError::ProviderInvalidToolCall(
-                    ModelProvider::Anthropic,
-                    "missing tool call",
-                ))?;
-        let args: Value = serde_json::from_str(&arguments)
-            .map_err(|_| ModelError::ProviderInvalidJson(ModelProvider::Anthropic))?;
-        action_from_provider_call(ModelProvider::Anthropic, &name, &args)
+        let (name, arguments) = assembly.finish().map_err(map_anthropic_assembly_error)?;
+        action_from_provider_call(ModelProvider::Anthropic, &name, &arguments)
     }
 
     fn choose(
@@ -1905,172 +1818,6 @@ mod tests {
     #[test]
     fn xai_responses_stream_rejects_truncated_tool_call() {
         assert_responses_stream_rejects_truncated_tool_call(super::ResponsesProvider::Xai);
-    }
-
-    fn assert_anthropic_stream_decision(
-        truncated: bool,
-        duplicate_stop: bool,
-        mismatched_type: bool,
-    ) {
-        use super::AnthropicDecisionSource;
-        use crate::agent_loop::WorkspaceAction;
-        use serde_json::json;
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
-        use std::time::Duration;
-
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-        let endpoint = format!("http://{}", listener.local_addr().expect("address"));
-        let server = std::thread::spawn(move || {
-            let (mut socket, _) = listener.accept().expect("accept");
-            socket
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .expect("timeout");
-            let mut request = [0_u8; 16384];
-            let count = socket.read(&mut request).expect("request");
-            let received = String::from_utf8_lossy(&request[..count]);
-            assert!(received
-                .to_ascii_lowercase()
-                .contains("authorization: bearer local-test-key"));
-            let frames = [
-                (
-                    "content_block_start",
-                    json!({"index":0,"content_block":{"type":"tool_use","id":"tool_1","name":"read_file","input":{}}}),
-                ),
-                (
-                    "content_block_delta",
-                    json!({"index":0,"delta":{"type":"input_json_delta","partial_json":r#"{"path":"#}}),
-                ),
-                (
-                    "content_block_delta",
-                    json!({"index":0,"delta":{"type":"input_json_delta","partial_json":r#""README.md"}"#}}),
-                ),
-                ("content_block_stop", json!({"index":0})),
-                ("message_delta", json!({"delta":{"stop_reason":"tool_use"}})),
-                ("message_stop", json!({})),
-            ];
-            let mut body = String::new();
-            for (kind, data) in frames {
-                if truncated && kind == "message_stop" {
-                    break;
-                }
-                let mut data = data;
-                data["type"] = serde_json::Value::String(
-                    if mismatched_type && kind == "content_block_delta" {
-                        "message_delta"
-                    } else {
-                        kind
-                    }
-                    .to_owned(),
-                );
-                body.push_str(&format!("event: {kind}\ndata: {data}\n\n"));
-                if duplicate_stop && kind == "message_delta" {
-                    body.push_str(&format!("event: {kind}\ndata: {data}\n\n"));
-                }
-            }
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(), body
-            );
-            socket.write_all(response.as_bytes()).expect("response");
-        });
-        let mut source =
-            AnthropicDecisionSource::with_endpoint("test-model", "local-test-key", 2, endpoint);
-        let result = source.choose_with_streaming("read README", &[], None, true);
-        if truncated || duplicate_stop || mismatched_type {
-            assert!(result.is_err(), "invalid stream must not yield an action");
-        } else {
-            let streamed = result.expect("valid Anthropic SSE decision");
-            assert!(matches!(streamed, WorkspaceAction::ReadFile { .. }));
-            let response = json!({
-                "stop_reason": "tool_use",
-                "content": [{
-                    "type": "tool_use",
-                    "id": "tool_1",
-                    "name": "read_file",
-                    "input": {"path": "README.md"}
-                }]
-            });
-            let nonstreamed = super::parse_anthropic_response(response.to_string().as_bytes())
-                .expect("equivalent non-streaming decision");
-            assert_eq!(format!("{streamed:?}"), format!("{nonstreamed:?}"));
-        }
-        server.join().expect("server");
-    }
-
-    #[test]
-    fn anthropic_stream_assembles_and_validates_completed_tool_use() {
-        assert_anthropic_stream_decision(false, false, false);
-    }
-
-    #[test]
-    fn anthropic_truncated_stream_never_yields_an_action() {
-        assert_anthropic_stream_decision(true, false, false);
-    }
-
-    #[test]
-    fn anthropic_duplicate_stop_reason_never_yields_an_action() {
-        assert_anthropic_stream_decision(false, true, false);
-    }
-
-    #[test]
-    fn anthropic_mismatched_event_type_never_yields_an_action() {
-        assert_anthropic_stream_decision(false, false, true);
-    }
-
-    #[test]
-    fn anthropic_stream_sends_workspace_header_only_when_configured() {
-        use super::AnthropicDecisionSource;
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
-        use std::time::Duration;
-
-        for workspace_id in [None, Some("wrkspc_stream_test")] {
-            let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-            let endpoint = format!("http://{}", listener.local_addr().expect("address"));
-            let server = std::thread::spawn(move || {
-                let (mut socket, _) = listener.accept().expect("accept");
-                socket
-                    .set_read_timeout(Some(Duration::from_secs(5)))
-                    .expect("timeout");
-                let mut received = Vec::new();
-                let mut chunk = [0_u8; 4096];
-                while !received.windows(4).any(|window| window == b"\r\n\r\n") {
-                    let count = socket.read(&mut chunk).expect("request");
-                    if count == 0 {
-                        break;
-                    }
-                    received.extend_from_slice(&chunk[..count]);
-                }
-                socket
-                    .write_all(
-                        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                    )
-                    .expect("response");
-                String::from_utf8_lossy(&received).to_ascii_lowercase()
-            });
-            let mut source =
-                AnthropicDecisionSource::with_endpoint("test-model", "local-test-key", 1, endpoint);
-            if let Some(workspace_id) = workspace_id {
-                source = source
-                    .with_workspace_id(workspace_id)
-                    .expect("valid workspace id");
-            }
-            let result = source.choose_with_streaming("read README", &[], None, true);
-            assert!(result.is_err(), "an empty stream never yields an action");
-            let received = server.join().expect("server completed");
-
-            assert!(received.contains("authorization: bearer local-test-key"));
-            assert!(!received.contains("x-api-key: local-test-key"));
-            assert!(received.contains("anthropic-version:"));
-            assert_eq!(
-                received.contains("anthropic-workspace-id:"),
-                workspace_id.is_some()
-            );
-            if let Some(workspace_id) = workspace_id {
-                assert!(received.contains(&format!("anthropic-workspace-id: {workspace_id}")));
-            }
-        }
     }
 
     #[test]
