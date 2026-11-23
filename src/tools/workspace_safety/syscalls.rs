@@ -42,6 +42,10 @@ pub(super) use backend::{
     sync_file, unlink_at, unlink_created_file, DirectoryStream,
 };
 
+pub(crate) fn encode_workspace_path(path: &OsStr) -> Vec<u8> {
+    backend::encode_workspace_path(path)
+}
+
 pub(super) fn duplicate_directory_file(directory: &DirHandle) -> io::Result<File> {
     duplicate_directory(directory).map(DirHandle::into_file)
 }

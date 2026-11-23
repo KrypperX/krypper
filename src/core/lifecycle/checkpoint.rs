@@ -1,24 +1,8 @@
 use super::*;
+use crate::tools::encode_workspace_path;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-
-#[cfg(unix)]
-fn workspace_path_bytes(path: &std::ffi::OsStr) -> Vec<u8> {
-    use std::os::unix::ffi::OsStrExt;
-    path.as_bytes().to_vec()
-}
-
-#[cfg(windows)]
-fn workspace_path_bytes(path: &std::ffi::OsStr) -> Vec<u8> {
-    use std::os::windows::ffi::OsStrExt;
-    path.encode_wide().flat_map(u16::to_le_bytes).collect()
-}
-
-#[cfg(not(any(unix, windows)))]
-fn workspace_path_bytes(path: &std::ffi::OsStr) -> Vec<u8> {
-    path.to_string_lossy().as_bytes().to_vec()
-}
 
 /// Maximum encoded size accepted for a TaskSession checkpoint.
 pub const MAX_TASK_SESSION_CHECKPOINT_BYTES: usize = 1024 * 1024;
@@ -480,7 +464,7 @@ impl TaskSession {
             })?;
             let task_workspace_identity =
                 (task_workspace_identity.volume, task_workspace_identity.file);
-            let task_workspace_path = workspace_path_bytes(workspace_root.path().as_os_str());
+            let task_workspace_path = encode_workspace_path(workspace_root.path().as_os_str());
             if workspace_path
                 .as_deref()
                 .is_some_and(|path| path != task_workspace_path.as_slice())
@@ -565,7 +549,7 @@ impl TaskSession {
                 });
             };
             if checkpoint_task.workspace_path
-                != workspace_path_bytes(current_workspace.path().as_os_str())
+                != encode_workspace_path(current_workspace.path().as_os_str())
             {
                 return Err(TaskSessionCheckpointError::WorkspaceMismatch { task_id });
             }
@@ -619,7 +603,7 @@ fn checkpoint_task(
     Ok(CheckpointTask {
         id: task.id.to_string(),
         description: task.description.clone(),
-        workspace_path: workspace_path_bytes(workspace_root.path().as_os_str()),
+        workspace_path: encode_workspace_path(workspace_root.path().as_os_str()),
         workspace_device,
         workspace_inode,
         state: task.state.into(),

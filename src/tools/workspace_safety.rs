@@ -26,6 +26,7 @@ pub(crate) use read::{
 };
 pub(crate) use replace::{apply_patch_file_at, replace_text_file_at};
 pub(crate) use search::{search_text_files_at, search_tree_text_files_at};
+pub(crate) use syscalls::encode_workspace_path;
 pub(crate) use types::{DirHandle, PatchEvidence, RootGuidanceReadError, WorkspaceRoot};
 
 use listing::{list_open_directory_with_limit, list_open_directory_with_limit_and_error};

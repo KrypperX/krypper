@@ -15,6 +15,10 @@ fn c_string(value: &OsStr) -> io::Result<CString> {
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))
 }
 
+pub(crate) fn encode_workspace_path(path: &OsStr) -> Vec<u8> {
+    path.as_bytes().to_vec()
+}
+
 fn owned_file_or_error(descriptor: RawFd) -> io::Result<File> {
     if descriptor < 0 {
         Err(io::Error::last_os_error())

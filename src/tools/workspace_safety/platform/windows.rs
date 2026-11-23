@@ -15,6 +15,11 @@ fn unavailable() -> io::Error {
     )
 }
 
+pub(crate) fn encode_workspace_path(path: &OsStr) -> Vec<u8> {
+    use std::os::windows::ffi::OsStrExt;
+    path.encode_wide().flat_map(u16::to_le_bytes).collect()
+}
+
 pub(crate) fn open_current_directory() -> io::Result<DirHandle> {
     Err(unavailable())
 }

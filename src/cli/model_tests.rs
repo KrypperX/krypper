@@ -277,7 +277,10 @@ fn caller_directed_cli_uses_explicit_workspace_without_changing_current_director
         "created"
     );
     assert!(!process_directory.join("selected file.txt").exists());
-    assert_eq!(current_directory, process_directory);
+    assert_eq!(
+        current_directory,
+        fs::canonicalize(&process_directory).unwrap()
+    );
 }
 
 #[test]
@@ -321,7 +324,10 @@ fn caller_directed_cli_without_workspace_uses_current_directory() {
         fs::read_to_string(workspace.path().join("default.txt")).expect("read default result"),
         "created"
     );
-    assert_eq!(current_directory, workspace.path());
+    assert_eq!(
+        current_directory,
+        fs::canonicalize(workspace.path()).unwrap()
+    );
 }
 
 #[test]
@@ -382,7 +388,10 @@ fn task_cli_rejects_missing_and_invalid_workspace_before_lifecycle() {
         (results, current_directory)
     });
 
-    assert_eq!(current_directory, process_directory);
+    assert_eq!(
+        current_directory,
+        fs::canonicalize(&process_directory).unwrap()
+    );
     assert_eq!(results.len(), 3);
     assert_eq!(results[0].0, 2);
     assert!(String::from_utf8_lossy(&results[0].2)
@@ -817,7 +826,10 @@ fn model_cli_uses_explicit_workspace_without_changing_current_directory() {
         "selected workspace"
     );
     assert!(!process_directory.join("model result.txt").exists());
-    assert_eq!(current_directory, process_directory);
+    assert_eq!(
+        current_directory,
+        fs::canonicalize(&process_directory).unwrap()
+    );
     assert_eq!(server.join().expect("join mock server").len(), 2);
 }
 

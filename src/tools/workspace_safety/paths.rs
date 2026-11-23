@@ -110,9 +110,14 @@ pub(super) fn open_root_relative_with_resolved_path(
             }
             let target = read_link_at(parent, &name).map_err(|_| CliError::new("invalid path"))?;
             if target.is_absolute() {
-                let target_path = normalize_absolute(&target);
+                let mut target_path = normalize_absolute(&target);
                 if !target_path.starts_with(root_path) {
-                    return Err(CliError::new("path must stay inside the current directory"));
+                    target_path = fs::canonicalize(&target_path).map_err(|_| {
+                        CliError::new("path must stay inside the current directory")
+                    })?;
+                    if !target_path.starts_with(root_path) {
+                        return Err(CliError::new("path must stay inside the current directory"));
+                    }
                 }
                 verify_root_descriptor(&directories[0], root_path)?;
                 let relative = target_path
