@@ -13,6 +13,25 @@ explicitly authorized Linux offline Cargo profile is now implemented through
 Tools and TaskSession; see [its contract](docs/offline-cargo-profile.md). The CLI
 does not grant process authority, and generic process execution remains absent.
 
+## Platform support
+
+Linux and macOS have supported workspace-containment backends in
+`src/tools/workspace_safety/platform/`. The Unix syscall boundary owns native
+descriptors, metadata structures, modes, path encoding, and durability calls;
+callers above it use `DirHandle`, `FileIdentity`, `FileKind`, `CreateMode`, and
+portable path components. Linux also provides the verified bwrap/cgroup Cargo
+sandbox. macOS keeps that capability unavailable and returns
+`ProcessOutcome::SandboxUnavailable`; MCP stdio remains available through its
+POSIX process-group and nonblocking-pipe implementation.
+
+Windows is compile-checked only. Its workspace backend is a typed unavailable
+stub, and MCP stdio returns `McpLifecycleError::PlatformUnavailable` before a
+child process can be created. The Linux process sandbox and supervisor are not
+compiled there. Do not replace these failures with an unconfined implementation;
+native containment and process supervision require a separate reviewed port.
+The CI matrix runs the full suite on Linux and macOS and checks all targets on
+Windows without running tests.
+
 ## Current implementation
 
 - [`src/core/task.rs`](src/core/task.rs) defines the `Task` and `Turn` domain

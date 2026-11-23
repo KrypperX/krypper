@@ -2,7 +2,6 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
-use std::os::unix::ffi::OsStringExt;
 
 use super::paths::{open_cwd_relative, open_workspace_relative};
 use super::syscalls::DirectoryStream;
@@ -56,15 +55,15 @@ pub(super) fn list_open_directory_with_limit_and_error(
         DirectoryStream::open(directory).map_err(|_| CliError::new("unable to list directory"))?;
     let mut names = Vec::new();
 
-    while let Some(name) = stream
+    while let Some((name, sort_key)) = stream
         .next_entry()
         .map_err(|_| CliError::new("unable to list directory"))?
     {
-        if name != b"." && name != b".." {
+        if name != OsStr::new(".") && name != OsStr::new("..") {
             if maximum_entries.is_some_and(|maximum| names.len() == maximum) {
                 return Err(CliError::new(limit_error));
             }
-            names.push(ListedName::new(name));
+            names.push(ListedName { sort_key, name });
         }
     }
 
@@ -75,36 +74,6 @@ pub(super) fn list_open_directory_with_limit_and_error(
 pub(super) struct ListedName {
     pub(super) sort_key: Vec<u32>,
     pub(super) name: OsString,
-}
-
-pub(super) fn python_codepoints(bytes: &[u8]) -> Vec<u32> {
-    let mut codepoints = Vec::new();
-    let mut offset = 0;
-    while offset < bytes.len() {
-        match std::str::from_utf8(&bytes[offset..]) {
-            Ok(valid) => {
-                codepoints.extend(valid.chars().map(u32::from));
-                break;
-            }
-            Err(error) => {
-                let valid_length = error.valid_up_to();
-                if valid_length > 0 {
-                    let valid = std::str::from_utf8(&bytes[offset..offset + valid_length])
-                        .expect("invariant: `valid_up_to` identifies valid UTF-8");
-                    codepoints.extend(valid.chars().map(u32::from));
-                    offset += valid_length;
-                }
-                let invalid_length = error.error_len().unwrap_or(bytes.len() - offset);
-                codepoints.extend(
-                    bytes[offset..offset + invalid_length]
-                        .iter()
-                        .map(|byte| 0xdc00 + u32::from(*byte)),
-                );
-                offset += invalid_length;
-            }
-        }
-    }
-    codepoints
 }
 
 pub(super) fn quote_json(codepoints: &[u32]) -> String {
@@ -136,12 +105,4 @@ pub(super) fn quote_json(codepoints: &[u32]) -> String {
     }
     quoted.push('"');
     quoted
-}
-
-impl ListedName {
-    pub(super) fn new(bytes: Vec<u8>) -> Self {
-        let sort_key = python_codepoints(&bytes);
-        let name = OsString::from_vec(bytes);
-        Self { sort_key, name }
-    }
 }

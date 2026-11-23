@@ -586,6 +586,7 @@ fn model_cli_reconsiders_nested_edits_with_only_applicable_guidance() {
 }
 
 #[test]
+#[cfg(unix)]
 fn model_cli_stops_with_a_typed_guidance_error_before_dispatch() {
     use std::os::unix::fs::symlink;
 

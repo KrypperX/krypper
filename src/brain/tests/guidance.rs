@@ -45,6 +45,7 @@ impl BoundedDecisionSource for RootGuidanceProbe {
 }
 
 #[test]
+#[cfg(unix)]
 fn unsafe_root_guidance_fails_before_decision_and_preserves_outside_canary() {
     use std::os::unix::fs::symlink;
 

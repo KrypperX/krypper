@@ -14,7 +14,7 @@ mod search;
 mod syscalls;
 mod types;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;
 
 pub(crate) use create::{create_directory_at, create_text_file, create_text_file_at};
@@ -26,14 +26,17 @@ pub(crate) use read::{
 };
 pub(crate) use replace::{apply_patch_file_at, replace_text_file_at};
 pub(crate) use search::{search_text_files_at, search_tree_text_files_at};
-pub(crate) use types::{PatchEvidence, RootGuidanceReadError, WorkspaceRoot};
+pub(crate) use types::{DirHandle, PatchEvidence, RootGuidanceReadError, WorkspaceRoot};
 
 use listing::{list_open_directory_with_limit, list_open_directory_with_limit_and_error};
-use paths::{open_workspace_relative, open_workspace_relative_with_resolved_path};
-use syscalls::{fstat, is_directory, is_regular_file, is_symlink, open_at, same_inode, stat_at};
+use paths::open_workspace_relative_with_resolved_path;
+use syscalls::{
+    duplicate_directory, duplicate_directory_file, is_directory, is_regular_file, is_symlink,
+    open_at, same_inode, stat_at,
+};
 
 #[cfg(test)]
 use replace::{apply_patch_file_at_with_ops, read_file_contents_at_for_verification};
 #[cfg(test)]
-use syscalls::{rename_file_at, write_to_fd};
+use syscalls::{rename_file_at, write_to_file};
 use types::{CliError, MAX_FILE_SIZE, MAX_TASK_DIRECTORY_ENTRIES};

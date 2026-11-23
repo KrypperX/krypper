@@ -3,7 +3,7 @@ use std::io;
 use std::sync::atomic::Ordering;
 
 use super::super::replace::{replace_text_file_at, replace_text_file_at_with_writer};
-use super::super::types::{WorkspaceRoot, MAX_FILE_SIZE};
+use super::super::types::{DirHandle, WorkspaceRoot, MAX_FILE_SIZE};
 use super::NEXT_TEMP;
 
 #[test]
@@ -16,7 +16,7 @@ fn replacement_changes_only_one_exact_match_in_an_existing_file() {
     fs::create_dir(&path).unwrap();
     fs::write(path.join("note.txt"), "before exact match after").unwrap();
     let root = WorkspaceRoot {
-        descriptor: fs::File::open(&path).unwrap().into(),
+        descriptor: DirHandle::from_file(fs::File::open(&path).unwrap()),
         path: fs::canonicalize(&path).unwrap(),
     };
 
@@ -45,7 +45,7 @@ fn replacement_accepts_a_result_at_the_one_mib_limit() {
     fs::create_dir(&path).unwrap();
     fs::write(path.join("note.txt"), "old").unwrap();
     let root = WorkspaceRoot {
-        descriptor: fs::File::open(&path).unwrap().into(),
+        descriptor: DirHandle::from_file(fs::File::open(&path).unwrap()),
         path: fs::canonicalize(&path).unwrap(),
     };
     let replacement = "x".repeat(MAX_FILE_SIZE);
@@ -70,7 +70,7 @@ fn replacement_rejects_empty_missing_and_ambiguous_matches_without_changes() {
     fs::create_dir(&path).unwrap();
     fs::write(path.join("note.txt"), "aaaa").unwrap();
     let root = WorkspaceRoot {
-        descriptor: fs::File::open(&path).unwrap().into(),
+        descriptor: DirHandle::from_file(fs::File::open(&path).unwrap()),
         path: fs::canonicalize(&path).unwrap(),
     };
 
@@ -103,7 +103,7 @@ fn failed_replacement_keeps_the_original_and_removes_its_partial_stage() {
     fs::create_dir(&path).unwrap();
     fs::write(path.join("note.txt"), "before exact match after").unwrap();
     let root = WorkspaceRoot {
-        descriptor: fs::File::open(&path).unwrap().into(),
+        descriptor: DirHandle::from_file(fs::File::open(&path).unwrap()),
         path: fs::canonicalize(&path).unwrap(),
     };
     let mut writes = 0;
@@ -113,10 +113,10 @@ fn failed_replacement_keeps_the_original_and_removes_its_partial_stage() {
         std::ffi::OsStr::new("note.txt"),
         "exact match",
         "a much longer replacement",
-        |fd, bytes| {
+        |file, bytes| {
             writes += 1;
             if writes == 1 {
-                super::write_to_fd(fd, &bytes[..3])
+                super::write_to_file(file, &bytes[..3])
             } else {
                 Err(io::Error::other("simulated disk failure"))
             }
@@ -156,7 +156,7 @@ fn replacement_rejects_unsafe_paths_non_regular_files_and_oversize_content() {
     symlink("note.txt", workspace.join("linked.txt")).unwrap();
     symlink(".", workspace.join("linked-parent")).unwrap();
     let root = WorkspaceRoot {
-        descriptor: fs::File::open(&workspace).unwrap().into(),
+        descriptor: DirHandle::from_file(fs::File::open(&workspace).unwrap()),
         path: fs::canonicalize(&workspace).unwrap(),
     };
     let too_long = "x".repeat(MAX_FILE_SIZE + 1);

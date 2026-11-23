@@ -5,6 +5,7 @@ use super::{
 use crate::tools::{capture_workspace_root_at, registry, WorkspaceRoot};
 use serde_json::json;
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -131,6 +132,7 @@ fn rejects_absolute_and_parent_paths() {
 }
 
 #[test]
+#[cfg(unix)]
 fn rejects_symlinked_manifest() {
     let fixture = Fixture::new("symlink-file");
     fixture.manifest(".krypper/skills/alpha.json", "alpha");
@@ -148,6 +150,7 @@ fn rejects_symlinked_manifest() {
 }
 
 #[test]
+#[cfg(unix)]
 fn rejects_symlinked_discovery_directory() {
     let fixture = Fixture::new("symlink-dir");
     fixture.manifest("real/alpha.json", "alpha");
@@ -165,6 +168,7 @@ fn rejects_symlinked_discovery_directory() {
 }
 
 #[test]
+#[cfg(unix)]
 fn rejects_symlink_that_escapes_the_workspace() {
     let fixture = Fixture::new("symlink-escape");
     let outside = fixture.path.with_extension("outside.json");

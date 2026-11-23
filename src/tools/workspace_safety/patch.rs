@@ -352,13 +352,13 @@ fn serialize_file_lines(lines: &[FileLine]) -> String {
     contents
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::apply_unified_diff;
     use std::ffi::OsStr;
     use std::fs;
+    use std::fs::File;
     use std::io;
-    use std::os::fd::RawFd;
     use std::os::unix::fs::{symlink, PermissionsExt};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -590,7 +590,7 @@ mod tests {
             &root,
             OsStr::new("note.txt"),
             patch,
-            |_fd: RawFd, _bytes: &[u8]| Err(io::Error::other("simulated write failure")),
+            |_file: &mut File, _bytes: &[u8]| Err(io::Error::other("simulated write failure")),
             super::super::rename_file_at,
             super::super::read_file_contents_at_for_verification,
         );
@@ -601,8 +601,8 @@ mod tests {
             &root,
             OsStr::new("note.txt"),
             patch,
-            super::super::write_to_fd,
-            |_fd: RawFd, _temporary: &OsStr, _target: &OsStr| {
+            super::super::write_to_file,
+            |_parent: &super::super::DirHandle, _temporary: &OsStr, _target: &OsStr| {
                 Err(io::Error::other("simulated uncertain commit"))
             },
             super::super::read_file_contents_at_for_verification,
@@ -614,9 +614,9 @@ mod tests {
             &root,
             OsStr::new("note.txt"),
             patch,
-            super::super::write_to_fd,
-            |fd: RawFd, temporary: &OsStr, target: &OsStr| {
-                super::super::rename_file_at(fd, temporary, target)?;
+            super::super::write_to_file,
+            |parent: &super::super::DirHandle, temporary: &OsStr, target: &OsStr| {
+                super::super::rename_file_at(parent, temporary, target)?;
                 Err(io::Error::other("simulated lost commit response"))
             },
             super::super::read_file_contents_at_for_verification,
@@ -629,9 +629,9 @@ mod tests {
             &root,
             OsStr::new("note.txt"),
             patch,
-            super::super::write_to_fd,
+            super::super::write_to_file,
             super::super::rename_file_at,
-            |_fd: RawFd, _target: &OsStr| {
+            |_parent: &super::super::DirHandle, _target: &OsStr| {
                 Err(super::super::CliError::new("simulated readback failure"))
             },
         );

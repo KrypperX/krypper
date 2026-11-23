@@ -1,17 +1,18 @@
 use super::{
-    fstat, is_directory, is_regular_file, is_symlink, list_open_directory_with_limit,
-    list_open_directory_with_limit_and_error, open_at, open_workspace_relative,
-    open_workspace_relative_with_resolved_path, same_inode, stat_at, CliError, WorkspaceRoot,
-    MAX_FILE_SIZE, MAX_TASK_DIRECTORY_ENTRIES,
+    duplicate_directory, duplicate_directory_file, is_directory, is_regular_file, is_symlink,
+    list_open_directory_with_limit, list_open_directory_with_limit_and_error, open_at,
+    open_workspace_relative_with_resolved_path, same_inode, stat_at, CliError, DirHandle,
+    WorkspaceRoot, MAX_FILE_SIZE, MAX_TASK_DIRECTORY_ENTRIES,
 };
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use std::collections::VecDeque;
 use std::ffi::OsStr;
-use std::fs::File;
 use std::io::Read;
-use std::os::fd::AsRawFd;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+
+use super::paths::open_workspace_directory;
+use super::syscalls::{fstat_directory, fstat_file, is_not_found, OpenRequest};
 
 pub(super) const MAX_SEARCH_QUERY_BYTES: usize = 4 * 1024;
 pub(super) const MAX_SEARCH_BYTES: usize = 16 * 1024 * 1024;
@@ -71,7 +72,7 @@ fn is_git_metadata_path(path: &Path) -> bool {
 fn ignore_rules_for_directory(
     root: &WorkspaceRoot,
     directory_path: &OsStr,
-    selected_directory: &File,
+    selected_directory: &DirHandle,
     bytes_scanned: &mut usize,
 ) -> Result<Option<IgnoreRules>, CliError> {
     let normalized_directory = normalize_relative_path(Path::new(directory_path));
@@ -86,11 +87,11 @@ fn ignore_rules_for_directory(
         .components()
         .any(|component| matches!(component, Component::ParentDir));
     let can_walk_normalized_path = if has_parent_component {
-        match open_workspace_relative(root, normalized_directory.as_os_str(), true) {
+        match open_workspace_directory(root, normalized_directory.as_os_str()) {
             Ok(normalized) => {
-                let normalized_status = fstat(normalized.as_raw_fd())
+                let normalized_status = fstat_directory(&normalized)
                     .map_err(|_| CliError::new("unable to search directory"))?;
-                let selected_status = fstat(selected_directory.as_raw_fd())
+                let selected_status = fstat_directory(selected_directory)
                     .map_err(|_| CliError::new("unable to search directory"))?;
                 same_inode(&normalized_status, &selected_status) && is_directory(&normalized_status)
             }
@@ -100,10 +101,8 @@ fn ignore_rules_for_directory(
         true
     };
 
-    let root_directory = File::from(
-        root.process_descriptor()
-            .map_err(|_| CliError::new("unable to read ignore file"))?,
-    );
+    let root_directory = duplicate_directory(&root.descriptor)
+        .map_err(|_| CliError::new("unable to read ignore file"))?;
     let mut rules = IgnoreRules::default();
     rules.push(read_ignore_file(
         root,
@@ -124,11 +123,11 @@ fn ignore_rules_for_directory(
                 return Ok(None);
             }
 
-            let directory = open_workspace_relative(root, prefix.as_os_str(), true)?;
+            let directory = open_workspace_directory(root, prefix.as_os_str())?;
             if index + 1 == components.len() {
-                let opened_status = fstat(directory.as_raw_fd())
+                let opened_status = fstat_directory(&directory)
                     .map_err(|_| CliError::new("unable to search directory"))?;
-                let selected_status = fstat(selected_directory.as_raw_fd())
+                let selected_status = fstat_directory(selected_directory)
                     .map_err(|_| CliError::new("unable to search directory"))?;
                 if !same_inode(&opened_status, &selected_status) || !is_directory(&opened_status) {
                     return Err(CliError::new("directory changed while searching"));
@@ -152,22 +151,20 @@ fn ignore_rules_for_directory(
 
 fn read_ignore_file(
     root: &WorkspaceRoot,
-    directory: &File,
+    directory: &DirHandle,
     relative_directory: &Path,
     bytes_scanned: &mut usize,
 ) -> Result<Option<Gitignore>, CliError> {
-    let directory_fd = directory.as_raw_fd();
     let name = OsStr::new(".gitignore");
-    let status = match stat_at(directory_fd, name) {
+    let status = match stat_at(directory, name) {
         Ok(status) => status,
-        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => return Ok(None),
+        Err(error) if is_not_found(&error) => return Ok(None),
         Err(_) => return Err(CliError::new("unable to read ignore file")),
     };
     if is_symlink(&status) || !is_regular_file(&status) {
         return Err(CliError::new("unable to read ignore file"));
     }
-    let size =
-        u64::try_from(status.st_size).map_err(|_| CliError::new("unable to read ignore file"))?;
+    let size = status.size;
     if size > MAX_FILE_SIZE as u64 {
         return Err(CliError::new("ignore file exceeds 1 MiB"));
     }
@@ -176,20 +173,14 @@ fn read_ignore_file(
         return Err(CliError::new("search exceeds 16 MiB scan limit"));
     }
 
-    let file = open_at(
-        directory_fd,
-        name,
-        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
-        0,
-    )
-    .map_err(|_| CliError::new("unable to read ignore file"))?;
+    let file = open_at(directory, name, OpenRequest::ReadFile)
+        .map_err(|_| CliError::new("unable to read ignore file"))?;
     let opened_status =
-        fstat(file.as_raw_fd()).map_err(|_| CliError::new("unable to read ignore file"))?;
+        fstat_file(&file).map_err(|_| CliError::new("unable to read ignore file"))?;
     if !same_inode(&status, &opened_status) || !is_regular_file(&opened_status) {
         return Err(CliError::new("ignore file changed while searching"));
     }
-    let opened_size = u64::try_from(opened_status.st_size)
-        .map_err(|_| CliError::new("unable to read ignore file"))?;
+    let opened_size = opened_status.size;
     if opened_size > MAX_FILE_SIZE as u64 {
         return Err(CliError::new("ignore file exceeds 1 MiB"));
     }
@@ -199,8 +190,7 @@ fn read_ignore_file(
 
     let read_limit = MAX_FILE_SIZE.min(remaining);
     let mut contents = Vec::with_capacity(opened_size as usize);
-    File::from(file)
-        .take(read_limit as u64 + 1)
+    file.take(read_limit as u64 + 1)
         .read_to_end(&mut contents)
         .map_err(|_| CliError::new("unable to read ignore file"))?;
     if contents.len() > MAX_FILE_SIZE {
@@ -209,7 +199,7 @@ fn read_ignore_file(
     if contents.len() > remaining {
         return Err(CliError::new("search exceeds 16 MiB scan limit"));
     }
-    let current_status = stat_at(directory_fd, name)
+    let current_status = stat_at(directory, name)
         .map_err(|_| CliError::new("ignore file changed while searching"))?;
     if !same_inode(&opened_status, &current_status) || !is_regular_file(&current_status) {
         return Err(CliError::new("ignore file changed while searching"));
@@ -261,8 +251,9 @@ pub(crate) fn search_text_files_at(
         }
     }
 
-    let (directory, resolved_directory_path) =
+    let (directory_file, resolved_directory_path) =
         open_workspace_relative_with_resolved_path(root, directory_path, true)?;
+    let directory = DirHandle::from_file(directory_file);
     if is_git_metadata_path(&resolved_directory_path) {
         return Ok(Vec::new());
     }
@@ -272,22 +263,15 @@ pub(crate) fn search_text_files_at(
     else {
         return Ok(Vec::new());
     };
-    let directory_fd = directory.as_raw_fd();
-    let entries_directory = open_at(
-        directory_fd,
-        OsStr::new("."),
-        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        0,
-    )
-    .map_err(|_| CliError::new("unable to search directory"))?;
     let names = list_open_directory_with_limit(
-        File::from(entries_directory),
+        duplicate_directory_file(&directory)
+            .map_err(|_| CliError::new("unable to search directory"))?,
         Some(MAX_TASK_DIRECTORY_ENTRIES),
     )?;
     let mut locations = Vec::new();
 
     for entry in names {
-        let status = stat_at(directory_fd, &entry.name)
+        let status = stat_at(&directory, &entry.name)
             .map_err(|_| CliError::new("unable to search directory"))?;
         if is_symlink(&status) || !is_regular_file(&status) {
             continue;
@@ -296,8 +280,7 @@ pub(crate) fn search_text_files_at(
         if ignore_rules.ignores(root, &relative_path, false) {
             continue;
         }
-        let size = u64::try_from(status.st_size)
-            .map_err(|_| CliError::new("unable to read search file"))?;
+        let size = status.size;
         if size > MAX_FILE_SIZE as u64 {
             return Err(CliError::new("file exceeds 1 MiB"));
         }
@@ -307,29 +290,25 @@ pub(crate) fn search_text_files_at(
             return Err(CliError::new("search exceeds 16 MiB scan limit"));
         }
 
-        let file = open_at(
-            directory_fd,
-            &entry.name,
-            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
-            0,
-        )
-        .map_err(|_| CliError::new("unable to read search file"))?;
-        let file = File::from(file);
-        let metadata = file
-            .metadata()
+        let file = open_at(&directory, &entry.name, OpenRequest::ReadFile)
             .map_err(|_| CliError::new("unable to read search file"))?;
-        if !metadata.is_file() {
+        let opened_status =
+            fstat_file(&file).map_err(|_| CliError::new("unable to read search file"))?;
+        if !same_inode(&status, &opened_status) {
+            return Err(CliError::new("file changed while searching"));
+        }
+        if !is_regular_file(&opened_status) {
             continue;
         }
-        if metadata.len() > MAX_FILE_SIZE as u64 {
+        if opened_status.size > MAX_FILE_SIZE as u64 {
             return Err(CliError::new("file exceeds 1 MiB"));
         }
-        if metadata.len() > remaining as u64 {
+        if opened_status.size > remaining as u64 {
             return Err(CliError::new("search exceeds 16 MiB scan limit"));
         }
 
         let read_limit = MAX_FILE_SIZE.min(remaining);
-        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        let mut bytes = Vec::with_capacity(opened_status.size as usize);
         file.take(read_limit as u64 + 1)
             .read_to_end(&mut bytes)
             .map_err(|_| CliError::new("unable to read search file"))?;
@@ -369,8 +348,9 @@ pub(crate) fn search_tree_text_files_at(
         }
     }
 
-    let (directory, resolved_directory_path) =
+    let (directory_file, resolved_directory_path) =
         open_workspace_relative_with_resolved_path(root, directory_path, true)?;
+    let directory = DirHandle::from_file(directory_file);
     if is_git_metadata_path(&resolved_directory_path) {
         return Ok(Vec::new());
     }
@@ -386,24 +366,17 @@ pub(crate) fn search_tree_text_files_at(
     let mut entries_considered = 0_usize;
 
     while let Some((relative_directory, depth, directory, ignore_rules)) = pending.pop_front() {
-        let directory_fd = directory.as_raw_fd();
-        let entries_directory = open_at(
-            directory_fd,
-            OsStr::new("."),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            0,
-        )
-        .map_err(|_| CliError::new("unable to search directory"))?;
         let remaining_entries = MAX_TREE_DIRECTORY_ENTRIES - entries_considered;
         let names = list_open_directory_with_limit_and_error(
-            File::from(entries_directory),
+            duplicate_directory_file(&directory)
+                .map_err(|_| CliError::new("unable to search directory"))?,
             Some(remaining_entries),
             TREE_DIRECTORY_ENTRY_LIMIT_ERROR,
         )?;
         entries_considered += names.len();
 
         for entry in names {
-            let status = stat_at(directory_fd, &entry.name)
+            let status = stat_at(&directory, &entry.name)
                 .map_err(|_| CliError::new("unable to search directory"))?;
             if is_symlink(&status) {
                 continue;
@@ -418,19 +391,14 @@ pub(crate) fn search_tree_text_files_at(
                 if depth == MAX_TREE_DIRECTORY_DEPTH {
                     return Err(CliError::new(TREE_DIRECTORY_DEPTH_LIMIT_ERROR));
                 }
-                let child = open_at(
-                    directory_fd,
-                    &entry.name,
-                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                    0,
-                )
-                .map_err(|_| CliError::new("unable to search directory"))?;
-                let opened_status = fstat(child.as_raw_fd())
+                let child = open_at(&directory, &entry.name, OpenRequest::ReadDirectory)
                     .map_err(|_| CliError::new("unable to search directory"))?;
+                let opened_status =
+                    fstat_file(&child).map_err(|_| CliError::new("unable to search directory"))?;
                 if !same_inode(&status, &opened_status) || !is_directory(&opened_status) {
                     return Err(CliError::new("directory changed while searching"));
                 }
-                let child_directory = File::from(child);
+                let child_directory = DirHandle::from_file(child);
                 let mut child_rules = ignore_rules.clone();
                 child_rules.push(read_ignore_file(
                     root,
@@ -448,8 +416,7 @@ pub(crate) fn search_tree_text_files_at(
                 continue;
             }
 
-            let size = u64::try_from(status.st_size)
-                .map_err(|_| CliError::new("unable to read search file"))?;
+            let size = status.size;
             if size > MAX_FILE_SIZE as u64 {
                 return Err(CliError::new("file exceeds 1 MiB"));
             }
@@ -458,23 +425,17 @@ pub(crate) fn search_tree_text_files_at(
                 return Err(CliError::new("search exceeds 16 MiB scan limit"));
             }
 
-            let file = open_at(
-                directory_fd,
-                &entry.name,
-                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
-                0,
-            )
-            .map_err(|_| CliError::new("unable to read search file"))?;
+            let file = open_at(&directory, &entry.name, OpenRequest::ReadFile)
+                .map_err(|_| CliError::new("unable to read search file"))?;
             let opened_status =
-                fstat(file.as_raw_fd()).map_err(|_| CliError::new("unable to read search file"))?;
+                fstat_file(&file).map_err(|_| CliError::new("unable to read search file"))?;
             if !same_inode(&status, &opened_status) {
                 return Err(CliError::new("file changed while searching"));
             }
             if !is_regular_file(&opened_status) {
                 continue;
             }
-            let opened_size = u64::try_from(opened_status.st_size)
-                .map_err(|_| CliError::new("unable to read search file"))?;
+            let opened_size = opened_status.size;
             if opened_size > MAX_FILE_SIZE as u64 {
                 return Err(CliError::new("file exceeds 1 MiB"));
             }
@@ -484,8 +445,7 @@ pub(crate) fn search_tree_text_files_at(
 
             let read_limit = MAX_FILE_SIZE.min(remaining_bytes);
             let mut bytes = Vec::with_capacity(opened_size as usize);
-            File::from(file)
-                .take(read_limit as u64 + 1)
+            file.take(read_limit as u64 + 1)
                 .read_to_end(&mut bytes)
                 .map_err(|_| CliError::new("unable to read search file"))?;
             if bytes.len() > MAX_FILE_SIZE {

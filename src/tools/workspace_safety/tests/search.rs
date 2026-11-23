@@ -4,7 +4,10 @@ use super::super::search::{
     search_text_files_at, search_tree_text_files_at, MAX_SEARCH_BYTES, MAX_SEARCH_LOCATIONS,
     MAX_SEARCH_QUERY_BYTES, MAX_TREE_DIRECTORY_DEPTH,
 };
-use super::super::{types::MAX_FILE_SIZE, WorkspaceRoot};
+use super::super::{
+    types::{DirHandle, MAX_FILE_SIZE},
+    WorkspaceRoot,
+};
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::{symlink, PermissionsExt};
@@ -31,7 +34,7 @@ fn returns_sorted_matching_file_and_line_locations() {
     fs::create_dir(path.join("nested")).unwrap();
     fs::write(path.join("nested/ignored.txt"), "needle nested\n").unwrap();
     let root = WorkspaceRoot {
-        descriptor: fs::File::open(&path).unwrap().into(),
+        descriptor: DirHandle::from_file(fs::File::open(&path).unwrap()),
         path: fs::canonicalize(&path).unwrap(),
     };
 
@@ -59,7 +62,7 @@ fn reports_lines_for_overlapping_multiline_literal_matches() {
     fs::create_dir(&path).unwrap();
     fs::write(path.join("note.txt"), "a\na\na").unwrap();
     let root = WorkspaceRoot {
-        descriptor: fs::File::open(&path).unwrap().into(),
+        descriptor: DirHandle::from_file(fs::File::open(&path).unwrap()),
         path: fs::canonicalize(&path).unwrap(),
     };
 
@@ -85,7 +88,7 @@ fn matches_utf8_literals_and_reports_the_starting_line() {
     fs::create_dir(&path).unwrap();
     fs::write(path.join("note.txt"), "雪\n猫 and 雪\n猫").unwrap();
     let root = WorkspaceRoot {
-        descriptor: fs::File::open(&path).unwrap().into(),
+        descriptor: DirHandle::from_file(fs::File::open(&path).unwrap()),
         path: fs::canonicalize(&path).unwrap(),
     };
 
@@ -110,7 +113,7 @@ fn rejects_empty_and_oversized_queries() {
     ));
     fs::create_dir(&path).unwrap();
     let root = WorkspaceRoot {
-        descriptor: fs::File::open(&path).unwrap().into(),
+        descriptor: DirHandle::from_file(fs::File::open(&path).unwrap()),
         path: fs::canonicalize(&path).unwrap(),
     };
 
@@ -148,7 +151,7 @@ fn rejects_invalid_utf8_and_oversized_files_without_partial_locations() {
     )
     .unwrap();
     let root = WorkspaceRoot {
-        descriptor: fs::File::open(&path).unwrap().into(),
+        descriptor: DirHandle::from_file(fs::File::open(&path).unwrap()),
         path: fs::canonicalize(&path).unwrap(),
     };
 
@@ -187,7 +190,7 @@ fn stops_at_cumulative_byte_and_result_location_limits() {
     }
     fs::write(path.join("z-invalid.txt"), [0xff]).unwrap();
     let root = WorkspaceRoot {
-        descriptor: fs::File::open(&path).unwrap().into(),
+        descriptor: DirHandle::from_file(fs::File::open(&path).unwrap()),
         path: fs::canonicalize(&path).unwrap(),
     };
     assert_eq!(
@@ -234,7 +237,7 @@ fn skips_symlinks_and_non_regular_entries_and_rejects_workspace_escapes() {
     .unwrap();
     symlink(path.join("actual/child"), path.join("directory-link")).unwrap();
     let root = WorkspaceRoot {
-        descriptor: fs::File::open(&path).unwrap().into(),
+        descriptor: DirHandle::from_file(fs::File::open(&path).unwrap()),
         path: fs::canonicalize(&path).unwrap(),
     };
 
@@ -272,7 +275,7 @@ fn result_paths_preserve_parent_components_after_directory_symlinks() {
     )
     .unwrap();
     let root = WorkspaceRoot {
-        descriptor: fs::File::open(&workspace).unwrap().into(),
+        descriptor: DirHandle::from_file(fs::File::open(&workspace).unwrap()),
         path: fs::canonicalize(&workspace).unwrap(),
     };
 
@@ -292,7 +295,7 @@ fn result_paths_preserve_parent_components_after_directory_symlinks() {
 
 fn tree_workspace_root(path: &Path) -> WorkspaceRoot {
     WorkspaceRoot {
-        descriptor: fs::File::open(path).unwrap().into(),
+        descriptor: DirHandle::from_file(fs::File::open(path).unwrap()),
         path: fs::canonicalize(path).unwrap(),
     }
 }

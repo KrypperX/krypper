@@ -3,7 +3,9 @@
 use crate::tools::process_profile::ProcessProfile;
 use crate::tools::{capture_workspace_root_at, WorkspaceRoot};
 use std::ffi::OsString;
+#[cfg(target_os = "linux")]
 use std::fs::File;
+#[cfg(target_os = "linux")]
 use std::io::Read;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -28,13 +30,16 @@ impl OfflineCargoPolicy {
     pub fn new(toolchain: &Path, registry: &Path) -> Result<Self, String> {
         let toolchain = capture_workspace_root_at(toolchain)?;
         let registry = capture_workspace_root_at(registry)?;
-        for binary in ["cargo", "rustc"] {
-            let mut magic = [0; 4];
-            File::open(toolchain.path().join("bin").join(binary))
-                .and_then(|mut f| f.read_exact(&mut magic))
-                .map_err(|_| "toolchain binary unavailable")?;
-            if magic != *b"\x7fELF" {
-                return Err("real ELF toolchain required".into());
+        #[cfg(target_os = "linux")]
+        {
+            for binary in ["cargo", "rustc"] {
+                let mut magic = [0; 4];
+                File::open(toolchain.path().join("bin").join(binary))
+                    .and_then(|mut f| f.read_exact(&mut magic))
+                    .map_err(|_| "toolchain binary unavailable")?;
+                if magic != *b"\x7fELF" {
+                    return Err("real ELF toolchain required".into());
+                }
             }
         }
         Ok(Self {
@@ -51,6 +56,7 @@ impl OfflineCargoPolicy {
         self.cancelled.clone()
     }
 
+    #[cfg(target_os = "linux")]
     pub(super) fn profile(&self) -> &ProcessProfile<'static> {
         &self.profile
     }
@@ -77,6 +83,7 @@ pub(crate) fn validate_test_filter(test_filter: Option<&str>) -> Result<(), &'st
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 pub(super) fn cargo_command_args(
     profile: &ProcessProfile<'_>,
     test_filter: Option<&str>,

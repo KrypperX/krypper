@@ -11,7 +11,6 @@ use krypper::task_lifecycle::{
     WorkspaceSearchLocation, WorkspaceWriteError,
 };
 use std::fs;
-use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use uuid::Uuid;
@@ -426,7 +425,10 @@ fn running_owned_turn_creates_directories_for_existing_file_actions() {
 }
 
 #[test]
+#[cfg(unix)]
 fn running_owned_turn_directory_creation_rejects_unsafe_or_existing_targets() {
+    use std::os::unix::fs::symlink;
+
     let temp = TempDir::new();
     let workspace = temp.path().join("workspace");
     let outside = temp.path().join("outside");
@@ -722,6 +724,7 @@ fn workspace_read_requires_an_existing_task_owned_running_turn() {
 }
 
 #[test]
+#[cfg(unix)]
 fn workspace_read_follows_only_symlinks_that_stay_inside_the_workspace() {
     use std::os::unix::fs::symlink;
 
@@ -802,6 +805,7 @@ fn failed_workspace_reads_report_file_errors_without_changing_lifecycle_history(
 }
 
 #[test]
+#[cfg(unix)]
 fn running_owned_turn_lists_immediate_entries_as_native_names_in_cli_order() {
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt;
@@ -944,6 +948,7 @@ fn workspace_listing_requires_an_existing_owned_running_turn() {
 }
 
 #[test]
+#[cfg(unix)]
 fn workspace_listing_uses_task_workspace_resolution_and_preserves_history_on_failure() {
     use std::os::unix::fs::symlink;
 
@@ -1236,6 +1241,7 @@ fn workspace_file_creation_requires_an_existing_task_owned_running_turn() {
 }
 
 #[test]
+#[cfg(unix)]
 fn failed_workspace_file_creations_preserve_files_and_lifecycle_history() {
     use std::os::unix::fs::symlink;
 
