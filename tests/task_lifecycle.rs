@@ -823,7 +823,11 @@ fn running_owned_turn_lists_immediate_entries_as_native_names_in_cli_order() {
     fs::write(workspace.join("nested/child-only"), "child").unwrap();
     fs::write(outside.join("outside-only"), "outside").unwrap();
     let non_utf8 = OsString::from_vec(b"bad-\xff".to_vec());
-    fs::write(workspace.join(&non_utf8), "native name").unwrap();
+    let has_non_utf8_name = match fs::write(workspace.join(&non_utf8), "native name") {
+        Ok(()) => true,
+        Err(error) if error.raw_os_error() == Some(libc::EILSEQ) => false,
+        Err(error) => panic!("create non-UTF-8 filename: {error}"),
+    };
     symlink("nested", workspace.join("entry-link")).unwrap();
     symlink(&outside, workspace.join("outside-link")).unwrap();
 
@@ -835,15 +839,17 @@ fn running_owned_turn_lists_immediate_entries_as_native_names_in_cli_order() {
         session.list_workspace_directory(task_id, turn_id, Path::new("."))
     });
 
-    let expected = vec![
+    let mut expected = vec![
         OsString::from(".hidden"),
         OsString::from("a"),
-        non_utf8,
         OsString::from("entry-link"),
         OsString::from("nested"),
         OsString::from("outside-link"),
         OsString::from("z"),
     ];
+    if has_non_utf8_name {
+        expected.insert(2, non_utf8);
+    }
     assert_eq!(entries, Ok(expected.clone()));
     assert!(expected.iter().all(|name| workspace.join(name).exists()));
     assert!(!expected.contains(&OsString::from(".")));

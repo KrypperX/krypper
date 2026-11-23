@@ -366,13 +366,15 @@ fn list_preserves_python_surrogate_escaping_for_non_utf8_names() {
     use std::os::unix::ffi::OsStringExt;
 
     let directory = TempDir::new();
-    fs::write(
-        directory
-            .path()
-            .join(OsString::from_vec(b"bad-\xff".to_vec())),
-        "",
-    )
-    .unwrap();
+    let non_utf8_name = OsString::from_vec(b"bad-\xff".to_vec());
+    let non_utf8_path = directory.path().join(non_utf8_name);
+    if let Err(error) = fs::write(non_utf8_path, "") {
+        if error.raw_os_error() == Some(libc::EILSEQ) {
+            // Some macOS filesystems reject path components that aren't valid UTF-8.
+            return;
+        }
+        panic!("create non-UTF-8 filename: {error}");
+    }
     let output = run(Some(directory.path()), &["list"]);
     assert!(output.status.success());
     assert_eq!(stdout(&output), "\"bad-\\udcff\"\n");
