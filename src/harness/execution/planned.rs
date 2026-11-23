@@ -821,6 +821,7 @@ fn is_registered_workspace_operation(action: &WorkspaceAction) -> bool {
             | WorkspaceAction::SearchTreeText { .. }
             | WorkspaceAction::CreateFile { .. }
             | WorkspaceAction::ReplaceText { .. }
+            | WorkspaceAction::ApplyPatch { .. }
     ) && workspace_operations()
         .iter()
         .any(|operation| operation.name() == workspace_action_name(action))

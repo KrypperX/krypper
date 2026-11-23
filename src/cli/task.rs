@@ -7,17 +7,23 @@ use super::help::{contains_help_before_terminator, usage_error, write_task_help}
 use super::model_selection::{configured_model_selection, prepare_model_source_with_credentials};
 use super::outcome::{write_observation, write_turn_outcome};
 use super::task_args::parse_task_action;
+#[path = "verified_task.rs"]
+mod verified_task;
+use self::verified_task::{
+    normalize_verification_path, run_verified_turn, VerifiedTaskControl, VerifiedTaskReport,
+};
 use super::MAX_FILE_SIZE;
 use crate::agent_loop::{
     run_goal_turn_with_budget, BoundedDecisionSource, GoalTurnStopReason, WorkspaceAction,
     WorkspaceObservation,
 };
+use crate::brain::ModelDecisionSource;
 use crate::brain::{ModelProvider, OLLAMA_ADDRESS};
 use crate::harness::execution::workspace_action_name;
 use crate::harness::recovery::{
     prepare_checkpoint_for_pause, prepare_resumed_session, ResumeError,
 };
-use crate::harness::verification::reconcile_task_state;
+use crate::harness::verification::{reconcile_task_state, MAX_COMPLETION_CHECKS};
 use crate::task_lifecycle::{TaskSession, TaskState, TurnState};
 use std::ffi::OsString;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -58,6 +64,29 @@ fn run_task_with_options(
     model_endpoint: SocketAddr,
     use_config: bool,
 ) -> io::Result<i32> {
+    run_task_with_selection_loader(
+        arguments,
+        input,
+        output,
+        error,
+        model_endpoint,
+        use_config,
+        configured_model_selection,
+    )
+}
+
+fn run_task_with_selection_loader<F>(
+    arguments: &[OsString],
+    input: &mut dyn Read,
+    output: &mut dyn Write,
+    error: &mut dyn Write,
+    model_endpoint: SocketAddr,
+    use_config: bool,
+    mut load_configured_selection: F,
+) -> io::Result<i32>
+where
+    F: FnMut(&mut dyn Write) -> Result<Option<(String, Option<ModelProvider>)>, String>,
+{
     if contains_help_before_terminator(arguments) {
         write_task_help(output)?;
         return Ok(0);
@@ -74,6 +103,8 @@ fn run_task_with_options(
     let mut activity_jsonl = false;
     let mut stream_events_jsonl = false;
     let mut model_usage_jsonl = false;
+    let mut verified = false;
+    let mut verify_files = Vec::new();
     let mut position = 0;
     while let Some(argument) = arguments.get(position) {
         let Some(option) = argument.to_str() else {
@@ -254,6 +285,52 @@ fn run_task_with_options(
                 }
                 model_usage_jsonl = true;
             }
+            "--verified" => {
+                if verified {
+                    return usage_error(
+                        error,
+                        Some("task"),
+                        "--verified may be provided only once",
+                    );
+                }
+                verified = true;
+            }
+            "--verify-file" => {
+                let Some(value) = arguments.get(position) else {
+                    return usage_error(
+                        error,
+                        Some("task"),
+                        "the following argument is required: --verify-file",
+                    );
+                };
+                let Some(value) = value.to_str() else {
+                    return usage_error(
+                        error,
+                        Some("task"),
+                        "verification file paths must be valid UTF-8",
+                    );
+                };
+                let path = match normalize_verification_path(value) {
+                    Ok(path) => path,
+                    Err(message) => return usage_error(error, Some("task"), message),
+                };
+                if verify_files.iter().any(|existing| existing == &path) {
+                    return usage_error(
+                        error,
+                        Some("task"),
+                        "each --verify-file path may be provided only once",
+                    );
+                }
+                if verify_files.len() == MAX_COMPLETION_CHECKS {
+                    return usage_error(
+                        error,
+                        Some("task"),
+                        "at most 32 --verify-file paths may be provided",
+                    );
+                }
+                verify_files.push(path);
+                position += 1;
+            }
             "--no-config" => {
                 if no_config {
                     return usage_error(
@@ -300,11 +377,29 @@ fn run_task_with_options(
             return usage_error(error, Some("task"), "goal must not be empty");
         }
     }
+    if verified {
+        if verify_files.is_empty() {
+            return usage_error(
+                error,
+                Some("task"),
+                "--verified requires at least one --verify-file PATH",
+            );
+        }
+        if max_actions < 2 {
+            return usage_error(
+                error,
+                Some("task"),
+                "--verified requires --max-actions of at least 2 for a plan and task control",
+            );
+        }
+    } else if !verify_files.is_empty() {
+        return usage_error(error, Some("task"), "--verify-file requires --verified");
+    }
     // Command-line selection always wins: --model or --provider (alone or
     // together) disables the configured defaults entirely, so a flag never mixes
     // with a configured provider.
     if use_config && !no_config && model.is_none() && provider.is_none() {
-        match configured_model_selection(error) {
+        match load_configured_selection(error) {
             Ok(Some((configured_model, configured_provider))) => {
                 model = Some(configured_model);
                 provider = configured_provider;
@@ -312,6 +407,20 @@ fn run_task_with_options(
             Ok(None) => {}
             Err(message) => return usage_error(error, Some("task"), &message),
         }
+    }
+    if verified && model.is_none() {
+        return usage_error(
+            error,
+            Some("task"),
+            "--verified requires --model or a saved Ollama model default",
+        );
+    }
+    if verified && provider.is_some_and(|provider| provider != ModelProvider::Ollama) {
+        return usage_error(
+            error,
+            Some("task"),
+            "--verified requires the local Ollama provider",
+        );
     }
     let mut model_source = match prepare_model_source_with_credentials(
         model,
@@ -440,142 +549,200 @@ fn run_task_with_options(
     let mut stream_error = None;
     let mut actions_taken = 0;
     let mut turn_results = Vec::new();
+    let mut verified_report = None;
+    let mut correction_used = false;
     let mut paused_checkpoint = None;
     // The emitter's sequence is scoped to this CLI invocation, not TaskSession history.
     let mut stream_event_sequence = 1_u64;
     let mut last_stream_positions = Vec::new();
     loop {
         let mut displayed_observations = 0;
-        let result = {
-            let mut decision_source = CliDecisionSource {
-                needs_project_guidance: model_source.is_some(),
-                decide: |decision_goal: &str,
-                         observations: &[WorkspaceObservation],
-                         project_guidance: Option<&str>| {
-                    while displayed_observations < observations.len() {
-                        if let Err(cause) = write_observation(
-                            output,
-                            observation_number + 1,
-                            &observations[displayed_observations],
-                        ) {
-                            stream_error = Some(cause);
-                            return WorkspaceAction::Unsupported {
-                                action: "unable to display action observation".to_owned(),
-                            };
-                        }
-                        displayed_observations += 1;
-                        observation_number += 1;
-                    }
-                    if let Err(cause) = output.flush() {
-                        stream_error = Some(cause);
-                        return WorkspaceAction::Unsupported {
-                            action: "unable to display action observation".to_owned(),
-                        };
-                    }
-
-                    decisions += 1;
-                    if let Some(model_source) = model_source.as_mut() {
-                        if let Err(cause) =
-                            writeln!(error, "model decision {decisions}/{max_actions}")
-                                .and_then(|()| error.flush())
-                        {
-                            stream_error = Some(cause);
-                            return WorkspaceAction::Unsupported {
-                                action: "unable to display model decision progress".to_owned(),
-                            };
-                        }
-                        let model_started = Instant::now();
-                        let action = model_source.choose_action_with_root_project_guidance(
-                            decision_goal,
-                            observations,
-                            project_guidance,
-                        );
-                        if model_usage_jsonl {
-                            let elapsed_ms = model_started.elapsed().as_millis() as u64;
-                            let usage = model_source.take_token_usage();
-                            let event = serde_json::json!({
-                                "type": "model_token_usage",
-                                "decision": decisions,
-                                "elapsed_ms": elapsed_ms,
-                                "prompt_tokens": usage.and_then(|value| value.prompt_tokens),
-                                "completion_tokens": usage.and_then(|value| value.completion_tokens),
-                                "total_tokens": usage.and_then(|value| value.total_tokens),
-                            });
-                            if let Err(cause) = writeln!(error, "KRYPPER_MODEL_USAGE {event}")
-                                .and_then(|()| error.flush())
-                            {
-                                stream_error = Some(cause);
-                                return WorkspaceAction::Unsupported {
-                                    action: "unable to display model usage event".to_owned(),
-                                };
-                            }
-                        }
-                        if let Err(cause) = writeln!(
-                            output,
-                            "Model selected action: {}",
-                            workspace_action_name(&action)
-                        ) {
-                            stream_error = Some(cause);
-                            return WorkspaceAction::Unsupported {
-                                action: "unable to display model action".to_owned(),
-                            };
-                        }
-                        return action;
-                    }
-                    if let Err(cause) = if activity_jsonl {
-                        writeln!(error, "action {decisions}/{max_actions}> ")
-                    } else {
-                        write!(error, "action {decisions}/{max_actions}> ")
-                    }
-                    .and_then(|()| error.flush())
-                    {
-                        stream_error = Some(cause);
-                        return WorkspaceAction::Unsupported {
-                            action: "unable to display action prompt".to_owned(),
-                        };
-                    }
-
-                    line.clear();
-                    match (&mut reader)
-                        .take(MAX_TASK_ACTION_LINE_BYTES as u64 + 1)
-                        .read_until(b'\n', &mut line)
-                    {
-                        Ok(0) => WorkspaceAction::Unsupported {
-                            action: "end of input before the next action".to_owned(),
-                        },
-                        Ok(bytes_read) if bytes_read > MAX_TASK_ACTION_LINE_BYTES => {
-                            WorkspaceAction::Unsupported {
-                                action: format!(
-                                "action line exceeds limit of {MAX_TASK_ACTION_LINE_BYTES} bytes"
-                            ),
-                            }
-                        }
-                        Ok(_) => match std::str::from_utf8(&line) {
-                            Ok(line) => parse_task_action(line),
-                            Err(cause) => WorkspaceAction::Unsupported {
-                                action: format!("input error: {cause}"),
-                            },
-                        },
-                        Err(cause) => WorkspaceAction::Unsupported {
-                            action: format!("input error: {cause}"),
-                        },
-                    }
-                },
+        let (result, stop_reason, reconcile_after_run, iteration_actions) = if verified {
+            let Some(ModelDecisionSource::Ollama(source)) = model_source.as_mut() else {
+                return Err(io::Error::other(
+                    "verified mode requires a local Ollama model",
+                ));
             };
-            run_goal_turn_with_budget(
+            let mut control = VerifiedTaskControl {
+                reader: &mut reader,
+                line: &mut line,
+                error,
+            };
+            let mut batch = run_verified_turn(
                 &mut session,
                 task_id,
                 turn_id,
                 &goal,
                 max_actions - actions_taken,
-                &mut decision_source,
-            )
-            .map_err(io::Error::other)?
-        };
-        actions_taken += result.actions_taken();
-        let stop_reason = result.stop_reason();
+                &verify_files,
+                !correction_used,
+                checkpoint_out.is_some(),
+                source,
+                &mut control,
+            )?;
+            correction_used |= batch.correction_attempted;
+            let stop_reason = batch.stop_reason;
+            let report = VerifiedTaskReport {
+                verification: batch.verification,
+                correction_status: batch.correction_status,
+                stop_reason,
+            };
+            let iteration_actions = batch.actions_taken;
+            let result = batch
+                .turns
+                .pop()
+                .ok_or_else(|| io::Error::other("verified task did not produce a turn result"))?;
+            for earlier_result in batch.turns {
+                for observation in earlier_result.observations() {
+                    write_observation(output, observation_number + 1, observation)?;
+                    observation_number += 1;
+                }
+                turn_results.push(earlier_result);
+            }
+            for observation in result.observations() {
+                write_observation(output, observation_number + 1, observation)?;
+                observation_number += 1;
+            }
+            displayed_observations = result.observations().len();
+            turn_id = result.turn_id();
+            verified_report = Some(report);
+            (result, stop_reason, false, iteration_actions)
+        } else {
+            let result = {
+                let mut decision_source = CliDecisionSource {
+                    needs_project_guidance: model_source.is_some(),
+                    decide: |decision_goal: &str,
+                             observations: &[WorkspaceObservation],
+                             project_guidance: Option<&str>| {
+                        while displayed_observations < observations.len() {
+                            if let Err(cause) = write_observation(
+                                output,
+                                observation_number + 1,
+                                &observations[displayed_observations],
+                            ) {
+                                stream_error = Some(cause);
+                                return WorkspaceAction::Unsupported {
+                                    action: "unable to display action observation".to_owned(),
+                                };
+                            }
+                            displayed_observations += 1;
+                            observation_number += 1;
+                        }
+                        if let Err(cause) = output.flush() {
+                            stream_error = Some(cause);
+                            return WorkspaceAction::Unsupported {
+                                action: "unable to display action observation".to_owned(),
+                            };
+                        }
 
-        reconcile_task_state(&mut session, task_id, stop_reason)?;
+                        decisions += 1;
+                        if let Some(model_source) = model_source.as_mut() {
+                            if let Err(cause) =
+                                writeln!(error, "model decision {decisions}/{max_actions}")
+                                    .and_then(|()| error.flush())
+                            {
+                                stream_error = Some(cause);
+                                return WorkspaceAction::Unsupported {
+                                    action: "unable to display model decision progress".to_owned(),
+                                };
+                            }
+                            let model_started = Instant::now();
+                            let action = model_source.choose_action_with_root_project_guidance(
+                                decision_goal,
+                                observations,
+                                project_guidance,
+                            );
+                            if model_usage_jsonl {
+                                let elapsed_ms = model_started.elapsed().as_millis() as u64;
+                                let usage = model_source.take_token_usage();
+                                let event = serde_json::json!({
+                                    "type": "model_token_usage",
+                                    "decision": decisions,
+                                    "elapsed_ms": elapsed_ms,
+                                    "prompt_tokens": usage.and_then(|value| value.prompt_tokens),
+                                    "completion_tokens": usage.and_then(|value| value.completion_tokens),
+                                    "total_tokens": usage.and_then(|value| value.total_tokens),
+                                });
+                                if let Err(cause) = writeln!(error, "KRYPPER_MODEL_USAGE {event}")
+                                    .and_then(|()| error.flush())
+                                {
+                                    stream_error = Some(cause);
+                                    return WorkspaceAction::Unsupported {
+                                        action: "unable to display model usage event".to_owned(),
+                                    };
+                                }
+                            }
+                            if let Err(cause) = writeln!(
+                                output,
+                                "Model selected action: {}",
+                                workspace_action_name(&action)
+                            ) {
+                                stream_error = Some(cause);
+                                return WorkspaceAction::Unsupported {
+                                    action: "unable to display model action".to_owned(),
+                                };
+                            }
+                            return action;
+                        }
+                        if let Err(cause) = if activity_jsonl {
+                            writeln!(error, "action {decisions}/{max_actions}> ")
+                        } else {
+                            write!(error, "action {decisions}/{max_actions}> ")
+                        }
+                        .and_then(|()| error.flush())
+                        {
+                            stream_error = Some(cause);
+                            return WorkspaceAction::Unsupported {
+                                action: "unable to display action prompt".to_owned(),
+                            };
+                        }
+
+                        line.clear();
+                        match (&mut reader)
+                            .take(MAX_TASK_ACTION_LINE_BYTES as u64 + 1)
+                            .read_until(b'\n', &mut line)
+                        {
+                            Ok(0) => WorkspaceAction::Unsupported {
+                                action: "end of input before the next action".to_owned(),
+                            },
+                            Ok(bytes_read) if bytes_read > MAX_TASK_ACTION_LINE_BYTES => {
+                                WorkspaceAction::Unsupported {
+                                    action: format!(
+                                "action line exceeds limit of {MAX_TASK_ACTION_LINE_BYTES} bytes"
+                            ),
+                                }
+                            }
+                            Ok(_) => match std::str::from_utf8(&line) {
+                                Ok(line) => parse_task_action(line),
+                                Err(cause) => WorkspaceAction::Unsupported {
+                                    action: format!("input error: {cause}"),
+                                },
+                            },
+                            Err(cause) => WorkspaceAction::Unsupported {
+                                action: format!("input error: {cause}"),
+                            },
+                        }
+                    },
+                };
+                run_goal_turn_with_budget(
+                    &mut session,
+                    task_id,
+                    turn_id,
+                    &goal,
+                    max_actions - actions_taken,
+                    &mut decision_source,
+                )
+                .map_err(io::Error::other)?
+            };
+            let stop_reason = result.stop_reason();
+            let iteration_actions = result.actions_taken();
+            (result, stop_reason, true, iteration_actions)
+        };
+        actions_taken += iteration_actions;
+
+        if reconcile_after_run {
+            reconcile_task_state(&mut session, task_id, stop_reason)?;
+        }
         if activity_jsonl {
             crate::streaming::write_activity_positions(&session, error)?;
         }
@@ -686,6 +853,19 @@ fn run_task_with_options(
     writeln!(output, "Turn state: {turn_state}")?;
     write_turn_outcome(output, "Turn outcome: ", result.outcome())?;
     writeln!(output, "Actions: {actions_taken}/{max_actions}")?;
+    if let Some(report) = verified_report.as_ref() {
+        writeln!(output, "Verification: {:?}", report.verification.status)?;
+        for check in &report.verification.checks {
+            write!(output, "- {}: {:?}", check.description, check.status)?;
+            if let Some(summary) = check.evidence_summary.as_deref() {
+                write!(output, " ({summary})")?;
+            }
+            writeln!(output)?;
+        }
+        writeln!(output, "Correction: {}", report.correction_status)?;
+        writeln!(output, "Stop reason: {:?}", report.stop_reason)?;
+        writeln!(output, "Actions remaining: {}", max_actions - actions_taken)?;
+    }
 
     if task.turns().len() > 1 {
         writeln!(output, "Task/turn lifecycle history (metadata only):")?;
@@ -795,3 +975,7 @@ pub(super) fn snapshot_task_and_turn_state(
 
     Ok((task.state(), turn.state()))
 }
+
+#[cfg(test)]
+#[path = "task_tests.rs"]
+mod tests;
