@@ -12,6 +12,14 @@ use crate::agent_loop::{BoundedDecisionSource, WorkspaceAction, WorkspaceObserva
 use serde_json::{json, Value};
 use ureq::Agent;
 
+/// Token counts returned by a provider response. Missing fields stay unknown.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ModelTokenUsage {
+    pub prompt_tokens: Option<u64>,
+    pub completion_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+}
+
 /// Only explicit opt-in values enable experimental native streaming.
 fn stream_flag_enabled(value: Option<&std::ffi::OsStr>) -> bool {
     matches!(value.and_then(|value| value.to_str()), Some(value) if value == "1" || value.eq_ignore_ascii_case("true"))
@@ -449,6 +457,20 @@ pub(super) fn parse_compatible_chat_response(
     action_from_provider_call(provider, name, &arguments)
 }
 
+fn parse_model_token_usage(response: &[u8]) -> Option<ModelTokenUsage> {
+    let response: Value = serde_json::from_slice(response).ok()?;
+    let value = response.get("usage")?;
+    let usage = ModelTokenUsage {
+        prompt_tokens: value.get("prompt_tokens").and_then(Value::as_u64),
+        completion_tokens: value.get("completion_tokens").and_then(Value::as_u64),
+        total_tokens: value.get("total_tokens").and_then(Value::as_u64),
+    };
+    (usage.prompt_tokens.is_some()
+        || usage.completion_tokens.is_some()
+        || usage.total_tokens.is_some())
+    .then_some(usage)
+}
+
 /// The provider protocol selected for a model request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelProvider {
@@ -537,6 +559,19 @@ pub(crate) enum ModelDecisionSource {
     Responses(ResponsesDecisionSource),
     Anthropic(AnthropicDecisionSource),
     OpenAiCompatible(OpenAiCompatibleDecisionSource),
+}
+
+impl ModelDecisionSource {
+    pub(crate) fn supports_token_usage(&self) -> bool {
+        matches!(self, Self::OpenAiCompatible(_))
+    }
+
+    pub(crate) fn take_token_usage(&mut self) -> Option<ModelTokenUsage> {
+        match self {
+            Self::OpenAiCompatible(source) => source.take_token_usage(),
+            _ => None,
+        }
+    }
 }
 
 impl BoundedDecisionSource for ModelDecisionSource {
@@ -1325,6 +1360,7 @@ pub struct OpenAiCompatibleDecisionSource {
     agent: Agent,
     remaining_decisions: usize,
     extension_declarations: Vec<Value>,
+    last_token_usage: Option<ModelTokenUsage>,
 }
 
 impl OpenAiCompatibleDecisionSource {
@@ -1390,7 +1426,12 @@ impl OpenAiCompatibleDecisionSource {
             agent: model_agent(),
             remaining_decisions: action_budget,
             extension_declarations: extension_declarations.to_vec(),
+            last_token_usage: None,
         }
+    }
+
+    pub(crate) fn take_token_usage(&mut self) -> Option<ModelTokenUsage> {
+        self.last_token_usage.take()
     }
 
     fn choose(
@@ -1399,6 +1440,7 @@ impl OpenAiCompatibleDecisionSource {
         observations: &[WorkspaceObservation],
         project_guidance: Option<&str>,
     ) -> Result<WorkspaceAction, ModelError> {
+        self.last_token_usage = None;
         let remaining = consume_decision_budget(&mut self.remaining_decisions)?;
         let request = build_compatible_chat_request_with_extensions(
             &self.model,
@@ -1418,6 +1460,7 @@ impl OpenAiCompatibleDecisionSource {
             None,
             &request,
         )?;
+        self.last_token_usage = parse_model_token_usage(&response);
         parse_compatible_chat_response(&response, provider)
     }
 }

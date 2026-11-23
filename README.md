@@ -40,9 +40,18 @@ The executable is `target/release/krypper`. Run it from the directory you want t
 
 Task actions can also be selected by an explicitly configured model. See the [CLI and runtime reference](docs/CLI_REFERENCE.md) for provider setup, task controls, and safety limits.
 
+To use Cloudflare Workers AI without saving credentials to a file, source the Bash helper from the repository root:
+
+```sh
+source scripts/cloudflare-workers-ai-env.sh
+```
+
+It prompts for the account ID and a hidden API token, then exports both variables in the current shell. The token remains available to child processes until you run `unset CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID` or close that shell.
+
 ## Documentation
 
 - [CLI and runtime reference](docs/CLI_REFERENCE.md) — commands, model providers, checkpoints, streaming, and safety constraints
+- [Context model evaluation](docs/context-model-evaluation.md) — offline preflight and opt-in same-model comparison runner
 - [Development guide](DEVELOPMENT.md) — code layout, architectural boundaries, and migration notes
 - [Documentation directory](docs/) — focused technical guides
 

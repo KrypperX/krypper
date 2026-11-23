@@ -258,6 +258,10 @@ MISTRAL_API_KEY=... cargo run -- task --goal "Read the brief" \
   --max-actions 6 --provider mistral --model mistral-small-latest
 ```
 
+To enter Cloudflare values without putting the token in shell history or writing it to a file, run `source scripts/cloudflare-workers-ai-env.sh` from the repository root. The helper exports credentials in the current Bash session; run `unset CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID` when finished. Cloudflare's [Workers AI REST API guide](https://developers.cloudflare.com/workers-ai/get-started/rest-api/) describes how to create a Workers AI API token and find the account ID.
+
+Pass `--model-usage-jsonl` to a model-backed task to emit one `KRYPPER_MODEL_USAGE` JSON record per decision to stderr. Compatible providers can report prompt, completion and total token counts; absent fields are `null`. The record also includes decision latency and contains no prompt, response text or credentials. This option is useful for evaluations and requires an OpenAI-compatible provider such as Cloudflare Workers AI.
+
 Krypper uses fixed HTTPS endpoints and does not accept custom API URLs:
 
 | Provider | Required environment variables | Fixed endpoint |

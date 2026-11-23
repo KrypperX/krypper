@@ -35,7 +35,7 @@ pub(super) fn usage_error(
         Some("write") => "usage: krypper write [-h] [--stdin] path ...",
         Some("models") => "usage: krypper models [--provider NAME] [--id MODEL_ID] [--json]",
         Some("task") => {
-            "usage: krypper task [-h] [--goal GOAL] --max-actions N [--workspace PATH] [--model NAME] [--provider NAME] [--no-config] [--checkpoint-out PATH] [--resume PATH] [--activity-jsonl]"
+            "usage: krypper task [-h] [--goal GOAL] --max-actions N [--workspace PATH] [--model NAME] [--provider NAME] [--no-config] [--checkpoint-out PATH] [--resume PATH] [--activity-jsonl] [--model-usage-jsonl]"
         }
         Some("context") => {
             "usage: krypper context [-h] --goal GOAL [--workspace PATH] [--repository-map]"
@@ -63,7 +63,7 @@ pub(super) fn write_context_help(output: &mut dyn Write) -> io::Result<()> {
 pub(super) fn write_task_help(output: &mut dyn Write) -> io::Result<()> {
     output.write_all(
         concat!(
-            "usage: krypper task [-h] [--goal GOAL] --max-actions N [--workspace PATH] [--model NAME] [--provider NAME] [--no-config] [--checkpoint-out PATH] [--resume PATH]\n\n",
+            "usage: krypper task [-h] [--goal GOAL] --max-actions N [--workspace PATH] [--model NAME] [--provider NAME] [--no-config] [--checkpoint-out PATH] [--resume PATH] [--activity-jsonl] [--model-usage-jsonl]\n\n",
             "run a bounded task in the selected workspace or current directory\n\n",
             "options:\n  --goal GOAL          task goal (required unless --resume is used)\n",
             "  --max-actions N      required positive action limit for this invocation\n",
@@ -75,6 +75,7 @@ pub(super) fn write_task_help(output: &mut dyn Write) -> io::Result<()> {
             "  --resume PATH        restore one running task and start a fresh turn\n",
             "  --activity-jsonl    write read-only task activity positions as JSONL to stderr after each turn\n",
             "  --stream-events-jsonl  write versioned metadata-only stream events as JSONL to stderr after each turn\n",
+            "  --model-usage-jsonl emit provider token counts and decision latency as prefixed JSON records to stderr\n",
             "  -h, --help           show this help message and exit\n\n",
             "Without --workspace, task captures the current directory as its workspace.\n",
             "With --workspace, the selected directory is validated before task history starts;\n",

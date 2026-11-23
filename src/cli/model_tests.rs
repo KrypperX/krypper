@@ -1377,6 +1377,7 @@ fn task_help_documents_provider_selection_and_network_disclosure() {
 
     assert_eq!(code, 0, "{}", String::from_utf8_lossy(&error));
     assert!(help.contains("--provider NAME"));
+    assert!(help.contains("--model-usage-jsonl"));
     assert!(help.contains(
         "choose ollama, gemini, openai, xai, anthropic, cloudflare, groq, openrouter, deepseek, zai, or mistral"
     ));
@@ -1412,4 +1413,62 @@ fn task_help_documents_provider_selection_and_network_disclosure() {
     assert!(help.contains("https://api.deepseek.com/chat/completions"));
     assert!(help.contains("https://api.z.ai/api/paas/v4/chat/completions"));
     assert!(help.contains("https://api.mistral.ai/v1/chat/completions"));
+}
+
+#[test]
+fn model_usage_jsonl_requires_a_compatible_model_provider() {
+    let args = [
+        OsString::from("--goal"),
+        OsString::from("Read the brief"),
+        OsString::from("--max-actions"),
+        OsString::from("1"),
+        OsString::from("--no-config"),
+        OsString::from("--model-usage-jsonl"),
+    ];
+    let mut input = Cursor::new(Vec::<u8>::new());
+    let mut output = Vec::new();
+    let mut error = Vec::new();
+    let code = run_task_with_endpoint(
+        &args,
+        &mut input,
+        &mut output,
+        &mut error,
+        SocketAddr::from(([127, 0, 0, 1], 11434)),
+    )
+    .expect("reject usage output without a model provider");
+
+    assert_eq!(code, 2);
+    assert!(String::from_utf8_lossy(&error)
+        .contains("--model-usage-jsonl requires a model-backed compatible provider"));
+    assert!(output.is_empty());
+}
+
+#[test]
+fn model_usage_jsonl_rejects_local_ollama_sources_before_network_access() {
+    let args = [
+        OsString::from("--goal"),
+        OsString::from("Read the brief"),
+        OsString::from("--max-actions"),
+        OsString::from("1"),
+        OsString::from("--no-config"),
+        OsString::from("--model"),
+        OsString::from("qwen3"),
+        OsString::from("--model-usage-jsonl"),
+    ];
+    let mut input = Cursor::new(Vec::<u8>::new());
+    let mut output = Vec::new();
+    let mut error = Vec::new();
+    let code = run_task_with_endpoint(
+        &args,
+        &mut input,
+        &mut output,
+        &mut error,
+        SocketAddr::from(([127, 0, 0, 1], 0)),
+    )
+    .expect("reject unsupported token usage output");
+
+    assert_eq!(code, 2);
+    assert!(String::from_utf8_lossy(&error)
+        .contains("--model-usage-jsonl is supported by OpenAI-compatible providers"));
+    assert!(output.is_empty());
 }
