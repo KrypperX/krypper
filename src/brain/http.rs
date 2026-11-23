@@ -122,7 +122,6 @@ pub(crate) fn post_chat(
     Ok(body)
 }
 
-#[allow(dead_code)]
 pub(crate) fn post_hosted_sse<F>(
     agent: &Agent,
     provider: ModelProvider,
