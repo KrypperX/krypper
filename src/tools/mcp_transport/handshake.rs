@@ -72,7 +72,7 @@ pub(super) fn initialize(
         deadline,
         cancel,
     )?;
-    if matches!(stdio.child.try_wait(), Ok(Some(_))) {
+    if matches!(stdio.child.has_exited(), Ok(true)) {
         return Err(McpLifecycleError::Disconnected);
     }
     Ok(version.to_owned())

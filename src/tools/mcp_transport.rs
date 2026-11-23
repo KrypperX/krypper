@@ -14,12 +14,16 @@ mod handshake;
 mod invocation;
 mod lifecycle;
 mod rpc;
+#[cfg(unix)]
+mod stdio;
+#[cfg(windows)]
+#[path = "mcp_transport/stdio_windows.rs"]
 mod stdio;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "mcp_transport/tool_tests.rs"]
 mod tool_tests;
 

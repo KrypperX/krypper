@@ -218,6 +218,7 @@ fn hostile_root_guidance_cannot_expand_registered_tools_or_plan_budget() {
 }
 
 #[test]
+#[cfg(unix)]
 fn harness_planner_rejects_root_guidance_symlink_before_model_request() {
     use std::os::unix::fs::symlink;
 

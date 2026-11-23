@@ -4,7 +4,7 @@
 //! workspace files for a task turn. The enums only carry data and `Display`/`From` plumbing.
 
 use crate::core::task::TurnState;
-use crate::tools::RootGuidanceReadError;
+use crate::tools::{CliError, RootGuidanceReadError};
 use std::fmt;
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -356,16 +356,49 @@ impl From<WorkspaceReadError> for WorkspaceReplaceError {
     }
 }
 
+/// The category of a TaskSession workspace capture failure.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TaskSessionWorkspaceErrorKind {
+    /// Workspace containment is not implemented on the current platform.
+    PlatformUnavailable,
+    /// The requested workspace could not be resolved, opened, or verified.
+    CaptureFailed,
+}
+
 /// A requested TaskSession workspace could not be captured safely.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TaskSessionWorkspaceError(pub(super) String);
+pub struct TaskSessionWorkspaceError {
+    message: String,
+    kind: TaskSessionWorkspaceErrorKind,
+}
+
+impl TaskSessionWorkspaceError {
+    /// Return the stable category of this workspace capture failure.
+    pub fn kind(&self) -> TaskSessionWorkspaceErrorKind {
+        self.kind
+    }
+}
+
+impl From<CliError> for TaskSessionWorkspaceError {
+    fn from(error: CliError) -> Self {
+        let kind = match &error {
+            CliError::PlatformUnavailable => TaskSessionWorkspaceErrorKind::PlatformUnavailable,
+            CliError::Message(_) => TaskSessionWorkspaceErrorKind::CaptureFailed,
+        };
+        Self {
+            message: error.message().to_owned(),
+            kind,
+        }
+    }
+}
 
 impl fmt::Display for TaskSessionWorkspaceError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
             "unable to capture task session workspace: {}",
-            self.0
+            self.message
         )
     }
 }

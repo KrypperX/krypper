@@ -56,23 +56,13 @@ fn config(script: &str, log: &Path, timeout: Duration) -> McpStdioConfig {
 }
 
 fn assert_process_group_gone(pgid: i32) {
-    let start = Instant::now();
-    loop {
-        // SAFETY: signal 0 only probes whether the process group exists; `kill` takes only integers.
-        if unsafe { libc::kill(-pgid, 0) } == -1 {
-            assert_eq!(
-                io::Error::last_os_error().raw_os_error(),
-                Some(libc::ESRCH),
-                "process group still exists"
-            );
-            return;
-        }
-        assert!(
-            start.elapsed() < Duration::from_secs(2),
-            "process group survived cleanup"
-        );
-        thread::sleep(Duration::from_millis(5));
-    }
+    // SAFETY: signal 0 only probes whether the process group exists; `kill` takes only integers.
+    assert_eq!(unsafe { libc::kill(-pgid, 0) }, -1);
+    assert_eq!(
+        io::Error::last_os_error().raw_os_error(),
+        Some(libc::ESRCH),
+        "cleanup returned before the process group was empty"
+    );
 }
 
 fn error_of(result: Result<McpSession, McpLifecycleError>) -> McpLifecycleError {
@@ -310,6 +300,67 @@ fn shutdown_kills_the_child_process_tree() {
     session.shutdown().expect("shutdown");
     assert_process_group_gone(pgid);
     assert!(!marker.exists(), "grandchild survived shutdown");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn eperm_with_exited_leader_and_live_descendant_fails_closed() {
+    let dir = temp_dir("eperm-live-descendant");
+    let descendant_pid_file = dir.0.join("descendant.pid");
+    let config = config(
+        "sleep 10 &\nprintf '%s\\n' \"$!\" > \"$1\"\nexit 0\n",
+        &descendant_pid_file,
+        Duration::from_secs(3),
+    );
+    let mut stdio = spawn(
+        &config,
+        Instant::now() + Duration::from_secs(3),
+        &McpCancellation::new(),
+    )
+    .expect("spawn MCP process");
+
+    let start = Instant::now();
+    let descendant_pid = loop {
+        if let Some(pid) = fs::read_to_string(&descendant_pid_file)
+            .ok()
+            .and_then(|contents| contents.trim().parse::<libc::pid_t>().ok())
+        {
+            break pid;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "descendant PID was not recorded"
+        );
+        thread::sleep(Duration::from_millis(5));
+    };
+
+    let start = Instant::now();
+    loop {
+        if stdio.child.has_exited().expect("check leader state") {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "process-group leader did not exit"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    // SAFETY: signal 0 probes the known descendant PID without delivering a signal.
+    assert_eq!(unsafe { libc::kill(descendant_pid, 0) }, 0);
+
+    let cleanup_started = Instant::now();
+    let cleanup = stdio
+        .child
+        .terminate_with_signal_error(io::Error::from_raw_os_error(libc::EPERM));
+    let cleanup_elapsed = cleanup_started.elapsed();
+    // SAFETY: this is the known live descendant created by the test, not a process-group ID.
+    let kill_descendant = unsafe { libc::kill(descendant_pid, libc::SIGKILL) };
+    assert_eq!(kill_descendant, 0, "test descendant was not still alive");
+    assert!(
+        cleanup_elapsed >= Duration::from_secs(1),
+        "cleanup did not wait to verify the still-populated group"
+    );
+    assert_eq!(cleanup, Err(McpLifecycleError::CleanupFailed));
 }
 
 #[test]

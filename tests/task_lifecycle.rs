@@ -5,13 +5,12 @@ use krypper::agent_loop::{
     run_goal_turn_with_budget, GoalTurnStopReason, WorkspaceAction, WorkspaceObservation,
 };
 use krypper::task_lifecycle::{
-    Task, TaskEvent, TaskHistoryEvent, TaskHistoryTransition, TaskSession, TaskState,
-    TurnActivitySummary, TurnCompletionError, TurnEvent, TurnOutcome, TurnState,
-    TurnTransitionError, WorkspaceListError, WorkspaceReadError, WorkspaceReplaceError,
-    WorkspaceSearchLocation, WorkspaceWriteError,
+    Task, TaskEvent, TaskHistoryEvent, TaskHistoryTransition, TaskSession,
+    TaskSessionWorkspaceErrorKind, TaskState, TurnActivitySummary, TurnCompletionError, TurnEvent,
+    TurnOutcome, TurnState, TurnTransitionError, WorkspaceListError, WorkspaceReadError,
+    WorkspaceReplaceError, WorkspaceSearchLocation, WorkspaceWriteError,
 };
 use std::fs;
-use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use uuid::Uuid;
@@ -309,8 +308,26 @@ fn explicit_workspace_session_rejects_missing_and_non_directory_paths() {
 
     assert!(missing_error.to_string().contains("workspace path"));
     assert!(file_error.to_string().contains("workspace path"));
+    assert_eq!(
+        missing_error.kind(),
+        TaskSessionWorkspaceErrorKind::CaptureFailed
+    );
+    assert_eq!(
+        file_error.kind(),
+        TaskSessionWorkspaceErrorKind::CaptureFailed
+    );
     assert!(!missing.exists());
     assert_eq!(fs::read_to_string(file).unwrap(), "not a directory");
+}
+
+#[cfg(windows)]
+#[test]
+fn unsupported_workspace_capture_has_a_typed_platform_error() {
+    let error = TaskSession::new_in_workspace(std::env::current_dir().unwrap()).unwrap_err();
+    assert_eq!(
+        error.kind(),
+        TaskSessionWorkspaceErrorKind::PlatformUnavailable
+    );
 }
 
 #[test]
@@ -426,7 +443,10 @@ fn running_owned_turn_creates_directories_for_existing_file_actions() {
 }
 
 #[test]
+#[cfg(unix)]
 fn running_owned_turn_directory_creation_rejects_unsafe_or_existing_targets() {
+    use std::os::unix::fs::symlink;
+
     let temp = TempDir::new();
     let workspace = temp.path().join("workspace");
     let outside = temp.path().join("outside");
@@ -722,6 +742,7 @@ fn workspace_read_requires_an_existing_task_owned_running_turn() {
 }
 
 #[test]
+#[cfg(unix)]
 fn workspace_read_follows_only_symlinks_that_stay_inside_the_workspace() {
     use std::os::unix::fs::symlink;
 
@@ -802,6 +823,7 @@ fn failed_workspace_reads_report_file_errors_without_changing_lifecycle_history(
 }
 
 #[test]
+#[cfg(unix)]
 fn running_owned_turn_lists_immediate_entries_as_native_names_in_cli_order() {
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt;
@@ -819,7 +841,11 @@ fn running_owned_turn_lists_immediate_entries_as_native_names_in_cli_order() {
     fs::write(workspace.join("nested/child-only"), "child").unwrap();
     fs::write(outside.join("outside-only"), "outside").unwrap();
     let non_utf8 = OsString::from_vec(b"bad-\xff".to_vec());
-    fs::write(workspace.join(&non_utf8), "native name").unwrap();
+    let has_non_utf8_name = match fs::write(workspace.join(&non_utf8), "native name") {
+        Ok(()) => true,
+        Err(error) if error.raw_os_error() == Some(libc::EILSEQ) => false,
+        Err(error) => panic!("create non-UTF-8 filename: {error}"),
+    };
     symlink("nested", workspace.join("entry-link")).unwrap();
     symlink(&outside, workspace.join("outside-link")).unwrap();
 
@@ -831,15 +857,17 @@ fn running_owned_turn_lists_immediate_entries_as_native_names_in_cli_order() {
         session.list_workspace_directory(task_id, turn_id, Path::new("."))
     });
 
-    let expected = vec![
+    let mut expected = vec![
         OsString::from(".hidden"),
         OsString::from("a"),
-        non_utf8,
         OsString::from("entry-link"),
         OsString::from("nested"),
         OsString::from("outside-link"),
         OsString::from("z"),
     ];
+    if has_non_utf8_name {
+        expected.insert(2, non_utf8);
+    }
     assert_eq!(entries, Ok(expected.clone()));
     assert!(expected.iter().all(|name| workspace.join(name).exists()));
     assert!(!expected.contains(&OsString::from(".")));
@@ -944,6 +972,7 @@ fn workspace_listing_requires_an_existing_owned_running_turn() {
 }
 
 #[test]
+#[cfg(unix)]
 fn workspace_listing_uses_task_workspace_resolution_and_preserves_history_on_failure() {
     use std::os::unix::fs::symlink;
 
@@ -1236,6 +1265,7 @@ fn workspace_file_creation_requires_an_existing_task_owned_running_turn() {
 }
 
 #[test]
+#[cfg(unix)]
 fn failed_workspace_file_creations_preserve_files_and_lifecycle_history() {
     use std::os::unix::fs::symlink;
 

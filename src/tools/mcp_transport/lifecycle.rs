@@ -17,6 +17,7 @@ use uuid::Uuid;
 pub enum McpLifecycleError {
     InvalidConfig(McpConfigError),
     SpawnFailed,
+    PlatformUnavailable,
     Io(io::ErrorKind),
     Timeout,
     Cancelled,

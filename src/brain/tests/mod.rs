@@ -203,6 +203,7 @@ fn request_body(request: &[u8]) -> Value {
 }
 
 mod completion;
+#[cfg(unix)]
 mod correction;
 mod endpoint;
 mod guidance;

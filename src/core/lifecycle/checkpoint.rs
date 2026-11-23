@@ -1,7 +1,7 @@
 use super::*;
+use crate::tools::encode_workspace_path;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::os::unix::ffi::OsStrExt;
 use std::sync::Arc;
 
 /// Maximum encoded size accepted for a TaskSession checkpoint.
@@ -462,15 +462,17 @@ impl TaskSession {
                     task_id: Some(task.id),
                 }
             })?;
-            let task_workspace_path = workspace_root.path().as_os_str().as_bytes();
+            let task_workspace_identity =
+                (task_workspace_identity.volume, task_workspace_identity.file);
+            let task_workspace_path = encode_workspace_path(workspace_root.path().as_os_str());
             if workspace_path
                 .as_deref()
-                .is_some_and(|path| path != task_workspace_path)
+                .is_some_and(|path| path != task_workspace_path.as_slice())
                 || workspace_identity.is_some_and(|identity| identity != task_workspace_identity)
             {
                 return Err(TaskSessionCheckpointError::WorkspaceMismatch { task_id: task.id });
             }
-            workspace_path.get_or_insert_with(|| task_workspace_path.to_vec());
+            workspace_path.get_or_insert(task_workspace_path);
             workspace_identity.get_or_insert(task_workspace_identity);
             tasks.push(checkpoint_task(task, task_workspace_identity)?);
         }
@@ -546,15 +548,18 @@ impl TaskSession {
                     task_id: Some(task_id),
                 });
             };
-            if checkpoint_task.workspace_path != current_workspace.path().as_os_str().as_bytes() {
+            if checkpoint_task.workspace_path
+                != encode_workspace_path(current_workspace.path().as_os_str())
+            {
                 return Err(TaskSessionCheckpointError::WorkspaceMismatch { task_id });
             }
-            let (workspace_device, workspace_inode) =
-                current_workspace.identity().map_err(|_| {
-                    TaskSessionCheckpointError::WorkspaceUnavailable {
-                        task_id: Some(task_id),
-                    }
-                })?;
+            let identity = current_workspace.identity().map_err(|_| {
+                TaskSessionCheckpointError::WorkspaceUnavailable {
+                    task_id: Some(task_id),
+                }
+            })?;
+            let workspace_device = identity.volume;
+            let workspace_inode = identity.file;
             if checkpoint_task.workspace_device != workspace_device
                 || checkpoint_task.workspace_inode != workspace_inode
             {
@@ -598,7 +603,7 @@ fn checkpoint_task(
     Ok(CheckpointTask {
         id: task.id.to_string(),
         description: task.description.clone(),
-        workspace_path: workspace_root.path().as_os_str().as_bytes().to_vec(),
+        workspace_path: encode_workspace_path(workspace_root.path().as_os_str()),
         workspace_device,
         workspace_inode,
         state: task.state.into(),

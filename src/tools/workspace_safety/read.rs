@@ -4,37 +4,49 @@ use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{self, Read};
-use std::os::fd::{AsRawFd, RawFd};
 use std::path::{Component, Path, PathBuf};
 
 use super::paths::{open_cwd_relative, open_workspace_relative, verify_root_descriptor};
 use super::syscalls::{
-    fstat, is_directory, is_regular_file, is_symlink, open_at, open_current_directory,
-    open_directory_path, same_file_snapshot, stat_at,
+    duplicate_directory, fstat_directory, fstat_file, is_directory, is_not_found, is_regular_file,
+    is_symlink, is_symlink_loop, open_at, open_current_directory, open_directory_path,
+    same_file_snapshot, stat_at, OpenRequest,
 };
 use super::types::{
-    CliError, RootGuidanceReadError, WorkspaceRoot, MAX_FILE_SIZE, MAX_ROOT_AGENTS_BYTES,
+    CliError, DirHandle, FileStatus, RootGuidanceReadError, WorkspaceRoot, MAX_FILE_SIZE,
+    MAX_ROOT_AGENTS_BYTES,
 };
 
 const NESTED_GUIDANCE_MARKER: &str = "\n\n--- AGENTS.md: ";
 
 pub(crate) fn capture_workspace_root() -> Result<WorkspaceRoot, String> {
-    let descriptor = open_current_directory()
-        .map_err(|error| format!("unable to open current directory: {error}"))?;
+    let descriptor = open_current_directory().map_err(|error| {
+        CliError::from_io(&error, "unable to open current directory")
+            .message()
+            .to_owned()
+    })?;
     let path = fs::canonicalize(".")
         .map_err(|error| format!("unable to resolve current directory: {error}"))?;
-    verify_root_descriptor(descriptor.as_raw_fd(), &path)
+    verify_root_descriptor(&descriptor, &path)
         .map_err(|error| format!("unable to verify current directory: {}", error.message()))?;
     Ok(WorkspaceRoot { descriptor, path })
 }
 
 pub(crate) fn capture_workspace_root_at(path: &Path) -> Result<WorkspaceRoot, String> {
+    capture_workspace_root_at_with_error(path).map_err(|error| error.message().to_owned())
+}
+
+pub(crate) fn capture_workspace_root_at_with_error(path: &Path) -> Result<WorkspaceRoot, CliError> {
     let path = fs::canonicalize(path)
-        .map_err(|error| format!("unable to resolve workspace path: {error}"))?;
+        .map_err(|error| CliError::new(format!("unable to resolve workspace path: {error}")))?;
     let descriptor = open_directory_path(&path)
-        .map_err(|error| format!("unable to open workspace path: {error}"))?;
-    verify_root_descriptor(descriptor.as_raw_fd(), &path)
-        .map_err(|error| format!("unable to verify workspace path: {}", error.message()))?;
+        .map_err(|error| CliError::from_io(&error, "unable to open workspace path"))?;
+    verify_root_descriptor(&descriptor, &path).map_err(|error| {
+        CliError::new(format!(
+            "unable to verify workspace path: {}",
+            error.message()
+        ))
+    })?;
     Ok(WorkspaceRoot { descriptor, path })
 }
 
@@ -49,7 +61,7 @@ pub(crate) fn read_text_file_at(root: &WorkspaceRoot, path: &OsStr) -> Result<St
 pub(crate) fn read_root_agents_md_at(
     root: &WorkspaceRoot,
 ) -> Result<Option<String>, RootGuidanceReadError> {
-    read_agents_md_at(root.descriptor.as_raw_fd(), |file| {
+    read_agents_md_at(&root.descriptor, |file| {
         let mut contents = Vec::with_capacity(MAX_ROOT_AGENTS_BYTES + 1);
         file.take((MAX_ROOT_AGENTS_BYTES + 1) as u64)
             .read_to_end(&mut contents)?;
@@ -62,7 +74,7 @@ pub(super) fn read_root_agents_md_at_with_reader(
     root: &WorkspaceRoot,
     read: impl FnMut(&mut File) -> io::Result<Vec<u8>>,
 ) -> Result<Option<String>, RootGuidanceReadError> {
-    read_agents_md_at(root.descriptor.as_raw_fd(), read)
+    read_agents_md_at(&root.descriptor, read)
 }
 
 pub(crate) fn read_project_guidance_at(
@@ -114,7 +126,7 @@ pub(super) fn read_project_guidance_at_with_reader_and_hook(
             }
             Err(error) => return Err(error),
         };
-        match stat_at(parent_fd.as_raw_fd(), &name) {
+        match stat_at(&parent_fd, &name) {
             Ok(status) if is_symlink(&status) => {
                 return Err(RootGuidanceReadError::Symlink);
             }
@@ -122,7 +134,7 @@ pub(super) fn read_project_guidance_at_with_reader_and_hook(
                 safe_targets.push((parent, name));
             }
             Ok(_) => return Err(RootGuidanceReadError::InvalidTargetPath),
-            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {
+            Err(error) if is_not_found(&error) => {
                 safe_targets.push((parent, name));
             }
             Err(_) => return Err(RootGuidanceReadError::ReadFailed),
@@ -144,9 +156,9 @@ pub(super) fn read_project_guidance_at_with_reader_and_hook(
             continue;
         };
         let directory_snapshot =
-            fstat(directory.as_raw_fd()).map_err(|_| RootGuidanceReadError::ReadFailed)?;
-        let agents_snapshot = guidance_file_snapshot(directory.as_raw_fd())?;
-        if let Some(contents) = read_agents_md_at(directory.as_raw_fd(), &mut read)? {
+            fstat_directory(&directory).map_err(|_| RootGuidanceReadError::ReadFailed)?;
+        let agents_snapshot = guidance_file_snapshot(&directory)?;
+        if let Some(contents) = read_agents_md_at(&directory, &mut read)? {
             found_guidance = true;
             if !path.is_empty() {
                 let directory_path = path.iter().fold(PathBuf::new(), |mut path, component| {
@@ -205,15 +217,13 @@ fn normalize_guidance_target(
 fn open_guidance_directory(
     root: &WorkspaceRoot,
     components: &[OsString],
-) -> Result<Option<std::os::fd::OwnedFd>, RootGuidanceReadError> {
-    let mut directory = root
-        .descriptor
-        .try_clone()
-        .map_err(|_| RootGuidanceReadError::ReadFailed)?;
+) -> Result<Option<DirHandle>, RootGuidanceReadError> {
+    let mut directory =
+        duplicate_directory(&root.descriptor).map_err(|_| RootGuidanceReadError::ReadFailed)?;
     for component in components {
-        let status = match stat_at(directory.as_raw_fd(), component) {
+        let status = match stat_at(&directory, component) {
             Ok(status) => status,
-            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => return Ok(None),
+            Err(error) if is_not_found(&error) => return Ok(None),
             Err(_) => return Err(RootGuidanceReadError::ReadFailed),
         };
         if is_symlink(&status) {
@@ -222,21 +232,17 @@ fn open_guidance_directory(
         if !is_directory(&status) {
             return Err(RootGuidanceReadError::InvalidTargetPath);
         }
-        let opened = open_at(
-            directory.as_raw_fd(),
-            component,
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            0,
-        )
-        .map_err(|error| {
-            if error.raw_os_error() == Some(libc::ELOOP) {
-                RootGuidanceReadError::ChangedDuringRead
-            } else {
-                RootGuidanceReadError::ReadFailed
-            }
-        })?;
+        let opened =
+            open_at(&directory, component, OpenRequest::ReadDirectory).map_err(|error| {
+                if is_symlink_loop(&error) {
+                    RootGuidanceReadError::ChangedDuringRead
+                } else {
+                    RootGuidanceReadError::ReadFailed
+                }
+            })?;
+        let opened = DirHandle::from_file(opened);
         let opened_status =
-            fstat(opened.as_raw_fd()).map_err(|_| RootGuidanceReadError::ReadFailed)?;
+            fstat_directory(&opened).map_err(|_| RootGuidanceReadError::ReadFailed)?;
         if !same_file_snapshot(&status, &opened_status) {
             return Err(RootGuidanceReadError::ChangedDuringRead);
         }
@@ -248,15 +254,15 @@ fn open_guidance_directory(
 fn verify_guidance_directory(
     root: &WorkspaceRoot,
     components: &[OsString],
-    original_directory_status: &libc::stat,
-    original_agents_status: Option<&libc::stat>,
+    original_directory_status: &FileStatus,
+    original_agents_status: Option<&FileStatus>,
 ) -> Result<(), RootGuidanceReadError> {
     let Some(current) = open_guidance_directory(root, components)? else {
         return Err(RootGuidanceReadError::ChangedDuringRead);
     };
     let current_status =
-        fstat(current.as_raw_fd()).map_err(|_| RootGuidanceReadError::ReadFailed)?;
-    let current_agents_status = guidance_file_snapshot(current.as_raw_fd())?;
+        fstat_directory(&current).map_err(|_| RootGuidanceReadError::ReadFailed)?;
+    let current_agents_status = guidance_file_snapshot(&current)?;
     let agents_match = match (original_agents_status, current_agents_status.as_ref()) {
         (None, None) => true,
         (Some(original), Some(current)) => same_file_snapshot(original, current),
@@ -268,24 +274,24 @@ fn verify_guidance_directory(
     Ok(())
 }
 
-fn guidance_file_snapshot(parent_fd: RawFd) -> Result<Option<libc::stat>, RootGuidanceReadError> {
-    match stat_at(parent_fd, OsStr::new("AGENTS.md")) {
+fn guidance_file_snapshot(parent: &DirHandle) -> Result<Option<FileStatus>, RootGuidanceReadError> {
+    match stat_at(parent, OsStr::new("AGENTS.md")) {
         Ok(status) => Ok(Some(status)),
-        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => Ok(None),
+        Err(error) if is_not_found(&error) => Ok(None),
         Err(_) => Err(RootGuidanceReadError::ReadFailed),
     }
 }
 
 fn read_agents_md_at(
-    parent_fd: RawFd,
+    parent: &DirHandle,
     mut read: impl FnMut(&mut File) -> io::Result<Vec<u8>>,
 ) -> Result<Option<String>, RootGuidanceReadError> {
     let name = OsStr::new("AGENTS.md");
-    let original_status = match stat_at(parent_fd, name) {
+    let original_status = match stat_at(parent, name) {
         Ok(status) => status,
-        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {
-            return match stat_at(parent_fd, name) {
-                Err(error) if error.raw_os_error() == Some(libc::ENOENT) => Ok(None),
+        Err(error) if is_not_found(&error) => {
+            return match stat_at(parent, name) {
+                Err(error) if is_not_found(&error) => Ok(None),
                 Ok(_) => Err(RootGuidanceReadError::ChangedDuringRead),
                 Err(_) => Err(RootGuidanceReadError::ReadFailed),
             }
@@ -298,34 +304,27 @@ fn read_agents_md_at(
     if !is_regular_file(&original_status) {
         return Err(RootGuidanceReadError::NotRegularFile);
     }
-    if original_status.st_size < 0 || original_status.st_size > MAX_ROOT_AGENTS_BYTES as i64 {
+    if original_status.size > MAX_ROOT_AGENTS_BYTES as u64 {
         return Err(RootGuidanceReadError::TooLarge);
     }
 
-    let descriptor = open_at(
-        parent_fd,
-        name,
-        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
-        0,
-    )
-    .map_err(|error| {
-        if error.raw_os_error() == Some(libc::ELOOP) {
+    let mut file = open_at(parent, name, OpenRequest::ReadFile).map_err(|error| {
+        if is_symlink_loop(&error) {
             RootGuidanceReadError::ChangedDuringRead
         } else {
             RootGuidanceReadError::ReadFailed
         }
     })?;
-    let mut file = File::from(descriptor);
-    let opened_status = fstat(file.as_raw_fd()).map_err(|_| RootGuidanceReadError::ReadFailed)?;
+    let opened_status = fstat_file(&file).map_err(|_| RootGuidanceReadError::ReadFailed)?;
     if !same_file_snapshot(&original_status, &opened_status) {
         return Err(RootGuidanceReadError::ChangedDuringRead);
     }
 
     let contents = read(&mut file).map_err(|_| RootGuidanceReadError::ReadFailed)?;
     let final_descriptor_status =
-        fstat(file.as_raw_fd()).map_err(|_| RootGuidanceReadError::ReadFailed)?;
-    let final_path_status = stat_at(parent_fd, name).map_err(|error| {
-        if error.raw_os_error() == Some(libc::ENOENT) {
+        fstat_file(&file).map_err(|_| RootGuidanceReadError::ReadFailed)?;
+    let final_path_status = stat_at(parent, name).map_err(|error| {
+        if is_not_found(&error) {
             RootGuidanceReadError::ChangedDuringRead
         } else {
             RootGuidanceReadError::ReadFailed

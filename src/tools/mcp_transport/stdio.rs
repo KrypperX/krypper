@@ -14,6 +14,8 @@ pub(super) const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 const MAX_STDERR_BYTES: usize = 4 * 1024;
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
 const REAP_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(target_os = "macos")]
+const MAX_PROCESS_GROUP_MEMBERS: usize = 65_536;
 
 pub(super) struct StdioChild {
     pub child: ManagedChild,
@@ -40,14 +42,39 @@ impl std::ops::DerefMut for ManagedChild {
 }
 
 impl ManagedChild {
-    pub(super) fn try_wait(&mut self) -> io::Result<Option<std::process::ExitStatus>> {
-        match self.0.as_mut() {
-            Some(child) => child.try_wait(),
-            None => Ok(None),
-        }
+    pub(super) fn has_exited(&mut self) -> io::Result<bool> {
+        let Some(child) = self.0.as_ref() else {
+            return Ok(false);
+        };
+        child_has_exited(child)
     }
 
     pub(super) fn terminate(&mut self) -> Result<(), McpLifecycleError> {
+        self.terminate_with_group_signal(|pgid| {
+            // SAFETY: `kill` takes only integers, and `pgid` is the process group established
+            // for this child by `process_group(0)` at spawn. This runs before reaping the child,
+            // so the group ID cannot have been recycled.
+            if unsafe { libc::kill(-pgid, libc::SIGKILL) } == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        })
+    }
+
+    #[cfg(all(test, target_os = "macos"))]
+    pub(super) fn terminate_with_signal_error(
+        &mut self,
+        error: io::Error,
+    ) -> Result<(), McpLifecycleError> {
+        // Tests use this seam to reproduce macOS permission errors without relying on setuid.
+        self.terminate_with_group_signal(|_| Err(error))
+    }
+
+    fn terminate_with_group_signal(
+        &mut self,
+        send_signal: impl FnOnce(libc::pid_t) -> io::Result<()>,
+    ) -> Result<(), McpLifecycleError> {
         let Some(mut child) = self.0.take() else {
             return Ok(());
         };
@@ -55,19 +82,24 @@ impl ManagedChild {
         // Send SIGKILL before reaping: while the child remains unreaped, its PID
         // cannot be recycled into an unrelated process group.
         let pgid = child.id() as libc::pid_t;
-        // SAFETY: `kill` takes only integers. `pgid` is the id of the child's own process
-        // group (set by `process_group(0)` at spawn), and the child has not been reaped yet,
-        // so the id cannot refer to an unrelated group.
-        if unsafe { libc::kill(-pgid, libc::SIGKILL) } != 0
-            && io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
-        {
-            let _ = child.kill();
-            if !reap(&mut child) {
-                thread::spawn(move || {
-                    let _ = child.wait();
-                });
+        if let Err(error) = send_signal(pgid) {
+            #[cfg(target_os = "macos")]
+            let macos_eperm_with_exited_leader = error.raw_os_error() == Some(libc::EPERM)
+                && child_has_exited(&child).unwrap_or(false);
+            #[cfg(not(target_os = "macos"))]
+            let macos_eperm_with_exited_leader = false;
+            if error.raw_os_error() != Some(libc::ESRCH) && !macos_eperm_with_exited_leader {
+                let _ = child.kill();
+                if !reap(&mut child) {
+                    thread::spawn(move || {
+                        let _ = child.wait();
+                    });
+                }
+                return Err(McpLifecycleError::CleanupFailed);
             }
-            return Err(McpLifecycleError::CleanupFailed);
+            // On macOS, EPERM can mean either that the group contains only zombies or that it
+            // contains a live process this caller cannot signal. Reap the leader, then verify
+            // group emptiness below before reporting success.
         }
         if !reap(&mut child) {
             thread::spawn(move || {
@@ -75,23 +107,8 @@ impl ManagedChild {
             });
             return Err(McpLifecycleError::CleanupFailed);
         }
-        // After reaping, a recycled PGID could theoretically make this signal-0
-        // existence probe report a different group. No signal is delivered; the
-        // bounded timeout would only cause a spurious CleanupFailed in that case.
-        let start = Instant::now();
-        loop {
-            // SAFETY: signal 0 delivers nothing and only probes whether the group exists;
-            // `kill` takes only integers.
-            if unsafe { libc::kill(-pgid, 0) } == -1 {
-                if io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
-                    return Err(McpLifecycleError::CleanupFailed);
-                }
-                break;
-            }
-            if start.elapsed() >= REAP_TIMEOUT {
-                return Err(McpLifecycleError::CleanupFailed);
-            }
-            thread::sleep(POLL_INTERVAL);
+        if !wait_for_process_group_empty(pgid) {
+            return Err(McpLifecycleError::CleanupFailed);
         }
         Ok(())
     }
@@ -101,6 +118,25 @@ impl Drop for ManagedChild {
     fn drop(&mut self) {
         let _ = self.terminate();
     }
+}
+
+fn child_has_exited(child: &Child) -> io::Result<bool> {
+    let mut status = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+    // SAFETY: `child` is still owned and unreaped. `status` points to writable storage,
+    // and WNOWAIT observes its exit without releasing the PID used as its process-group ID.
+    let result = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            child.id() as libc::id_t,
+            status.as_mut_ptr(),
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: waitid succeeded and initialized the siginfo_t output.
+    Ok(unsafe { status.assume_init() }.si_signo != 0)
 }
 
 fn reap(child: &mut Child) -> bool {
@@ -114,6 +150,71 @@ fn reap(child: &mut Child) -> bool {
         thread::sleep(POLL_INTERVAL);
     }
     false
+}
+
+fn wait_for_process_group_empty(pgid: libc::pid_t) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < REAP_TIMEOUT {
+        match process_group_is_empty(pgid) {
+            Ok(true) => return true,
+            Ok(false) | Err(_) => thread::sleep(POLL_INTERVAL),
+        }
+    }
+    matches!(process_group_is_empty(pgid), Ok(true))
+}
+
+#[cfg(target_os = "macos")]
+fn process_group_is_empty(pgid: libc::pid_t) -> io::Result<bool> {
+    let mut pids = vec![0; 64];
+    loop {
+        let buffer_size = std::mem::size_of_val(pids.as_slice()) as libc::c_int;
+        // Clear errno so a zero result can be distinguished from libproc's error return.
+        // SAFETY: `__error` returns this thread's writable errno slot.
+        unsafe { *libc::__error() = 0 };
+        // SAFETY: `pids` is writable storage of `buffer_size` bytes and `pgid` was captured
+        // from the child created for this process group.
+        let count = unsafe { libc::proc_listpgrppids(pgid, pids.as_mut_ptr().cast(), buffer_size) };
+        // SAFETY: `__error` returns this thread's errno slot.
+        let errno = unsafe { *libc::__error() };
+        if errno != 0 {
+            return Err(io::Error::from_raw_os_error(errno));
+        }
+        if count < 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "libproc returned a negative process count",
+            ));
+        }
+
+        let count = count as usize;
+        if count == 0 {
+            return Ok(true);
+        }
+        if count < pids.len() {
+            return Ok(false);
+        }
+        if pids.len() >= MAX_PROCESS_GROUP_MEMBERS {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "process group is too large to verify completely",
+            ));
+        }
+        pids.resize((pids.len() * 2).min(MAX_PROCESS_GROUP_MEMBERS), 0);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn process_group_is_empty(pgid: libc::pid_t) -> io::Result<bool> {
+    // SAFETY: signal 0 probes the process group and does not deliver a signal.
+    if unsafe { libc::kill(-pgid, 0) } == 0 {
+        return Ok(false);
+    }
+    let error = io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::ESRCH) => Ok(true),
+        Some(libc::EPERM) => Ok(false),
+        _ => Err(error),
+    }
 }
 
 pub(super) fn spawn(
@@ -269,7 +370,7 @@ pub(super) fn read_line(
         if response.len() >= MAX_RESPONSE_BYTES {
             return Err(McpLifecycleError::OutputLimitExceeded);
         }
-        if stdout_eof && !progressed && matches!(child.try_wait(), Ok(Some(_))) {
+        if stdout_eof && !progressed && matches!(child.has_exited(), Ok(true)) {
             return Err(McpLifecycleError::Disconnected);
         }
         thread::sleep(POLL_INTERVAL);

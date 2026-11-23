@@ -33,6 +33,7 @@ pub enum ProcessResource {
 
 /// The condition that stopped the supervised loop, before cleanup readback.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg(target_os = "linux")]
 pub(super) enum StopReason {
     OutputLimit,
     Cancelled,
@@ -44,6 +45,7 @@ pub(super) enum StopReason {
 }
 
 /// Record a kernel limit event once, keeping a fixed precedence for audit and selection.
+#[cfg(target_os = "linux")]
 pub(super) fn record_event(events: &mut Vec<ProcessResource>, resource: ProcessResource) {
     if events.contains(&resource) {
         return;
@@ -59,6 +61,7 @@ pub(super) fn record_event(events: &mut Vec<ProcessResource>, resource: ProcessR
 
 /// Select one outcome. Unconfirmed cleanup and kernel limit events win over the loop's stop
 /// reason so an interrupted or over-budget run can never be reported as a clean completion.
+#[cfg(target_os = "linux")]
 pub(super) fn resolve_outcome(
     stop: StopReason,
     events: &[ProcessResource],

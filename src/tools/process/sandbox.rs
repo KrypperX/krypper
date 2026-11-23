@@ -35,9 +35,9 @@ pub(super) fn sandbox(
     group: &Path,
 ) -> io::Result<Command> {
     let roots: [OwnedFd; 3] = [
-        root.process_descriptor()?,
-        policy.toolchain.process_descriptor()?,
-        policy.registry.process_descriptor()?,
+        root.process_descriptor()?.into(),
+        policy.toolchain.process_descriptor()?.into(),
+        policy.registry.process_descriptor()?.into(),
     ];
     // Keep sources above destinations so dup2 cannot overwrite a later source descriptor.
     let mut pinned = Vec::new();

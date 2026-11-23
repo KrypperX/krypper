@@ -13,10 +13,10 @@ use crate::core::task::{
     TurnCompletionError, TurnOutcome, TurnState,
 };
 use crate::tools::{
-    apply_patch_file_at, capture_workspace_root, capture_workspace_root_at, create_directory_at,
-    create_text_file_at, list_task_directory_names_at, read_project_guidance_at,
-    read_root_agents_md_at, read_text_file_at, replace_text_file_at, search_text_files_at,
-    search_tree_text_files_at, PatchEvidence, WorkspaceRoot,
+    apply_patch_file_at, capture_workspace_root, capture_workspace_root_at_with_error,
+    create_directory_at, create_text_file_at, list_task_directory_names_at,
+    read_project_guidance_at, read_root_agents_md_at, read_text_file_at, replace_text_file_at,
+    search_text_files_at, search_tree_text_files_at, PatchEvidence, WorkspaceRoot,
 };
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -145,7 +145,9 @@ impl TaskSession {
     ///
     /// # Errors
     ///
-    /// Returns a clear error if the path cannot be resolved, opened, or verified as a directory.
+    /// Returns [`TaskSessionWorkspaceErrorKind::CaptureFailed`] if the path cannot be resolved,
+    /// opened, or verified as a directory, and [`TaskSessionWorkspaceErrorKind::PlatformUnavailable`]
+    /// when native workspace containment is not implemented on the current platform.
     ///
     /// # Example
     ///
@@ -162,8 +164,8 @@ impl TaskSession {
     pub fn new_in_workspace(
         workspace_path: impl AsRef<Path>,
     ) -> Result<Self, TaskSessionWorkspaceError> {
-        let workspace_root = capture_workspace_root_at(workspace_path.as_ref())
-            .map_err(TaskSessionWorkspaceError)?;
+        let workspace_root = capture_workspace_root_at_with_error(workspace_path.as_ref())
+            .map_err(TaskSessionWorkspaceError::from)?;
         Ok(Self {
             id: Uuid::new_v4(),
             workspace_root: Some(Arc::new(workspace_root)),

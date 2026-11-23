@@ -7,8 +7,18 @@ on:
 permissions:
   contents: read
 jobs:
-  verify:
-    runs-on: ubuntu-latest
+  verify-platforms:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            run_catalog: true
+          - os: macos-latest
+            run_catalog: false
+          - os: windows-latest
+            run_catalog: false
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -19,12 +29,23 @@ jobs:
       - name: Check Rust targets
         run: cargo check --all-targets --locked
       - name: Lint Rust targets with Clippy
+        if: runner.os != 'Windows'
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: Build Rust targets
+        if: runner.os != 'Windows'
         run: cargo build --all-targets --locked
       - name: Test Rust targets
+        if: runner.os != 'Windows'
         run: cargo test --all-targets --locked
       - name: Check offline model catalog
+        if: matrix.run_catalog
         run: cargo run --locked --example generate_model_catalog -- --check
       - name: Check patch whitespace
         run: git show --check --format=oneline HEAD
+  verify:
+    if: always()
+    needs: verify-platforms
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all platform checks to pass
+        run: test "${{ needs.verify-platforms.result }}" = "success"

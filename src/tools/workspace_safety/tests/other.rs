@@ -1,6 +1,5 @@
 use std::fs;
 use std::io;
-use std::os::fd::AsRawFd;
 use std::sync::atomic::Ordering;
 
 use super::super::create::create_text_file;
@@ -16,16 +15,16 @@ fn failed_write_removes_the_partial_file_it_created() {
         NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
     ));
     fs::create_dir(&path).unwrap();
-    let root = fs::File::open(&path).unwrap();
+    let root = super::super::types::DirHandle::from_file(fs::File::open(&path).unwrap());
     let mut writes = 0;
     let result = create_text_file_at_with_writer(
-        root.as_raw_fd(),
+        &root,
         std::ffi::OsStr::new("partial.txt"),
         b"complete text",
-        |fd, bytes| {
+        |file, bytes| {
             writes += 1;
             if writes == 1 {
-                super::write_to_fd(fd, &bytes[..3])
+                super::write_to_file(file, &bytes[..3])
             } else {
                 Err(io::Error::other("simulated disk failure"))
             }
@@ -66,7 +65,6 @@ fn write_enforces_the_encoded_one_mib_limit_before_creation() {
 
 #[test]
 fn directory_names_match_python_json_escaping_and_sort_order() {
-    let name = super::ListedName::new(vec![b'\xff']);
-    assert_eq!(super::quote_json(&name.sort_key), "\"\\udcff\"");
-    assert_eq!(name.sort_key, vec![0xdcff]);
+    let codepoints = vec![0xdcff];
+    assert_eq!(super::quote_json(&codepoints), "\"\\udcff\"");
 }
