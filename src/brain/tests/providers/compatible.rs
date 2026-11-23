@@ -114,6 +114,12 @@ fn compatible_chat_profiles_have_fixed_endpoints_and_cloudflare_path_validation(
         "https://api.cloudflare.com/client/v4/accounts/account-123/ai/v1/chat/completions"
     );
     assert_eq!(
+        OpenAiCompatibleProvider::CloudflareAiGateway
+            .endpoint(Some(&account_id))
+            .expect("Cloudflare AI Gateway endpoint"),
+        "https://api.cloudflare.com/client/v4/accounts/account-123/ai/v1/chat/completions"
+    );
+    assert_eq!(
         OpenAiCompatibleProvider::Groq
             .endpoint(None)
             .expect("Groq endpoint"),
@@ -156,7 +162,61 @@ fn compatible_chat_profiles_have_fixed_endpoints_and_cloudflare_path_validation(
         );
     }
     assert!(OpenAiCompatibleProvider::Cloudflare.endpoint(None).is_err());
+    assert!(OpenAiCompatibleProvider::CloudflareAiGateway
+        .endpoint(None)
+        .is_err());
+    for valid in ["default", "account-gateway_1"] {
+        assert!(CloudflareGatewayId::try_from(valid).is_ok());
+    }
+    for invalid in ["", "gateway id", "gateway\nid", &"a".repeat(65)] {
+        assert!(
+            CloudflareGatewayId::try_from(invalid).is_err(),
+            "{invalid:?}"
+        );
+    }
     assert!(mistral_provider().endpoint(Some(&account_id)).is_err());
+}
+
+#[test]
+fn cloudflare_ai_gateway_sends_gateway_id_header() {
+    let key = "local-cloudflare-gateway-token";
+    let response = compatible_chat_response(vec![compatible_chat_function_call(
+        "complete_task",
+        json!({"result":"done through AI Gateway"}),
+    )]);
+    let (address, server) = mock_server(vec![ok(response)]);
+    let endpoint = format!("http://{address}/v1/chat/completions");
+    let headers = vec![("cf-aig-gateway-id".to_owned(), "default".to_owned())];
+    let mut source = OpenAiCompatibleDecisionSource::with_endpoint_and_headers(
+        "openai/gpt-4.1",
+        OpenAiCompatibleProvider::CloudflareAiGateway,
+        key,
+        3,
+        endpoint,
+        &headers,
+    );
+
+    assert_eq!(
+        source.choose_action("complete the task", &[]),
+        WorkspaceAction::Complete {
+            result: "done through AI Gateway".to_owned()
+        }
+    );
+    let request = server
+        .join()
+        .expect("join Cloudflare AI Gateway mock")
+        .into_iter()
+        .next()
+        .expect("one gateway request");
+    assert_eq!(
+        request_header(&request, "authorization"),
+        Some(format!("Bearer {key}"))
+    );
+    assert_eq!(
+        request_header(&request, "cf-aig-gateway-id").as_deref(),
+        Some("default")
+    );
+    assert_eq!(request_body(&request)["model"], "openai/gpt-4.1");
 }
 
 #[test]
@@ -169,6 +229,7 @@ fn cloudflare_chat_profile_uses_compatible_request_and_normalizes_one_action() {
     let (action, request) =
         run_compatible_profile(OpenAiCompatibleProvider::Cloudflare, key, response);
     assert_compatible_chat_request(&request, key);
+    assert_eq!(request_header(&request, "cf-aig-gateway-id"), None);
     assert_eq!(
         action,
         WorkspaceAction::CreateFile {

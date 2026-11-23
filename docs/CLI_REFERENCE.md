@@ -242,6 +242,10 @@ ANTHROPIC_API_KEY=... cargo run -- task --goal "Read the brief" \
 CLOUDFLARE_ACCOUNT_ID=... CLOUDFLARE_API_TOKEN=... cargo run -- task \
   --goal "Read the brief" --max-actions 6 --provider cloudflare --model MODEL
 
+CLOUDFLARE_ACCOUNT_ID=... CLOUDFLARE_API_TOKEN=... \
+  CLOUDFLARE_AI_GATEWAY_ID=default cargo run -- task \
+  --goal "Read the brief" --max-actions 6 --provider cloudflare-ai-gateway --model openai/MODEL
+
 GROQ_API_KEY=... cargo run -- task --goal "Read the brief" \
   --max-actions 6 --provider groq --model MODEL
 
@@ -258,6 +262,12 @@ MISTRAL_API_KEY=... cargo run -- task --goal "Read the brief" \
   --max-actions 6 --provider mistral --model mistral-small-latest
 ```
 
+Use `--provider cloudflare` for direct Workers AI calls with `@cf/...` model IDs. Use `--provider cloudflare-ai-gateway` to route third-party `author/model` IDs or Workers AI `@cf/...` IDs through a gateway. AI Gateway routing adds the `cf-aig-gateway-id` header; when `CLOUDFLARE_AI_GATEWAY_ID` is unset, Krypper uses `default`.
+
+To enter Cloudflare values without putting the token in shell history or writing it to a file, run `source scripts/cloudflare-workers-ai-env.sh` from the repository root. The helper exports credentials and the optional gateway ID in the current Bash session; run `unset CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_AI_GATEWAY_ID` when finished. For AI Gateway, create a token with `AI Gateway - Read`, `AI Gateway - Edit`, and `Workers AI - Read` permissions. See Cloudflare's [Workers AI REST API guide](https://developers.cloudflare.com/workers-ai/get-started/rest-api/) and [AI Gateway REST API guide](https://developers.cloudflare.com/ai-gateway/usage/rest-api/) for setup and model ID formats.
+
+Pass `--model-usage-jsonl` to a model-backed task to emit one `KRYPPER_MODEL_USAGE` JSON record per decision to stderr. Compatible providers can report prompt, completion and total token counts; absent fields are `null`. The record also includes decision latency and contains no prompt, response text or credentials. This option is useful for evaluations and requires an OpenAI-compatible provider such as Cloudflare Workers AI.
+
 Krypper uses fixed HTTPS endpoints and does not accept custom API URLs:
 
 | Provider | Required environment variables | Fixed endpoint |
@@ -267,6 +277,7 @@ Krypper uses fixed HTTPS endpoints and does not accept custom API URLs:
 | xAI | `XAI_API_KEY` | `https://api.x.ai/v1/responses` |
 | Anthropic | `ANTHROPIC_API_KEY` (optional: `ANTHROPIC_WORKSPACE_ID`) | `https://api.anthropic.com/v1/messages` |
 | Cloudflare Workers AI | `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN` | `https://api.cloudflare.com/client/v4/accounts/<account-id>/ai/v1/chat/completions` |
+| Cloudflare AI Gateway | `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, optional `CLOUDFLARE_AI_GATEWAY_ID` (default: `default`) | Same Cloudflare AI endpoint with `cf-aig-gateway-id` header |
 | Groq | `GROQ_API_KEY` | `https://api.groq.com/openai/v1/chat/completions` |
 | OpenRouter | `OPENROUTER_API_KEY` | `https://openrouter.ai/api/v1/chat/completions` |
 | DeepSeek | `DEEPSEEK_API_KEY` | `https://api.deepseek.com/chat/completions` |
@@ -297,8 +308,8 @@ endpoints are not used. It uses Krypper's supported function tools with one
 required call, parallel calls disabled, and response storage disabled. See the [xAI Responses API](https://docs.x.ai/developers/rest-api-reference/inference/responses),
 [function calling guide](https://docs.x.ai/developers/tools/function-calling), and
 [API authentication](https://docs.x.ai/developers/rest-api-reference/inference).
-Anthropic uses the Messages API, and Cloudflare Workers AI, Groq, OpenRouter,
-DeepSeek, Z.AI, and Mistral share the OpenAI Chat Completions-compatible task adapter.
+Anthropic uses the Messages API, and Cloudflare Workers AI, Cloudflare AI Gateway,
+Groq, OpenRouter, DeepSeek, Z.AI, and Mistral share the OpenAI Chat Completions-compatible task adapter.
 DeepSeek, Z.AI, and Mistral use `tool_choice: auto`; Mistral also disables parallel tool calls.
 Krypper still requires exactly one supported call and validates its arguments locally. DeepSeek
 and Z.AI accept function arguments as either JSON text or a JSON object; Mistral uses JSON text.

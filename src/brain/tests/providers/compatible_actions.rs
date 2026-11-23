@@ -28,6 +28,46 @@ fn mistral_chat_profile_uses_auto_tool_choice_and_accepts_one_supported_call() {
 }
 
 #[test]
+fn cloudflare_compatible_response_exposes_token_usage_to_the_caller() {
+    let key = "local-cloudflare-usage-token";
+    let mut response: Value = serde_json::from_str(&compatible_chat_response(vec![
+        compatible_chat_function_call("complete_task", json!({"result": "done"})),
+    ]))
+    .expect("build mock Cloudflare response");
+    response["usage"] = json!({
+        "prompt_tokens": 123,
+        "completion_tokens": 17,
+        "total_tokens": 140,
+    });
+
+    let (address, server) = mock_server(vec![ok(response.to_string())]);
+    let mut source = OpenAiCompatibleDecisionSource::with_endpoint(
+        "test-model",
+        OpenAiCompatibleProvider::Cloudflare,
+        key,
+        1,
+        format!("http://{address}/v1/chat/completions"),
+    );
+    let action = source.choose_action("finish", &[]);
+
+    assert_eq!(
+        action,
+        WorkspaceAction::Complete {
+            result: "done".to_owned()
+        }
+    );
+    assert_eq!(
+        source.take_token_usage(),
+        Some(crate::brain::ModelTokenUsage {
+            prompt_tokens: Some(123),
+            completion_tokens: Some(17),
+            total_tokens: Some(140),
+        })
+    );
+    assert_eq!(server.join().expect("join Cloudflare mock").len(), 1);
+}
+
+#[test]
 fn mistral_action_uses_the_existing_workspace_and_action_budget_path() {
     let key = "local-mistral-test-key";
     let (address, server) = mock_server(vec![
