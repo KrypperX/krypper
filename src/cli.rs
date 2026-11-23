@@ -9,6 +9,8 @@ mod help;
 mod model_selection;
 mod models;
 mod outcome;
+mod settings;
+mod setup;
 mod task;
 mod task_args;
 use self::help::{
@@ -69,6 +71,7 @@ fn run_with(
         "task" => run_task(arguments, input, output, error),
         "models" => models::run(arguments, output, error),
         "context" => context::run(arguments, output, error),
+        "setup" => setup::run(arguments, input, output, error),
         _ if command_name.starts_with('-') => usage_error(
             error,
             None,
@@ -78,7 +81,7 @@ fn run_with(
             error,
             None,
             &format!(
-                "invalid choice: '{command_name}' (choose from 'show', 'list', 'write', 'task', 'models', 'context')"
+                "invalid choice: '{command_name}' (choose from 'show', 'list', 'write', 'task', 'models', 'context', 'setup')"
             ),
         ),
     }
