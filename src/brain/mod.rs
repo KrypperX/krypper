@@ -47,7 +47,9 @@ pub use providers::{
     ModelProvider, OpenAiCompatibleDecisionSource, OpenAiCompatibleProvider,
     ResponsesDecisionSource, ResponsesProvider,
 };
-pub(crate) use providers::{CloudflareAccountId, ModelDecisionSource, OpenAiCompatibleCredentials};
+pub(crate) use providers::{
+    CloudflareAccountId, CloudflareGatewayId, ModelDecisionSource, OpenAiCompatibleCredentials,
+};
 #[allow(unused_imports)] // some re-exports are used only by tests
 pub(crate) use request::{
     build_anthropic_request, build_gemini_request, build_responses_request,

@@ -24,7 +24,7 @@ Cloudflare's model catalog is discovery metadata, not an account entitlement che
 
 Use the existing models.dev snapshot for offline, cross-provider discovery and common model metadata. Use Cloudflare's feed for Workers AI-specific IDs, task labels, request schemas, context and capability properties, and deprecation or paid-plan metadata. The Cloudflare feed is narrower and more provider-authoritative; neither source is proof of account-specific inference access.
 
-The current Krypper change keeps the pinned cross-provider snapshot as its catalog data and maps the Krypper selector `cloudflare` to the models.dev provider ID `cloudflare-workers-ai`. It does not fetch either source at runtime.
+The current Krypper change keeps the pinned cross-provider snapshot as its catalog data. `cloudflare` selects the `cloudflare-workers-ai` source; `cloudflare-ai-gateway` selects both `cloudflare-ai-gateway` and `cloudflare-workers-ai` records because the unified REST endpoint routes third-party and Workers AI model IDs. Calls through AI Gateway use the documented `cf-aig-gateway-id` header. Krypper does not fetch either catalog at runtime. See Cloudflare's [AI Gateway REST API guide](https://developers.cloudflare.com/ai-gateway/usage/rest-api/) for supported paths and IDs.
 
 ## Recommendation
 

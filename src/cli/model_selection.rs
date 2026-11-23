@@ -3,9 +3,9 @@
 use super::config::{config_path, load_model_defaults};
 use crate::brain::{
     validate_model_name_for_provider, AnthropicDecisionSource, CloudflareAccountId,
-    GeminiDecisionSource, ModelDecisionSource, ModelProvider, OllamaDecisionSource,
-    OpenAiCompatibleCredentials, OpenAiCompatibleDecisionSource, OpenAiCompatibleProvider,
-    ResponsesDecisionSource, ResponsesProvider,
+    CloudflareGatewayId, GeminiDecisionSource, ModelDecisionSource, ModelProvider,
+    OllamaDecisionSource, OpenAiCompatibleCredentials, OpenAiCompatibleDecisionSource,
+    OpenAiCompatibleProvider, ResponsesDecisionSource, ResponsesProvider,
 };
 use std::io::Write;
 use std::net::SocketAddr;
@@ -118,6 +118,22 @@ pub(super) fn prepare_model_source(
                         api_token,
                     }
                 }
+                OpenAiCompatibleProvider::CloudflareAiGateway => {
+                    let account_id = std::env::var("CLOUDFLARE_ACCOUNT_ID").map_err(|_| {
+                        "CLOUDFLARE_ACCOUNT_ID must be set for --provider cloudflare-ai-gateway"
+                    })?;
+                    let account_id = CloudflareAccountId::try_from(account_id.as_str())?;
+                    let api_token = hosted_api_key(
+                        "CLOUDFLARE_API_TOKEN",
+                        "CLOUDFLARE_API_TOKEN must be set and nonempty for --provider cloudflare-ai-gateway",
+                    )?;
+                    let gateway_id = cloudflare_gateway_id_from_env()?;
+                    OpenAiCompatibleCredentials::CloudflareAiGateway {
+                        account_id,
+                        api_token,
+                        gateway_id,
+                    }
+                }
                 OpenAiCompatibleProvider::Groq => OpenAiCompatibleCredentials::Groq {
                     api_key: hosted_api_key(
                         "GROQ_API_KEY",
@@ -198,6 +214,17 @@ fn hosted_api_key(
         return Err(missing_message);
     }
     Ok(key)
+}
+
+fn cloudflare_gateway_id_from_env() -> Result<CloudflareGatewayId, &'static str> {
+    let value = match std::env::var("CLOUDFLARE_AI_GATEWAY_ID") {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => "default".to_owned(),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err("CLOUDFLARE_AI_GATEWAY_ID must be valid UTF-8")
+        }
+    };
+    CloudflareGatewayId::try_from(value.as_str())
 }
 
 #[cfg(test)]

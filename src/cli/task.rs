@@ -167,7 +167,7 @@ fn run_task_with_options(
                         error,
                         Some("task"),
                         &format!(
-                            "unsupported provider '{value}' (choose from 'ollama', 'gemini', 'openai', 'xai', 'anthropic', 'cloudflare', 'groq', 'openrouter', 'deepseek', 'zai', 'mistral')"
+                            "unsupported provider '{value}' (choose from 'ollama', 'gemini', 'openai', 'xai', 'anthropic', 'cloudflare', 'cloudflare-ai-gateway', 'groq', 'openrouter', 'deepseek', 'zai', 'mistral')"
                         ),
                     );
                 };

@@ -92,6 +92,8 @@ impl ResponsesProvider {
 pub enum OpenAiCompatibleProvider {
     /// Cloudflare Workers AI.
     Cloudflare,
+    /// Cloudflare AI Gateway, including Workers AI and third-party catalog models.
+    CloudflareAiGateway,
     /// Groq.
     Groq,
     /// OpenRouter.
@@ -110,11 +112,13 @@ impl OpenAiCompatibleProvider {
         cloudflare_account_id: Option<&CloudflareAccountId>,
     ) -> Result<String, &'static str> {
         match (self, cloudflare_account_id) {
-            (Self::Cloudflare, Some(account_id)) => Ok(format!(
+            (Self::Cloudflare | Self::CloudflareAiGateway, Some(account_id)) => Ok(format!(
                 "https://api.cloudflare.com/client/v4/accounts/{}/ai/v1/chat/completions",
                 account_id.as_str()
             )),
-            (Self::Cloudflare, None) => Err("CLOUDFLARE_ACCOUNT_ID is required for Cloudflare"),
+            (Self::Cloudflare | Self::CloudflareAiGateway, None) => {
+                Err("CLOUDFLARE_ACCOUNT_ID is required for Cloudflare")
+            }
             (Self::Groq, None) => Ok(GROQ_CHAT_COMPLETIONS_URL.to_owned()),
             (Self::OpenRouter, None) => Ok(OPENROUTER_CHAT_COMPLETIONS_URL.to_owned()),
             (Self::DeepSeek, None) => Ok(DEEPSEEK_CHAT_COMPLETIONS_URL.to_owned()),
@@ -130,6 +134,7 @@ impl OpenAiCompatibleProvider {
     pub(super) fn label(self) -> &'static str {
         match self {
             Self::Cloudflare => "Cloudflare Workers AI",
+            Self::CloudflareAiGateway => "Cloudflare AI Gateway",
             Self::Groq => "Groq",
             Self::OpenRouter => "OpenRouter",
             Self::DeepSeek => "DeepSeek",
@@ -161,6 +166,31 @@ impl TryFrom<&str> for CloudflareAccountId {
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
         {
             return Err("CLOUDFLARE_ACCOUNT_ID must be one safe path component");
+        }
+        Ok(Self(value.to_owned()))
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CloudflareGatewayId(String);
+
+impl CloudflareGatewayId {
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<&str> for CloudflareGatewayId {
+    type Error = &'static str;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        if value.is_empty()
+            || value.len() > 64
+            || !value.bytes().all(|byte| byte.is_ascii_graphic())
+        {
+            return Err(
+                "CLOUDFLARE_AI_GATEWAY_ID must be 1-64 visible ASCII characters without spaces",
+            );
         }
         Ok(Self(value.to_owned()))
     }
@@ -228,6 +258,11 @@ pub(crate) enum OpenAiCompatibleCredentials {
         account_id: CloudflareAccountId,
         api_token: String,
     },
+    CloudflareAiGateway {
+        account_id: CloudflareAccountId,
+        api_token: String,
+        gateway_id: CloudflareGatewayId,
+    },
     Groq {
         api_key: String,
     },
@@ -245,42 +280,69 @@ pub(crate) enum OpenAiCompatibleCredentials {
     },
 }
 
+struct OpenAiCompatibleParts {
+    provider: OpenAiCompatibleProvider,
+    endpoint: String,
+    api_key: String,
+    extra_headers: Vec<(String, String)>,
+}
+
 impl OpenAiCompatibleCredentials {
-    fn into_parts(self) -> Result<(OpenAiCompatibleProvider, String, String), &'static str> {
+    fn into_parts(self) -> Result<OpenAiCompatibleParts, &'static str> {
         match self {
             Self::Cloudflare {
                 account_id,
                 api_token,
-            } => Ok((
-                OpenAiCompatibleProvider::Cloudflare,
-                OpenAiCompatibleProvider::Cloudflare.endpoint(Some(&account_id))?,
+            } => Ok(OpenAiCompatibleParts {
+                provider: OpenAiCompatibleProvider::Cloudflare,
+                endpoint: OpenAiCompatibleProvider::Cloudflare.endpoint(Some(&account_id))?,
+                api_key: api_token,
+                extra_headers: Vec::new(),
+            }),
+            Self::CloudflareAiGateway {
+                account_id,
                 api_token,
-            )),
-            Self::Groq { api_key } => Ok((
-                OpenAiCompatibleProvider::Groq,
-                OpenAiCompatibleProvider::Groq.endpoint(None)?,
+                gateway_id,
+            } => Ok(OpenAiCompatibleParts {
+                provider: OpenAiCompatibleProvider::CloudflareAiGateway,
+                endpoint: OpenAiCompatibleProvider::CloudflareAiGateway
+                    .endpoint(Some(&account_id))?,
+                api_key: api_token,
+                extra_headers: vec![(
+                    "cf-aig-gateway-id".to_owned(),
+                    gateway_id.as_str().to_owned(),
+                )],
+            }),
+            Self::Groq { api_key } => Ok(OpenAiCompatibleParts {
+                provider: OpenAiCompatibleProvider::Groq,
+                endpoint: OpenAiCompatibleProvider::Groq.endpoint(None)?,
                 api_key,
-            )),
-            Self::OpenRouter { api_key } => Ok((
-                OpenAiCompatibleProvider::OpenRouter,
-                OpenAiCompatibleProvider::OpenRouter.endpoint(None)?,
+                extra_headers: Vec::new(),
+            }),
+            Self::OpenRouter { api_key } => Ok(OpenAiCompatibleParts {
+                provider: OpenAiCompatibleProvider::OpenRouter,
+                endpoint: OpenAiCompatibleProvider::OpenRouter.endpoint(None)?,
                 api_key,
-            )),
-            Self::DeepSeek { api_key } => Ok((
-                OpenAiCompatibleProvider::DeepSeek,
-                OpenAiCompatibleProvider::DeepSeek.endpoint(None)?,
+                extra_headers: Vec::new(),
+            }),
+            Self::DeepSeek { api_key } => Ok(OpenAiCompatibleParts {
+                provider: OpenAiCompatibleProvider::DeepSeek,
+                endpoint: OpenAiCompatibleProvider::DeepSeek.endpoint(None)?,
                 api_key,
-            )),
-            Self::Zai { api_key } => Ok((
-                OpenAiCompatibleProvider::Zai,
-                OpenAiCompatibleProvider::Zai.endpoint(None)?,
+                extra_headers: Vec::new(),
+            }),
+            Self::Zai { api_key } => Ok(OpenAiCompatibleParts {
+                provider: OpenAiCompatibleProvider::Zai,
+                endpoint: OpenAiCompatibleProvider::Zai.endpoint(None)?,
                 api_key,
-            )),
-            Self::Mistral { api_key } => Ok((
-                OpenAiCompatibleProvider::Mistral,
-                OpenAiCompatibleProvider::Mistral.endpoint(None)?,
+                extra_headers: Vec::new(),
+            }),
+            Self::Mistral { api_key } => Ok(OpenAiCompatibleParts {
+                provider: OpenAiCompatibleProvider::Mistral,
+                endpoint: OpenAiCompatibleProvider::Mistral.endpoint(None)?,
                 api_key,
-            )),
+                extra_headers: Vec::new(),
+            }),
         }
     }
 }
@@ -515,6 +577,9 @@ impl ModelProvider {
             "xai" => Some(Self::Xai),
             "anthropic" => Some(Self::Anthropic),
             "cloudflare" => Some(Self::OpenAiCompatible(OpenAiCompatibleProvider::Cloudflare)),
+            "cloudflare-ai-gateway" => Some(Self::OpenAiCompatible(
+                OpenAiCompatibleProvider::CloudflareAiGateway,
+            )),
             "groq" => Some(Self::OpenAiCompatible(OpenAiCompatibleProvider::Groq)),
             "openrouter" => Some(Self::OpenAiCompatible(OpenAiCompatibleProvider::OpenRouter)),
             "deepseek" => Some(Self::OpenAiCompatible(OpenAiCompatibleProvider::DeepSeek)),
@@ -1357,6 +1422,7 @@ pub struct OpenAiCompatibleDecisionSource {
     provider: OpenAiCompatibleProvider,
     api_key: String,
     endpoint: String,
+    extra_headers: Vec<(String, String)>,
     agent: Agent,
     remaining_decisions: usize,
     extension_declarations: Vec<Value>,
@@ -1369,14 +1435,20 @@ impl OpenAiCompatibleDecisionSource {
         credentials: OpenAiCompatibleCredentials,
         action_budget: usize,
     ) -> Result<Self, &'static str> {
-        let (provider, endpoint, api_key) = credentials.into_parts()?;
-        Ok(Self::with_url(
+        let OpenAiCompatibleParts {
+            provider,
+            endpoint,
+            api_key,
+            extra_headers,
+        } = credentials.into_parts()?;
+        Ok(Self::with_url_and_headers(
             model,
             provider,
             api_key,
             action_budget,
             endpoint,
             &[],
+            &extra_headers,
         ))
     }
 
@@ -1389,6 +1461,26 @@ impl OpenAiCompatibleDecisionSource {
         endpoint: String,
     ) -> Self {
         Self::with_url(model, provider, api_key, action_budget, endpoint, &[])
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_endpoint_and_headers(
+        model: impl Into<String>,
+        provider: OpenAiCompatibleProvider,
+        api_key: impl Into<String>,
+        action_budget: usize,
+        endpoint: String,
+        extra_headers: &[(String, String)],
+    ) -> Self {
+        Self::with_url_and_headers(
+            model,
+            provider,
+            api_key,
+            action_budget,
+            endpoint,
+            &[],
+            extra_headers,
+        )
     }
 
     /// Create a source that advertises host-authorized extension declarations.
@@ -1418,11 +1510,32 @@ impl OpenAiCompatibleDecisionSource {
         endpoint: String,
         extension_declarations: &[Value],
     ) -> Self {
+        Self::with_url_and_headers(
+            model,
+            provider,
+            api_key,
+            action_budget,
+            endpoint,
+            extension_declarations,
+            &[],
+        )
+    }
+
+    fn with_url_and_headers(
+        model: impl Into<String>,
+        provider: OpenAiCompatibleProvider,
+        api_key: impl Into<String>,
+        action_budget: usize,
+        endpoint: String,
+        extension_declarations: &[Value],
+        extra_headers: &[(String, String)],
+    ) -> Self {
         Self {
             model: model.into(),
             provider,
             api_key: api_key.into(),
             endpoint,
+            extra_headers: extra_headers.to_vec(),
             agent: model_agent(),
             remaining_decisions: action_budget,
             extension_declarations: extension_declarations.to_vec(),
@@ -1452,12 +1565,18 @@ impl OpenAiCompatibleDecisionSource {
             &self.extension_declarations,
         )?;
         let provider = ModelProvider::OpenAiCompatible(self.provider);
-        let response = post_hosted(
+        let extra_headers = self
+            .extra_headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+        let response = post_hosted_with_headers(
             &self.agent,
             provider,
             &self.endpoint,
             &self.api_key,
             None,
+            &extra_headers,
             &request,
         )?;
         self.last_token_usage = parse_model_token_usage(&response);
@@ -1492,7 +1611,37 @@ impl BoundedDecisionSource for OpenAiCompatibleDecisionSource {
 
 #[cfg(test)]
 mod tests {
-    use super::{OpenAiCompatibleCredentials, OpenAiCompatibleProvider};
+    use super::{
+        CloudflareAccountId, CloudflareGatewayId, OpenAiCompatibleCredentials,
+        OpenAiCompatibleParts, OpenAiCompatibleProvider,
+    };
+
+    #[test]
+    fn cloudflare_ai_gateway_credentials_add_the_gateway_header() {
+        let credentials = OpenAiCompatibleCredentials::CloudflareAiGateway {
+            account_id: CloudflareAccountId::try_from("account-123").expect("valid account ID"),
+            api_token: "local-test-token".to_owned(),
+            gateway_id: CloudflareGatewayId::try_from("default").expect("valid gateway ID"),
+        };
+
+        let OpenAiCompatibleParts {
+            provider,
+            endpoint,
+            api_key: api_token,
+            extra_headers: headers,
+        } = credentials.into_parts().expect("valid gateway credentials");
+
+        assert_eq!(provider, OpenAiCompatibleProvider::CloudflareAiGateway);
+        assert_eq!(
+            endpoint,
+            "https://api.cloudflare.com/client/v4/accounts/account-123/ai/v1/chat/completions"
+        );
+        assert_eq!(api_token, "local-test-token");
+        assert_eq!(
+            headers,
+            vec![("cf-aig-gateway-id".to_owned(), "default".to_owned())]
+        );
+    }
 
     #[test]
     fn decision_sources_carry_extension_declarations_into_requests() {
@@ -1977,6 +2126,7 @@ mod tests {
             "xai",
             "anthropic",
             "cloudflare",
+            "cloudflare-ai-gateway",
             "groq",
             "openrouter",
             "deepseek",
@@ -2005,7 +2155,12 @@ mod tests {
     #[test]
     fn mistral_credentials_bind_to_the_fixed_endpoint() {
         let key = "local-mistral-test-key";
-        let (provider, endpoint, api_key) = OpenAiCompatibleCredentials::Mistral {
+        let OpenAiCompatibleParts {
+            provider,
+            endpoint,
+            api_key,
+            extra_headers: headers,
+        } = OpenAiCompatibleCredentials::Mistral {
             api_key: key.to_owned(),
         }
         .into_parts()
@@ -2014,5 +2169,6 @@ mod tests {
         assert_eq!(provider, OpenAiCompatibleProvider::Mistral);
         assert_eq!(endpoint, "https://api.mistral.ai/v1/chat/completions");
         assert_eq!(api_key, key);
+        assert!(headers.is_empty());
     }
 }

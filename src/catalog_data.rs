@@ -2,15 +2,19 @@
 //! User configuration and provider routing remain authoritative.
 use serde_json::Value;
 
-/// Match a Krypper provider selector to a provider ID in the central catalog.
-/// models.dev calls Cloudflare Workers AI `cloudflare-workers-ai`, while Krypper's
-/// provider selector is `cloudflare`.
+/// Match a Krypper provider selector to provider IDs in the central catalog.
+/// The Cloudflare Gateway selector can use both its unified third-party models
+/// and Cloudflare-hosted Workers AI models.
 pub fn provider_matches(selector: &str, catalog_provider: &str) -> bool {
     selector == catalog_provider
-        || matches!(
-            (selector, catalog_provider),
-            ("cloudflare", "cloudflare-workers-ai")
-        )
+        || match selector {
+            "cloudflare" => catalog_provider == "cloudflare-workers-ai",
+            "cloudflare-ai-gateway" => matches!(
+                catalog_provider,
+                "cloudflare-ai-gateway" | "cloudflare-workers-ai"
+            ),
+            _ => false,
+        }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,5 +92,20 @@ mod tests {
         assert!(lookup("unknown-provider", "custom-model")
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn cloudflare_selectors_match_workers_ai_and_gateway_catalogs() {
+        assert!(provider_matches("cloudflare", "cloudflare-workers-ai"));
+        assert!(!provider_matches("cloudflare", "cloudflare-ai-gateway"));
+        assert!(provider_matches(
+            "cloudflare-ai-gateway",
+            "cloudflare-ai-gateway"
+        ));
+        assert!(provider_matches(
+            "cloudflare-ai-gateway",
+            "cloudflare-workers-ai"
+        ));
+        assert!(!provider_matches("cloudflare-ai-gateway", "openai"));
     }
 }

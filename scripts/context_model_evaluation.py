@@ -50,6 +50,7 @@ def command_version(command: list[str], cwd: Path = ROOT) -> str | None:
     environment = os.environ.copy()
     environment.pop("CLOUDFLARE_ACCOUNT_ID", None)
     environment.pop("CLOUDFLARE_API_TOKEN", None)
+    environment.pop("CLOUDFLARE_AI_GATEWAY_ID", None)
     try:
         result = subprocess.run(
             command,
@@ -68,6 +69,7 @@ def source_diff_digest() -> str | None:
     environment = os.environ.copy()
     environment.pop("CLOUDFLARE_ACCOUNT_ID", None)
     environment.pop("CLOUDFLARE_API_TOKEN", None)
+    environment.pop("CLOUDFLARE_AI_GATEWAY_ID", None)
     try:
         result = subprocess.run(
             ["git", "diff", "--binary", "HEAD"],
@@ -102,6 +104,7 @@ def read_context(binary: Path, workspace: Path, goal: str, arm: str) -> dict[str
     environment = os.environ.copy()
     environment.pop("CLOUDFLARE_ACCOUNT_ID", None)
     environment.pop("CLOUDFLARE_API_TOKEN", None)
+    environment.pop("CLOUDFLARE_AI_GATEWAY_ID", None)
     result = subprocess.run(
         command, cwd=ROOT, env=environment, capture_output=True, text=True, timeout=60
     )
@@ -144,6 +147,7 @@ def verify_failing_baselines(
         environment = os.environ.copy()
         environment.pop("CLOUDFLARE_ACCOUNT_ID", None)
         environment.pop("CLOUDFLARE_API_TOKEN", None)
+        environment.pop("CLOUDFLARE_AI_GATEWAY_ID", None)
         environment["CARGO_TARGET_DIR"] = str(root / "cargo-target")
         for task in suite["tasks"]:
             workspace = root / task["id"]
@@ -322,7 +326,7 @@ def run_live_arm(
             "--workspace",
             str(workspace),
             "--provider",
-            "cloudflare",
+            args.provider,
             "--model",
             args.model,
             "--no-config",
@@ -354,6 +358,7 @@ def run_live_arm(
         cargo_environment = environment.copy()
         cargo_environment.pop("CLOUDFLARE_ACCOUNT_ID", None)
         cargo_environment.pop("CLOUDFLARE_API_TOKEN", None)
+        cargo_environment.pop("CLOUDFLARE_AI_GATEWAY_ID", None)
         try:
             cargo = subprocess.run(
                 ["cargo", "test", "--offline", "--quiet"],
@@ -422,8 +427,14 @@ def write_report(report: dict[str, Any], output: Path | None) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, default=ROOT / "target/debug/krypper")
-    parser.add_argument("--live", action="store_true", help="send fixture prompts to Cloudflare Workers AI")
-    parser.add_argument("--model", help="exact Cloudflare Workers AI model id; required with --live")
+    parser.add_argument("--live", action="store_true", help="send fixture prompts to Cloudflare")
+    parser.add_argument(
+        "--provider",
+        choices=("cloudflare", "cloudflare-ai-gateway"),
+        default="cloudflare",
+        help="use Workers AI directly or route through AI Gateway",
+    )
+    parser.add_argument("--model", help="exact Cloudflare model id; required with --live")
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--action-budget", type=int, default=10)
     parser.add_argument("--seed", type=int, default=231)
@@ -444,7 +455,7 @@ def main() -> int:
         if missing:
             parser.error("--live needs environment variables: " + ", ".join(missing))
         print(
-            "Live mode sends the fixture goal and retrieved repository context to Cloudflare Workers AI; provider charges may apply.",
+            f"Live mode sends fixture goals and retrieved repository context to {args.provider}; provider charges may apply.",
             file=sys.stderr,
         )
 
@@ -491,7 +502,7 @@ def main() -> int:
         "schema_version": 1,
         "scope": "provider_backed_context_evaluation" if args.live else "offline_context_preflight",
         "live": args.live,
-        "provider": "cloudflare" if args.live else None,
+        "provider": args.provider if args.live else None,
         "model": args.model if args.live else None,
         "source_revision": source_revision,
         "source_diff_sha256": source_diff,

@@ -13,7 +13,7 @@ python3 scripts/context_model_evaluation.py
 
 This first verifies in disposable workspaces that all four fixtures fail their tests before a fix. It then checks both retrieval arms and prints a JSON report with baseline outcomes, context size, gold-path recall, skipped stale or oversized results, and fixture and binary digests. It makes no Cloudflare request. Live mode performs the same baseline check before sending any model request.
 
-## Cloudflare Workers AI run
+## Cloudflare live run
 
 From the repository root, load credentials into the current Bash session. The helper prompts for the account ID and hides token input; it does not save either value:
 
@@ -21,7 +21,7 @@ From the repository root, load credentials into the current Bash session. The he
 source scripts/cloudflare-workers-ai-env.sh
 ```
 
-Then run at least three repeats with the same Cloudflare model for both arms:
+Then run at least three repeats with the same Cloudflare model for both arms. The default provider is direct Workers AI (`cloudflare`):
 
 ```sh
 python3 scripts/context_model_evaluation.py \
@@ -32,15 +32,15 @@ python3 scripts/context_model_evaluation.py \
   --output /tmp/krypper-context-evaluation.json
 ```
 
-Choose a text-generation model ID from Cloudflare's [Workers AI model catalog](https://developers.cloudflare.com/workers-ai/models/).
+Choose a text-generation model ID from Cloudflare's [Workers AI model catalog](https://developers.cloudflare.com/workers-ai/models/). To route the same evaluation through AI Gateway, add `--provider cloudflare-ai-gateway`; use a third-party `author/model` ID or a Workers AI `@cf/...` ID from `krypper models --provider cloudflare-ai-gateway`.
 
-Live mode sends each fixture task and its retrieved repository context to Cloudflare Workers AI. With four tasks, two arms, three repeats, and a 10-action budget, it can make up to 240 model requests and incur provider charges; runs that finish early make fewer requests. The runner uses disposable workspaces, passes `--no-config`, and does not include credentials, raw prompts, or model responses in the report. Afterward, clear the variables from the current shell:
+Live mode sends each fixture task and its retrieved repository context to the selected Cloudflare endpoint. With four tasks, two arms, three repeats, and a 10-action budget, it can make up to 240 model requests and incur provider charges; runs that finish early make fewer requests. The runner uses disposable workspaces, passes `--no-config`, and does not include credentials, raw prompts, or model responses in the report. Afterward, clear the variables from the current shell:
 
 ```sh
-unset CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID
+unset CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_AI_GATEWAY_ID
 ```
 
-The custom API token needs Workers AI access. See Cloudflare's [Workers AI REST API guide](https://developers.cloudflare.com/workers-ai/get-started/rest-api/) for token and account setup.
+Workers AI direct calls require Workers AI access. For AI Gateway, Cloudflare's guide recommends `AI Gateway - Read`, `AI Gateway - Edit`, and `Workers AI - Read`. See Cloudflare's [Workers AI REST API guide](https://developers.cloudflare.com/workers-ai/get-started/rest-api/) and [AI Gateway REST API guide](https://developers.cloudflare.com/ai-gateway/usage/rest-api/) for account setup, gateway selection, and model ID formats.
 
 ## Report interpretation
 

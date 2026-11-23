@@ -23,7 +23,7 @@ pub(super) fn run(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -
                 )?;
                 writeln!(
                     out,
-                    "Krypper provider 'cloudflare' selects the models.dev 'cloudflare-workers-ai' catalog."
+                    "'cloudflare' selects Workers AI; 'cloudflare-ai-gateway' selects the AI Gateway and Workers AI catalogs."
                 )?;
                 return Ok(0);
             }
@@ -130,5 +130,43 @@ mod tests {
             0
         );
         assert_eq!(String::from_utf8(out).unwrap().trim(), "[]");
+    }
+
+    #[test]
+    fn cloudflare_selectors_list_runnable_catalog_models() {
+        fn models_for(provider: &str) -> Vec<serde_json::Value> {
+            let mut out = Vec::new();
+            assert_eq!(
+                run(
+                    &[
+                        OsString::from("--provider"),
+                        OsString::from(provider),
+                        OsString::from("--json"),
+                    ],
+                    &mut out,
+                    &mut Vec::new(),
+                )
+                .unwrap(),
+                0
+            );
+            serde_json::from_slice(&out).expect("model list JSON")
+        }
+
+        let workers_ai = models_for("cloudflare");
+        assert!(!workers_ai.is_empty());
+        assert!(workers_ai.iter().all(|model| {
+            model["provider"] == "cloudflare-workers-ai"
+                && model["id"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with("@cf/"))
+        }));
+
+        let gateway = models_for("cloudflare-ai-gateway");
+        let providers: std::collections::BTreeSet<_> = gateway
+            .iter()
+            .filter_map(|model| model["provider"].as_str())
+            .collect();
+        assert!(providers.contains("cloudflare-ai-gateway"));
+        assert!(providers.contains("cloudflare-workers-ai"));
     }
 }
