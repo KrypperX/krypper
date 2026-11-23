@@ -50,6 +50,31 @@ impl ManagedChild {
     }
 
     pub(super) fn terminate(&mut self) -> Result<(), McpLifecycleError> {
+        self.terminate_with_group_signal(|pgid| {
+            // SAFETY: `kill` takes only integers, and `pgid` is the process group established
+            // for this child by `process_group(0)` at spawn. This runs before reaping the child,
+            // so the group ID cannot have been recycled.
+            if unsafe { libc::kill(-pgid, libc::SIGKILL) } == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        })
+    }
+
+    #[cfg(all(test, target_os = "macos"))]
+    pub(super) fn terminate_with_signal_error(
+        &mut self,
+        error: io::Error,
+    ) -> Result<(), McpLifecycleError> {
+        // Tests use this seam to reproduce macOS permission errors without relying on setuid.
+        self.terminate_with_group_signal(|_| Err(error))
+    }
+
+    fn terminate_with_group_signal(
+        &mut self,
+        send_signal: impl FnOnce(libc::pid_t) -> io::Result<()>,
+    ) -> Result<(), McpLifecycleError> {
         let Some(mut child) = self.0.take() else {
             return Ok(());
         };
@@ -57,11 +82,7 @@ impl ManagedChild {
         // Send SIGKILL before reaping: while the child remains unreaped, its PID
         // cannot be recycled into an unrelated process group.
         let pgid = child.id() as libc::pid_t;
-        // SAFETY: `kill` takes only integers. `pgid` is the id of the child's own process
-        // group (set by `process_group(0)` at spawn), and the child has not been reaped yet,
-        // so the id cannot refer to an unrelated group.
-        if unsafe { libc::kill(-pgid, libc::SIGKILL) } != 0 {
-            let error = io::Error::last_os_error();
+        if let Err(error) = send_signal(pgid) {
             #[cfg(target_os = "macos")]
             let macos_eperm_with_exited_leader = error.raw_os_error() == Some(libc::EPERM)
                 && child_has_exited(&child).unwrap_or(false);
