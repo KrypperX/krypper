@@ -212,7 +212,6 @@ where
     })
 }
 
-#[allow(dead_code)]
 pub(crate) fn post_responses_text_stream<F>(
     agent: &Agent,
     provider: ModelProvider,
