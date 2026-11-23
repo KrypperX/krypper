@@ -1,0 +1,58 @@
+# Bounded search and Rust module map evaluation
+
+This is a retrieval-only comparison for the opt-in `krypper context
+--repository-map` output. It does not measure model behavior, task completion,
+or user outcomes.
+
+## Method
+
+- Compare the existing bounded-search context with the module map using the
+  same 4,096-byte payload ceiling.
+- Give both methods the same goal and workspace. Alternate which method runs
+  first and repeat each task three times.
+- Count a hit when the expected source path appears in a bounded-search
+  snippet, or among a module's conventional path candidates.
+- Measure the module map's source bytes read and the median retrieval time for
+  each method. No model or provider calls are made.
+- Use four hand-authored tasks over a synthetic Rust workspace and three
+  hand-authored tasks over a fixed slice of Krypper's source tree.
+
+The synthetic fixture is pinned by SHA-256
+`68c9d7aa4dc3f722777fe55e1a6ff37013a12428c42b53fb142f4c5a1a7e1842`. The
+Krypper source fixture is a static snapshot in
+`tests/fixtures/repository_map/krypper_source`, taken from baseline commit
+`5c4ce1cd8f05d2dec93c545f67608c28d8ddb7e8`; its evaluated tree has SHA-256
+`65589fe3a7fd64c8c4d8306c73f704b0e087147cc1d48558bada027d9b5adc71`. The
+benchmark verifies both fixture hashes so source edits do not silently change
+the comparison corpus.
+
+## Results
+
+One run of `cargo test --locked --test
+agent_quality_repository_map_benchmark -- --nocapture` produced:
+
+| Fixture | Expected-path hits, search | Expected-path hits, map | Average payload, search | Average payload, map | Map source bytes read | Median time, search | Median time, map |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Synthetic, 4 tasks × 3 repeats | 9/15 | 15/15 | 477 B | 925 B | 93 B | 1,670 µs | 1,105 µs |
+| Krypper source slice, 3 tasks × 3 repeats | 3/9 | 9/9 | 1,073 B | 4,038 B | 215,289 B | 12,320 µs | 27,606 µs |
+
+The map reached every hand-labelled expected path in these fixtures. On the
+Krypper source slice, each map retrieval read an average of 215,289 source bytes
+and used nearly the entire payload budget; its measured median time was also
+higher. Baseline source bytes were not measured. Timing is especially noisy at
+three repeats and should not be treated as a performance claim.
+
+## Limits and decision
+
+These tasks and expected paths were authored alongside the implementation, and
+the Krypper sample is only a selected source slice. They are not held-out tasks
+or representative external repositories. Path-candidate reachability does not
+show that a model will select the right file or complete a task successfully.
+No model, prompt, or behavior comparison was run.
+
+Keep the module map opt-in and leave the existing planner retrieval unchanged.
+Broader claims require held-out tasks, representative repositories, and a
+matched-model evaluation with controlled budgets and repeated runs.
+
+Environment: Rust `1.100.0`, Cargo `1.100.0`, Linux
+`6.8.0-147-generic x86_64`, run on 2026-11-23.

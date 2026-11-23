@@ -381,6 +381,25 @@ cargo run -- context --goal "Locate parse_goal in src/parser.rs" --workspace "ta
 `context` makes no model request, changes no file, and prints bounded JSON with
 the queries, attributed snippets, counters and truncation flag.
 
+For an opt-in structural view of out-of-line Rust modules, pass
+`--repository-map`. It reuses the same bounded workspace tree search and safe
+file reads, examines at most 64 source files, accepts up to 2 MiB of source,
+and caps module entries at 4 KiB. It may read one additional file, bounded by
+the existing 1 MiB safe-read limit, to detect the source cap. The lightweight
+lexical filter skips comments, strings, and nested inline modules; it is not a
+Rust parser and may omit declarations in macros or unusual formatting. The
+reported conventional path candidates are advisory and may not exist; verify
+them with a workspace read before use. A `#[path = ...]` declaration is
+reported without conventional candidates. The map does not index functions or
+other symbols and is not added to planner prompts. The default `context` output
+and planner behavior are unchanged. See the
+[bounded retrieval comparison](context-module-map-evaluation.md) for the
+current hand-authored evaluation and its limits.
+
+```sh
+cargo run -- context --goal "Locate parser tokens" --repository-map --workspace "task workspace"
+```
+
 The adapter exposes the existing task workspace actions and task completion.
 When an embedding host registers extension tools, the adapter can also advertise
 those host-authorized declarations; the CLI itself registers none, so its default
