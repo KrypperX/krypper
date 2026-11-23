@@ -191,10 +191,8 @@ where
     run_goal_turn_with_budget(session, task_id, turn_id, goal, max_actions, &mut source)
 }
 
-// Reserve a reflection decision, one workspace operation, and task control.
+// The correction needs a plan decision, a workspace operation, and task control.
 const MIN_COMPLETION_CORRECTION_ACTIONS: usize = 3;
-
-#[allow(clippy::too_many_arguments)]
 /// Runs the opt-in independent-check flow and permits at most one bounded correction.
 ///
 /// The initial turn and optional initial plan use the existing Harness path. `check_evidence`
@@ -205,6 +203,7 @@ const MIN_COMPLETION_CORRECTION_ACTIONS: usize = 3;
 /// initial turn whose checks are failed or unknown. TaskSession is transitioned to success only
 /// after the final independent checks pass on a completed turn. A correction-phase
 /// error fails the running task after closing any still-running correction turn.
+#[allow(clippy::too_many_arguments)] // Session, IDs, goal, budget, plan, checks, and correction hooks are distinct inputs.
 pub fn run_goal_turn_with_completion_correction<D, E, P, PE>(
     session: &mut TaskSession,
     task_id: Uuid,
@@ -262,38 +261,26 @@ where
     };
     let initial_verification = verify_completion_checks(required_checks, &initial_evidence);
     if !initial_is_complete || initial_verification.status == CompletionVerificationStatus::Passed {
-        let final_verification = reconcile_task_state_with_checks(
+        return finish_completion_without_correction(
             session,
             task_id,
-            initial_result.stop_reason(),
-            required_checks,
-            &initial_evidence,
-        )
-        .map_err(CompletionCorrectionError::Session)?;
-        return Ok(CompletionCorrectionResult {
             initial_result,
             initial_verification,
-            correction_result: None,
-            final_verification,
-        });
+            required_checks,
+            &initial_evidence,
+        );
     }
 
     let remaining_actions = max_actions.saturating_sub(initial_result.actions_taken());
     if remaining_actions < MIN_COMPLETION_CORRECTION_ACTIONS {
-        let final_verification = reconcile_task_state_with_checks(
+        return finish_completion_without_correction(
             session,
             task_id,
-            initial_result.stop_reason(),
-            required_checks,
-            &initial_evidence,
-        )
-        .map_err(CompletionCorrectionError::Session)?;
-        return Ok(CompletionCorrectionResult {
             initial_result,
             initial_verification,
-            correction_result: None,
-            final_verification,
-        });
+            required_checks,
+            &initial_evidence,
+        );
     }
 
     let plan = correction_plan(
@@ -346,9 +333,10 @@ where
     })
 }
 
+// The correction needs a plan decision, a workspace operation, a focused test rerun, and task
+// control to complete and verify the repair.
 const MIN_PROCESS_CORRECTION_ACTIONS: usize = 4;
 
-#[allow(clippy::too_many_arguments)]
 /// Runs one task turn and permits a single correction for a complete offline Cargo failure.
 ///
 /// A correction is eligible only when the last observation is a complete, cleanup-confirmed
@@ -358,6 +346,7 @@ const MIN_PROCESS_CORRECTION_ACTIONS: usize = 4;
 /// followed the last workspace mutation. Existing independent completion checks remain required
 /// for task success. Correction-phase errors fail the running task after
 /// closing any still-running correction turn.
+#[allow(clippy::too_many_arguments)] // Session, IDs, goal, budget, checks, and correction hooks are distinct inputs.
 pub fn run_goal_turn_with_process_failure_correction<D, E, P, PE>(
     session: &mut TaskSession,
     task_id: Uuid,
@@ -405,40 +394,28 @@ where
     let initial_verification = verify_completion_checks(required_checks, &initial_evidence);
     let Some(failure) = last_correctable_process_failure(&initial_result) else {
         let test_verification = process_test_verification(&initial_result, false);
-        let final_verification = reconcile_task_state_with_checks(
+        return finish_process_without_correction(
             session,
             task_id,
-            initial_result.stop_reason(),
-            required_checks,
-            &initial_evidence,
-        )
-        .map_err(ProcessFailureCorrectionError::Session)?;
-        return Ok(ProcessFailureCorrectionResult {
             initial_result,
             initial_verification,
-            correction_result: None,
-            final_verification,
+            required_checks,
+            &initial_evidence,
             test_verification,
-        });
+        );
     };
 
     let remaining_actions = max_actions.saturating_sub(initial_result.actions_taken());
     if remaining_actions < MIN_PROCESS_CORRECTION_ACTIONS {
-        let final_verification = reconcile_task_state_with_checks(
+        return finish_process_without_correction(
             session,
             task_id,
-            initial_result.stop_reason(),
-            required_checks,
-            &initial_evidence,
-        )
-        .map_err(ProcessFailureCorrectionError::Session)?;
-        return Ok(ProcessFailureCorrectionResult {
             initial_result,
             initial_verification,
-            correction_result: None,
-            final_verification,
-            test_verification: ProcessTestVerificationStatus::Failed,
-        });
+            required_checks,
+            &initial_evidence,
+            ProcessTestVerificationStatus::Failed,
+        );
     }
 
     let plan = correction_plan(
@@ -754,6 +731,58 @@ impl std::error::Error for CompletionCorrectionError {
             Self::Session(error) => Some(error),
         }
     }
+}
+
+fn finish_completion_without_correction(
+    session: &mut TaskSession,
+    task_id: Uuid,
+    initial_result: GoalTurnResult,
+    initial_verification: CompletionVerification,
+    required_checks: &[RequiredCompletionCheck],
+    initial_evidence: &[CompletionCheckEvidence],
+) -> Result<CompletionCorrectionResult, CompletionCorrectionError> {
+    let final_verification = reconcile_task_state_with_checks(
+        session,
+        task_id,
+        initial_result.stop_reason(),
+        required_checks,
+        initial_evidence,
+    )
+    .map_err(CompletionCorrectionError::Session)?;
+
+    Ok(CompletionCorrectionResult {
+        initial_result,
+        initial_verification,
+        correction_result: None,
+        final_verification,
+    })
+}
+
+fn finish_process_without_correction(
+    session: &mut TaskSession,
+    task_id: Uuid,
+    initial_result: GoalTurnResult,
+    initial_verification: CompletionVerification,
+    required_checks: &[RequiredCompletionCheck],
+    initial_evidence: &[CompletionCheckEvidence],
+    test_verification: ProcessTestVerificationStatus,
+) -> Result<ProcessFailureCorrectionResult, ProcessFailureCorrectionError> {
+    let final_verification = reconcile_task_state_with_checks(
+        session,
+        task_id,
+        initial_result.stop_reason(),
+        required_checks,
+        initial_evidence,
+    )
+    .map_err(ProcessFailureCorrectionError::Session)?;
+
+    Ok(ProcessFailureCorrectionResult {
+        initial_result,
+        initial_verification,
+        correction_result: None,
+        final_verification,
+        test_verification,
+    })
 }
 
 struct PlanDecisionSource<'a, D: ?Sized> {

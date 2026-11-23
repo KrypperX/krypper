@@ -512,3 +512,55 @@ fn reactive_default_execution_and_workspace_safety_are_unchanged() {
         TaskState::Running
     );
 }
+
+#[test]
+fn incomplete_initial_turn_does_not_request_correction() {
+    let workspace = TempWorkspace::new();
+    let (mut session, task_id, turn_id) = running_turn(&workspace.workspace, "fixture task");
+    let mut decisions = |_: &str, _: &[WorkspaceObservation]| WorkspaceAction::ListDirectory {
+        path: PathBuf::from("."),
+    };
+    let planner_calls = Rc::new(Cell::new(0usize));
+    let planner_calls_for_plan = Rc::clone(&planner_calls);
+
+    let result = run_goal_turn_with_completion_correction(
+        &mut session,
+        task_id,
+        turn_id,
+        "fixture task",
+        1,
+        None,
+        &[required_check()],
+        |_, _| {
+            evidence(
+                CompletionCheckEvidenceStatus::Passed,
+                "should not be collected",
+            )
+        },
+        |_, _, _, _, _, _| {
+            planner_calls_for_plan.set(planner_calls_for_plan.get() + 1);
+            Err(WorkspacePlanError::InvalidResponse)
+        },
+        &mut decisions,
+    )
+    .expect("run correction flow");
+
+    assert_eq!(planner_calls.get(), 0);
+    assert!(result.correction_result().is_none());
+    assert_ne!(
+        result.initial_result().stop_reason(),
+        krypper::harness::execution::GoalTurnStopReason::Completed
+    );
+    assert_ne!(
+        result.initial_result().stop_reason(),
+        krypper::harness::execution::GoalTurnStopReason::ActionCompleted
+    );
+    assert_eq!(
+        result.final_verification().status,
+        CompletionVerificationStatus::Unknown
+    );
+    assert_eq!(
+        session.get_task(task_id).expect("task").state(),
+        TaskState::Failed
+    );
+}
