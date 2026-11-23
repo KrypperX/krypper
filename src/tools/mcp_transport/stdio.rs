@@ -98,9 +98,9 @@ impl ManagedChild {
                     "[mcp-cleanup] group kill {pgid} failed: {error}; members: {}",
                     process_group_snapshot(pgid)
                 );
-                let child_kill = child.kill();
+                let _child_kill = child.kill();
                 #[cfg(all(test, target_os = "macos"))]
-                eprintln!("[mcp-cleanup] direct child fallback kill: {child_kill:?}");
+                eprintln!("[mcp-cleanup] direct child fallback kill: {_child_kill:?}");
                 if !reap(&mut child) {
                     #[cfg(all(test, target_os = "macos"))]
                     eprintln!(
@@ -140,10 +140,10 @@ fn reap(child: &mut Child) -> bool {
     while start.elapsed() < REAP_TIMEOUT {
         match child.try_wait() {
             Ok(Some(_)) => return true,
-            Err(error) => {
+            Err(_error) => {
                 #[cfg(all(test, target_os = "macos"))]
                 eprintln!(
-                    "[mcp-cleanup] try_wait for child {} failed: {error}",
+                    "[mcp-cleanup] try_wait for child {} failed: {_error}",
                     child.id()
                 );
                 return false;
