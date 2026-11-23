@@ -256,7 +256,7 @@ fn setup_help_describes_local_configuration_and_masked_credentials() {
 #[test]
 fn setup_requires_a_terminal_for_interactive_changes() {
     let directory = TempDir::new();
-    let output = run_with_input(directory.path(), &["setup"], b"1\nmodel\n");
+    let output = run(Some(directory.path()), &["setup"]);
     assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
     assert!(stderr(&output).contains("requires an interactive terminal"));
     assert!(!directory
