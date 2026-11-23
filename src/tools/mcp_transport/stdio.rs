@@ -15,23 +15,6 @@ const MAX_STDERR_BYTES: usize = 4 * 1024;
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
 const REAP_TIMEOUT: Duration = Duration::from_secs(2);
 
-#[cfg(all(test, target_os = "macos"))]
-fn process_group_snapshot(pgid: libc::pid_t) -> String {
-    let process_group = pgid.to_string();
-    Command::new("ps")
-        .args(["-A", "-o", "pid=,ppid=,pgid=,stat="])
-        .output()
-        .ok()
-        .map(|output| {
-            String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .filter(|line| line.split_whitespace().nth(2) == Some(process_group.as_str()))
-                .collect::<Vec<_>>()
-                .join(" | ")
-        })
-        .unwrap_or_else(|| "ps unavailable".to_owned())
-}
-
 pub(super) struct StdioChild {
     pub child: ManagedChild,
     pub stdin: ChildStdin,
@@ -61,22 +44,7 @@ impl ManagedChild {
         let Some(child) = self.0.as_ref() else {
             return Ok(false);
         };
-        let mut status = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
-        // SAFETY: `child` is still owned and unreaped. `status` points to writable storage,
-        // and WNOWAIT observes its exit without releasing the PID used as its process-group ID.
-        let result = unsafe {
-            libc::waitid(
-                libc::P_PID,
-                child.id() as libc::id_t,
-                status.as_mut_ptr(),
-                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-            )
-        };
-        if result != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: waitid succeeded and initialized the siginfo_t output.
-        Ok(unsafe { status.assume_init() }.si_signo != 0)
+        child_has_exited(child)
     }
 
     pub(super) fn terminate(&mut self) -> Result<(), McpLifecycleError> {
@@ -92,34 +60,25 @@ impl ManagedChild {
         // so the id cannot refer to an unrelated group.
         if unsafe { libc::kill(-pgid, libc::SIGKILL) } != 0 {
             let error = io::Error::last_os_error();
-            if error.raw_os_error() != Some(libc::ESRCH) {
-                #[cfg(all(test, target_os = "macos"))]
-                eprintln!(
-                    "[mcp-cleanup] group kill {pgid} failed: {error}; members: {}",
-                    process_group_snapshot(pgid)
-                );
-                let _child_kill = child.kill();
-                #[cfg(all(test, target_os = "macos"))]
-                eprintln!("[mcp-cleanup] direct child fallback kill: {_child_kill:?}");
+            #[cfg(target_os = "macos")]
+            let group_contains_only_exited_processes = error.raw_os_error() == Some(libc::EPERM)
+                && child_has_exited(&child).unwrap_or(false);
+            #[cfg(not(target_os = "macos"))]
+            let group_contains_only_exited_processes = false;
+            if error.raw_os_error() != Some(libc::ESRCH) && !group_contains_only_exited_processes {
+                let _ = child.kill();
                 if !reap(&mut child) {
-                    #[cfg(all(test, target_os = "macos"))]
-                    eprintln!(
-                        "[mcp-cleanup] direct child reap after group kill error failed; members: {}",
-                        process_group_snapshot(pgid)
-                    );
                     thread::spawn(move || {
                         let _ = child.wait();
                     });
                 }
                 return Err(McpLifecycleError::CleanupFailed);
             }
+            // macOS returns EPERM if the process group contains only zombies. The unreaped
+            // child still pins this PGID, and any live descendant shares a UID that the caller
+            // can signal, so a confirmed exited leader means no live group member remains.
         }
         if !reap(&mut child) {
-            #[cfg(all(test, target_os = "macos"))]
-            eprintln!(
-                "[mcp-cleanup] direct child reap after group kill failed; members: {}",
-                process_group_snapshot(pgid)
-            );
             thread::spawn(move || {
                 let _ = child.wait();
             });
@@ -135,19 +94,31 @@ impl Drop for ManagedChild {
     }
 }
 
+fn child_has_exited(child: &Child) -> io::Result<bool> {
+    let mut status = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+    // SAFETY: `child` is still owned and unreaped. `status` points to writable storage,
+    // and WNOWAIT observes its exit without releasing the PID used as its process-group ID.
+    let result = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            child.id() as libc::id_t,
+            status.as_mut_ptr(),
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: waitid succeeded and initialized the siginfo_t output.
+    Ok(unsafe { status.assume_init() }.si_signo != 0)
+}
+
 fn reap(child: &mut Child) -> bool {
     let start = Instant::now();
     while start.elapsed() < REAP_TIMEOUT {
         match child.try_wait() {
             Ok(Some(_)) => return true,
-            Err(_error) => {
-                #[cfg(all(test, target_os = "macos"))]
-                eprintln!(
-                    "[mcp-cleanup] try_wait for child {} failed: {_error}",
-                    child.id()
-                );
-                return false;
-            }
+            Err(_) => return false,
             _ => {}
         }
         thread::sleep(POLL_INTERVAL);
