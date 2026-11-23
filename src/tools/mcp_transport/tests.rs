@@ -309,7 +309,7 @@ fn eperm_with_exited_leader_and_live_descendant_fails_closed() {
     let descendant_pid_file = dir.0.join("descendant.pid");
     let config = config(
         "sleep 10 &\nprintf '%s\\n' \"$!\" > \"$1\"\nexit 0\n",
-        &dir.0.join("log"),
+        &descendant_pid_file,
         Duration::from_secs(3),
     );
     let mut stdio = spawn(
