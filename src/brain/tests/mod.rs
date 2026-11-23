@@ -203,7 +203,7 @@ fn request_body(request: &[u8]) -> Value {
 }
 
 mod completion;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 mod correction;
 mod endpoint;
 mod guidance;

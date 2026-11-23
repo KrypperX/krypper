@@ -289,10 +289,19 @@ pub(crate) fn sync_file(file: &File) -> io::Result<()> {
 }
 
 pub(crate) fn sync_directory(directory: &DirHandle) -> io::Result<()> {
-    // SAFETY: `directory` is an open directory descriptor. Directory metadata is synchronized
-    // after the rename; F_FULLFSYNC is reserved for the staged data file.
-    if unsafe { libc::fsync(directory.file().as_raw_fd()) } != 0 {
-        return Err(io::Error::last_os_error());
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: F_FULLFSYNC takes the open directory descriptor and no additional argument.
+        if unsafe { libc::fcntl(directory.file().as_raw_fd(), libc::F_FULLFSYNC) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: `directory` is an open directory descriptor and fsync takes one descriptor.
+        if unsafe { libc::fsync(directory.file().as_raw_fd()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
     }
     Ok(())
 }
