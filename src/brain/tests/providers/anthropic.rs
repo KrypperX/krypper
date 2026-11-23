@@ -89,6 +89,43 @@ fn anthropic_messages_request_uses_fixed_contract_and_normalizes_one_action() {
     );
 }
 
+
+#[test]
+fn anthropic_sse_request_preserves_auth_version_and_workspace_headers() {
+    let (address, server) = mock_server(vec![ok("event: ping\ndata: {}\n\n".to_owned())]);
+    let endpoint = format!("http://{address}/v1/messages");
+    let result = crate::brain::http::post_hosted_sse_with_headers(
+        &model_agent(),
+        ModelProvider::Anthropic,
+        &endpoint,
+        "local-anthropic-stream-key",
+        &[("anthropic-workspace-id", "wrkspc_01JwQvzr7rXLA5AGx3HKfFUJ")],
+        br#"{}"#,
+        |_| Ok(()),
+    );
+    let requests = server.join().expect("join Anthropic SSE mock server");
+    assert!(result.is_ok(), "SSE transport failed: {result:?}");
+    let request = &requests[0];
+    assert_eq!(
+        request_header(request, "x-api-key").as_deref(),
+        Some("local-anthropic-stream-key")
+    );
+    assert_eq!(request_header(request, "authorization"), None);
+    assert_eq!(
+        request_header(request, "anthropic-version").as_deref(),
+        Some("2026-10-21")
+    );
+    assert_eq!(
+        request_header(request, "anthropic-workspace-id").as_deref(),
+        Some("wrkspc_01JwQvzr7rXLA5AGx3HKfFUJ")
+    );
+    assert_eq!(
+        request_header(request, "accept").as_deref(),
+        Some("text/event-stream")
+    );
+    assert!(!request_body(request).to_string().contains("local-anthropic-stream-key"));
+}
+
 #[test]
 fn anthropic_workspace_header_is_sent_only_when_configured() {
     for workspace_id in [None, Some("wrkspc_01JwQvzr7rXLA5AGx3HKfFUJ")] {
