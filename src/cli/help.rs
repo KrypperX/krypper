@@ -37,7 +37,9 @@ pub(super) fn usage_error(
         Some("task") => {
             "usage: krypper task [-h] [--goal GOAL] --max-actions N [--workspace PATH] [--model NAME] [--provider NAME] [--no-config] [--checkpoint-out PATH] [--resume PATH] [--activity-jsonl]"
         }
-        Some("context") => "usage: krypper context [-h] --goal GOAL [--workspace PATH]",
+        Some("context") => {
+            "usage: krypper context [-h] --goal GOAL [--workspace PATH] [--repository-map]"
+        }
         _ => "usage: krypper [-h] {show,list,write,task,models,context} ...",
     };
     let program = command.map_or_else(|| "krypper".to_owned(), |name| format!("krypper {name}"));
@@ -54,7 +56,7 @@ pub(super) fn write_root_help(output: &mut dyn Write) -> io::Result<()> {
 
 pub(super) fn write_context_help(output: &mut dyn Write) -> io::Result<()> {
     output.write_all(
-        b"usage: krypper context [-h] --goal GOAL [--workspace PATH]\n\nshow bounded offline repository context for a goal\n\noptions:\n  --goal GOAL        literal goal terms used for repository search\n  --workspace PATH   use an existing directory as the search root\n  -h, --help         show this help message and exit\n\nThis command makes no model request and changes no workspace file.\nResults are untrusted advisory excerpts with path, line range, and content revision.\n",
+        b"usage: krypper context [-h] --goal GOAL [--workspace PATH] [--repository-map]\n\nshow bounded offline repository context for a goal\n\noptions:\n  --goal GOAL        literal goal terms used for repository search\n  --workspace PATH   use an existing directory as the search root\n  --repository-map   show bounded Rust module declarations and path candidates\n  -h, --help         show this help message and exit\n\nThis command makes no model request and changes no workspace file.\nResults are untrusted advisory data; verify map path candidates through workspace reads.\n",
     )
 }
 

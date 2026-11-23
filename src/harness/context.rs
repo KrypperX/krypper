@@ -79,24 +79,43 @@ pub fn collect_repository_context(
 ) -> Result<RepositoryContext, RepositoryContextError> {
     collect_repository_context_with_sources(
         goal,
-        |query| {
-            session
-                .search_workspace_tree_text(task_id, turn_id, Path::new("."), query)
-                .map_err(|error| {
-                    let message = error.to_string();
-                    if message.contains("not running") || message.contains("was not found") {
-                        RepositoryContextError::TaskUnavailable
-                    } else {
-                        RepositoryContextError::SearchFailed(message)
-                    }
-                })
-        },
+        |query| search_workspace(session, task_id, turn_id, query),
         |path| {
             session
                 .read_workspace_file(task_id, turn_id, path)
                 .map_err(|error| RepositoryContextError::SearchFailed(error.to_string()))
         },
     )
+}
+
+pub(super) fn search_workspace(
+    session: &TaskSession,
+    task_id: Uuid,
+    turn_id: Uuid,
+    query: &str,
+) -> Result<Vec<WorkspaceSearchLocation>, RepositoryContextError> {
+    session
+        .search_workspace_tree_text(task_id, turn_id, Path::new("."), query)
+        .map_err(|error| workspace_error(error.to_string()))
+}
+
+pub(super) fn read_workspace(
+    session: &TaskSession,
+    task_id: Uuid,
+    turn_id: Uuid,
+    path: &Path,
+) -> Result<String, RepositoryContextError> {
+    session
+        .read_workspace_file(task_id, turn_id, path)
+        .map_err(|error| workspace_error(error.to_string()))
+}
+
+fn workspace_error(message: String) -> RepositoryContextError {
+    if message.contains("not running") || message.contains("was not found") {
+        RepositoryContextError::TaskUnavailable
+    } else {
+        RepositoryContextError::SearchFailed(message)
+    }
 }
 
 fn collect_repository_context_with_sources<F, G>(
@@ -172,7 +191,7 @@ fn goal_queries(goal: &str) -> Vec<String> {
     queries
 }
 
-fn is_oversized_error(message: &str) -> bool {
+pub(super) fn is_oversized_error(message: &str) -> bool {
     message.contains("exceeds 1 MiB") || message.contains("16 MiB")
 }
 
@@ -272,7 +291,7 @@ fn sanitize_snippet_line(line: &str, neutralized: &mut usize) -> String {
     sanitized
 }
 
-fn revision_of(contents: &str) -> String {
+pub(super) fn revision_of(contents: &str) -> String {
     digest::digest(&digest::SHA256, contents.as_bytes())
         .as_ref()
         .iter()

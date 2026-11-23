@@ -3,6 +3,7 @@ use super::help::{
     write_context_help,
 };
 use crate::harness::context::collect_repository_context;
+use crate::harness::repository_map::collect_repository_module_map;
 use crate::task_lifecycle::{TaskSession, TaskState, TurnState};
 use std::ffi::OsString;
 use std::io::{self, Write};
@@ -20,6 +21,7 @@ pub(super) fn run(
 
     let mut goal = None;
     let mut workspace = None;
+    let mut repository_map = false;
     let mut index = 0;
     while index < arguments.len() {
         let argument = arguments[index].to_string_lossy();
@@ -53,6 +55,16 @@ pub(super) fn run(
                     );
                 }
                 index += 2;
+            }
+            "--repository-map" => {
+                if std::mem::replace(&mut repository_map, true) {
+                    return usage_error(
+                        error,
+                        Some("context"),
+                        "--repository-map may be provided only once",
+                    );
+                }
+                index += 1;
             }
             _ if starts_with_option(&arguments[index]) => {
                 return usage_error(
@@ -111,12 +123,20 @@ pub(super) fn run(
         turn_id
     };
 
-    let context = match collect_repository_context(&session, task_id, turn_id, &goal) {
-        Ok(context) => context,
-        Err(cause) => return usage_error(error, Some("context"), &cause.to_string()),
-    };
-    let encoded = serde_json::to_string_pretty(&context)
-        .map_err(|cause| io::Error::other(format!("encode repository context: {cause}")))?;
+    let encoded = if repository_map {
+        let context = match collect_repository_module_map(&session, task_id, turn_id, &goal) {
+            Ok(context) => context,
+            Err(cause) => return usage_error(error, Some("context"), &cause.to_string()),
+        };
+        serde_json::to_string_pretty(&context)
+    } else {
+        let context = match collect_repository_context(&session, task_id, turn_id, &goal) {
+            Ok(context) => context,
+            Err(cause) => return usage_error(error, Some("context"), &cause.to_string()),
+        };
+        serde_json::to_string_pretty(&context)
+    }
+    .map_err(|cause| io::Error::other(format!("encode repository context: {cause}")))?;
     writeln!(output, "{encoded}")?;
     Ok(0)
 }

@@ -23,7 +23,7 @@ The executable is `target/release/krypper`. Run it from the directory you want t
 | `krypper write <path> <text>` | Create a new file |
 | `krypper task --goal <goal> --max-actions <n>` | Run a bounded task |
 | `krypper models` | Browse the offline model catalog |
-| `krypper context --goal <goal>` | Show bounded offline repository context |
+| `krypper context --goal <goal>` | Show bounded offline repository context, or an opt-in Rust module map |
 
 ## Quick start
 
