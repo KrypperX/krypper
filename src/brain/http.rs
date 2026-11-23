@@ -92,6 +92,19 @@ pub(crate) fn model_agent() -> Agent {
     Agent::new_with_config(config)
 }
 
+fn apply_auth(
+    provider: ModelProvider,
+    request: ureq::RequestBuilder<ureq::typestate::WithBody>,
+    api_key: &str,
+) -> ureq::RequestBuilder<ureq::typestate::WithBody> {
+    if provider == ModelProvider::Gemini {
+        request.header("x-goog-api-key", api_key)
+    } else {
+        let authorization = format!("Bearer {api_key}");
+        request.header("Authorization", authorization)
+    }
+}
+
 pub(crate) fn post_chat(
     agent: &Agent,
     address: SocketAddr,
@@ -157,17 +170,18 @@ where
     if body.len() > MAX_MODEL_REQUEST_BYTES {
         return Err(ModelError::RequestTooLarge);
     }
-    let authorization = format!("Bearer {api_key}");
-    let request = agent
-        .post(endpoint)
-        .header("Content-Type", "application/json")
-        .header("Accept", "text/event-stream");
+    let request = apply_auth(
+        provider,
+        agent
+            .post(endpoint)
+            .header("Content-Type", "application/json")
+            .header("Accept", "text/event-stream"),
+        api_key,
+    );
     let request = if provider == ModelProvider::Anthropic {
-        request
-            .header("x-api-key", api_key)
-            .header("anthropic-version", providers::ANTHROPIC_API_VERSION)
+        request.header("anthropic-version", providers::ANTHROPIC_API_VERSION)
     } else {
-        request.header("Authorization", &authorization)
+        request
     };
     let request = extra_headers
         .iter()
@@ -263,15 +277,13 @@ pub(crate) fn post_hosted_with_headers(
     if body.len() > MAX_MODEL_REQUEST_BYTES {
         return Err(ModelError::RequestTooLarge);
     }
-    let request = agent
-        .post(endpoint)
-        .header("Content-Type", "application/json");
-    let request = if provider == ModelProvider::Gemini {
-        request.header("x-goog-api-key", api_key)
-    } else {
-        let authorization = format!("Bearer {api_key}");
-        request.header("Authorization", &authorization)
-    };
+    let request = apply_auth(
+        provider,
+        agent
+            .post(endpoint)
+            .header("Content-Type", "application/json"),
+        api_key,
+    );
     let request = match api_version {
         Some(version) => request.header("anthropic-version", version),
         None => request,

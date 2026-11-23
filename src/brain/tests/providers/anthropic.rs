@@ -106,10 +106,10 @@ fn anthropic_sse_request_preserves_auth_version_and_workspace_headers() {
     assert!(result.is_ok(), "SSE transport failed: {result:?}");
     let request = &requests[0];
     assert_eq!(
-        request_header(request, "x-api-key").as_deref(),
-        Some("local-anthropic-stream-key")
+        request_header(request, "authorization").as_deref(),
+        Some("Bearer local-anthropic-stream-key")
     );
-    assert_eq!(request_header(request, "authorization"), None);
+    assert_eq!(request_header(request, "x-api-key"), None);
     assert_eq!(
         request_header(request, "anthropic-version").as_deref(),
         Some("2026-10-21")
