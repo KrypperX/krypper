@@ -1,6 +1,7 @@
 //! Model selection: the user configuration defaults and the provider decision source.
 
 use super::config::{config_path, load_model_defaults};
+use super::provider_profiles::{is_profile_id_candidate, load_provider_profiles, selected_profile};
 use super::settings::{load_credentials, user_settings_paths, CredentialStore};
 use crate::brain::{
     provider_descriptor, validate_model_name_for_provider, AdapterId, AuthFieldRole,
@@ -17,7 +18,7 @@ use std::net::SocketAddr;
 /// model requests without the person seeing which model and file selected it.
 pub(super) fn configured_model_selection(
     error: &mut dyn Write,
-) -> Result<Option<(String, Option<ModelProvider>)>, String> {
+) -> Result<Option<(String, Option<String>)>, String> {
     let Some(path) = config_path(
         std::env::var_os("KRYPPER_CONFIG"),
         std::env::var_os("XDG_CONFIG_HOME"),
@@ -29,15 +30,22 @@ pub(super) fn configured_model_selection(
     let Some(defaults) = load_model_defaults(&path)? else {
         return Ok(None);
     };
-    let provider = match defaults.provider.as_deref() {
-        Some(name) => Some(ModelProvider::parse(name).ok_or_else(|| {
-            format!(
-                "invalid config file '{}': unsupported provider '{name}'",
-                defaults.path.display()
-            )
-        })?),
-        None => None,
-    };
+    if defaults
+        .provider
+        .as_deref()
+        .is_some_and(is_profile_id_candidate)
+    {
+        let user_model_path = user_settings_paths()
+            .map_err(|_| "cannot locate per-user settings for provider profiles".to_owned())?
+            .map(|paths| paths.model);
+        if user_model_path.as_deref() != Some(defaults.path.as_path()) {
+            return Err(
+                "custom provider profiles can be selected from the per-user model config or with explicit --provider, not from KRYPPER_CONFIG"
+                    .to_owned(),
+            );
+        }
+    }
+    let provider = defaults.provider.clone();
     let _ = writeln!(
         error,
         "krypper: using model '{}' (provider: {}) from {}; pass --no-config to ignore it",
@@ -58,9 +66,40 @@ pub(super) fn prepare_model_source(
     prepare_model_source_with_credentials(model, provider, action_budget, ollama_endpoint, false)
 }
 
+#[cfg(test)]
 pub(super) fn prepare_model_source_with_credentials(
     model: Option<String>,
     provider: Option<ModelProvider>,
+    action_budget: usize,
+    ollama_endpoint: SocketAddr,
+    use_saved_credentials: bool,
+) -> Result<Option<ModelDecisionSource>, &'static str> {
+    prepare_model_source_for_selection(
+        model,
+        provider.map(ProviderSelection::BuiltIn),
+        action_budget,
+        ollama_endpoint,
+        use_saved_credentials,
+    )
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum ProviderSelection {
+    BuiltIn(ModelProvider),
+    Profile(String),
+}
+
+pub(super) fn parse_provider_selection(value: &str) -> Option<ProviderSelection> {
+    ModelProvider::parse(value)
+        .map(ProviderSelection::BuiltIn)
+        .or_else(|| {
+            is_profile_id_candidate(value).then(|| ProviderSelection::Profile(value.to_owned()))
+        })
+}
+
+pub(super) fn prepare_model_source_for_selection(
+    model: Option<String>,
+    provider: Option<ProviderSelection>,
     action_budget: usize,
     ollama_endpoint: SocketAddr,
     use_saved_credentials: bool,
@@ -72,82 +111,115 @@ pub(super) fn prepare_model_source_with_credentials(
             Ok(None)
         };
     };
-    let provider = provider.unwrap_or(ModelProvider::Ollama);
-    validate_model_name_for_provider(&model, provider)?;
+    let provider = provider.unwrap_or(ProviderSelection::BuiltIn(ModelProvider::Ollama));
     let mut credential_resolver = CredentialResolver::new(use_saved_credentials);
-    let source_credentials = match provider {
-        ModelProvider::Ollama => ProviderSourceCredentials::None,
-        ModelProvider::Gemini
-        | ModelProvider::OpenAi
-        | ModelProvider::Xai
-        | ModelProvider::Anthropic => ProviderSourceCredentials::HostedApiKey(hosted_api_key_for(
-            provider,
-            &mut credential_resolver,
-        )?),
-        ModelProvider::OpenAiCompatible(compatible_provider) => {
-            let credentials = match compatible_provider {
-                OpenAiCompatibleProvider::Cloudflare => {
-                    let account_id = required_auth_field(
-                        provider,
-                        AuthFieldRole::CloudflareAccountId,
-                        &mut credential_resolver,
-                    )?;
-                    let account_id = CloudflareAccountId::try_from(account_id.as_str())?;
-                    let api_token = hosted_api_key_for(provider, &mut credential_resolver)?;
-                    OpenAiCompatibleCredentials::Cloudflare {
-                        account_id,
-                        api_token,
-                    }
-                }
-                OpenAiCompatibleProvider::CloudflareAiGateway => {
-                    let account_id = required_auth_field(
-                        provider,
-                        AuthFieldRole::CloudflareAccountId,
-                        &mut credential_resolver,
-                    )?;
-                    let account_id = CloudflareAccountId::try_from(account_id.as_str())?;
-                    let api_token = hosted_api_key_for(provider, &mut credential_resolver)?;
-                    let gateway_id =
-                        cloudflare_gateway_id_from_env(&mut credential_resolver, provider)?;
-                    OpenAiCompatibleCredentials::CloudflareAiGateway {
-                        account_id,
-                        api_token,
-                        gateway_id,
-                    }
-                }
-                OpenAiCompatibleProvider::Groq => OpenAiCompatibleCredentials::Groq {
-                    api_key: hosted_api_key_for(provider, &mut credential_resolver)?,
-                },
-                OpenAiCompatibleProvider::OpenRouter => OpenAiCompatibleCredentials::OpenRouter {
-                    api_key: hosted_api_key_for(provider, &mut credential_resolver)?,
-                },
-                OpenAiCompatibleProvider::DeepSeek => OpenAiCompatibleCredentials::DeepSeek {
-                    api_key: hosted_api_key_for(provider, &mut credential_resolver)?,
-                },
-                OpenAiCompatibleProvider::Zai => OpenAiCompatibleCredentials::Zai {
-                    api_key: hosted_api_key_for(provider, &mut credential_resolver)?,
-                },
-                OpenAiCompatibleProvider::Mistral => OpenAiCompatibleCredentials::Mistral {
-                    api_key: hosted_api_key_for(provider, &mut credential_resolver)?,
-                },
+    let source = match provider {
+        ProviderSelection::Profile(profile_id) => {
+            let paths = user_settings_paths()
+                .map_err(|_| "cannot locate per-user provider profiles")?
+                .ok_or("per-user provider profiles are unavailable")?;
+            let profiles = load_provider_profiles(&paths.provider_profiles)
+                .map_err(|_| "cannot load per-user provider profiles; inspect per-user settings")?;
+            let (protocol, endpoint, credential_name) =
+                selected_profile(&profiles, &profile_id, &model)?;
+            let credentials = match credential_name {
+                Some(name) => ProviderSourceCredentials::HostedApiKey(hosted_api_key(
+                    &name,
+                    "provider profile API key must be set and nonempty",
+                    &mut credential_resolver,
+                )?),
+                None => ProviderSourceCredentials::None,
             };
-            ProviderSourceCredentials::OpenAiCompatible(credentials)
+            let registry = ProviderDecisionSourceRegistry::with_builtins();
+            registry
+                .create(ProviderSourceConfig::for_profile(
+                    protocol,
+                    endpoint,
+                    model,
+                    action_budget,
+                    ollama_endpoint,
+                    credentials,
+                ))
+                .map_err(|error| error.message())?
+        }
+        ProviderSelection::BuiltIn(provider) => {
+            validate_model_name_for_provider(&model, provider)?;
+            let source_credentials = match provider {
+                ModelProvider::Ollama => ProviderSourceCredentials::None,
+                ModelProvider::Gemini
+                | ModelProvider::OpenAi
+                | ModelProvider::Xai
+                | ModelProvider::Anthropic => ProviderSourceCredentials::HostedApiKey(
+                    hosted_api_key_for(provider, &mut credential_resolver)?,
+                ),
+                ModelProvider::OpenAiCompatible(compatible_provider) => {
+                    let credentials = match compatible_provider {
+                        OpenAiCompatibleProvider::Cloudflare => {
+                            let account_id = required_auth_field(
+                                provider,
+                                AuthFieldRole::CloudflareAccountId,
+                                &mut credential_resolver,
+                            )?;
+                            let account_id = CloudflareAccountId::try_from(account_id.as_str())?;
+                            let api_token = hosted_api_key_for(provider, &mut credential_resolver)?;
+                            OpenAiCompatibleCredentials::Cloudflare {
+                                account_id,
+                                api_token,
+                            }
+                        }
+                        OpenAiCompatibleProvider::CloudflareAiGateway => {
+                            let account_id = required_auth_field(
+                                provider,
+                                AuthFieldRole::CloudflareAccountId,
+                                &mut credential_resolver,
+                            )?;
+                            let account_id = CloudflareAccountId::try_from(account_id.as_str())?;
+                            let api_token = hosted_api_key_for(provider, &mut credential_resolver)?;
+                            let gateway_id =
+                                cloudflare_gateway_id_from_env(&mut credential_resolver, provider)?;
+                            OpenAiCompatibleCredentials::CloudflareAiGateway {
+                                account_id,
+                                api_token,
+                                gateway_id,
+                            }
+                        }
+                        OpenAiCompatibleProvider::Groq => OpenAiCompatibleCredentials::Groq {
+                            api_key: hosted_api_key_for(provider, &mut credential_resolver)?,
+                        },
+                        OpenAiCompatibleProvider::OpenRouter => {
+                            OpenAiCompatibleCredentials::OpenRouter {
+                                api_key: hosted_api_key_for(provider, &mut credential_resolver)?,
+                            }
+                        }
+                        OpenAiCompatibleProvider::DeepSeek => {
+                            OpenAiCompatibleCredentials::DeepSeek {
+                                api_key: hosted_api_key_for(provider, &mut credential_resolver)?,
+                            }
+                        }
+                        OpenAiCompatibleProvider::Zai => OpenAiCompatibleCredentials::Zai {
+                            api_key: hosted_api_key_for(provider, &mut credential_resolver)?,
+                        },
+                        OpenAiCompatibleProvider::Mistral => OpenAiCompatibleCredentials::Mistral {
+                            api_key: hosted_api_key_for(provider, &mut credential_resolver)?,
+                        },
+                    };
+                    ProviderSourceCredentials::OpenAiCompatible(credentials)
+                }
+            };
+            let registry = ProviderDecisionSourceRegistry::with_builtins();
+            let source = registry
+                .create(ProviderSourceConfig::new(
+                    provider,
+                    model,
+                    action_budget,
+                    ollama_endpoint,
+                    source_credentials,
+                ))
+                .map_err(|error| error.message())?;
+            apply_anthropic_workspace_id(source, &mut credential_resolver)?
         }
     };
-    let registry = ProviderDecisionSourceRegistry::with_builtins();
-    let source = registry
-        .create(ProviderSourceConfig::new(
-            provider,
-            model,
-            action_budget,
-            ollama_endpoint,
-            source_credentials,
-        ))
-        .map_err(|error| error.message())?;
-    Ok(Some(apply_anthropic_workspace_id(
-        source,
-        &mut credential_resolver,
-    )?))
+    Ok(Some(source))
 }
 
 /// Applies the optional `ANTHROPIC_WORKSPACE_ID` to an Anthropic source.
@@ -211,7 +283,7 @@ fn configured_value_from_sources(
 }
 
 fn hosted_api_key(
-    name: &'static str,
+    name: &str,
     missing_message: &'static str,
     credentials: &mut CredentialResolver,
 ) -> Result<String, &'static str> {
@@ -294,7 +366,7 @@ impl CredentialResolver {
 
     fn required(
         &mut self,
-        name: &'static str,
+        name: &str,
         missing_message: &'static str,
     ) -> Result<String, &'static str> {
         match std::env::var(name) {

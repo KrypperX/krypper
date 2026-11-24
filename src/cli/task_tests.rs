@@ -1,5 +1,4 @@
 use super::{read_repository_context_json, run_task_with_endpoint, run_task_with_selection_loader};
-use crate::brain::ModelProvider;
 use serde_json::{json, Value};
 use std::ffi::OsString;
 use std::fs;
@@ -719,11 +718,7 @@ fn verified_cli_rejects_configured_hosted_provider_before_credential_lookup() {
             let Some(defaults) = super::super::config::load_model_defaults(&config_path)? else {
                 return Ok(None);
             };
-            let provider = defaults
-                .provider
-                .as_deref()
-                .map(ModelProvider::parse)
-                .expect("fixture provider is supported");
+            let provider = defaults.provider;
             writeln!(
                 stderr,
                 "using model defaults from {}",

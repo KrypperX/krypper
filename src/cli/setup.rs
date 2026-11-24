@@ -2,6 +2,7 @@
 
 use super::config::{load_model_defaults, ModelDefaults};
 use super::help::{usage_error, write_setup_help};
+use super::provider_profiles::load_provider_profiles;
 use super::settings::{
     load_credentials, remove_settings, save_credentials, save_model_defaults, user_settings_paths,
     valid_credential, CredentialStore, UserSettingsPaths,
@@ -98,11 +99,19 @@ fn show_status(output: &mut dyn Write) -> io::Result<i32> {
         }
     };
     let credential_count = credentials.as_ref().map_or(0, |store| store.len());
+    let profile_count = match load_provider_profiles(&paths.provider_profiles) {
+        Ok(profiles) => profiles.len(),
+        Err(message) => {
+            writeln!(output, "krypper setup: {message}")?;
+            return Ok(2);
+        }
+    };
 
     write_status(
         output,
         defaults.as_ref(),
         credential_count,
+        profile_count,
         &paths,
         has_config_override(),
     )?;
@@ -113,6 +122,7 @@ fn write_status(
     output: &mut dyn Write,
     defaults: Option<&ModelDefaults>,
     credential_count: usize,
+    profile_count: usize,
     paths: &UserSettingsPaths,
     config_override: bool,
 ) -> io::Result<()> {
@@ -144,6 +154,15 @@ fn write_status(
             "KRYPPER_CONFIG is set and overrides these saved model defaults for task runs."
         )?;
     }
+    if profile_count == 0 {
+        writeln!(output, "Provider profiles: none")?;
+    } else {
+        writeln!(
+            output,
+            "Provider profiles: {profile_count} configured ({})",
+            paths.provider_profiles.display()
+        )?;
+    }
     writeln!(
         output,
         "Environment values override saved credentials. Use `krypper setup --reset` to remove these per-user settings."
@@ -160,7 +179,7 @@ fn reset_settings(
     if !prompt_yes_no(
         input,
         output,
-        "Remove saved provider/model defaults and stored credentials from this user account? [y/N] ",
+        "Remove saved defaults, provider profiles, and stored credentials from this user account? [y/N] ",
         false,
     )? {
         writeln!(output, "No settings removed.")?;
@@ -712,6 +731,7 @@ mod tests {
         let paths = UserSettingsPaths {
             model: PathBuf::from("/user/config/krypper/config.toml"),
             credentials: PathBuf::from("/user/config/krypper/credentials.json"),
+            provider_profiles: PathBuf::from("/user/config/krypper/provider-profiles.json"),
         };
         let defaults = ModelDefaults {
             model: "test-model".to_owned(),
@@ -723,6 +743,7 @@ mod tests {
             &mut output,
             Some(&defaults),
             credentials.len(),
+            0,
             &paths,
             false,
         )
@@ -740,6 +761,7 @@ mod tests {
         let paths = UserSettingsPaths {
             model: PathBuf::from("/user/config/krypper/config.toml"),
             credentials: PathBuf::from("/user/config/krypper/credentials.json"),
+            provider_profiles: PathBuf::from("/user/config/krypper/provider-profiles.json"),
         };
         let provider = provider_descriptors()
             .iter()

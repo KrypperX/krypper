@@ -57,6 +57,15 @@ impl AnthropicDecisionSource {
         Self::with_url(model, api_key, action_budget, endpoint.to_owned(), &[])
     }
 
+    pub(crate) fn with_profile_endpoint(
+        model: impl Into<String>,
+        api_key: String,
+        action_budget: usize,
+        endpoint: String,
+    ) -> Self {
+        Self::with_url(model, api_key, action_budget, endpoint, &[])
+    }
+
     #[cfg(test)]
     pub(crate) fn with_endpoint(
         model: impl Into<String>,

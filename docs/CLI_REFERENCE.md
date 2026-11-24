@@ -526,11 +526,70 @@ flags ignore the saved model/provider pair but can still use saved credentials.
 `KRYPPER_CONFIG` overrides the model defaults read by `task`; `krypper setup`
 always writes to the ordinary per-user configuration directory.
 
+### Trusted provider profiles
+
+To connect an endpoint that uses one of Krypper's existing protocols, create
+`provider-profiles.json` in the ordinary per-user configuration directory
+(`$XDG_CONFIG_HOME/krypper/` or `$HOME/.config/krypper/`). This file is never
+read from `KRYPPER_CONFIG` or the task workspace. On Unix, keep it private with
+mode `0600`; `krypper setup --status` reports the profile count, and
+`krypper setup --reset` removes profiles, defaults, and saved credentials.
+
+Example OpenAI-compatible profile:
+
+```json
+{
+  "version": 1,
+  "profiles": [
+    {
+      "id": "my-worker",
+      "label": "My Worker",
+      "enabled": true,
+      "protocol": "openai-compatible-chat",
+      "endpoint": "https://example.invalid/v1/chat/completions",
+      "credential_ref": "profile:my-worker:api-key"
+    }
+  ]
+}
+```
+
+Profiles can use `openai-compatible-chat`, `openai-responses`,
+`anthropic-messages`, `gemini-generate-content`, or `ollama-chat`. The first
+three hosted endpoint fields are complete request URLs. Gemini uses an API
+base ending at its version path, such as `https://example.invalid/v1beta`; the
+adapter adds the validated model route. Ollama uses its server base, such as
+`http://127.0.0.1:11434`; the adapter adds `/api/chat`. Endpoints must use
+HTTPS or HTTP on a loopback host, and cannot contain userinfo, query strings,
+fragments, or control characters. Proxies are disabled and redirects are not
+followed.
+
+Hosted profiles use the API key format already defined by their protocol
+adapter. For `id: "my-worker"`, set `KRYPPER_PROVIDER_MY_WORKER_API_KEY` in the
+environment, or save a value under that exact name in the separate per-user
+`credentials.json`. Environment values override saved values. The profile
+file stores only the fixed credential reference; it cannot define headers,
+authentication schemes, aliases, endpoint templates, or code.
+
+Select a profile explicitly with `--provider my-worker` and a model. A saved
+`provider = "my-worker"` default in the existing model configuration is also
+supported when it is in the ordinary per-user model configuration. A
+`KRYPPER_CONFIG` override can select built-in providers but cannot select a
+custom profile; use `--provider` or the per-user model configuration. Either
+choice is the user's explicit opt-in to send task data to that profile.
+`--no-config` ignores saved model defaults and saved credentials;
+an explicit `--provider my-worker` still loads its per-user profile and can use
+the profile's environment variable. Profile editing is file-based in this
+phase; interactive setup management is planned for the later CLI/TUI phase.
+
+The JSON schema is versioned and strict. It supports at most 16 profiles and
+64 KiB, rejects unknown fields and built-in selector conflicts, and fails
+before a provider request when a profile is invalid or disabled.
+
 Use `krypper setup --status` to show the saved provider/model and whether a
 credential file exists. It never displays credential values. Use
-`krypper setup --reset` to confirm and remove the per-user defaults and
-credential file. Removing a file does not erase copies retained by filesystem
-snapshots or backups.
+`krypper setup --reset` to confirm and remove the per-user defaults, provider
+profiles, and credential file. Removing a file does not erase copies retained
+by filesystem snapshots or backups.
 
 Setup offers a connection test only after saving the settings. If accepted, it
 sends one short request using an empty temporary workspace. Hosted requests may
@@ -544,7 +603,7 @@ if you had typed those flags. Without the file, nothing changes.
 
 ```toml
 # ~/.config/krypper/config.toml
-provider = "ollama"   # optional; same names as --provider, default ollama
+provider = "ollama"   # optional; built-in selector or enabled profile ID
 model = "qwen3"       # required when the file sets anything
 ```
 

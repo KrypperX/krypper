@@ -212,6 +212,68 @@ fn decision_source_registry_builds_each_builtin_protocol_adapter() {
 }
 
 #[test]
+fn decision_source_registry_builds_profiles_for_every_existing_protocol_family() {
+    use super::{
+        AdapterId, DecisionProtocol, ProviderDecisionSourceRegistry, ProviderSourceConfig,
+        ProviderSourceCredentials,
+    };
+
+    let registry = ProviderDecisionSourceRegistry::with_builtins();
+    let socket = "127.0.0.1:11434".parse().expect("socket address");
+    let cases = [
+        (
+            DecisionProtocol::OllamaChat,
+            "http://127.0.0.1:11434/api/chat",
+            "qwen3",
+            ProviderSourceCredentials::None,
+            AdapterId::OLLAMA,
+        ),
+        (
+            DecisionProtocol::GeminiGenerateContent,
+            "https://models.example/v1beta/models/gemini-2:generateContent",
+            "gemini-2",
+            ProviderSourceCredentials::HostedApiKey("test-key".to_owned()),
+            AdapterId::GEMINI,
+        ),
+        (
+            DecisionProtocol::Responses,
+            "https://models.example/v1/responses",
+            "gpt-test",
+            ProviderSourceCredentials::HostedApiKey("test-key".to_owned()),
+            AdapterId::RESPONSES,
+        ),
+        (
+            DecisionProtocol::AnthropicMessages,
+            "https://models.example/v1/messages",
+            "claude-test",
+            ProviderSourceCredentials::HostedApiKey("test-key".to_owned()),
+            AdapterId::ANTHROPIC,
+        ),
+        (
+            DecisionProtocol::CompatibleChat,
+            "https://models.example/v1/chat/completions",
+            "custom-model",
+            ProviderSourceCredentials::HostedApiKey("test-key".to_owned()),
+            AdapterId::OPENAI_COMPATIBLE,
+        ),
+    ];
+
+    for (protocol, endpoint, model, credentials, expected_adapter) in cases {
+        let source = registry
+            .create(ProviderSourceConfig::for_profile(
+                protocol,
+                endpoint.to_owned(),
+                model.to_owned(),
+                1,
+                socket,
+                credentials,
+            ))
+            .expect("profile uses registered protocol adapter");
+        assert_eq!(source.adapter_id(), expected_adapter);
+    }
+}
+
+#[test]
 fn decision_source_registry_rejects_credentials_for_a_different_provider() {
     use super::{
         ModelProvider, OpenAiCompatibleCredentials, OpenAiCompatibleProvider,

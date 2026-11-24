@@ -26,14 +26,15 @@ pub use decision::OllamaDecisionSource;
 pub use plan::{WorkspacePlan, WorkspacePlanError};
 pub use reflection::BrainReflectionError;
 
-pub(crate) use action::{action_from_error, action_from_provider_call};
+pub(crate) use action::{action_from_call, action_from_error, action_from_provider_call};
 pub(crate) use decision::consume_decision_budget;
 pub(crate) use dto::{OllamaChatResponse, OllamaMessageRole};
 pub use errors::ModelError;
 #[allow(unused_imports)] // some re-exports are used only by tests
 pub(crate) use http::{
-    model_agent, post_chat, post_hosted, post_hosted_sse, post_hosted_sse_with_headers,
-    post_hosted_with_headers, post_responses_text_stream, validate_endpoint,
+    model_agent, post_chat, post_chat_at_endpoint, post_hosted, post_hosted_sse,
+    post_hosted_sse_with_headers, post_hosted_with_headers, post_profile_with_bearer,
+    post_responses_text_stream, validate_endpoint,
 };
 pub(crate) use limits::{OLLAMA_ADDRESS, SYSTEM_INSTRUCTIONS};
 pub(crate) use parse::{parse_model_plan_response, parse_responses_response};
@@ -50,9 +51,9 @@ pub use providers::{
 pub(crate) use providers::{
     is_provider_credential_name, provider_catalog_matches, provider_descriptor,
     provider_descriptor_by_selector, provider_descriptors, AdapterId, AuthFieldRole,
-    CloudflareAccountId, CloudflareGatewayId, ModelDecisionSource, OpenAiCompatibleCredentials,
-    ProviderAuthField, ProviderDecisionSourceRegistry, ProviderDescriptor, ProviderEndpoint,
-    ProviderSourceConfig, ProviderSourceCredentials,
+    CloudflareAccountId, CloudflareGatewayId, DecisionProtocol, ModelDecisionSource,
+    OpenAiCompatibleCredentials, ProviderAuthField, ProviderDecisionSourceRegistry,
+    ProviderDescriptor, ProviderEndpoint, ProviderSourceConfig, ProviderSourceCredentials,
 };
 #[cfg(test)]
 pub(crate) use request::{build_anthropic_request, build_gemini_request, build_responses_request};
@@ -62,12 +63,10 @@ pub use request::{
 };
 pub(crate) use request::{
     enable_responses_streaming, encode_model_request, gemini_generate_content_endpoint,
-    validate_model_name_for_provider,
+    validate_model_name, validate_model_name_for_provider,
 };
 pub(crate) use tools_schema::{tool_definitions, workspace_tool_definitions};
 
-#[cfg(test)]
-pub(crate) use action::action_from_call;
 #[cfg(test)]
 pub(crate) use limits::MAX_MODEL_REQUEST_BYTES;
 #[cfg(test)]

@@ -135,6 +135,37 @@ pub(crate) fn post_chat(
     Ok(body)
 }
 
+pub(crate) fn post_chat_at_endpoint(
+    agent: &Agent,
+    endpoint: &str,
+    body: &[u8],
+) -> Result<Vec<u8>, ModelError> {
+    validate_endpoint(endpoint)?;
+    if body.len() > MAX_MODEL_REQUEST_BYTES {
+        return Err(ModelError::RequestTooLarge);
+    }
+    let response = agent
+        .post(endpoint)
+        .header("Content-Type", "application/json")
+        .send(body)
+        .map_err(|error| match error {
+            ureq::Error::StatusCode(status) => ModelError::HttpStatus(status),
+            ureq::Error::ConnectionFailed => ModelError::ServiceUnavailable,
+            _ => ModelError::Transport("profile HTTP transport failure".to_owned()),
+        })?;
+    let mut response_body = Vec::new();
+    response
+        .into_body()
+        .as_reader()
+        .take(MAX_MODEL_RESPONSE_BYTES.saturating_add(1) as u64)
+        .read_to_end(&mut response_body)
+        .map_err(|_| ModelError::Transport("profile HTTP response read failed".to_owned()))?;
+    if response_body.len() > MAX_MODEL_RESPONSE_BYTES {
+        return Err(ModelError::ResponseTooLarge);
+    }
+    Ok(response_body)
+}
+
 pub(crate) fn post_hosted_sse<F>(
     agent: &Agent,
     provider: ModelProvider,
@@ -256,6 +287,42 @@ pub(crate) fn post_hosted(
     body: &[u8],
 ) -> Result<Vec<u8>, ModelError> {
     post_hosted_with_headers(agent, provider, endpoint, api_key, api_version, &[], body)
+}
+
+/// Sends one generic Bearer-authenticated profile request after validating
+/// the exact configured endpoint. Errors use provider-neutral variants so a
+/// custom profile is never attributed to a built-in provider.
+pub(crate) fn post_profile_with_bearer(
+    agent: &Agent,
+    endpoint: &str,
+    api_key: &str,
+    body: &[u8],
+) -> Result<Vec<u8>, ModelError> {
+    validate_endpoint(endpoint)?;
+    if body.len() > MAX_MODEL_REQUEST_BYTES {
+        return Err(ModelError::RequestTooLarge);
+    }
+    let response = agent
+        .post(endpoint)
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {api_key}"))
+        .send(body)
+        .map_err(|error| match error {
+            ureq::Error::StatusCode(status) => ModelError::HttpStatus(status),
+            ureq::Error::ConnectionFailed => ModelError::ServiceUnavailable,
+            _ => ModelError::Transport("provider profile request failed".to_owned()),
+        })?;
+    let mut response_body = Vec::new();
+    response
+        .into_body()
+        .as_reader()
+        .take(MAX_MODEL_RESPONSE_BYTES.saturating_add(1) as u64)
+        .read_to_end(&mut response_body)
+        .map_err(|_| ModelError::Transport("provider profile response read failed".to_owned()))?;
+    if response_body.len() > MAX_MODEL_RESPONSE_BYTES {
+        return Err(ModelError::ResponseTooLarge);
+    }
+    Ok(response_body)
 }
 
 /// Like [`post_hosted`], with additional fixed request headers.

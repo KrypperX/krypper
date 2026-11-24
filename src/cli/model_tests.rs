@@ -18,6 +18,9 @@ use uuid::Uuid;
 
 static PROVIDER_ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+#[path = "model_tests/provider_profile_tests.rs"]
+mod provider_profile_tests;
+
 #[test]
 fn task_result_states_use_snapshot_entries_for_matching_ids() {
     let mut session = TaskSession::new();
@@ -177,6 +180,30 @@ fn mock_server(responses: Vec<MockResponse>) -> (SocketAddr, JoinHandle<Vec<Vec<
     (address, handle)
 }
 
+fn redirecting_mock_server() -> (SocketAddr, TcpListener, JoinHandle<Vec<u8>>) {
+    let redirect_listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind redirect target");
+    redirect_listener
+        .set_nonblocking(true)
+        .expect("make redirect target nonblocking");
+    let redirect_address = redirect_listener
+        .local_addr()
+        .expect("read redirect target address");
+    let redirect_to = format!("http://{redirect_address}/capture");
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind redirect source");
+    let address = listener.local_addr().expect("read redirect source address");
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept initial profile request");
+        let request = read_request(&mut stream);
+        write!(
+            stream,
+            "HTTP/1.1 302 Found\r\nLocation: {redirect_to}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        )
+        .expect("write redirect response");
+        request
+    });
+    (address, redirect_listener, handle)
+}
+
 fn read_request(stream: &mut TcpStream) -> Vec<u8> {
     let mut request = Vec::new();
     let mut chunk = [0_u8; 4096];
@@ -213,6 +240,18 @@ fn request_json(request: &[u8]) -> Value {
         .expect("request header terminator")
         + 4;
     serde_json::from_slice(&request[body_start..]).expect("decode model request")
+}
+
+fn request_header(request: &[u8], wanted_name: &str) -> Option<String> {
+    let header_end = request.windows(4).position(|bytes| bytes == b"\r\n\r\n")?;
+    String::from_utf8_lossy(&request[..header_end])
+        .lines()
+        .skip(1)
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case(wanted_name)
+                .then(|| value.trim().to_owned())
+        })
 }
 
 fn task_args(max_actions: &str) -> Vec<OsString> {
@@ -1451,7 +1490,7 @@ fn provider_option_requires_a_model_and_rejects_unknown_names() {
         ("deepseek", None, "--model is required with --provider"),
         ("zai", None, "--model is required with --provider"),
         ("mistral", None, "--model is required with --provider"),
-        ("unknown", Some("test-model"), "unsupported provider"),
+        ("Unknown", Some("test-model"), "unsupported provider"),
     ] {
         let mut args = vec![
             OsString::from("--goal"),
@@ -1524,7 +1563,7 @@ fn task_help_documents_provider_selection_and_network_disclosure() {
             "missing {credential} in task help"
         );
     }
-    assert!(help.contains("no custom API URL is accepted"));
+    assert!(help.contains("trusted per-user profiles use their configured endpoint"));
     assert!(help.contains("optional ANTHROPIC_WORKSPACE_ID"));
     assert!(help.contains(
         "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"

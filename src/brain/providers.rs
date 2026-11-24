@@ -1,11 +1,12 @@
 use super::limits::MAX_STREAMED_TOOL_ARGUMENT_BYTES;
 use super::{
-    action_from_error, action_from_provider_call, build_anthropic_request_with_extensions,
-    build_gemini_request_with_extensions, build_responses_request_with_extensions,
-    consume_decision_budget, enable_responses_streaming, encode_model_request,
-    gemini_generate_content_endpoint, model_agent, parse_anthropic_response, parse_gemini_response,
-    parse_responses_response, post_hosted, post_hosted_sse, post_hosted_sse_with_headers,
-    post_hosted_with_headers, post_responses_text_stream, tool_definitions,
+    action_from_call, action_from_error, action_from_provider_call,
+    build_anthropic_request_with_extensions, build_gemini_request_with_extensions,
+    build_responses_request_with_extensions, consume_decision_budget, enable_responses_streaming,
+    encode_model_request, gemini_generate_content_endpoint, model_agent, parse_anthropic_response,
+    parse_gemini_response, parse_responses_response, post_hosted, post_hosted_sse,
+    post_hosted_sse_with_headers, post_hosted_with_headers, post_profile_with_bearer,
+    post_responses_text_stream, tool_definitions, validate_endpoint, validate_model_name,
     validate_model_name_for_provider, ModelError, OllamaDecisionSource, SYSTEM_INSTRUCTIONS,
 };
 use crate::agent_loop::{BoundedDecisionSource, WorkspaceAction, WorkspaceObservation};
@@ -107,6 +108,18 @@ pub(crate) enum DecisionProtocol {
     CompatibleChat,
 }
 
+impl DecisionProtocol {
+    fn adapter_id(self) -> AdapterId {
+        match self {
+            Self::OllamaChat => AdapterId::OLLAMA,
+            Self::GeminiGenerateContent => AdapterId::GEMINI,
+            Self::Responses => AdapterId::RESPONSES,
+            Self::AnthropicMessages => AdapterId::ANTHROPIC,
+            Self::CompatibleChat => AdapterId::OPENAI_COMPATIBLE,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ProviderCapabilities {
     pub(crate) protocol: DecisionProtocol,
@@ -143,6 +156,20 @@ impl AdapterId {
     }
 }
 
+/// Validated profile data passed from the per-user settings resolver to one
+/// registered protocol adapter. It intentionally excludes the profile ID and
+/// credentials so they cannot affect request routing or adapter behavior.
+pub(crate) struct ProviderProfileSource {
+    protocol: DecisionProtocol,
+    endpoint: String,
+}
+
+impl ProviderProfileSource {
+    pub(crate) fn new(protocol: DecisionProtocol, endpoint: String) -> Self {
+        Self { protocol, endpoint }
+    }
+}
+
 /// Narrow capability hooks the CLI needs beyond the shared bounded decision contract.
 pub(crate) trait ProviderDecisionSource: BoundedDecisionSource {
     fn set_repository_context(&mut self, _context: Value) -> Result<(), &'static str> {
@@ -168,7 +195,7 @@ pub(crate) trait ProviderDecisionSource: BoundedDecisionSource {
 
 impl ProviderDecisionSource for OllamaDecisionSource {
     fn ollama_source_mut(&mut self) -> Option<&mut OllamaDecisionSource> {
-        Some(self)
+        self.has_builtin_endpoint().then_some(self)
     }
 }
 
@@ -209,7 +236,8 @@ pub(crate) enum ProviderSourceCredentials {
 ///
 /// This deliberately has no `Debug` implementation because it may hold credentials.
 pub(crate) struct ProviderSourceConfig {
-    provider: ModelProvider,
+    provider: Option<ModelProvider>,
+    profile: Option<ProviderProfileSource>,
     model: String,
     action_budget: usize,
     ollama_endpoint: SocketAddr,
@@ -225,7 +253,26 @@ impl ProviderSourceConfig {
         credentials: ProviderSourceCredentials,
     ) -> Self {
         Self {
-            provider,
+            provider: Some(provider),
+            profile: None,
+            model,
+            action_budget,
+            ollama_endpoint,
+            credentials,
+        }
+    }
+
+    pub(crate) fn for_profile(
+        protocol: DecisionProtocol,
+        endpoint: String,
+        model: String,
+        action_budget: usize,
+        ollama_endpoint: SocketAddr,
+        credentials: ProviderSourceCredentials,
+    ) -> Self {
+        Self {
+            provider: None,
+            profile: Some(ProviderProfileSource::new(protocol, endpoint)),
             model,
             action_budget,
             ollama_endpoint,
@@ -306,7 +353,15 @@ impl ProviderDecisionSourceRegistry {
         &self,
         config: ProviderSourceConfig,
     ) -> Result<ModelDecisionSource, ProviderDecisionSourceRegistryError> {
-        let adapter_id = provider_descriptor(config.provider).adapter_id;
+        let adapter_id = match (&config.profile, config.provider) {
+            (Some(profile), None) => profile.protocol.adapter_id(),
+            (None, Some(provider)) => provider_descriptor(provider).adapter_id,
+            _ => {
+                return Err(ProviderDecisionSourceRegistryError::BuildFailed(
+                    "provider source selection is invalid",
+                ))
+            }
+        };
         self.create_with_adapter(adapter_id, config)
     }
 
@@ -328,12 +383,26 @@ fn ollama_source_factory(
 ) -> Result<Box<dyn ProviderDecisionSource>, &'static str> {
     let ProviderSourceConfig {
         provider,
+        profile,
         model,
         action_budget,
         ollama_endpoint,
         credentials,
     } = config;
-    if provider != ModelProvider::Ollama {
+    if let Some(profile) = profile {
+        if profile.protocol != DecisionProtocol::OllamaChat {
+            return Err("Ollama adapter received a different profile protocol");
+        }
+        if !matches!(credentials, ProviderSourceCredentials::None) {
+            return Err("Ollama profile does not accept hosted credentials");
+        }
+        return Ok(Box::new(OllamaDecisionSource::with_profile_endpoint(
+            model,
+            action_budget,
+            profile.endpoint,
+        )));
+    }
+    if provider != Some(ModelProvider::Ollama) {
         return Err("Ollama adapter requires the Ollama provider");
     }
     if !matches!(credentials, ProviderSourceCredentials::None) {
@@ -351,12 +420,27 @@ fn gemini_source_factory(
 ) -> Result<Box<dyn ProviderDecisionSource>, &'static str> {
     let ProviderSourceConfig {
         provider,
+        profile,
         model,
         action_budget,
         credentials,
         ..
     } = config;
-    if provider != ModelProvider::Gemini {
+    if let Some(profile) = profile {
+        if profile.protocol != DecisionProtocol::GeminiGenerateContent {
+            return Err("Gemini adapter received a different profile protocol");
+        }
+        let ProviderSourceCredentials::HostedApiKey(api_key) = credentials else {
+            return Err("Gemini profile requires an API key");
+        };
+        return Ok(Box::new(GeminiDecisionSource::with_profile_endpoint(
+            model,
+            api_key,
+            action_budget,
+            profile.endpoint,
+        )?));
+    }
+    if provider != Some(ModelProvider::Gemini) {
         return Err("Gemini adapter requires the Gemini provider");
     }
     let ProviderSourceCredentials::HostedApiKey(api_key) = credentials else {
@@ -374,14 +458,29 @@ fn responses_source_factory(
 ) -> Result<Box<dyn ProviderDecisionSource>, &'static str> {
     let ProviderSourceConfig {
         provider,
+        profile,
         model,
         action_budget,
         credentials,
         ..
     } = config;
+    if let Some(profile) = profile {
+        if profile.protocol != DecisionProtocol::Responses {
+            return Err("Responses adapter received a different profile protocol");
+        }
+        let ProviderSourceCredentials::HostedApiKey(api_key) = credentials else {
+            return Err("Responses profile requires an API key");
+        };
+        return Ok(Box::new(ResponsesDecisionSource::with_profile_endpoint(
+            model,
+            api_key,
+            action_budget,
+            profile.endpoint,
+        )));
+    }
     let responses_provider = match provider {
-        ModelProvider::OpenAi => ResponsesProvider::OpenAi,
-        ModelProvider::Xai => ResponsesProvider::Xai,
+        Some(ModelProvider::OpenAi) => ResponsesProvider::OpenAi,
+        Some(ModelProvider::Xai) => ResponsesProvider::Xai,
         _ => return Err("Responses adapter requires OpenAI or xAI"),
     };
     let ProviderSourceCredentials::HostedApiKey(api_key) = credentials else {
@@ -400,12 +499,27 @@ fn anthropic_source_factory(
 ) -> Result<Box<dyn ProviderDecisionSource>, &'static str> {
     let ProviderSourceConfig {
         provider,
+        profile,
         model,
         action_budget,
         credentials,
         ..
     } = config;
-    if provider != ModelProvider::Anthropic {
+    if let Some(profile) = profile {
+        if profile.protocol != DecisionProtocol::AnthropicMessages {
+            return Err("Anthropic adapter received a different profile protocol");
+        }
+        let ProviderSourceCredentials::HostedApiKey(api_key) = credentials else {
+            return Err("Anthropic profile requires an API key");
+        };
+        return Ok(Box::new(AnthropicDecisionSource::with_profile_endpoint(
+            model,
+            api_key,
+            action_budget,
+            profile.endpoint,
+        )));
+    }
+    if provider != Some(ModelProvider::Anthropic) {
         return Err("Anthropic adapter requires the Anthropic provider");
     }
     let ProviderSourceCredentials::HostedApiKey(api_key) = credentials else {
@@ -423,12 +537,29 @@ fn compatible_source_factory(
 ) -> Result<Box<dyn ProviderDecisionSource>, &'static str> {
     let ProviderSourceConfig {
         provider,
+        profile,
         model,
         action_budget,
         credentials,
         ..
     } = config;
-    let ModelProvider::OpenAiCompatible(selected_provider) = provider else {
+    if let Some(profile) = profile {
+        if profile.protocol != DecisionProtocol::CompatibleChat {
+            return Err("compatible chat adapter received a different profile protocol");
+        }
+        let ProviderSourceCredentials::HostedApiKey(api_key) = credentials else {
+            return Err("compatible profile requires an API key");
+        };
+        return Ok(Box::new(
+            OpenAiCompatibleDecisionSource::with_profile_endpoint(
+                model,
+                api_key,
+                action_budget,
+                profile.endpoint,
+            ),
+        ));
+    }
+    let Some(ModelProvider::OpenAiCompatible(selected_provider)) = provider else {
         return Err("compatible chat adapter requires an OpenAI-compatible provider");
     };
     let ProviderSourceCredentials::OpenAiCompatible(credentials) = credentials else {

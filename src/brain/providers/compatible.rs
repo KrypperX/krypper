@@ -272,6 +272,41 @@ pub(crate) fn build_compatible_chat_request_with_retrieval_context(
     remaining_decisions: usize,
     context: CompatibleRequestContext<'_>,
 ) -> Result<Vec<u8>, ModelError> {
+    build_compatible_chat_request_with_retrieval_context_for(
+        model,
+        Some(provider),
+        goal,
+        observations,
+        remaining_decisions,
+        context,
+    )
+}
+
+pub(crate) fn build_profile_compatible_chat_request(
+    model: &str,
+    goal: &str,
+    observations: &[WorkspaceObservation],
+    remaining_decisions: usize,
+    context: CompatibleRequestContext<'_>,
+) -> Result<Vec<u8>, ModelError> {
+    build_compatible_chat_request_with_retrieval_context_for(
+        model,
+        None,
+        goal,
+        observations,
+        remaining_decisions,
+        context,
+    )
+}
+
+fn build_compatible_chat_request_with_retrieval_context_for(
+    model: &str,
+    provider: Option<OpenAiCompatibleProvider>,
+    goal: &str,
+    observations: &[WorkspaceObservation],
+    remaining_decisions: usize,
+    context: CompatibleRequestContext<'_>,
+) -> Result<Vec<u8>, ModelError> {
     let CompatibleRequestContext {
         project_guidance,
         extension_declarations,
@@ -279,8 +314,14 @@ pub(crate) fn build_compatible_chat_request_with_retrieval_context(
     } = context;
     crate::brain::provider_bridge::validate_declarations(extension_declarations)
         .map_err(|_| ModelError::InvalidToolCall("invalid extension declarations"))?;
-    super::validate_model_name_for_provider(model, ModelProvider::OpenAiCompatible(provider))
-        .map_err(ModelError::InvalidModelName)?;
+    match provider {
+        Some(provider) => super::validate_model_name_for_provider(
+            model,
+            ModelProvider::OpenAiCompatible(provider),
+        ),
+        None => super::validate_model_name(model),
+    }
+    .map_err(ModelError::InvalidModelName)?;
     let prompt = build_task_prompt_with_repository_context_json(
         goal,
         observations,
@@ -290,9 +331,11 @@ pub(crate) fn build_compatible_chat_request_with_retrieval_context(
     )?;
     let tool_choice = if matches!(
         provider,
-        OpenAiCompatibleProvider::DeepSeek
-            | OpenAiCompatibleProvider::Zai
-            | OpenAiCompatibleProvider::Mistral
+        Some(
+            OpenAiCompatibleProvider::DeepSeek
+                | OpenAiCompatibleProvider::Zai
+                | OpenAiCompatibleProvider::Mistral
+        )
     ) {
         "auto"
     } else {
@@ -314,7 +357,7 @@ pub(crate) fn build_compatible_chat_request_with_retrieval_context(
         "n": 1,
         "stream": false
     });
-    if provider == OpenAiCompatibleProvider::OpenRouter {
+    if provider == Some(OpenAiCompatibleProvider::OpenRouter) {
         request["provider"] = json!({"allow_fallbacks":false});
     }
     encode_model_request(&request)
@@ -324,97 +367,113 @@ pub(crate) fn parse_compatible_chat_response(
     response: &[u8],
     provider: ModelProvider,
 ) -> Result<WorkspaceAction, ModelError> {
+    parse_compatible_chat_response_for(response, Some(provider))
+}
+
+pub(crate) fn parse_profile_compatible_chat_response(
+    response: &[u8],
+) -> Result<WorkspaceAction, ModelError> {
+    parse_compatible_chat_response_for(response, None)
+}
+
+fn compatible_invalid_json(provider: Option<ModelProvider>) -> ModelError {
+    provider.map_or(ModelError::InvalidJson, ModelError::ProviderInvalidJson)
+}
+
+fn compatible_invalid_tool_call(
+    provider: Option<ModelProvider>,
+    message: &'static str,
+) -> ModelError {
+    provider.map_or(ModelError::InvalidToolCall(message), |provider| {
+        ModelError::ProviderInvalidToolCall(provider, message)
+    })
+}
+
+fn parse_compatible_chat_response_for(
+    response: &[u8],
+    provider: Option<ModelProvider>,
+) -> Result<WorkspaceAction, ModelError> {
     let response: Value =
-        serde_json::from_slice(response).map_err(|_| ModelError::ProviderInvalidJson(provider))?;
-    let choices = response.get("choices").and_then(Value::as_array).ok_or(
-        ModelError::ProviderInvalidToolCall(provider, "missing chat completion choices"),
-    )?;
+        serde_json::from_slice(response).map_err(|_| compatible_invalid_json(provider))?;
+    let choices = response
+        .get("choices")
+        .and_then(Value::as_array)
+        .ok_or_else(|| compatible_invalid_tool_call(provider, "missing chat completion choices"))?;
     if choices.len() != 1 {
-        return Err(ModelError::ProviderInvalidToolCall(
+        return Err(compatible_invalid_tool_call(
             provider,
             "expected exactly one chat completion choice",
         ));
     }
-    let choice = choices.first().ok_or(ModelError::ProviderInvalidToolCall(
-        provider,
-        "missing chat completion choice",
-    ))?;
+    let choice = choices
+        .first()
+        .ok_or_else(|| compatible_invalid_tool_call(provider, "missing chat completion choice"))?;
     if choice.get("finish_reason").and_then(Value::as_str) != Some("tool_calls") {
-        return Err(ModelError::ProviderInvalidToolCall(
+        return Err(compatible_invalid_tool_call(
             provider,
             "response did not finish with a tool call",
         ));
     }
     let message = choice
         .get("message")
-        .ok_or(ModelError::ProviderInvalidToolCall(
-            provider,
-            "missing assistant message",
-        ))?;
+        .ok_or_else(|| compatible_invalid_tool_call(provider, "missing assistant message"))?;
     if message.get("role").and_then(Value::as_str) != Some("assistant") {
-        return Err(ModelError::ProviderInvalidToolCall(
+        return Err(compatible_invalid_tool_call(
             provider,
             "tool calls must come from an assistant message",
         ));
     }
-    let calls = message.get("tool_calls").and_then(Value::as_array).ok_or(
-        ModelError::ProviderInvalidToolCall(provider, "missing function tool calls"),
-    )?;
+    let calls = message
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .ok_or_else(|| compatible_invalid_tool_call(provider, "missing function tool calls"))?;
     if calls.len() != 1 {
-        return Err(ModelError::ProviderInvalidToolCall(
+        return Err(compatible_invalid_tool_call(
             provider,
             "expected exactly one tool call",
         ));
     }
-    let call = calls.first().ok_or(ModelError::ProviderInvalidToolCall(
-        provider,
-        "expected exactly one tool call",
-    ))?;
+    let call = calls
+        .first()
+        .ok_or_else(|| compatible_invalid_tool_call(provider, "expected exactly one tool call"))?;
     if call.get("type").and_then(Value::as_str) != Some("function") {
-        return Err(ModelError::ProviderInvalidToolCall(
+        return Err(compatible_invalid_tool_call(
             provider,
             "response used an unsupported tool call type",
         ));
     }
     let function = call
         .get("function")
-        .ok_or(ModelError::ProviderInvalidToolCall(
-            provider,
-            "missing function call details",
-        ))?;
-    let name =
-        function
-            .get("name")
-            .and_then(Value::as_str)
-            .ok_or(ModelError::ProviderInvalidToolCall(
-                provider,
-                "tool call has no function name",
-            ))?;
-    let arguments = function
-        .get("arguments")
-        .ok_or(ModelError::ProviderInvalidToolCall(
-            provider,
-            "tool call arguments are not JSON text",
-        ))?;
+        .ok_or_else(|| compatible_invalid_tool_call(provider, "missing function call details"))?;
+    let name = function
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| compatible_invalid_tool_call(provider, "tool call has no function name"))?;
+    let arguments = function.get("arguments").ok_or_else(|| {
+        compatible_invalid_tool_call(provider, "tool call arguments are not JSON text")
+    })?;
     let supports_object_arguments = matches!(
         provider,
-        ModelProvider::OpenAiCompatible(
+        Some(ModelProvider::OpenAiCompatible(
             OpenAiCompatibleProvider::DeepSeek | OpenAiCompatibleProvider::Zai
-        )
+        ))
     );
     let arguments = match arguments {
         Value::String(arguments) => serde_json::from_str(arguments).map_err(|_| {
-            ModelError::ProviderInvalidToolCall(provider, "tool arguments are invalid JSON")
+            compatible_invalid_tool_call(provider, "tool arguments are invalid JSON")
         })?,
         Value::Object(arguments) if supports_object_arguments => Value::Object(arguments.clone()),
         _ => {
-            return Err(ModelError::ProviderInvalidToolCall(
+            return Err(compatible_invalid_tool_call(
                 provider,
                 "tool call arguments are not JSON text",
             ));
         }
     };
-    action_from_provider_call(provider, name, &arguments)
+    match provider {
+        Some(provider) => action_from_provider_call(provider, name, &arguments),
+        None => super::action_from_call(name, &arguments),
+    }
 }
 
 fn parse_model_token_usage(response: &[u8]) -> Option<ModelTokenUsage> {
@@ -434,7 +493,7 @@ fn parse_model_token_usage(response: &[u8]) -> Option<ModelTokenUsage> {
 /// Bounded OpenAI-compatible chat decision source with extensions.
 pub struct OpenAiCompatibleDecisionSource {
     pub(super) core: HostedSourceCore,
-    provider: OpenAiCompatibleProvider,
+    provider: Option<OpenAiCompatibleProvider>,
     extra_headers: Vec<(String, String)>,
     last_token_usage: Option<ModelTokenUsage>,
     repository_context: Option<Value>,
@@ -461,6 +520,21 @@ impl OpenAiCompatibleDecisionSource {
             &[],
             &extra_headers,
         ))
+    }
+
+    pub(crate) fn with_profile_endpoint(
+        model: impl Into<String>,
+        api_key: String,
+        action_budget: usize,
+        endpoint: String,
+    ) -> Self {
+        Self {
+            core: HostedSourceCore::new(model, api_key, action_budget, endpoint, &[]),
+            provider: None,
+            extra_headers: Vec::new(),
+            last_token_usage: None,
+            repository_context: None,
+        }
     }
 
     #[cfg(test)]
@@ -549,7 +623,7 @@ impl OpenAiCompatibleDecisionSource {
                 endpoint,
                 extension_declarations,
             ),
-            provider,
+            provider: Some(provider),
             extra_headers: extra_headers.to_vec(),
             last_token_usage: None,
             repository_context: None,
@@ -572,35 +646,59 @@ impl OpenAiCompatibleDecisionSource {
     ) -> Result<WorkspaceAction, ModelError> {
         self.last_token_usage = None;
         let remaining = self.core.consume_decision_budget()?;
-        let request = build_compatible_chat_request_with_retrieval_context(
-            &self.core.model,
-            self.provider,
-            goal,
-            observations,
-            remaining,
-            CompatibleRequestContext {
-                project_guidance,
-                extension_declarations: &self.core.extension_declarations,
-                repository_context: self.repository_context.as_ref(),
-            },
-        )?;
-        let provider = ModelProvider::OpenAiCompatible(self.provider);
-        let extra_headers = self
-            .extra_headers
-            .iter()
-            .map(|(name, value)| (name.as_str(), value.as_str()))
-            .collect::<Vec<_>>();
-        let response = post_hosted_with_headers(
-            &self.core.agent,
-            provider,
-            &self.core.endpoint,
-            &self.core.api_key,
-            None,
-            &extra_headers,
-            &request,
-        )?;
+        let request_context = CompatibleRequestContext {
+            project_guidance,
+            extension_declarations: &self.core.extension_declarations,
+            repository_context: self.repository_context.as_ref(),
+        };
+        let request = match self.provider {
+            Some(provider) => build_compatible_chat_request_with_retrieval_context(
+                &self.core.model,
+                provider,
+                goal,
+                observations,
+                remaining,
+                request_context,
+            )?,
+            None => build_profile_compatible_chat_request(
+                &self.core.model,
+                goal,
+                observations,
+                remaining,
+                request_context,
+            )?,
+        };
+        let response = match self.provider {
+            Some(provider) => {
+                let extra_headers = self
+                    .extra_headers
+                    .iter()
+                    .map(|(name, value)| (name.as_str(), value.as_str()))
+                    .collect::<Vec<_>>();
+                post_hosted_with_headers(
+                    &self.core.agent,
+                    ModelProvider::OpenAiCompatible(provider),
+                    &self.core.endpoint,
+                    &self.core.api_key,
+                    None,
+                    &extra_headers,
+                    &request,
+                )?
+            }
+            None => post_profile_with_bearer(
+                &self.core.agent,
+                &self.core.endpoint,
+                &self.core.api_key,
+                &request,
+            )?,
+        };
         self.last_token_usage = parse_model_token_usage(&response);
-        parse_compatible_chat_response(&response, provider)
+        match self.provider {
+            Some(provider) => {
+                parse_compatible_chat_response(&response, ModelProvider::OpenAiCompatible(provider))
+            }
+            None => parse_profile_compatible_chat_response(&response),
+        }
     }
 }
 

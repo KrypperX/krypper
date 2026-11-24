@@ -4,7 +4,10 @@ use super::checkpoint_files::{
     read_task_checkpoint, validate_checkpoint_output_path, write_task_checkpoint,
 };
 use super::help::{contains_help_before_terminator, usage_error, write_task_help};
-use super::model_selection::{configured_model_selection, prepare_model_source_with_credentials};
+use super::model_selection::{
+    configured_model_selection, parse_provider_selection, prepare_model_source_for_selection,
+    ProviderSelection,
+};
 use super::outcome::{write_observation, write_turn_outcome};
 use super::task_args::parse_task_action;
 #[path = "verified_task.rs"]
@@ -119,7 +122,7 @@ pub(super) fn run_task_with_endpoint(
     run_task_with_options(arguments, input, output, error, model_endpoint, false)
 }
 
-fn run_task_with_options(
+pub(super) fn run_task_with_options(
     arguments: &[OsString],
     input: &mut dyn Read,
     output: &mut dyn Write,
@@ -148,7 +151,7 @@ fn run_task_with_selection_loader<F>(
     mut load_configured_selection: F,
 ) -> io::Result<i32>
 where
-    F: FnMut(&mut dyn Write) -> Result<Option<(String, Option<ModelProvider>)>, String>,
+    F: FnMut(&mut dyn Write) -> Result<Option<(String, Option<String>)>, String>,
 {
     if contains_help_before_terminator(arguments) {
         write_task_help(output)?;
@@ -158,7 +161,7 @@ where
     let mut goal = None;
     let mut max_actions = None;
     let mut model = None;
-    let mut provider = None;
+    let mut provider = None::<ProviderSelection>;
     let mut workspace = None;
     let mut checkpoint_out = None;
     let mut resume = None;
@@ -257,13 +260,11 @@ where
                 let Some(value) = value.to_str() else {
                     return usage_error(error, Some("task"), "provider name must be valid UTF-8");
                 };
-                let Some(selected_provider) = ModelProvider::parse(value) else {
+                let Some(selected_provider) = parse_provider_selection(value) else {
                     return usage_error(
                         error,
                         Some("task"),
-                        &format!(
-                            "unsupported provider '{value}' (choose from 'ollama', 'gemini', 'openai', 'xai', 'anthropic', 'cloudflare', 'cloudflare-ai-gateway', 'groq', 'openrouter', 'deepseek', 'zai', 'mistral')"
-                        ),
+                        &format!("unsupported provider or invalid profile ID '{value}'"),
                     );
                 };
                 provider = Some(selected_provider);
@@ -498,7 +499,16 @@ where
         match load_configured_selection(error) {
             Ok(Some((configured_model, configured_provider))) => {
                 model = Some(configured_model);
-                provider = configured_provider;
+                if let Some(name) = configured_provider {
+                    let Some(selection) = parse_provider_selection(&name) else {
+                        return usage_error(
+                            error,
+                            Some("task"),
+                            "unsupported provider or invalid profile ID in saved defaults",
+                        );
+                    };
+                    provider = Some(selection);
+                }
             }
             Ok(None) => {}
             Err(message) => return usage_error(error, Some("task"), &message),
@@ -511,14 +521,18 @@ where
             "--verified requires --model or a saved Ollama model default",
         );
     }
-    if verified && provider.is_some_and(|provider| provider != ModelProvider::Ollama) {
+    if verified
+        && provider
+            .as_ref()
+            .is_some_and(|provider| provider != &ProviderSelection::BuiltIn(ModelProvider::Ollama))
+    {
         return usage_error(
             error,
             Some("task"),
             "--verified requires the local Ollama provider",
         );
     }
-    let mut model_source = match prepare_model_source_with_credentials(
+    let mut model_source = match prepare_model_source_for_selection(
         model,
         provider,
         max_actions,
