@@ -1,14 +1,15 @@
 //! Optional user-level defaults for `krypper task`.
 //!
-//! The file uses a small TOML subset: `key = "value"` lines, blank lines, and
-//! `#` comments. Credentials are kept
-//! in a separate per-user credential store; environment variables override the
-//! stored values.
+//! The file accepts top-level string assignments and TOML comments. Credentials
+//! are kept in a separate per-user credential store; environment variables
+//! override the stored values.
 //!
 //! Krypper reads the file only from the user's own configuration location, never
 //! from a task workspace, so repository contents cannot change which service
 //! receives task data.
 
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, Read};
@@ -204,53 +205,60 @@ fn read_config_text(path: &Path) -> Result<Option<String>, String> {
 }
 
 fn parse_config(text: &str) -> Result<ParsedConfig, String> {
-    let mut parsed = ParsedConfig::default();
-    for (index, raw_line) in text.lines().enumerate() {
-        let number = index + 1;
+    let mut seen = BTreeSet::new();
+    for raw_line in text.lines() {
         let line = raw_line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
         if line.starts_with('[') {
-            return Err(format!("line {number}: tables are not supported"));
+            return Err("tables are not supported".to_owned());
         }
         let Some((key, value)) = line.split_once('=') else {
-            return Err(format!("line {number}: expected key = \"value\""));
+            return Err("expected key = \"value\"".to_owned());
         };
         let key = key.trim();
-        let value =
-            parse_quoted_value(value.trim()).map_err(|cause| format!("line {number}: {cause}"))?;
-        match key {
-            "provider" => set_value(&mut parsed.provider, key, value, number)?,
-            "model" => set_value(&mut parsed.model, key, value, number)?,
+        if !seen.insert(key) {
+            return Err(format!("duplicate key '{key}'"));
+        }
+        if !is_single_line_quoted_string(value) {
+            return Err(
+                "values must be single-line, double-quoted or single-quoted strings".to_owned(),
+            );
+        }
+    }
+    let values = toml::from_str::<BTreeMap<String, String>>(text)
+        .map_err(|_| "invalid TOML syntax; values must be quoted strings".to_owned())?;
+    let mut parsed = ParsedConfig::default();
+    for (key, value) in values {
+        if value.is_empty() {
+            return Err(format!("{key} must not be empty"));
+        }
+        if value.chars().any(char::is_control) {
+            return Err(format!("{key} must not contain control characters"));
+        }
+        match key.as_str() {
+            "provider" => parsed.provider = Some(value),
+            "model" => parsed.model = Some(value),
             "routing_mode" => {
                 let mode = match value.as_str() {
                     "manual" => RoutingMode::Manual,
                     "automatic" => RoutingMode::Automatic,
-                    _ => {
-                        return Err(format!(
-                            "line {number}: routing_mode must be manual or automatic"
-                        ));
-                    }
+                    _ => return Err("routing_mode must be manual or automatic".to_owned()),
                 };
-                set_value(&mut parsed.routing_mode, key, mode, number)?;
+                parsed.routing_mode = Some(mode);
             }
             "allow_cross_provider_data_transfer" => {
                 let enabled = match value.as_str() {
                     "true" => true,
                     "false" => false,
                     _ => {
-                        return Err(format!(
-                            "line {number}: allow_cross_provider_data_transfer must be true or false"
-                        ));
+                        return Err(
+                            "allow_cross_provider_data_transfer must be true or false".to_owned()
+                        )
                     }
                 };
-                set_value(
-                    &mut parsed.allow_cross_provider_data_transfer,
-                    key,
-                    enabled,
-                    number,
-                )?;
+                parsed.allow_cross_provider_data_transfer = Some(enabled);
             }
             "fallback_budget_micro_usd" => {
                 let budget = value
@@ -259,54 +267,55 @@ fn parse_config(text: &str) -> Result<ParsedConfig, String> {
                     .filter(|budget| *budget > 0 && *budget <= MAX_FALLBACK_BUDGET_MICRO_USD)
                     .ok_or_else(|| {
                         format!(
-                            "line {number}: fallback budget must be between 1 and {MAX_FALLBACK_BUDGET_MICRO_USD} micro-USD"
+                            "fallback budget must be between 1 and {MAX_FALLBACK_BUDGET_MICRO_USD} micro-USD"
                         )
                     })?;
-                set_value(&mut parsed.fallback_budget_micro_usd, key, budget, number)?;
+                parsed.fallback_budget_micro_usd = Some(budget);
             }
             _ => {
-                return Err(format!(
-                    "line {number}: unknown key (supported keys: provider, model, routing_mode, allow_cross_provider_data_transfer, fallback_budget_micro_usd)"
-                ));
+                return Err(
+                    "unknown key (supported keys: provider, model, routing_mode, allow_cross_provider_data_transfer, fallback_budget_micro_usd)"
+                        .to_owned(),
+                );
             }
         }
     }
     Ok(parsed)
 }
 
+fn is_single_line_quoted_string(value: &str) -> bool {
+    let value = value.trim_start();
+    let Some(quote) = value
+        .chars()
+        .next()
+        .filter(|quote| matches!(quote, '"' | '\''))
+    else {
+        return false;
+    };
+    if value.starts_with(&quote.to_string().repeat(3)) {
+        return false;
+    }
+
+    let mut escaped = false;
+    let mut closing_quote = None;
+    for (index, character) in value[1..].char_indices() {
+        if quote == '"' && escaped {
+            escaped = false;
+        } else if quote == '"' && character == '\\' {
+            escaped = true;
+        } else if character == quote {
+            closing_quote = Some(index);
+            break;
+        }
+    }
+    let Some(closing_quote) = closing_quote else {
+        return false;
+    };
+    let trailing = value[closing_quote + 2..].trim();
+    trailing.is_empty() || trailing.starts_with('#')
+}
+
 pub(super) const MAX_FALLBACK_BUDGET_MICRO_USD: u64 = 1_000_000_000;
-
-fn set_value<T>(slot: &mut Option<T>, key: &str, value: T, line: usize) -> Result<(), String> {
-    if slot.is_some() {
-        return Err(format!("line {line}: duplicate key '{key}'"));
-    }
-    *slot = Some(value);
-    Ok(())
-}
-
-fn parse_quoted_value(value: &str) -> Result<String, &'static str> {
-    let Some(rest) = value.strip_prefix('"') else {
-        return Err("value must be a double-quoted string");
-    };
-    let Some(end) = rest.find('"') else {
-        return Err("string is missing its closing quote");
-    };
-    let (text, after) = rest.split_at(end);
-    let after = after[1..].trim();
-    if !after.is_empty() && !after.starts_with('#') {
-        return Err("unexpected text after the string");
-    }
-    if text.is_empty() {
-        return Err("value must not be empty");
-    }
-    if text.contains('\\') {
-        return Err("escape sequences are not supported");
-    }
-    if text.chars().any(char::is_control) {
-        return Err("value must not contain control characters");
-    }
-    Ok(text.to_owned())
-}
 
 #[cfg(test)]
 mod tests {
@@ -393,15 +402,23 @@ mod tests {
     }
 
     #[test]
+    fn accepts_single_quoted_toml_strings() {
+        let parsed = parse_config("model = 'qwen3'\n").unwrap();
+
+        assert_eq!(parsed.model.as_deref(), Some("qwen3"));
+    }
+
+    #[test]
     fn rejects_unsupported_or_malformed_lines() {
         for (text, fragment) in [
             ("[model]\n", "tables"),
             ("model\n", "expected key"),
             ("model = qwen3\n", "double-quoted"),
-            ("model = \"qwen3\n", "closing quote"),
-            ("model = \"qwen3\" extra\n", "unexpected text"),
+            ("model = \"\"\"qwen3\"\"\"\n", "double-quoted"),
+            ("model = \"qwen3\n", "double-quoted"),
+            ("model = \"qwen3\" extra\n", "double-quoted"),
             ("model = \"\"\n", "must not be empty"),
-            ("model = \"a\\nb\"\n", "escape"),
+            ("model = \"a\\nb\"\n", "control characters"),
             ("api_key = \"secret\"\n", "unknown key"),
             ("model = \"a\"\nmodel = \"b\"\n", "duplicate"),
         ] {

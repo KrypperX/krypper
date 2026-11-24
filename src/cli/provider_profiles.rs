@@ -115,7 +115,6 @@ pub(super) fn load_provider_profiles(path: &Path) -> Result<Vec<ProviderProfile>
             path.display()
         ));
     }
-    ensure_private_permissions(path, &metadata)?;
     let file = open_private_file(path).map_err(|cause| {
         format!(
             "cannot read provider profiles '{}': {}",
@@ -123,6 +122,20 @@ pub(super) fn load_provider_profiles(path: &Path) -> Result<Vec<ProviderProfile>
             cause.kind()
         )
     })?;
+    let opened_metadata = file.metadata().map_err(|cause| {
+        format!(
+            "cannot inspect provider profiles '{}': {}",
+            path.display(),
+            cause.kind()
+        )
+    })?;
+    if !opened_metadata.is_file() {
+        return Err(format!(
+            "provider profiles '{}' is not a regular file",
+            path.display()
+        ));
+    }
+    ensure_private_permissions(path, &opened_metadata, "provider profiles")?;
     let mut bytes = Vec::new();
     file.take(MAX_PROVIDER_PROFILE_BYTES + 1)
         .read_to_end(&mut bytes)
