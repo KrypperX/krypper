@@ -1,5 +1,6 @@
 //! Offline, vendored models.dev catalog. Informational only: not a provider allowlist.
 //! User configuration and provider routing remain authoritative.
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Match a built-in provider selector to catalog IDs from its trusted
@@ -8,7 +9,7 @@ pub fn provider_matches(selector: &str, catalog_provider: &str) -> bool {
     crate::brain::provider_catalog_matches(selector, catalog_provider)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelSpec {
     pub provider: String,
     pub id: String,
