@@ -8,14 +8,14 @@ use super::settings::{
 use crate::agent_loop::DecisionFailureCode;
 use crate::brain::capability_evidence::{
     assess_required_capability, now_unix_secs, resolve_provider_readiness, CapabilityFreshness,
-    CapabilityName, CapabilityProvenance, CapabilityVerification, EvidenceHealth,
-    ProviderEvidenceObservation, ProviderEvidenceRecord, RequiredCapabilityResult,
+    EvidenceHealth, ProviderEvidenceObservation, ProviderEvidenceRecord, RequiredCapabilityResult,
 };
 use crate::brain::{
     provider_descriptor_by_selector, AnthropicWorkspaceId, AuthFieldRole, CloudflareAccountId,
     CloudflareGatewayId, DecisionProtocol, ModelTokenUsage, ProviderDecisionSourceRegistry,
     ProviderDescriptor,
 };
+use crate::routing::{CapabilityName, CapabilityProvenance, CapabilityVerification};
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::PathBuf;
