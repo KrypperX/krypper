@@ -1,6 +1,6 @@
 # Provider and model architecture contract
 
-**Status:** baseline and staged design contract. This document records the current code and acceptance rules for future provider work; it does not claim that configurable profiles, automatic routing, or fallback are implemented.
+**Status:** current implementation and staged design contract. The code has an internal typed factory registry around the existing protocol adapters. Configurable provider profiles, automatic routing, and fallback are not implemented.
 
 ## Scope and baseline
 
@@ -12,11 +12,11 @@ The public objective and staged requirements come from [issue #303](https://gith
 
 As of 2026-11-24, the only open pull request was [#302](https://github.com/KrypperX/krypper/pull/302), for multi-file impact analysis; it does not overlap provider/model architecture. No open provider-architecture pull request was found at this baseline.
 
-At the crate root, `src/lib.rs` re-exports `ModelProvider`, `OllamaDecisionSource`, and `ModelError`. Its public `extensions` module exports `ModelProvider`, `ModelError`, `AnthropicDecisionSource`, `GeminiDecisionSource`, `OpenAiCompatibleDecisionSource`, `OpenAiCompatibleProvider`, `ResponsesDecisionSource`, and `ResponsesProvider`. The provider-specific request builders are `build_anthropic_request_with_extensions`, `build_chat_request_with_extensions`, `build_compatible_chat_request_with_extensions`, `build_gemini_request_with_extensions`, and `build_responses_request_with_extensions`. `src/brain/mod.rs` re-exports those source and provider types from the private brain module so `src/lib.rs` can expose the host-facing API. `ModelDecisionSource`, `DecisionProtocol`, and `ProviderCapabilities` in `src/brain/providers.rs` are `pub(crate)`, not public extension APIs.
+At the crate root, `src/lib.rs` re-exports `ModelProvider`, `OllamaDecisionSource`, and `ModelError`. Its public `extensions` module exports `ModelProvider`, `ModelError`, `AnthropicDecisionSource`, `GeminiDecisionSource`, `OpenAiCompatibleDecisionSource`, `OpenAiCompatibleProvider`, `ResponsesDecisionSource`, and `ResponsesProvider`. The provider-specific request builders are `build_anthropic_request_with_extensions`, `build_chat_request_with_extensions`, `build_compatible_chat_request_with_extensions`, `build_gemini_request_with_extensions`, and `build_responses_request_with_extensions`. `src/brain/mod.rs` re-exports those source and provider types from the private brain module so `src/lib.rs` can expose the host-facing API. `ModelDecisionSource`, `DecisionProtocol`, `ProviderCapabilities`, adapter IDs, and the source factory registry are crate-private implementation details, not public extension APIs.
 
 The public catalog API is `krypper::catalog_data::{lookup, models, provider_matches, ModelSpec}`. It reads the bundled snapshot and exposes descriptive model metadata; it does not perform network access or select a provider.
 
-Relevant existing tests cover several boundaries: `src/brain/providers/tests.rs` checks the capability registry against all twelve selectors; `src/brain/tests/providers/` has protocol request, response, action, streaming, and extension-dispatch fixtures; and `src/brain/tests/endpoint.rs` checks endpoint rejection before request or credential use. `src/cli/model_tests.rs` and `src/cli/task_tests.rs` cover explicit provider selection, credentials, and preflight; `src/cli/setup.rs` has the setup-list test described below. Catalog behavior is covered in `src/catalog_data.rs` and generator validation in `examples/generate_model_catalog.rs`; provider event handling also has fixtures in `src/streaming/tests/provider.rs`.
+Relevant tests cover several boundaries: `src/brain/providers/tests.rs` checks the capability and factory registries against all twelve selectors, duplicate/missing registration errors, and fake-adapter forwarding; `src/brain/tests/providers/` has protocol request, response, action, streaming, and extension-dispatch fixtures; and `src/brain/tests/endpoint.rs` checks endpoint rejection before request or credential use. `src/cli/model_tests.rs` and `src/cli/task_tests.rs` cover explicit provider selection, credentials, and preflight; `src/cli/setup.rs` has the setup-list test described below. Catalog behavior is covered in `src/catalog_data.rs` and generator validation in `examples/generate_model_catalog.rs`; provider event handling also has fixtures in `src/streaming/tests/provider.rs`.
 
 ## Current implementation
 
@@ -32,9 +32,9 @@ The CLI selects one model source. An explicit `--provider` selects a provider; s
 
 The main code locations are:
 
-- `src/brain/providers.rs` defines the public `ModelProvider` enum, maps providers to protocol-level capability flags, dispatches the internal `ModelDecisionSource` variants, and re-exports the provider adapter types.
+- `src/brain/providers.rs` defines the public `ModelProvider` enum, maps providers to protocol-level capabilities and stable adapter IDs, registers factories for the five protocol families, and wraps each constructed source behind the internal `ModelDecisionSource` facade.
 - `src/brain/providers/{anthropic,compatible,gemini,responses}.rs` implement the hosted protocol adapters; `OpenAiCompatibleProvider` is defined in `compatible.rs`. The local Ollama source remains in Brain's decision module.
-- `src/cli/model_selection.rs` resolves provider defaults and credentials, validates model IDs, and constructs the selected decision source. Provider-specific endpoints and credential requirements are fixed in code.
+- `src/cli/model_selection.rs` resolves provider defaults and credentials, validates model IDs, and builds the selected source through the typed registry. Provider-specific endpoints and credential requirements remain fixed in code.
 - Provider selector names are repeated in `ModelProvider::parse`, the interactive choices in `src/cli/setup.rs`, the provider list in `src/cli/help.rs`, and the unsupported-provider error in `src/cli/task.rs`. The setup test checks that every setup entry parses and verifies both Cloudflare labels, but it does not prove setup includes every supported selector. `src/brain/providers/tests.rs` separately enumerates all twelve selectors for capability parity; CLI tests exercise explicit selection, help text, and unknown-provider rejection.
 - `src/cli/settings.rs` stores model defaults and credentials in separate per-user files. Environment values override saved credential values. `KRYPPER_CONFIG` only selects model defaults; credential lookup stays in the per-user settings directory.
 - `src/catalog_data.rs`, `snapshots/models-dev/`, and `docs/models-dev-catalog.md` provide the offline model metadata catalog. It is descriptive: it does not grant credentials, select a provider, or reject an unknown model ID. The catalog snapshot is not refreshed during normal execution.
@@ -82,7 +82,7 @@ The target contract is:
 
 ## Migration and rollback
 
-The current public provider enums and constructors are compatibility surfaces. Introduce the internal adapter seam first while preserving those entry points and existing request/response behavior. Migrate one protocol family at a time and keep the current explicit-selection path available until parity tests pass. Provider descriptors can then drive setup/help enumeration from one source. Only after that parity is established should user-defined trusted profiles or opt-in routing be added.
+The current public provider enums and constructors are compatibility surfaces. The internal adapter seam now wraps the existing source implementations and keeps their request/response behavior intact. Adding or changing a source must preserve the explicit-selection path and protocol fixtures. Provider descriptors can later drive setup/help enumeration from one source; only after that parity is established should user-defined trusted profiles or opt-in routing be added.
 
 Configuration changes must be versioned and backward compatible. Use bounded parsing and atomic writes; keep credentials in the existing per-user credential store, referenced by name from profiles rather than copied into profile/catalog files. A rollback must allow the prior defaults and credential files to be read without a destructive reset. If a schema cannot be read or a profile fails validation, fail before any provider request and leave the previous valid configuration intact.
 
@@ -104,4 +104,4 @@ Each phase is a separate reviewable change. Reverting an adapter-registry phase 
 
 ## Scope of this baseline document
 
-This document records current structure and testable contracts only. It does not add provider profiles, a registry, automatic routing, fallback, dynamic code loading, or live provider probes. Those behaviors require the focused implementation and evidence described above.
+This document records the current structure and staged testable contracts. The current implementation includes a crate-private typed factory registry around the five existing protocol families. It does not add provider profiles, automatic routing, fallback, dynamic code loading, or live provider probes. Those behaviors require the focused implementation and evidence described above.

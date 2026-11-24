@@ -1,5 +1,5 @@
 use super::{prepare_model_source, run_task_with_endpoint, snapshot_task_and_turn_state};
-use crate::brain::{ModelDecisionSource, ModelProvider};
+use crate::brain::{AdapterId, ModelProvider};
 use crate::harness::execution::GoalTurnError;
 use crate::task_lifecycle::{
     TaskSession, TaskState, TurnOutcome, TurnState, WorkspaceGuidanceReadError,
@@ -1090,15 +1090,21 @@ fn xai_credentials_are_loaded_only_for_explicit_selection() {
         SocketAddr::from(([127, 0, 0, 1], 0)),
     );
 
-    assert!(matches!(
-        explicit,
-        Ok(Some(ModelDecisionSource::Responses(_)))
-    ));
+    assert_eq!(
+        explicit
+            .expect("explicit xAI provider is prepared")
+            .expect("explicit model source exists")
+            .adapter_id(),
+        AdapterId::RESPONSES
+    );
     assert!(matches!(caller_directed, Ok(None)));
-    assert!(matches!(
-        implicit_ollama,
-        Ok(Some(ModelDecisionSource::Ollama(_)))
-    ));
+    assert_eq!(
+        implicit_ollama
+            .expect("implicit Ollama provider is prepared")
+            .expect("implicit model source exists")
+            .adapter_id(),
+        AdapterId::OLLAMA
+    );
 }
 
 #[test]
@@ -1120,20 +1126,26 @@ fn anthropic_workspace_id_environment_is_optional_and_validated() {
 
     {
         let _unset = RestoreEnvironmentVariable::remove("ANTHROPIC_WORKSPACE_ID");
-        assert!(matches!(
-            prepare(),
-            Ok(Some(ModelDecisionSource::Anthropic(_)))
-        ));
+        assert_eq!(
+            prepare()
+                .expect("Anthropic source is prepared without an optional workspace")
+                .expect("Anthropic model source exists")
+                .adapter_id(),
+            AdapterId::ANTHROPIC
+        );
     }
     {
         let _set = RestoreEnvironmentVariable::set(
             "ANTHROPIC_WORKSPACE_ID",
             "wrkspc_01JwQvzr7rXLA5AGx3HKfFUJ",
         );
-        assert!(matches!(
-            prepare(),
-            Ok(Some(ModelDecisionSource::Anthropic(_)))
-        ));
+        assert_eq!(
+            prepare()
+                .expect("Anthropic source is prepared with a valid workspace")
+                .expect("Anthropic model source exists")
+                .adapter_id(),
+            AdapterId::ANTHROPIC
+        );
     }
     for invalid in ["", "a b", "a\nb", "wrk/space"] {
         let _set = RestoreEnvironmentVariable::set("ANTHROPIC_WORKSPACE_ID", invalid);
@@ -1265,7 +1277,7 @@ fn cloudflare_ai_gateway_defaults_and_validates_gateway_id_before_task_lifecycle
                 1,
                 SocketAddr::from(([127, 0, 0, 1], 0)),
             ),
-            Ok(Some(ModelDecisionSource::OpenAiCompatible(_)))
+            Ok(Some(source)) if source.adapter_id() == AdapterId::OPENAI_COMPATIBLE
         ));
     }
 

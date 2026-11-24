@@ -10,6 +10,8 @@ use super::{
 };
 use crate::agent_loop::{BoundedDecisionSource, WorkspaceAction, WorkspaceObservation};
 use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::net::SocketAddr;
 use ureq::Agent;
 
 mod anthropic;
@@ -108,6 +110,18 @@ pub(crate) enum DecisionProtocol {
     CompatibleChat,
 }
 
+impl DecisionProtocol {
+    pub(crate) const fn adapter_id(self) -> AdapterId {
+        match self {
+            Self::OllamaChat => AdapterId::OLLAMA,
+            Self::GeminiGenerateContent => AdapterId::GEMINI,
+            Self::Responses => AdapterId::RESPONSES,
+            Self::AnthropicMessages => AdapterId::ANTHROPIC,
+            Self::CompatibleChat => AdapterId::OPENAI_COMPATIBLE,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ProviderCapabilities {
     pub(crate) protocol: DecisionProtocol,
@@ -164,34 +178,367 @@ impl ModelProvider {
     }
 }
 
-pub(crate) enum ModelDecisionSource {
-    Ollama(OllamaDecisionSource),
-    Gemini(GeminiDecisionSource),
-    Responses(ResponsesDecisionSource),
-    Anthropic(AnthropicDecisionSource),
-    OpenAiCompatible(OpenAiCompatibleDecisionSource),
+/// Stable identifier for one protocol adapter factory.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct AdapterId(&'static str);
+
+impl AdapterId {
+    pub(crate) const OLLAMA: Self = Self::new("ollama-chat");
+    pub(crate) const GEMINI: Self = Self::new("gemini-generate-content");
+    pub(crate) const RESPONSES: Self = Self::new("openai-responses");
+    pub(crate) const ANTHROPIC: Self = Self::new("anthropic-messages");
+    pub(crate) const OPENAI_COMPATIBLE: Self = Self::new("openai-compatible-chat");
+
+    pub(crate) const fn new(value: &'static str) -> Self {
+        Self(value)
+    }
+}
+
+/// Narrow capability hooks the CLI needs beyond the shared bounded decision contract.
+pub(crate) trait ProviderDecisionSource: BoundedDecisionSource {
+    fn set_repository_context(&mut self, _context: Value) -> Result<(), &'static str> {
+        Err("--repository-context-json is supported by OpenAI-compatible providers")
+    }
+
+    fn supports_token_usage(&self) -> bool {
+        false
+    }
+
+    fn take_token_usage(&mut self) -> Option<ModelTokenUsage> {
+        None
+    }
+
+    fn ollama_source_mut(&mut self) -> Option<&mut OllamaDecisionSource> {
+        None
+    }
+
+    fn set_anthropic_workspace_id(&mut self, _workspace_id: &str) -> Result<(), &'static str> {
+        Err("ANTHROPIC_WORKSPACE_ID is supported by Anthropic")
+    }
+}
+
+impl ProviderDecisionSource for OllamaDecisionSource {
+    fn ollama_source_mut(&mut self) -> Option<&mut OllamaDecisionSource> {
+        Some(self)
+    }
+}
+
+impl ProviderDecisionSource for GeminiDecisionSource {}
+impl ProviderDecisionSource for ResponsesDecisionSource {}
+
+impl ProviderDecisionSource for AnthropicDecisionSource {
+    fn set_anthropic_workspace_id(&mut self, workspace_id: &str) -> Result<(), &'static str> {
+        self.set_workspace_id(workspace_id)
+    }
+}
+
+impl ProviderDecisionSource for OpenAiCompatibleDecisionSource {
+    fn set_repository_context(&mut self, context: Value) -> Result<(), &'static str> {
+        OpenAiCompatibleDecisionSource::set_repository_context(self, context);
+        Ok(())
+    }
+
+    fn supports_token_usage(&self) -> bool {
+        true
+    }
+
+    fn take_token_usage(&mut self) -> Option<ModelTokenUsage> {
+        OpenAiCompatibleDecisionSource::take_token_usage(self)
+    }
+}
+
+/// Provider-specific secrets and account data resolved by the CLI.
+///
+/// This deliberately has no `Debug` implementation so credentials cannot be logged accidentally.
+pub(crate) enum ProviderSourceCredentials {
+    None,
+    HostedApiKey(String),
+    OpenAiCompatible(OpenAiCompatibleCredentials),
+}
+
+/// Inputs required to construct one bounded source without changing its wire protocol.
+///
+/// This deliberately has no `Debug` implementation because it may hold credentials.
+pub(crate) struct ProviderSourceConfig {
+    provider: ModelProvider,
+    model: String,
+    action_budget: usize,
+    ollama_endpoint: SocketAddr,
+    credentials: ProviderSourceCredentials,
+}
+
+impl ProviderSourceConfig {
+    pub(crate) fn new(
+        provider: ModelProvider,
+        model: String,
+        action_budget: usize,
+        ollama_endpoint: SocketAddr,
+        credentials: ProviderSourceCredentials,
+    ) -> Self {
+        Self {
+            provider,
+            model,
+            action_budget,
+            ollama_endpoint,
+            credentials,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProviderDecisionSourceRegistryError {
+    DuplicateAdapter(AdapterId),
+    MissingAdapter(AdapterId),
+    BuildFailed(&'static str),
+}
+
+impl ProviderDecisionSourceRegistryError {
+    pub(crate) const fn message(self) -> &'static str {
+        match self {
+            Self::DuplicateAdapter(_) => "provider adapter is already registered",
+            Self::MissingAdapter(_) => "provider adapter is not registered",
+            Self::BuildFailed(message) => message,
+        }
+    }
+}
+
+pub(crate) type ProviderSourceFactory =
+    fn(ProviderSourceConfig) -> Result<Box<dyn ProviderDecisionSource>, &'static str>;
+
+/// Factory registry for the existing protocol-specific decision sources.
+pub(crate) struct ProviderDecisionSourceRegistry {
+    factories: HashMap<AdapterId, ProviderSourceFactory>,
+}
+
+impl ProviderDecisionSourceRegistry {
+    pub(crate) fn new() -> Self {
+        Self {
+            factories: HashMap::new(),
+        }
+    }
+
+    pub(crate) fn with_builtins() -> Self {
+        let mut registry = Self::new();
+        for (id, factory) in [
+            (
+                AdapterId::OLLAMA,
+                ollama_source_factory as ProviderSourceFactory,
+            ),
+            (AdapterId::GEMINI, gemini_source_factory),
+            (AdapterId::RESPONSES, responses_source_factory),
+            (AdapterId::ANTHROPIC, anthropic_source_factory),
+            (AdapterId::OPENAI_COMPATIBLE, compatible_source_factory),
+        ] {
+            registry
+                .register(id, factory)
+                .expect("built-in provider adapter IDs must be unique");
+        }
+        registry
+    }
+
+    pub(crate) fn register(
+        &mut self,
+        id: AdapterId,
+        factory: ProviderSourceFactory,
+    ) -> Result<(), ProviderDecisionSourceRegistryError> {
+        if self.factories.contains_key(&id) {
+            return Err(ProviderDecisionSourceRegistryError::DuplicateAdapter(id));
+        }
+        self.factories.insert(id, factory);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn contains(&self, id: AdapterId) -> bool {
+        self.factories.contains_key(&id)
+    }
+
+    pub(crate) fn create(
+        &self,
+        config: ProviderSourceConfig,
+    ) -> Result<ModelDecisionSource, ProviderDecisionSourceRegistryError> {
+        let adapter_id = config.provider.capabilities().protocol.adapter_id();
+        self.create_with_adapter(adapter_id, config)
+    }
+
+    pub(crate) fn create_with_adapter(
+        &self,
+        adapter_id: AdapterId,
+        config: ProviderSourceConfig,
+    ) -> Result<ModelDecisionSource, ProviderDecisionSourceRegistryError> {
+        let factory = self.factories.get(&adapter_id).ok_or(
+            ProviderDecisionSourceRegistryError::MissingAdapter(adapter_id),
+        )?;
+        let source = factory(config).map_err(ProviderDecisionSourceRegistryError::BuildFailed)?;
+        Ok(ModelDecisionSource::from_adapter(adapter_id, source))
+    }
+}
+
+fn ollama_source_factory(
+    config: ProviderSourceConfig,
+) -> Result<Box<dyn ProviderDecisionSource>, &'static str> {
+    let ProviderSourceConfig {
+        provider,
+        model,
+        action_budget,
+        ollama_endpoint,
+        credentials,
+    } = config;
+    if provider != ModelProvider::Ollama {
+        return Err("Ollama adapter requires the Ollama provider");
+    }
+    if !matches!(credentials, ProviderSourceCredentials::None) {
+        return Err("Ollama adapter does not accept hosted credentials");
+    }
+    Ok(Box::new(OllamaDecisionSource::with_endpoint(
+        model,
+        action_budget,
+        ollama_endpoint,
+    )))
+}
+
+fn gemini_source_factory(
+    config: ProviderSourceConfig,
+) -> Result<Box<dyn ProviderDecisionSource>, &'static str> {
+    let ProviderSourceConfig {
+        provider,
+        model,
+        action_budget,
+        credentials,
+        ..
+    } = config;
+    if provider != ModelProvider::Gemini {
+        return Err("Gemini adapter requires the Gemini provider");
+    }
+    let ProviderSourceCredentials::HostedApiKey(api_key) = credentials else {
+        return Err("Gemini adapter requires hosted API key credentials");
+    };
+    Ok(Box::new(GeminiDecisionSource::new(
+        model,
+        api_key,
+        action_budget,
+    )?))
+}
+
+fn responses_source_factory(
+    config: ProviderSourceConfig,
+) -> Result<Box<dyn ProviderDecisionSource>, &'static str> {
+    let ProviderSourceConfig {
+        provider,
+        model,
+        action_budget,
+        credentials,
+        ..
+    } = config;
+    let responses_provider = match provider {
+        ModelProvider::OpenAi => ResponsesProvider::OpenAi,
+        ModelProvider::Xai => ResponsesProvider::Xai,
+        _ => return Err("Responses adapter requires OpenAI or xAI"),
+    };
+    let ProviderSourceCredentials::HostedApiKey(api_key) = credentials else {
+        return Err("Responses adapter requires hosted API key credentials");
+    };
+    Ok(Box::new(ResponsesDecisionSource::new(
+        model,
+        responses_provider,
+        api_key,
+        action_budget,
+    )))
+}
+
+fn anthropic_source_factory(
+    config: ProviderSourceConfig,
+) -> Result<Box<dyn ProviderDecisionSource>, &'static str> {
+    let ProviderSourceConfig {
+        provider,
+        model,
+        action_budget,
+        credentials,
+        ..
+    } = config;
+    if provider != ModelProvider::Anthropic {
+        return Err("Anthropic adapter requires the Anthropic provider");
+    }
+    let ProviderSourceCredentials::HostedApiKey(api_key) = credentials else {
+        return Err("Anthropic adapter requires hosted API key credentials");
+    };
+    Ok(Box::new(AnthropicDecisionSource::new(
+        model,
+        api_key,
+        action_budget,
+    )))
+}
+
+fn compatible_source_factory(
+    config: ProviderSourceConfig,
+) -> Result<Box<dyn ProviderDecisionSource>, &'static str> {
+    let ProviderSourceConfig {
+        provider,
+        model,
+        action_budget,
+        credentials,
+        ..
+    } = config;
+    let ModelProvider::OpenAiCompatible(selected_provider) = provider else {
+        return Err("compatible chat adapter requires an OpenAI-compatible provider");
+    };
+    let ProviderSourceCredentials::OpenAiCompatible(credentials) = credentials else {
+        return Err("compatible chat adapter requires provider credentials");
+    };
+    if credentials.provider() != selected_provider {
+        return Err("compatible provider credentials do not match the selected provider");
+    }
+    Ok(Box::new(OpenAiCompatibleDecisionSource::new(
+        model,
+        credentials,
+        action_budget,
+    )?))
+}
+
+/// Runtime facade retained for existing CLI and Harness call sites.
+pub(crate) struct ModelDecisionSource {
+    adapter_id: AdapterId,
+    source: Box<dyn ProviderDecisionSource>,
 }
 
 impl ModelDecisionSource {
+    fn from_adapter(adapter_id: AdapterId, source: Box<dyn ProviderDecisionSource>) -> Self {
+        Self { adapter_id, source }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_source_for_test<S>(adapter_id: AdapterId, source: S) -> Self
+    where
+        S: ProviderDecisionSource + 'static,
+    {
+        Self::from_adapter(adapter_id, Box::new(source))
+    }
+
+    pub(crate) fn adapter_id(&self) -> AdapterId {
+        self.adapter_id
+    }
+
     pub(crate) fn set_repository_context(&mut self, context: Value) -> Result<(), &'static str> {
-        match self {
-            Self::OpenAiCompatible(source) => {
-                source.set_repository_context(context);
-                Ok(())
-            }
-            _ => Err("--repository-context-json is supported by OpenAI-compatible providers"),
-        }
+        self.source.set_repository_context(context)
     }
 
     pub(crate) fn supports_token_usage(&self) -> bool {
-        matches!(self, Self::OpenAiCompatible(_))
+        self.source.supports_token_usage()
     }
 
     pub(crate) fn take_token_usage(&mut self) -> Option<ModelTokenUsage> {
-        match self {
-            Self::OpenAiCompatible(source) => source.take_token_usage(),
-            _ => None,
-        }
+        self.source.take_token_usage()
+    }
+
+    pub(crate) fn ollama_source_mut(&mut self) -> Option<&mut OllamaDecisionSource> {
+        self.source.ollama_source_mut()
+    }
+
+    pub(crate) fn set_anthropic_workspace_id(
+        &mut self,
+        workspace_id: &str,
+    ) -> Result<(), &'static str> {
+        self.source.set_anthropic_workspace_id(workspace_id)
     }
 }
 
@@ -201,17 +548,11 @@ impl BoundedDecisionSource for ModelDecisionSource {
         goal: &str,
         observations: &[WorkspaceObservation],
     ) -> WorkspaceAction {
-        match self {
-            Self::Ollama(source) => source.choose_action(goal, observations),
-            Self::Gemini(source) => source.choose_action(goal, observations),
-            Self::Responses(source) => source.choose_action(goal, observations),
-            Self::Anthropic(source) => source.choose_action(goal, observations),
-            Self::OpenAiCompatible(source) => source.choose_action(goal, observations),
-        }
+        self.source.choose_action(goal, observations)
     }
 
     fn needs_root_project_guidance(&self) -> bool {
-        true
+        self.source.needs_root_project_guidance()
     }
 
     fn choose_action_with_root_project_guidance(
@@ -220,23 +561,8 @@ impl BoundedDecisionSource for ModelDecisionSource {
         observations: &[WorkspaceObservation],
         guidance: Option<&str>,
     ) -> WorkspaceAction {
-        match self {
-            Self::Ollama(source) => {
-                source.choose_action_with_root_project_guidance(goal, observations, guidance)
-            }
-            Self::Gemini(source) => {
-                source.choose_action_with_root_project_guidance(goal, observations, guidance)
-            }
-            Self::Responses(source) => {
-                source.choose_action_with_root_project_guidance(goal, observations, guidance)
-            }
-            Self::Anthropic(source) => {
-                source.choose_action_with_root_project_guidance(goal, observations, guidance)
-            }
-            Self::OpenAiCompatible(source) => {
-                source.choose_action_with_root_project_guidance(goal, observations, guidance)
-            }
-        }
+        self.source
+            .choose_action_with_root_project_guidance(goal, observations, guidance)
     }
 }
 

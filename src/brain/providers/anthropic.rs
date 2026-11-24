@@ -116,6 +116,11 @@ impl AnthropicDecisionSource {
         Ok(self)
     }
 
+    pub(crate) fn set_workspace_id(&mut self, workspace_id: &str) -> Result<(), &'static str> {
+        self.workspace_id = Some(AnthropicWorkspaceId::try_from(workspace_id)?);
+        Ok(())
+    }
+
     fn workspace_headers(&self) -> Vec<(&'static str, &str)> {
         self.workspace_id
             .iter()

@@ -3,10 +3,9 @@
 use super::config::{config_path, load_model_defaults};
 use super::settings::{load_credentials, user_settings_paths, CredentialStore};
 use crate::brain::{
-    validate_model_name_for_provider, AnthropicDecisionSource, CloudflareAccountId,
-    CloudflareGatewayId, GeminiDecisionSource, ModelDecisionSource, ModelProvider,
-    OllamaDecisionSource, OpenAiCompatibleCredentials, OpenAiCompatibleDecisionSource,
-    OpenAiCompatibleProvider, ResponsesDecisionSource, ResponsesProvider,
+    validate_model_name_for_provider, AdapterId, CloudflareAccountId, CloudflareGatewayId,
+    ModelDecisionSource, ModelProvider, OpenAiCompatibleCredentials, OpenAiCompatibleProvider,
+    ProviderDecisionSourceRegistry, ProviderSourceConfig, ProviderSourceCredentials,
 };
 use std::io::Write;
 use std::net::SocketAddr;
@@ -74,55 +73,33 @@ pub(super) fn prepare_model_source_with_credentials(
     };
     let provider = provider.unwrap_or(ModelProvider::Ollama);
     validate_model_name_for_provider(&model, provider)?;
-    let mut credentials = CredentialResolver::new(use_saved_credentials);
-    let source = match provider {
-        ModelProvider::Ollama => ModelDecisionSource::Ollama(OllamaDecisionSource::with_endpoint(
-            model,
-            action_budget,
-            ollama_endpoint,
-        )),
-        ModelProvider::Gemini => ModelDecisionSource::Gemini(GeminiDecisionSource::new(
-            model,
-            hosted_api_key(
-                "GEMINI_API_KEY",
-                "GEMINI_API_KEY must be set and nonempty for --provider gemini",
-                &mut credentials,
-            )?,
-            action_budget,
+    let mut credential_resolver = CredentialResolver::new(use_saved_credentials);
+    let source_credentials = match provider {
+        ModelProvider::Ollama => ProviderSourceCredentials::None,
+        ModelProvider::Gemini => ProviderSourceCredentials::HostedApiKey(hosted_api_key(
+            "GEMINI_API_KEY",
+            "GEMINI_API_KEY must be set and nonempty for --provider gemini",
+            &mut credential_resolver,
         )?),
-        ModelProvider::OpenAi => ModelDecisionSource::Responses(ResponsesDecisionSource::new(
-            model,
-            ResponsesProvider::OpenAi,
-            hosted_api_key(
-                "OPENAI_API_KEY",
-                "OPENAI_API_KEY must be set and nonempty for --provider openai",
-                &mut credentials,
-            )?,
-            action_budget,
-        )),
-        ModelProvider::Xai => ModelDecisionSource::Responses(ResponsesDecisionSource::new(
-            model,
-            ResponsesProvider::Xai,
-            hosted_api_key(
-                "XAI_API_KEY",
-                "XAI_API_KEY must be set and nonempty for --provider xai",
-                &mut credentials,
-            )?,
-            action_budget,
-        )),
-        ModelProvider::Anthropic => ModelDecisionSource::Anthropic(AnthropicDecisionSource::new(
-            model,
-            hosted_api_key(
-                "ANTHROPIC_API_KEY",
-                "ANTHROPIC_API_KEY must be set and nonempty for --provider anthropic",
-                &mut credentials,
-            )?,
-            action_budget,
-        )),
-        ModelProvider::OpenAiCompatible(provider) => {
-            let credentials = match provider {
+        ModelProvider::OpenAi => ProviderSourceCredentials::HostedApiKey(hosted_api_key(
+            "OPENAI_API_KEY",
+            "OPENAI_API_KEY must be set and nonempty for --provider openai",
+            &mut credential_resolver,
+        )?),
+        ModelProvider::Xai => ProviderSourceCredentials::HostedApiKey(hosted_api_key(
+            "XAI_API_KEY",
+            "XAI_API_KEY must be set and nonempty for --provider xai",
+            &mut credential_resolver,
+        )?),
+        ModelProvider::Anthropic => ProviderSourceCredentials::HostedApiKey(hosted_api_key(
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_API_KEY must be set and nonempty for --provider anthropic",
+            &mut credential_resolver,
+        )?),
+        ModelProvider::OpenAiCompatible(compatible_provider) => {
+            let credentials = match compatible_provider {
                 OpenAiCompatibleProvider::Cloudflare => {
-                    let account_id = credentials.required(
+                    let account_id = credential_resolver.required(
                         "CLOUDFLARE_ACCOUNT_ID",
                         "CLOUDFLARE_ACCOUNT_ID must be set for --provider cloudflare",
                     )?;
@@ -130,7 +107,7 @@ pub(super) fn prepare_model_source_with_credentials(
                     let api_token = hosted_api_key(
                         "CLOUDFLARE_API_TOKEN",
                         "CLOUDFLARE_API_TOKEN must be set and nonempty for --provider cloudflare",
-                        &mut credentials,
+                        &mut credential_resolver,
                     )?;
                     OpenAiCompatibleCredentials::Cloudflare {
                         account_id,
@@ -138,7 +115,7 @@ pub(super) fn prepare_model_source_with_credentials(
                     }
                 }
                 OpenAiCompatibleProvider::CloudflareAiGateway => {
-                    let account_id = credentials.required(
+                    let account_id = credential_resolver.required(
                         "CLOUDFLARE_ACCOUNT_ID",
                         "CLOUDFLARE_ACCOUNT_ID must be set for --provider cloudflare-ai-gateway",
                     )?;
@@ -146,9 +123,9 @@ pub(super) fn prepare_model_source_with_credentials(
                     let api_token = hosted_api_key(
                         "CLOUDFLARE_API_TOKEN",
                         "CLOUDFLARE_API_TOKEN must be set and nonempty for --provider cloudflare-ai-gateway",
-                        &mut credentials,
+                        &mut credential_resolver,
                     )?;
-                    let gateway_id = cloudflare_gateway_id_from_env(&mut credentials)?;
+                    let gateway_id = cloudflare_gateway_id_from_env(&mut credential_resolver)?;
                     OpenAiCompatibleCredentials::CloudflareAiGateway {
                         account_id,
                         api_token,
@@ -159,48 +136,54 @@ pub(super) fn prepare_model_source_with_credentials(
                     api_key: hosted_api_key(
                         "GROQ_API_KEY",
                         "GROQ_API_KEY must be set and nonempty for --provider groq",
-                        &mut credentials,
+                        &mut credential_resolver,
                     )?,
                 },
                 OpenAiCompatibleProvider::OpenRouter => OpenAiCompatibleCredentials::OpenRouter {
                     api_key: hosted_api_key(
                         "OPENROUTER_API_KEY",
                         "OPENROUTER_API_KEY must be set and nonempty for --provider openrouter",
-                        &mut credentials,
+                        &mut credential_resolver,
                     )?,
                 },
                 OpenAiCompatibleProvider::DeepSeek => OpenAiCompatibleCredentials::DeepSeek {
                     api_key: hosted_api_key(
                         "DEEPSEEK_API_KEY",
                         "DEEPSEEK_API_KEY must be set and nonempty for --provider deepseek",
-                        &mut credentials,
+                        &mut credential_resolver,
                     )?,
                 },
                 OpenAiCompatibleProvider::Zai => OpenAiCompatibleCredentials::Zai {
                     api_key: hosted_api_key(
                         "ZAI_API_KEY",
                         "ZAI_API_KEY must be set and nonempty for --provider zai",
-                        &mut credentials,
+                        &mut credential_resolver,
                     )?,
                 },
                 OpenAiCompatibleProvider::Mistral => OpenAiCompatibleCredentials::Mistral {
                     api_key: hosted_api_key(
                         "MISTRAL_API_KEY",
                         "MISTRAL_API_KEY must be set and nonempty for --provider mistral",
-                        &mut credentials,
+                        &mut credential_resolver,
                     )?,
                 },
             };
-            ModelDecisionSource::OpenAiCompatible(OpenAiCompatibleDecisionSource::new(
-                model,
-                credentials,
-                action_budget,
-            )?)
+            ProviderSourceCredentials::OpenAiCompatible(credentials)
         }
     };
+    let registry = ProviderDecisionSourceRegistry::with_builtins();
+    let source = registry
+        .create(ProviderSourceConfig::new(
+            provider,
+            model,
+            action_budget,
+            ollama_endpoint,
+            source_credentials,
+        ))
+        .map_err(|error| error.message())?;
     Ok(Some(apply_anthropic_workspace_id(
         source,
-        &mut credentials,
+        &mut credential_resolver,
     )?))
 }
 
@@ -210,21 +193,20 @@ pub(super) fn prepare_model_source_with_credentials(
 /// scoped to a workspace, so the variable is optional. Other providers pass
 /// through untouched.
 fn apply_anthropic_workspace_id(
-    source: ModelDecisionSource,
+    mut source: ModelDecisionSource,
     credentials: &mut CredentialResolver,
 ) -> Result<ModelDecisionSource, &'static str> {
-    let ModelDecisionSource::Anthropic(anthropic) = source else {
+    if source.adapter_id() != AdapterId::ANTHROPIC {
         return Ok(source);
-    };
+    }
     let workspace_id = credentials.optional(
         "ANTHROPIC_WORKSPACE_ID",
         "ANTHROPIC_WORKSPACE_ID must be valid UTF-8",
     )?;
-    let anthropic = match workspace_id {
-        Some(workspace_id) => anthropic.with_workspace_id(&workspace_id)?,
-        None => anthropic,
-    };
-    Ok(ModelDecisionSource::Anthropic(anthropic))
+    if let Some(workspace_id) = workspace_id {
+        source.set_anthropic_workspace_id(&workspace_id)?;
+    }
+    Ok(source)
 }
 
 /// An unset variable means "not configured"; a set value (even an empty one)

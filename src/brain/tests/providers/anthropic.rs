@@ -301,20 +301,21 @@ fn hosted_provider_errors_never_echo_keys_or_response_bodies() {
         }]);
         let endpoint = format!("http://{address}{path}");
         let mut source = if provider == "OpenAI" {
-            ModelDecisionSource::Responses(ResponsesDecisionSource::with_endpoint(
-                "test-model",
-                ResponsesProvider::OpenAi,
-                key,
-                1,
-                endpoint,
-            ))
+            ModelDecisionSource::from_source_for_test(
+                AdapterId::RESPONSES,
+                ResponsesDecisionSource::with_endpoint(
+                    "test-model",
+                    ResponsesProvider::OpenAi,
+                    key,
+                    1,
+                    endpoint,
+                ),
+            )
         } else {
-            ModelDecisionSource::Anthropic(AnthropicDecisionSource::with_endpoint(
-                "test-model",
-                key,
-                1,
-                endpoint,
-            ))
+            ModelDecisionSource::from_source_for_test(
+                AdapterId::ANTHROPIC,
+                AnthropicDecisionSource::with_endpoint("test-model", key, 1, endpoint),
+            )
         };
         let action = source.choose_action("Test a failed request", &[]);
         let requests = server.join().expect("join provider error mock server");
