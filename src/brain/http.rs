@@ -1,11 +1,12 @@
 //! HTTP transport for model requests, including streaming helpers.
 //!
-//! The adapters submit each request once. An ambiguous error after request
-//! transmission begins is returned rather than replaying work that a provider
-//! may already have processed or billed.
+//! Hosted adapters retry at most once after known connection failures that
+//! happen before request transmission. Ambiguous errors after transmission
+//! begins are returned rather than replaying work a provider may have billed.
 
 use std::io::Read;
 use std::net::SocketAddr;
+use std::time::Duration;
 use ureq::Agent;
 
 use super::errors::*;
@@ -13,6 +14,36 @@ use super::limits::*;
 use super::providers;
 use super::providers::*;
 use super::request::*;
+
+const MAX_PRE_SEND_RETRIES: usize = 1;
+const PRE_SEND_RETRY_DELAY: Duration = Duration::from_millis(100);
+
+/// Retry only failures whose error kind guarantees that request transmission
+/// has not begun. Generic I/O and send/receive timeouts are ambiguous.
+fn is_retryable_pre_send_error(error: &ureq::Error) -> bool {
+    matches!(
+        error,
+        ureq::Error::ConnectionFailed
+            | ureq::Error::HostNotFound
+            | ureq::Error::Timeout(ureq::Timeout::Connect)
+    )
+}
+
+fn send_with_pre_send_retry<T>(
+    mut send: impl FnMut() -> Result<T, ureq::Error>,
+) -> Result<T, ureq::Error> {
+    let mut retries = 0;
+    loop {
+        match send() {
+            Ok(response) => return Ok(response),
+            Err(error) if retries < MAX_PRE_SEND_RETRIES && is_retryable_pre_send_error(&error) => {
+                retries += 1;
+                std::thread::sleep(PRE_SEND_RETRY_DELAY);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
 
 /// Validates a provider endpoint before any credential header is attached.
 ///
@@ -157,15 +188,17 @@ pub(crate) fn post_chat_at_endpoint(
     if body.len() > MAX_MODEL_REQUEST_BYTES {
         return Err(ModelError::RequestTooLarge);
     }
-    let response = agent
-        .post(endpoint)
-        .header("Content-Type", "application/json")
-        .send(body)
-        .map_err(|error| match error {
-            ureq::Error::StatusCode(status) => ModelError::HttpStatus(status),
-            ureq::Error::ConnectionFailed => ModelError::ServiceUnavailable,
-            _ => ModelError::Transport("profile HTTP transport failure".to_owned()),
-        })?;
+    let response = send_with_pre_send_retry(|| {
+        agent
+            .post(endpoint)
+            .header("Content-Type", "application/json")
+            .send(body)
+    })
+    .map_err(|error| match error {
+        ureq::Error::StatusCode(status) => ModelError::HttpStatus(status),
+        ureq::Error::ConnectionFailed => ModelError::ServiceUnavailable,
+        _ => ModelError::Transport("profile HTTP transport failure".to_owned()),
+    })?;
     let mut response_body = Vec::new();
     response
         .into_body()
@@ -214,25 +247,28 @@ where
     if body.len() > MAX_MODEL_REQUEST_BYTES {
         return Err(ModelError::RequestTooLarge);
     }
-    let request = apply_auth(
-        provider,
-        agent
-            .post(endpoint)
-            .header("Content-Type", "application/json")
-            .header("Accept", "text/event-stream"),
-        api_key,
-    );
-    let request = if provider == ModelProvider::Anthropic {
-        request.header("anthropic-version", providers::ANTHROPIC_API_VERSION)
-    } else {
-        request
-    };
-    let request = extra_headers
-        .iter()
-        .fold(request, |request, (name, value)| {
-            request.header(*name, *value)
-        });
-    let response = request.send(body).map_err(|error| match error {
+    let response = send_with_pre_send_retry(|| {
+        let request = apply_auth(
+            provider,
+            agent
+                .post(endpoint)
+                .header("Content-Type", "application/json")
+                .header("Accept", "text/event-stream"),
+            api_key,
+        );
+        let request = if provider == ModelProvider::Anthropic {
+            request.header("anthropic-version", providers::ANTHROPIC_API_VERSION)
+        } else {
+            request
+        };
+        let request = extra_headers
+            .iter()
+            .fold(request, |request, (name, value)| {
+                request.header(*name, *value)
+            });
+        request.send(body)
+    })
+    .map_err(|error| match error {
         ureq::Error::StatusCode(status) => ModelError::ProviderHttpStatus(provider, status),
         _ => ModelError::ProviderTransport(provider),
     })?;
@@ -319,16 +355,18 @@ pub(crate) fn post_profile_with_bearer(
     if body.len() > MAX_MODEL_REQUEST_BYTES {
         return Err(ModelError::RequestTooLarge);
     }
-    let response = agent
-        .post(endpoint)
-        .header("Content-Type", "application/json")
-        .header("Authorization", format!("Bearer {api_key}"))
-        .send(body)
-        .map_err(|error| match error {
-            ureq::Error::StatusCode(status) => ModelError::HttpStatus(status),
-            ureq::Error::ConnectionFailed => ModelError::ServiceUnavailable,
-            _ => ModelError::Transport("provider profile request failed".to_owned()),
-        })?;
+    let response = send_with_pre_send_retry(|| {
+        agent
+            .post(endpoint)
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {api_key}"))
+            .send(body)
+    })
+    .map_err(|error| match error {
+        ureq::Error::StatusCode(status) => ModelError::HttpStatus(status),
+        ureq::Error::ConnectionFailed => ModelError::ServiceUnavailable,
+        _ => ModelError::Transport("provider profile request failed".to_owned()),
+    })?;
     let mut response_body = Vec::new();
     response
         .into_body()
@@ -360,23 +398,26 @@ pub(crate) fn post_hosted_with_headers(
     if body.len() > MAX_MODEL_REQUEST_BYTES {
         return Err(ModelError::RequestTooLarge);
     }
-    let request = apply_auth(
-        provider,
-        agent
-            .post(endpoint)
-            .header("Content-Type", "application/json"),
-        api_key,
-    );
-    let request = match api_version {
-        Some(version) => request.header("anthropic-version", version),
-        None => request,
-    };
-    let request = extra_headers
-        .iter()
-        .fold(request, |request, (name, value)| {
-            request.header(*name, *value)
-        });
-    let response = request.send(body).map_err(|error| match error {
+    let response = send_with_pre_send_retry(|| {
+        let request = apply_auth(
+            provider,
+            agent
+                .post(endpoint)
+                .header("Content-Type", "application/json"),
+            api_key,
+        );
+        let request = match api_version {
+            Some(version) => request.header("anthropic-version", version),
+            None => request,
+        };
+        let request = extra_headers
+            .iter()
+            .fold(request, |request, (name, value)| {
+                request.header(*name, *value)
+            });
+        request.send(body)
+    })
+    .map_err(|error| match error {
         ureq::Error::StatusCode(status) => ModelError::ProviderHttpStatus(provider, status),
         _ => ModelError::ProviderTransport(provider),
     })?;
@@ -396,6 +437,7 @@ pub(crate) fn post_hosted_with_headers(
 #[cfg(test)]
 mod transport_configuration_tests {
     use super::*;
+    use std::cell::Cell;
 
     #[test]
     fn loopback_and_hosted_agents_have_distinct_connection_budgets() {
@@ -411,5 +453,50 @@ mod transport_configuration_tests {
             hosted_model_agent().config().timeouts().global,
             Some(REQUEST_TIMEOUT)
         );
+    }
+
+    #[test]
+    fn retries_a_known_pre_send_failure_once() {
+        let attempts = Cell::new(0);
+
+        let response = send_with_pre_send_retry(|| {
+            let attempt = attempts.get() + 1;
+            attempts.set(attempt);
+            if attempt == 1 {
+                Err(ureq::Error::Timeout(ureq::Timeout::Connect))
+            } else {
+                Ok("response")
+            }
+        })
+        .expect("the second pre-send attempt should succeed");
+
+        assert_eq!(response, "response");
+        assert_eq!(attempts.get(), 2);
+    }
+
+    #[test]
+    fn does_not_retry_an_ambiguous_send_error() {
+        let attempts = Cell::new(0);
+
+        let result: Result<(), _> = send_with_pre_send_retry(|| {
+            attempts.set(attempts.get() + 1);
+            Err(ureq::Error::Io(std::io::Error::other("send failed")))
+        });
+
+        assert!(result.is_err());
+        assert_eq!(attempts.get(), 1);
+    }
+
+    #[test]
+    fn stops_after_one_pre_send_retry() {
+        let attempts = Cell::new(0);
+
+        let result: Result<(), _> = send_with_pre_send_retry(|| {
+            attempts.set(attempts.get() + 1);
+            Err(ureq::Error::ConnectionFailed)
+        });
+
+        assert!(result.is_err());
+        assert_eq!(attempts.get(), MAX_PRE_SEND_RETRIES + 1);
     }
 }
