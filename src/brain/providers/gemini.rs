@@ -114,6 +114,7 @@ impl GeminiDecisionSource {
             project_guidance,
             &self.core.extension_declarations,
         )?;
+        let advertised_tools = AdvertisedToolNames::from_request(&request)?;
         let response = super::post_hosted(
             &self.core.agent,
             ModelProvider::Gemini,
@@ -122,7 +123,7 @@ impl GeminiDecisionSource {
             None,
             &request,
         )?;
-        super::parse_gemini_response(&response)
+        super::parse_gemini_response(&response, &advertised_tools)
     }
 }
 

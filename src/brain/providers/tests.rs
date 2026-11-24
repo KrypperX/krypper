@@ -541,9 +541,12 @@ fn assert_responses_stream_validates_action(provider: super::ResponsesProvider) 
             "arguments": r#"{"path":"README.md"}"#
         }]
     });
-    let nonstreamed =
-        super::parse_responses_response(response.to_string().as_bytes(), provider.model_provider())
-            .expect("equivalent non-streaming decision");
+    let nonstreamed = super::parse_responses_response(
+        response.to_string().as_bytes(),
+        provider.model_provider(),
+        &super::super::AdvertisedToolNames::all_builtins(),
+    )
+    .expect("equivalent non-streaming decision");
     assert_eq!(format!("{action:?}"), format!("{nonstreamed:?}"));
     server.join().expect("server completed");
 }

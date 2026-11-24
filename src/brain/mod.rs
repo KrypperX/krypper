@@ -17,6 +17,7 @@ pub mod provider_bridge;
 mod providers;
 mod reflection;
 mod request;
+mod tool_set;
 mod tools_schema;
 
 #[cfg(test)]
@@ -65,6 +66,7 @@ pub(crate) use request::{
     enable_responses_streaming, encode_model_request, gemini_generate_content_endpoint,
     validate_model_name, validate_model_name_for_provider,
 };
+pub(crate) use tool_set::AdvertisedToolNames;
 pub(crate) use tools_schema::{tool_definitions, workspace_tool_definitions};
 
 #[cfg(test)]

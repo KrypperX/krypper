@@ -214,7 +214,10 @@ fn xai_responses_parser_rejects_every_ambiguous_or_unsupported_response_shape() 
     ];
 
     for response in invalid_responses {
-        assert!(parse_responses_response(&response, ModelProvider::Xai).is_err());
+        assert!(
+            parse_responses_response(&response, ModelProvider::Xai, &all_advertised_tools())
+                .is_err()
+        );
     }
 }
 

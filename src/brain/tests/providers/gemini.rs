@@ -206,7 +206,7 @@ fn gemini_response_parser_requires_exactly_one_well_formed_supported_call() {
     ];
 
     for response in invalid_responses {
-        assert!(parse_gemini_response(&response).is_err());
+        assert!(parse_gemini_response(&response, &all_advertised_tools()).is_err());
     }
 }
 
@@ -223,7 +223,8 @@ fn gemini_parser_keeps_local_argument_bounds_authoritative() {
         ),
     ] {
         assert!(parse_gemini_response(
-            gemini_response(vec![gemini_function_call(name, args)]).as_bytes()
+            gemini_response(vec![gemini_function_call(name, args)]).as_bytes(),
+            &all_advertised_tools()
         )
         .is_err());
     }

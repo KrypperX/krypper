@@ -44,8 +44,10 @@ fn malformed_and_unsupported_model_calls_fail_the_active_turn() {
 
 #[test]
 fn parser_maps_only_one_supported_tool_call() {
+    let advertised_tools = all_advertised_tools();
     let action = parse_model_response(
             br#"{"message":{"role":"assistant","tool_calls":[{"function":{"name":"create_file","arguments":{"path":"notes.txt","contents":"hello"}}}]}}"#,
+            &advertised_tools,
         )
         .expect("parse supported action");
     assert_eq!(
@@ -58,6 +60,7 @@ fn parser_maps_only_one_supported_tool_call() {
 
     let patch_action = parse_model_response(
         br#"{"message":{"role":"assistant","tool_calls":[{"function":{"name":"apply_patch","arguments":{"path":"notes with spaces.txt","patch":"--- a/notes with spaces.txt\n+++ b/notes with spaces.txt\n@@ -1 +1 @@\n-old\n+new\n"}}}]}}"#,
+        &advertised_tools,
     )
     .expect("parse registered patch action");
     assert_eq!(
@@ -72,22 +75,23 @@ fn parser_maps_only_one_supported_tool_call() {
             "apply_patch",
             json!({"path":"notes.txt", "patch":"x".repeat(32 * 1024 + 1)})
         )
-        .as_bytes()
+        .as_bytes(),
+        &advertised_tools,
     )
     .is_err());
 
-    assert!(parse_model_response(b"not json").is_err());
+    assert!(parse_model_response(b"not json", &advertised_tools).is_err());
     assert!(parse_model_response(
             br#"{"message":{"tool_calls":[{"function":{"name":"run_shell","arguments":{"command":"touch unsafe"}}}]}}"#
-        )
+        , &advertised_tools)
         .is_err());
     assert!(parse_model_response(
             br#"{"message":{"tool_calls":[{"function":{"name":"complete_task","arguments":{"result":"done"}}},{"function":{"name":"complete_task","arguments":{"result":"also done"}}}]}}"#
-        )
+        , &advertised_tools)
         .is_err());
     assert!(parse_model_response(
             br#"{"message":{"tool_calls":[{"function":{"name":"create_file","arguments":{"path":"notes.txt","contents":"hello","command":"unsafe"}}}]}}"#
-        )
+        , &advertised_tools)
         .is_err());
 }
 
@@ -95,10 +99,12 @@ fn parser_maps_only_one_supported_tool_call() {
 fn parser_rejects_tool_calls_without_an_assistant_role() {
     assert!(parse_model_response(
         br#"{"message":{"tool_calls":[{"function":{"name":"create_file","arguments":{"path":"unsafe.txt","contents":"must not write"}}}]}}"#
+        , &all_advertised_tools()
     )
     .is_err());
     assert!(parse_model_response(
         br#"{"message":{"role":"user","tool_calls":[{"function":{"name":"create_file","arguments":{"path":"unsafe.txt","contents":"must not write"}}}]}}"#
+        , &all_advertised_tools()
     )
     .is_err());
 }

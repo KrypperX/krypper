@@ -26,6 +26,7 @@ use super::plan::*;
 use super::reflection;
 use super::reflection::*;
 use super::request::*;
+use super::tool_set::AdvertisedToolNames;
 
 pub struct OllamaDecisionSource {
     pub(super) model: String,
@@ -168,9 +169,11 @@ impl OllamaDecisionSource {
             ),
         }
         .map_err(|_| WorkspacePlanError::ModelRequestFailed)?;
+        let advertised_tools = AdvertisedToolNames::from_request(&request)
+            .map_err(|_| WorkspacePlanError::ModelRequestFailed)?;
         let response = post_chat(&self.agent, self.address, &request)
             .map_err(|_| WorkspacePlanError::ModelRequestFailed)?;
-        parse_model_plan_response(&response, maximum)
+        parse_model_plan_response(&response, maximum, &advertised_tools)
     }
 
     pub(crate) fn accept_plan_with_project_guidance(
@@ -398,11 +401,12 @@ impl OllamaDecisionSource {
             project_guidance,
             &self.extension_declarations,
         )?;
+        let advertised_tools = AdvertisedToolNames::from_request(&request)?;
         let response = match self.profile_endpoint.as_deref() {
             Some(endpoint) => post_chat_at_endpoint(&self.agent, endpoint, &request)?,
             None => post_chat(&self.agent, self.address, &request)?,
         };
-        parse_model_response(&response)
+        parse_model_response(&response, &advertised_tools)
     }
 }
 

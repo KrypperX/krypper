@@ -1,4 +1,5 @@
 use super::*;
+use crate::brain::AdvertisedToolNames;
 use crate::harness::context::build_task_prompt_with_repository_context_json;
 
 /// Token counts returned by a provider response. Missing fields stay unknown.
@@ -366,14 +367,16 @@ fn build_compatible_chat_request_with_retrieval_context_for(
 pub(crate) fn parse_compatible_chat_response(
     response: &[u8],
     provider: ModelProvider,
+    advertised_tools: &AdvertisedToolNames,
 ) -> Result<WorkspaceAction, ModelError> {
-    parse_compatible_chat_response_for(response, Some(provider))
+    parse_compatible_chat_response_for(response, Some(provider), advertised_tools)
 }
 
 pub(crate) fn parse_profile_compatible_chat_response(
     response: &[u8],
+    advertised_tools: &AdvertisedToolNames,
 ) -> Result<WorkspaceAction, ModelError> {
-    parse_compatible_chat_response_for(response, None)
+    parse_compatible_chat_response_for(response, None, advertised_tools)
 }
 
 fn compatible_invalid_json(provider: Option<ModelProvider>) -> ModelError {
@@ -392,6 +395,7 @@ fn compatible_invalid_tool_call(
 fn parse_compatible_chat_response_for(
     response: &[u8],
     provider: Option<ModelProvider>,
+    advertised_tools: &AdvertisedToolNames,
 ) -> Result<WorkspaceAction, ModelError> {
     let response: Value =
         serde_json::from_slice(response).map_err(|_| compatible_invalid_json(provider))?;
@@ -471,8 +475,8 @@ fn parse_compatible_chat_response_for(
         }
     };
     match provider {
-        Some(provider) => action_from_provider_call(provider, name, &arguments),
-        None => super::action_from_call(name, &arguments),
+        Some(provider) => action_from_provider_call(provider, name, &arguments, advertised_tools),
+        None => super::action_from_call(name, &arguments, advertised_tools),
     }
 }
 
@@ -668,6 +672,7 @@ impl OpenAiCompatibleDecisionSource {
                 request_context,
             )?,
         };
+        let advertised_tools = AdvertisedToolNames::from_request(&request)?;
         let response = match self.provider {
             Some(provider) => {
                 let extra_headers = self
@@ -694,10 +699,12 @@ impl OpenAiCompatibleDecisionSource {
         };
         self.last_token_usage = parse_model_token_usage(&response);
         match self.provider {
-            Some(provider) => {
-                parse_compatible_chat_response(&response, ModelProvider::OpenAiCompatible(provider))
-            }
-            None => parse_profile_compatible_chat_response(&response),
+            Some(provider) => parse_compatible_chat_response(
+                &response,
+                ModelProvider::OpenAiCompatible(provider),
+                &advertised_tools,
+            ),
+            None => parse_profile_compatible_chat_response(&response, &advertised_tools),
         }
     }
 }

@@ -160,7 +160,8 @@ fn deepseek_and_zai_parsers_accept_object_and_json_text_arguments() {
             assert_eq!(
                 parse_compatible_chat_response(
                     response.as_bytes(),
-                    ModelProvider::OpenAiCompatible(provider)
+                    ModelProvider::OpenAiCompatible(provider),
+                    &all_advertised_tools()
                 )
                 .expect("valid provider arguments"),
                 WorkspaceAction::Complete {
@@ -204,7 +205,8 @@ fn compatible_chat_parser_rejects_missing_malformed_unsupported_and_multiple_cal
         for response in &invalid_responses {
             assert!(parse_compatible_chat_response(
                 response,
-                ModelProvider::OpenAiCompatible(provider)
+                ModelProvider::OpenAiCompatible(provider),
+                &all_advertised_tools()
             )
             .is_err());
         }
@@ -217,7 +219,8 @@ fn compatible_chat_parser_rejects_missing_malformed_unsupported_and_multiple_cal
         )]);
     assert!(parse_compatible_chat_response(
         object_arguments.as_bytes(),
-        ModelProvider::OpenAiCompatible(OpenAiCompatibleProvider::Groq)
+        ModelProvider::OpenAiCompatible(OpenAiCompatibleProvider::Groq),
+        &all_advertised_tools()
     )
     .is_err());
 }

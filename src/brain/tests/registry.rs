@@ -261,7 +261,7 @@ fn descriptive_metadata_does_not_register_unknown_tools_or_grant_cargo_authority
     }))
     .expect("encode unregistered tool fixture");
     assert_eq!(
-        parse_model_plan_response(&unsupported, 1),
+        parse_model_plan_response(&unsupported, 1, &all_advertised_tools()),
         Err(WorkspacePlanError::UnsupportedOperation)
     );
 
@@ -286,13 +286,14 @@ fn brain_module_source_path_preserves_root_compatibility() {
 #[test]
 fn offline_profile_accepts_only_an_optional_literal_filter() {
     assert_eq!(
-        action_from_call("offline_cargo_test", &json!({})).unwrap(),
+        action_from_call("offline_cargo_test", &json!({}), &all_advertised_tools()).unwrap(),
         WorkspaceAction::OfflineCargoTest { test_filter: None }
     );
     assert_eq!(
         action_from_call(
             "offline_cargo_test",
-            &json!({"test_filter":"module::selected_test"})
+            &json!({"test_filter":"module::selected_test"}),
+            &all_advertised_tools()
         )
         .unwrap(),
         WorkspaceAction::OfflineCargoTest {
@@ -310,6 +311,98 @@ fn offline_profile_accepts_only_an_optional_literal_filter() {
         json!({"test_filter":"x".repeat(257)}),
         json!([]),
     ] {
-        assert!(action_from_call("offline_cargo_test", &arguments).is_err());
+        assert!(
+            action_from_call("offline_cargo_test", &arguments, &all_advertised_tools()).is_err()
+        );
     }
+}
+
+#[test]
+fn advertised_tool_names_follow_each_request_schema_and_gemini_allow_list() {
+    let gemini_request = build_gemini_request("gemini-2.5-flash", "goal", &[], 1, None).unwrap();
+    let requests = [
+        build_chat_request("fixture-model", "goal", &[], 1, None).unwrap(),
+        build_responses_request("fixture-model", ModelProvider::OpenAi, "goal", &[], 1, None)
+            .unwrap(),
+        build_anthropic_request("fixture-model", "goal", &[], 1, None).unwrap(),
+        gemini_request.clone(),
+    ];
+    for request in requests {
+        let names = AdvertisedToolNames::from_request(&request).unwrap();
+        assert!(names.contains("read_file"));
+        assert!(names.contains("complete_task"));
+    }
+
+    let plan_request =
+        build_plan_request_with_project_guidance("fixture-model", "goal", &[], 4, None, None)
+            .unwrap();
+    let plan_tools = AdvertisedToolNames::from_request(&plan_request).unwrap();
+    assert!(plan_tools.contains("read_file"));
+    assert!(!plan_tools.contains("complete_task"));
+
+    let mut gemini_request: Value =
+        serde_json::from_slice(&gemini_request).expect("decode Gemini request fixture");
+    gemini_request["toolConfig"]["functionCallingConfig"]["allowedFunctionNames"] =
+        json!(["read_file"]);
+    let restricted = serde_json::to_vec(&gemini_request).expect("encode restricted Gemini request");
+    let restricted_tools = AdvertisedToolNames::from_request(&restricted).unwrap();
+    assert!(restricted_tools.contains("read_file"));
+    assert!(!restricted_tools.contains("create_directory"));
+}
+
+#[test]
+fn action_parser_rejects_every_unadvertised_builtin_and_extension_with_a_typed_error() {
+    let advertised = AdvertisedToolNames::from_names(["read_file"]);
+    for name in [
+        "offline_cargo_test",
+        "search_tree_text",
+        "create_directory",
+        "complete_task",
+        "custom_extension",
+    ] {
+        assert!(matches!(
+            action_from_call(name, &json!({}), &advertised),
+            Err(ModelError::InvalidToolCall("tool was not advertised"))
+        ));
+    }
+    assert!(matches!(
+        action_from_provider_call(
+            ModelProvider::Anthropic,
+            "complete_task",
+            &json!({"result":"done"}),
+            &advertised,
+        ),
+        Err(ModelError::ProviderInvalidToolCall(
+            ModelProvider::Anthropic,
+            "tool was not advertised"
+        ))
+    ));
+}
+
+#[test]
+fn an_advertised_extension_remains_dispatchable_after_schema_extraction() {
+    let declaration = json!({
+        "type":"function",
+        "function":{
+            "name":"custom_extension",
+            "description":"host-registered extension fixture",
+            "parameters":{
+                "type":"object",
+                "properties":{},
+                "required":[],
+                "additionalProperties":false
+            }
+        }
+    });
+    let request =
+        build_chat_request_with_extensions("fixture-model", "goal", &[], 1, None, &[declaration])
+            .unwrap();
+    let advertised = AdvertisedToolNames::from_request(&request).unwrap();
+    let error = action_from_call("custom_extension", &json!({}), &advertised).unwrap_err();
+
+    assert!(matches!(
+        action_from_error(error),
+        WorkspaceAction::Extension { name, arguments }
+            if name == "custom_extension" && arguments == json!({})
+    ));
 }

@@ -196,6 +196,7 @@ impl AnthropicDecisionSource {
             serde_json::from_slice(&request).map_err(|_| ModelError::RequestEncoding)?;
         body["stream"] = Value::Bool(true);
         let request = encode_model_request(&body)?;
+        let advertised_tools = AdvertisedToolNames::from_request(&request)?;
         let mut assembly =
             crate::streaming::AnthropicFinalActions::new(MAX_STREAMED_TOOL_ARGUMENT_BYTES);
         let workspace_headers = self.workspace_headers();
@@ -217,7 +218,12 @@ impl AnthropicDecisionSource {
             },
         )?;
         let (name, arguments) = assembly.finish().map_err(map_anthropic_assembly_error)?;
-        action_from_provider_call(ModelProvider::Anthropic, &name, &arguments)
+        action_from_provider_call(
+            ModelProvider::Anthropic,
+            &name,
+            &arguments,
+            &advertised_tools,
+        )
     }
 
     fn choose(
@@ -250,6 +256,7 @@ impl AnthropicDecisionSource {
             project_guidance,
             &self.core.extension_declarations,
         )?;
+        let advertised_tools = AdvertisedToolNames::from_request(&request)?;
         let workspace_headers = self.workspace_headers();
         let response = post_hosted_with_headers(
             &self.core.agent,
@@ -260,7 +267,7 @@ impl AnthropicDecisionSource {
             &workspace_headers,
             &request,
         )?;
-        parse_anthropic_response(&response)
+        parse_anthropic_response(&response, &advertised_tools)
     }
 }
 
