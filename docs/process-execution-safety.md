@@ -21,12 +21,12 @@ Brain / caller: OfflineCargoTest action with an optional literal test filter
 
 The authoritative runtime checks are:
 
-- Task ownership, running-turn state, grant presence and workspace binding in `src/core/lifecycle/session.rs:440-472`.
-- The registered `offline_cargo_test` operation and closed request schema in `src/tools/registry.rs:280-289` and `src/tools/registry.rs:147-152`.
-- Harness action dispatch and typed process observation in `src/harness/execution/action.rs:102-121`.
-- Filter validation and fixed argv construction in `validate_test_filter` and `cargo_command_args` in `src/tools/process/policy.rs`.
-- Fail-closed platform, cleanup-latch, cancellation, lease, supervisor, probe and resource-readback gates in `src/tools/process/supervisor.rs:549-621` and `src/tools/process/supervisor.rs:439-465`.
-- Sandbox mounts, namespace flags, fixed payload environment and descriptor hygiene in `src/tools/process/sandbox.rs:32-135` and `src/tools/process/sandbox.rs:138-195`.
+- `TaskSession::run_offline_cargo_tests` in `src/core/lifecycle/session.rs` checks task ownership, running-turn state, grant presence and workspace binding.
+- `workspace_operations` and `OperationDefinition` in `src/tools/registry.rs` define the registered `offline_cargo_test` operation, its closed request schema and descriptive effect.
+- `execute_action` in `src/harness/execution/action.rs` dispatches the action and records its typed process observation.
+- `validate_test_filter` and `cargo_command_args` in `src/tools/process/policy.rs` validate the optional filter and construct the fixed argument list.
+- `run_with_containment`, `run_with_bounds` and `settle_before_launch` in `src/tools/process/supervisor.rs` implement fail-closed readiness, cleanup, cancellation, lease and resource-readback gates.
+- `sandbox` in `src/tools/process/sandbox.rs` constructs the sandbox command, mounts, namespace flags, payload environment and descriptor hygiene.
 
 Registry effect descriptions, tool metadata and model output are descriptive inputs only; they do not authorize a process. The versioned descriptor in `src/tools/process_profile.rs` is also descriptive: its own module contract says it registers no tool, grants no authority, selects no sandbox and launches no process. The fixed policy validates the `offline_cargo_test` descriptor and uses its executable, argument prefix and limits; cwd, environment values, sandbox flags and enforcement remain owned by the policy and supervisor.
 
