@@ -123,10 +123,14 @@ pub struct CatalogProviderMetadata {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelPricing {
-    /// USD per one million input tokens. Missing prices remain unknown.
+    /// Reference USD rate per one million input tokens. This metadata supports
+    /// estimates; it does not represent an invoice rate. Missing prices remain
+    /// unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_usd_per_million_tokens: Option<Number>,
-    /// USD per one million output tokens. Missing prices remain unknown.
+    /// Reference USD rate per one million output tokens. This metadata supports
+    /// estimates; it does not represent an invoice rate. Missing prices remain
+    /// unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_usd_per_million_tokens: Option<Number>,
 }
@@ -152,8 +156,12 @@ pub struct ModelFeatures {
 #[serde(deny_unknown_fields)]
 pub struct CatalogModel {
     pub model: ModelSpec,
+    /// Optional reference rates used for route estimates. Missing or stale
+    /// prices must not be treated as zero or as proof of actual billed cost.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pricing: Option<ModelPricing>,
+    /// Optional descriptive catalog facts; runtime capability evidence is
+    /// tracked separately by the provider-evidence subsystem.
     #[serde(default)]
     pub features: ModelFeatures,
     #[serde(default)]

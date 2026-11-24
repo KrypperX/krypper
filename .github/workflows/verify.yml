@@ -40,6 +40,9 @@ jobs:
       - name: Check offline model catalog
         if: matrix.run_catalog
         run: cargo run --locked --example generate_model_catalog -- --check
+      - name: Test offline model-routing evaluation helpers
+        if: matrix.run_catalog
+        run: python3 -m unittest discover -s tests -p 'test_*.py'
       - name: Check patch whitespace
         run: git show --check --format=oneline HEAD
   verify:

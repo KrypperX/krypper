@@ -184,7 +184,8 @@ pub struct RoutingCandidate {
     /// Freshness of `capabilities`, independent of provider probe readiness.
     pub capability_evidence_freshness: CapabilityEvidenceFreshness,
     /// Caller-computed estimated total cost for this request, in micro-USD.
-    /// `None` means unknown; the router never interprets it as zero.
+    /// `None` means unknown; the router never interprets it as zero. This is a
+    /// routing estimate, not a report of provider-billed charges.
     pub estimated_cost_micro_usd: Option<u64>,
     /// Latency from fresh runtime evidence, in milliseconds.
     pub observed_latency_ms: Option<u64>,
