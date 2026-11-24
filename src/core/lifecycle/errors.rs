@@ -384,7 +384,9 @@ impl From<CliError> for TaskSessionWorkspaceError {
     fn from(error: CliError) -> Self {
         let kind = match &error {
             CliError::PlatformUnavailable => TaskSessionWorkspaceErrorKind::PlatformUnavailable,
-            CliError::Message(_) | CliError::WorkspaceMetadataMutationDenied => {
+            CliError::Message(_)
+            | CliError::WorkspaceMetadataMutationDenied
+            | CliError::WorkspaceMutationCommittedButUnverified => {
                 TaskSessionWorkspaceErrorKind::CaptureFailed
             }
         };

@@ -29,6 +29,12 @@ pub(super) enum PathComponent {
     Normal(OsString),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum RenameFileError {
+    NotCommitted,
+    CommittedButUnverified,
+}
+
 #[cfg(unix)]
 #[path = "platform/unix.rs"]
 mod backend;

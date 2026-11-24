@@ -5,7 +5,7 @@ use std::fs::File;
 use std::io;
 use std::path::Path;
 
-use super::super::syscalls::OpenRequest;
+use super::super::syscalls::{OpenRequest, RenameFileError};
 use super::super::types::{CreateMode, DirHandle, FileIdentity, FileStatus};
 
 fn unavailable() -> io::Error {
@@ -56,8 +56,8 @@ pub(crate) fn rename_file_at(
     _parent: &DirHandle,
     _temporary_name: &OsStr,
     _name: &OsStr,
-) -> io::Result<()> {
-    Err(unavailable())
+) -> Result<(), RenameFileError> {
+    Err(RenameFileError::NotCommitted)
 }
 
 pub(crate) fn unlink_created_file(
