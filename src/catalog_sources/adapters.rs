@@ -28,7 +28,7 @@ impl CatalogSource for ModelsDevSource {
         let mut models = Vec::new();
 
         for (provider_id, provider) in raw_providers {
-            if provider_id.is_empty() {
+            if provider_id.is_empty() || has_terminal_controls(provider_id) {
                 return Err(CatalogError::InvalidSourcePayload(descriptor.id.clone()));
             }
             let provider = provider
@@ -40,14 +40,19 @@ impl CatalogSource for ModelsDevSource {
             let raw_models = raw_models
                 .as_object()
                 .ok_or(CatalogError::InvalidSourcePayload(descriptor.id.clone()))?;
+            let provider_name = provider
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|name| !name.is_empty())
+                .unwrap_or(provider_id);
+            let provider_name = strip_terminal_controls(provider_name);
             providers.push(CatalogProviderMetadata {
                 id: provider_id.clone(),
-                name: provider
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .filter(|name| !name.is_empty())
-                    .unwrap_or(provider_id)
-                    .to_owned(),
+                name: if provider_name.is_empty() {
+                    provider_id.clone()
+                } else {
+                    provider_name
+                },
                 documentation_url: provider
                     .get("doc")
                     .and_then(Value::as_str)
@@ -55,7 +60,7 @@ impl CatalogSource for ModelsDevSource {
                     .map(str::to_owned),
             });
             for (model_id, raw_model) in raw_models {
-                if model_id.is_empty() {
+                if model_id.is_empty() || has_terminal_controls(model_id) {
                     return Err(CatalogError::InvalidSourcePayload(descriptor.id.clone()));
                 }
                 let model = raw_model
@@ -76,16 +81,26 @@ impl CatalogSource for ModelsDevSource {
                     structured_output: model.get("structured_output").and_then(Value::as_bool),
                     ..ModelFeatures::default()
                 };
+                let model_name = model
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or(model_id);
+                let model_name = strip_terminal_controls(model_name);
+                let status = model
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .map(strip_terminal_controls)
+                    .filter(|status| !status.is_empty());
                 models.push(CatalogModel {
                     model: ModelSpec {
                         provider: provider_id.clone(),
                         id: model_id.clone(),
-                        name: model
-                            .get("name")
-                            .and_then(Value::as_str)
-                            .filter(|name| !name.is_empty())
-                            .unwrap_or(model_id)
-                            .to_owned(),
+                        name: if model_name.is_empty() {
+                            model_id.clone()
+                        } else {
+                            model_name
+                        },
                         context_window: limits
                             .and_then(|limits| limits.get("context"))
                             .and_then(Value::as_u64),
@@ -94,10 +109,7 @@ impl CatalogSource for ModelsDevSource {
                             .and_then(Value::as_u64),
                         tool_calling: model.get("tool_call").and_then(Value::as_bool),
                         reasoning: model.get("reasoning").and_then(Value::as_bool),
-                        status: model
-                            .get("status")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned),
+                        status,
                         modalities: model.get("modalities").cloned(),
                     },
                     pricing,
@@ -149,7 +161,7 @@ impl CatalogSource for CloudflareWorkersAiSource {
                 .and_then(Value::as_str)
                 .filter(|id| {
                     id.strip_prefix("@cf/")
-                        .is_some_and(|suffix| !suffix.is_empty())
+                        .is_some_and(|suffix| !suffix.is_empty() && !has_terminal_controls(id))
                 })
                 .ok_or(CatalogError::InvalidSourcePayload(descriptor.id.clone()))?;
             let properties = match raw_model.get("properties") {
@@ -196,10 +208,15 @@ impl CatalogSource for CloudflareWorkersAiSource {
                     vision,
                     requires_workers_paid: property("require_workers_paid")
                         .and_then(Value::as_bool),
-                    task: raw_model.get("task").and_then(task_name).map(str::to_owned),
+                    task: raw_model
+                        .get("task")
+                        .and_then(task_name)
+                        .map(strip_terminal_controls)
+                        .filter(|task| !task.is_empty()),
                     planned_deprecation_date: property("planned_deprecation_date")
                         .and_then(Value::as_str)
-                        .map(str::to_owned),
+                        .map(strip_terminal_controls)
+                        .filter(|date| !date.is_empty()),
                 },
                 sources: vec![descriptor.id.clone()],
             });

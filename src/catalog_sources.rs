@@ -331,6 +331,12 @@ fn valid_price(value: Option<&Number>) -> bool {
 }
 
 fn safe_https_url(url: &str) -> bool {
+    if url
+        .chars()
+        .any(|character| character.is_control() || character.is_whitespace())
+    {
+        return false;
+    }
     let Some(authority_and_path) = url.strip_prefix("https://") else {
         return false;
     };
@@ -340,9 +346,20 @@ fn safe_https_url(url: &str) -> bool {
         .unwrap_or_default();
     !authority.is_empty()
         && !authority.contains('@')
-        && !authority
-            .bytes()
-            .any(|byte| byte.is_ascii_whitespace() || byte == b'\\')
+        && !authority.chars().any(|character| {
+            character.is_control() || character.is_whitespace() || character == '\\'
+        })
+}
+
+fn strip_terminal_controls(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_control())
+        .collect()
+}
+
+fn has_terminal_controls(value: &str) -> bool {
+    value.chars().any(char::is_control)
 }
 
 fn validate_contribution(contribution: &CatalogContribution) -> Result<(), CatalogError> {
@@ -369,7 +386,11 @@ fn validate_contribution(contribution: &CatalogContribution) -> Result<(), Catal
 
     let mut provider_ids = BTreeSet::new();
     for provider in &contribution.providers {
-        if provider.id.is_empty() || provider.name.is_empty() {
+        if provider.id.is_empty()
+            || provider.name.is_empty()
+            || has_terminal_controls(&provider.id)
+            || has_terminal_controls(&provider.name)
+        {
             return Err(CatalogError::InvalidSourcePayload(
                 provenance.source.clone(),
             ));
@@ -392,6 +413,25 @@ fn validate_contribution(contribution: &CatalogContribution) -> Result<(), Catal
     for model in &contribution.models {
         if model.model.provider.is_empty()
             || model.model.id.is_empty()
+            || model.model.name.is_empty()
+            || has_terminal_controls(&model.model.provider)
+            || has_terminal_controls(&model.model.id)
+            || has_terminal_controls(&model.model.name)
+            || model
+                .model
+                .status
+                .as_deref()
+                .is_some_and(has_terminal_controls)
+            || model
+                .features
+                .task
+                .as_deref()
+                .is_some_and(has_terminal_controls)
+            || model
+                .features
+                .planned_deprecation_date
+                .as_deref()
+                .is_some_and(has_terminal_controls)
             || model.sources.len() != 1
             || model.sources.first() != Some(&provenance.source)
             || model.pricing.as_ref().is_some_and(|pricing| {

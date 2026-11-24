@@ -208,6 +208,44 @@ fn models_dev_source_maps_provider_metadata_pricing_and_features() {
 }
 
 #[test]
+fn catalog_display_text_strips_terminal_controls_and_ids_reject_them() {
+    let bytes = br#"{"provider":{"name":"Provider\u001b[2J","models":{"model":{"name":"Model\u001b[31m name","status":"deprecated\u001b[0m"}}}}"#;
+    let contribution = ModelsDevSource.parse(bytes, 10).unwrap();
+    assert_eq!(contribution.providers[0].name, "Provider[2J");
+    assert_eq!(contribution.models[0].model.name, "Model[31m name");
+    assert_eq!(
+        contribution.models[0].model.status.as_deref(),
+        Some("deprecated[0m")
+    );
+
+    let controlled_provider_id = br#"{"provider\u001b":{"models":{"model":{}}}}"#;
+    let controlled_model_id = br#"{"provider":{"models":{"model\u001b":{}}}}"#;
+    assert!(ModelsDevSource.parse(controlled_provider_id, 10).is_err());
+    assert!(ModelsDevSource.parse(controlled_model_id, 10).is_err());
+}
+
+#[test]
+fn cloudflare_catalog_display_text_strips_terminal_controls() {
+    let contribution = CloudflareWorkersAiSource
+        .parse(
+            br#"{"models":[{"name":"@cf/text","task":"Text\u001b[2J Generation","properties":[{"property_id":"planned_deprecation_date","value":"2027-01-01\u001b[0m"}]}]}"#,
+            10,
+        )
+        .unwrap();
+    assert_eq!(
+        contribution.models[0].features.task.as_deref(),
+        Some("Text[2J Generation")
+    );
+    assert_eq!(
+        contribution.models[0]
+            .features
+            .planned_deprecation_date
+            .as_deref(),
+        Some("2027-01-01[0m")
+    );
+}
+
+#[test]
 fn cloudflare_source_preserves_exact_workers_id_and_ignores_unknown_fields() {
     let contribution = CloudflareWorkersAiSource
         .parse(CLOUDFLARE_FIXTURE, 1_800_000_001)
