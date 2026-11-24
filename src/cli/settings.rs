@@ -1,6 +1,8 @@
 //! Per-user model defaults and provider credentials used by `krypper setup`.
 
-use super::config::{config_path, RoutingMode};
+use super::config::{
+    config_path, validate_route_settings, RoutingMode, MAX_FALLBACK_BUDGET_MICRO_USD,
+};
 use crate::brain::{is_provider_credential_name, validate_model_name_for_provider, ModelProvider};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
@@ -68,6 +70,7 @@ impl CredentialStore {
     }
 }
 
+#[derive(Clone)]
 pub(super) struct UserSettingsPaths {
     pub(super) model: PathBuf,
     pub(super) credentials: PathBuf,
@@ -107,7 +110,7 @@ pub(super) fn load_credentials(path: &Path) -> Result<Option<CredentialStore>, S
     }
     ensure_private_permissions(path, &metadata)?;
 
-    let file = open_credentials(path)
+    let file = open_private_file(path)
         .map_err(|cause| file_error("cannot read credential store", path, cause))?;
     let mut bytes = Vec::new();
     file.take(MAX_CREDENTIAL_BYTES + 1)
@@ -155,13 +158,18 @@ pub(super) fn save_model_configuration(
     };
     validate_model_name_for_provider(model, provider_kind)
         .map_err(|_| "invalid model ID".to_owned())?;
-    if routing_mode == RoutingMode::Manual
-        && (allow_cross_provider_data_transfer || fallback_budget_micro_usd.is_some())
+    validate_route_settings(
+        routing_mode,
+        allow_cross_provider_data_transfer,
+        fallback_budget_micro_usd,
+    )
+    .map_err(str::to_owned)?;
+    if fallback_budget_micro_usd
+        .is_some_and(|budget| budget == 0 || budget > MAX_FALLBACK_BUDGET_MICRO_USD)
     {
-        return Err("cross-provider routing and fallback require automatic routing".to_owned());
-    }
-    if fallback_budget_micro_usd.is_some_and(|budget| budget == 0 || budget > 1_000_000_000) {
-        return Err("fallback budget must be between 1 and 1000000000 micro-USD".to_owned());
+        return Err(format!(
+            "fallback budget must be between 1 and {MAX_FALLBACK_BUDGET_MICRO_USD} micro-USD"
+        ));
     }
     let mut contents = format!("provider = \"{provider}\"\nmodel = \"{model}\"\n");
     if routing_mode == RoutingMode::Automatic {
@@ -355,7 +363,7 @@ fn set_private_file_permissions(path: &Path) -> Result<(), String> {
 }
 
 #[cfg(unix)]
-pub(super) fn open_credentials(path: &Path) -> io::Result<File> {
+pub(super) fn open_private_file(path: &Path) -> io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
     OpenOptions::new()
         .read(true)
@@ -364,7 +372,7 @@ pub(super) fn open_credentials(path: &Path) -> io::Result<File> {
 }
 
 #[cfg(not(unix))]
-pub(super) fn open_credentials(path: &Path) -> io::Result<File> {
+pub(super) fn open_private_file(path: &Path) -> io::Result<File> {
     File::open(path)
 }
 

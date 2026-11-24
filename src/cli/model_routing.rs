@@ -1,12 +1,17 @@
 //! Shared CLI route resolution over catalog metadata and per-user evidence.
 
-use super::config::ModelDefaults;
+use super::config::load_model_defaults;
 use super::model_catalog::{cache_path_for_user_settings, load_catalog, LoadedCatalog};
 use super::model_evidence::records;
-use super::settings::{load_credentials, CredentialStore, UserSettingsPaths};
+use super::provider_profiles::{load_provider_profiles, selected_profile};
+use super::settings::{
+    effective_credential_value, load_credentials, user_settings_paths, valid_credential,
+    CredentialStore, EffectiveCredentialValue, UserSettingsPaths,
+};
 use super::setup_probe::{
     configuration_revision_for_provider, existing_provider_configuration_revision,
 };
+use super::{ModelDefaults, RoutingMode};
 use crate::brain::capability_evidence::{
     now_unix_secs, resolve_provider_readiness, CapabilityFreshness,
 };
@@ -35,11 +40,81 @@ struct CandidateBuildOptions<'a> {
     create_revision_key: bool,
 }
 
-pub(super) fn resolve_automatic_route(
+/// Shared per-user model selection for command and terminal frontends.
+///
+/// The implementation owns catalog, credential, and probe-evidence lookup.
+/// Callers can load non-secret model defaults and request a route, but never
+/// receive credential-store access or implement provider readiness themselves.
+pub(crate) struct ModelRoutingService {
+    paths: UserSettingsPaths,
+}
+
+impl ModelRoutingService {
+    /// Opens the ordinary settings location for the current user.
+    pub(crate) fn for_current_user() -> Result<Option<Self>, String> {
+        Ok(user_settings_paths()?.map(|paths| Self { paths }))
+    }
+
+    pub(super) fn for_user_settings(paths: &UserSettingsPaths) -> Self {
+        Self {
+            paths: paths.clone(),
+        }
+    }
+
+    /// Reads the user's non-secret model and routing preferences.
+    pub(crate) fn load_user_defaults(&self) -> Result<Option<ModelDefaults>, String> {
+        load_model_defaults(&self.paths.model)
+    }
+
+    /// Resolves the route shown by setup/status and future frontends.
+    pub(crate) fn configured_route(
+        &self,
+        defaults: &ModelDefaults,
+    ) -> Result<RoutingSelection, String> {
+        if defaults.routing_mode == RoutingMode::Manual {
+            return Ok(manual_route(defaults));
+        }
+        self.resolve(defaults, false, false)
+            .map(|resolution| resolution.selection)
+    }
+
+    pub(crate) fn provider_readiness_for_default(
+        &self,
+        defaults: &ModelDefaults,
+    ) -> Result<Option<crate::routing::ProviderReadiness>, String> {
+        provider_readiness_for_default(&self.paths, defaults)
+    }
+
+    pub(super) fn resolve_for_task(
+        &self,
+        defaults: &ModelDefaults,
+        compatible_only: bool,
+        create_revision_key: bool,
+    ) -> Result<RouteResolution, String> {
+        self.resolve(defaults, compatible_only, create_revision_key)
+    }
+
+    fn resolve(
+        &self,
+        defaults: &ModelDefaults,
+        compatible_only: bool,
+        create_revision_key: bool,
+    ) -> Result<RouteResolution, String> {
+        resolve_automatic_route(defaults, &self.paths, compatible_only, create_revision_key)
+    }
+}
+
+fn manual_route(defaults: &ModelDefaults) -> RoutingSelection {
+    RoutingSelection {
+        provider: Some(defaults.provider.as_deref().unwrap_or("ollama").to_owned()),
+        model: defaults.model.clone(),
+        reason: crate::routing::SelectionReasonCode::ManualOverride,
+    }
+}
+
+fn resolve_automatic_route(
     defaults: &ModelDefaults,
     paths: &UserSettingsPaths,
-    allow_cross_provider_data_transfer: bool,
-    fallback_budget_micro_usd: Option<u64>,
     compatible_only: bool,
     create_revision_key: bool,
 ) -> Result<RouteResolution, String> {
@@ -50,7 +125,7 @@ pub(super) fn resolve_automatic_route(
         required_capabilities: vec![CapabilityName::DecisionRequest, CapabilityName::ToolCalling],
         minimum_context_window_tokens: Some(1),
         minimum_output_tokens: Some(1),
-        maximum_estimated_cost_micro_usd: fallback_budget_micro_usd,
+        maximum_estimated_cost_micro_usd: defaults.fallback_budget_micro_usd,
         preferences: vec![SelectionPreference::LowestLatency],
     };
     let candidates = build_candidates(
@@ -60,7 +135,7 @@ pub(super) fn resolve_automatic_route(
             credentials: &credentials,
             evidence_records: &evidence_records,
             anchor_provider: defaults.provider.as_deref().unwrap_or("ollama"),
-            allow_cross_provider_data_transfer,
+            allow_cross_provider_data_transfer: defaults.allow_cross_provider_data_transfer,
             compatible_only,
             create_revision_key,
         },
@@ -80,15 +155,36 @@ pub(super) fn resolve_automatic_route(
     })
 }
 
-pub(super) fn provider_readiness_for_default(
-    defaults: &ModelDefaults,
+fn provider_readiness_for_default(
     paths: &UserSettingsPaths,
+    defaults: &ModelDefaults,
 ) -> Result<Option<crate::routing::ProviderReadiness>, String> {
     let provider = defaults.provider.as_deref().unwrap_or("ollama");
-    let Some(descriptor) = crate::brain::provider_descriptor_by_selector(provider) else {
-        return Ok(None);
-    };
     let credentials = load_credentials(&paths.credentials)?.unwrap_or_else(CredentialStore::empty);
+    let Some(descriptor) = crate::brain::provider_descriptor_by_selector(provider) else {
+        let profiles = load_provider_profiles(&paths.provider_profiles)?;
+        let Some(profile) = profiles.iter().find(|profile| profile.id == provider) else {
+            return Ok(None);
+        };
+        let selected = selected_profile(std::slice::from_ref(profile), provider, &defaults.model);
+        let mut configured = selected.is_ok();
+        if let Ok((_, _, Some(name))) = selected {
+            configured &=
+                match effective_credential_value(std::env::var(&name), credentials.get(&name)) {
+                    EffectiveCredentialValue::Configured(value) => valid_credential(&value),
+                    EffectiveCredentialValue::Missing
+                    | EffectiveCredentialValue::InvalidEnvironment => false,
+                };
+        }
+        let adapter_id = profile.protocol.decision_protocol().adapter_id();
+        return Ok(Some(resolve_provider_readiness(
+            true,
+            ProviderDecisionSourceRegistry::with_builtins().contains(adapter_id),
+            configured,
+            CapabilityFreshness::Missing,
+            None,
+        )));
+    };
     let (revision, configured) = existing_provider_configuration_revision(
         paths,
         *descriptor,

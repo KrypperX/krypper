@@ -6,7 +6,7 @@ use super::checkpoint_files::{
 use super::config::{ModelDefaults, RoutingMode};
 use super::fallback_runtime::{CliFallbackRuntime, CliFallbackRuntimeConfig, TaskDecisionSource};
 use super::help::{contains_help_before_terminator, usage_error, write_task_help};
-use super::model_routing::resolve_automatic_route;
+use super::model_routing::ModelRoutingService;
 use super::model_selection::{
     configured_model_defaults, parse_provider_selection, prepare_model_source_for_selection,
     ProviderSelection,
@@ -566,18 +566,17 @@ where
             .is_some_and(|defaults| defaults.routing_mode == RoutingMode::Automatic)
     {
         let defaults = configured_defaults.as_ref().expect("checked above");
-        let Some(paths) = user_settings_paths().map_err(io::Error::other)? else {
+        let Some(model_routing) =
+            ModelRoutingService::for_current_user().map_err(io::Error::other)?
+        else {
             return usage_error(
                 error,
                 Some("task"),
                 "automatic routing needs a per-user settings directory",
             );
         };
-        let resolution = match resolve_automatic_route(
+        let resolution = match model_routing.resolve_for_task(
             defaults,
-            &paths,
-            defaults.allow_cross_provider_data_transfer,
-            defaults.fallback_budget_micro_usd,
             repository_context_json.is_some() || model_usage_jsonl,
             true,
         ) {

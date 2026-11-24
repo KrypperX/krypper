@@ -1,0 +1,36 @@
+{
+  "allow_cross_provider_data_transfer": false,
+  "catalog": {
+    "origin": "embedded",
+    "provenance": [
+      {
+        "license": "MIT",
+        "license_url": "https://github.com/anomalyco/models.dev/blob/dev/LICENSE",
+        "retrieved_at_unix": "<dynamic>",
+        "schema_version": 1,
+        "source": "models-dev",
+        "source_sha256": "df2b12da367f295d55796f387c8c7028672243a456d2f798b1a7cd353d7ec6f6",
+        "url": "https://models.dev/api.json"
+      }
+    ],
+    "stale": "<dynamic>"
+  },
+  "config_override": false,
+  "credential_count": 0,
+  "fallback_budget_micro_usd": null,
+  "model": "gpt-4.1",
+  "provider": "openai",
+  "provider_profile_count": 0,
+  "provider_readiness": {
+    "configured": false,
+    "discoverable": true,
+    "executable": true,
+    "verification": "unknown"
+  },
+  "route": {
+    "model": "gpt-4.1",
+    "provider": "openai",
+    "reason": "manual_override"
+  },
+  "routing_mode": "manual"
+}

@@ -1,7 +1,7 @@
 //! Per-user persistence for explicit provider probes and runtime capability evidence.
 
 use super::settings::{
-    ensure_private_permissions, open_credentials, write_private_file, UserSettingsPaths,
+    ensure_private_permissions, open_private_file, write_private_file, UserSettingsPaths,
 };
 use crate::brain::capability_evidence::{
     configuration_revision, new_configuration_revision_key, now_unix_secs, CapabilityFreshness,
@@ -92,7 +92,7 @@ fn load(path: &Path) -> Result<ProviderEvidenceStore, String> {
         ));
     }
     ensure_private_permissions(path, &metadata)?;
-    let file = open_credentials(path).map_err(|cause| {
+    let file = open_private_file(path).map_err(|cause| {
         format!(
             "cannot read provider evidence '{}': {}",
             path.display(),
@@ -155,7 +155,7 @@ fn read_revision_key(path: &Path) -> Result<[u8; 32], RevisionKeyError> {
     if !metadata.file_type().is_file() || ensure_private_permissions(path, &metadata).is_err() {
         return Err(RevisionKeyError::Invalid);
     }
-    let file = open_credentials(path).map_err(|_| RevisionKeyError::Io)?;
+    let file = open_private_file(path).map_err(|_| RevisionKeyError::Io)?;
     let mut bytes = Vec::new();
     file.take((REVISION_KEY_BYTES + 1) as u64)
         .read_to_end(&mut bytes)

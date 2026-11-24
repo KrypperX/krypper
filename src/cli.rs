@@ -4,12 +4,13 @@ use std::io::{self, Read, Write};
 
 mod checkpoint_files;
 mod config;
+pub(crate) use self::config::{ModelDefaults, RoutingMode};
 mod context;
 mod fallback_runtime;
 mod help;
 mod model_catalog;
 mod model_evidence;
-mod model_routing;
+pub(crate) mod model_routing;
 mod model_selection;
 mod models;
 mod outcome;

@@ -20,21 +20,44 @@ const CONFIG_FILE: &str = "config.toml";
 
 /// Model selection defaults loaded from a configuration file.
 #[derive(Debug, PartialEq, Eq)]
-pub(super) struct ModelDefaults {
-    pub(super) model: String,
-    pub(super) provider: Option<String>,
-    pub(super) routing_mode: RoutingMode,
-    pub(super) allow_cross_provider_data_transfer: bool,
+pub(crate) struct ModelDefaults {
+    pub(crate) model: String,
+    pub(crate) provider: Option<String>,
+    pub(crate) routing_mode: RoutingMode,
+    pub(crate) allow_cross_provider_data_transfer: bool,
     /// A configured ceiling enables bounded fallback; `None` keeps it disabled.
-    pub(super) fallback_budget_micro_usd: Option<u64>,
-    pub(super) path: PathBuf,
+    pub(crate) fallback_budget_micro_usd: Option<u64>,
+    pub(crate) path: PathBuf,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(super) enum RoutingMode {
+pub(crate) enum RoutingMode {
     #[default]
     Manual,
     Automatic,
+}
+
+impl RoutingMode {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Automatic => "automatic",
+        }
+    }
+}
+
+pub(super) fn validate_route_settings(
+    routing_mode: RoutingMode,
+    allow_cross_provider_data_transfer: bool,
+    fallback_budget_micro_usd: Option<u64>,
+) -> Result<(), &'static str> {
+    if routing_mode == RoutingMode::Manual
+        && (allow_cross_provider_data_transfer || fallback_budget_micro_usd.is_some())
+    {
+        Err("cross-provider routing and fallback require automatic routing")
+    } else {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -118,14 +141,12 @@ pub(super) fn load_model_defaults(path: &Path) -> Result<Option<ModelDefaults>, 
     let allow_cross_provider_data_transfer =
         parsed.allow_cross_provider_data_transfer.unwrap_or(false);
     let fallback_budget_micro_usd = parsed.fallback_budget_micro_usd;
-    if routing_mode == RoutingMode::Manual
-        && (allow_cross_provider_data_transfer || fallback_budget_micro_usd.is_some())
-    {
-        return Err(format!(
-            "invalid config file '{}': cross-provider routing and fallback require automatic routing",
-            path.display()
-        ));
-    }
+    validate_route_settings(
+        routing_mode,
+        allow_cross_provider_data_transfer,
+        fallback_budget_micro_usd,
+    )
+    .map_err(|message| format!("invalid config file '{}': {message}", path.display()))?;
     Ok(Some(ModelDefaults {
         model,
         provider: parsed.provider,
@@ -253,7 +274,7 @@ fn parse_config(text: &str) -> Result<ParsedConfig, String> {
     Ok(parsed)
 }
 
-const MAX_FALLBACK_BUDGET_MICRO_USD: u64 = 1_000_000_000;
+pub(super) const MAX_FALLBACK_BUDGET_MICRO_USD: u64 = 1_000_000_000;
 
 fn set_value<T>(slot: &mut Option<T>, key: &str, value: T, line: usize) -> Result<(), String> {
     if slot.is_some() {

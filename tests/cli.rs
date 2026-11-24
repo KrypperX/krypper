@@ -300,6 +300,168 @@ fn setup_status_redacts_saved_credentials_and_writes_nothing_to_the_workspace() 
         .path()
         .join(".config/krypper/config.toml")
         .exists());
+
+    let json = command(Some(workspace.path()), &["setup", "--status", "--json"])
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .output()
+        .expect("show JSON setup status");
+    assert!(json.status.success(), "{}", stderr(&json));
+    let status: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(status["provider"], "openai");
+    assert_eq!(status["model"], "gpt-4.1");
+    assert_eq!(status["routing_mode"], "manual");
+    assert_eq!(status["route"]["reason"], "manual_override");
+    assert!(status["provider_readiness"].is_object());
+    assert!(status["catalog"]["provenance"].is_array());
+    assert!(!String::from_utf8_lossy(&json.stdout).contains(secret));
+}
+
+#[test]
+fn setup_status_json_matches_manual_routing_snapshot() {
+    let workspace = TempDir::new();
+    let xdg = TempDir::new();
+    let config_directory = xdg.path().join("krypper");
+    fs::create_dir_all(&config_directory).unwrap();
+    fs::write(
+        config_directory.join("config.toml"),
+        "provider = \"openai\"\nmodel = \"gpt-4.1\"\n",
+    )
+    .unwrap();
+
+    let output = command(Some(workspace.path()), &["setup", "--status", "--json"])
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env_remove("KRYPPER_CONFIG")
+        .env_remove("OPENAI_API_KEY")
+        .output()
+        .expect("show status JSON for the saved manual route");
+    assert!(output.status.success(), "{}", stderr(&output));
+    let mut status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(status["catalog"]["stale"].is_boolean());
+    assert!(status["catalog"]["provenance"][0]["retrieved_at_unix"].is_u64());
+    status["catalog"]["stale"] = serde_json::json!("<dynamic>");
+    status["catalog"]["provenance"][0]["retrieved_at_unix"] = serde_json::json!("<dynamic>");
+    assert_eq!(
+        serde_json::to_string_pretty(&status).unwrap(),
+        include_str!("fixtures/cli/setup-status-manual.json").trim_end()
+    );
+}
+
+#[test]
+fn setup_status_reports_readiness_for_a_saved_provider_profile() {
+    let workspace = TempDir::new();
+    let xdg = TempDir::new();
+    let config_directory = xdg.path().join("krypper");
+    fs::create_dir_all(&config_directory).unwrap();
+    let config_path = config_directory.join("config.toml");
+    let profiles_path = config_directory.join("provider-profiles.json");
+    let credentials_path = config_directory.join("credentials.json");
+    fs::write(
+        &config_path,
+        "provider = \"my-worker\"\nmodel = \"gpt-4.1\"\n",
+    )
+    .unwrap();
+    fs::write(
+        &profiles_path,
+        r#"{"version":1,"profiles":[{"id":"my-worker","label":"My Worker","enabled":true,"protocol":"openai-compatible-chat","endpoint":"https://example.invalid/v1/chat/completions","credential_ref":"profile:my-worker:api-key"}]}"#,
+    )
+    .unwrap();
+    fs::write(
+        &credentials_path,
+        r#"{"KRYPPER_PROVIDER_MY_WORKER_API_KEY":"private-profile-secret"}"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&config_directory, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&profiles_path, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::set_permissions(&credentials_path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    let output = command(Some(workspace.path()), &["setup", "--status", "--json"])
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env_remove("KRYPPER_CONFIG")
+        .env_remove("KRYPPER_PROVIDER_MY_WORKER_API_KEY")
+        .output()
+        .expect("show status for the saved provider profile");
+    assert!(output.status.success(), "{}", stderr(&output));
+    let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(status["provider"], "my-worker");
+    assert_eq!(status["provider_readiness"]["discoverable"], true);
+    assert_eq!(status["provider_readiness"]["executable"], true);
+    assert_eq!(status["provider_readiness"]["configured"], true);
+    assert_eq!(status["provider_readiness"]["verification"], "unknown");
+    assert_eq!(status["route"]["reason"], "manual_override");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("private-profile-secret"));
+}
+
+#[test]
+fn setup_routing_mode_is_per_user_and_automatic_task_fails_before_provider_access_without_probe() {
+    let workspace = TempDir::new();
+    let xdg = TempDir::new();
+    let config_directory = xdg.path().join("krypper");
+    fs::create_dir_all(&config_directory).unwrap();
+    let model_config = config_directory.join("config.toml");
+    fs::write(
+        &model_config,
+        "provider = \"openai\"\nmodel = \"gpt-4.1\"\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&config_directory, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    let automatic = command(
+        Some(workspace.path()),
+        &[
+            "setup",
+            "--routing-mode",
+            "automatic",
+            "--fallback-budget-usd",
+            "0.25",
+        ],
+    )
+    .env("XDG_CONFIG_HOME", xdg.path())
+    .output()
+    .expect("save automatic routing preferences");
+    assert!(automatic.status.success(), "{}", stderr(&automatic));
+    assert!(stdout(&automatic).contains("Bounded fallback: enabled"));
+
+    let task = command(
+        Some(workspace.path()),
+        &[
+            "task",
+            "--goal",
+            "do not send a request without verified route evidence",
+            "--max-actions",
+            "1",
+            "--workspace",
+            workspace.path().to_str().unwrap(),
+        ],
+    )
+    .env("KRYPPER_CONFIG", &model_config)
+    .env("XDG_CONFIG_HOME", xdg.path())
+    .output()
+    .expect("reject automatic routing without current probe evidence");
+    assert_eq!(task.status.code(), Some(2), "{}", stderr(&task));
+    assert!(stderr(&task).contains("automatic routing found no eligible model"));
+    assert!(!stderr(&task).contains("selected route"));
+
+    let manual = command(
+        Some(workspace.path()),
+        &["setup", "--routing-mode", "manual"],
+    )
+    .env("XDG_CONFIG_HOME", xdg.path())
+    .output()
+    .expect("restore manual routing preferences");
+    assert!(manual.status.success(), "{}", stderr(&manual));
+    let saved = fs::read_to_string(&model_config).unwrap();
+    assert!(!saved.contains("routing_mode"));
+    assert!(!saved.contains("fallback_budget_micro_usd"));
+    assert!(saved.contains("provider = \"openai\""));
+    assert!(saved.contains("model = \"gpt-4.1\""));
 }
 
 #[test]

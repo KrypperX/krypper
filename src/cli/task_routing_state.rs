@@ -1,7 +1,7 @@
 //! Private, task-scoped routing snapshots and bounded fallback checkpoints.
 
 use super::settings::{
-    ensure_private_permissions, open_credentials, remove_file_if_present, write_private_file,
+    ensure_private_permissions, open_private_file, remove_file_if_present, write_private_file,
     UserSettingsPaths,
 };
 use crate::fallback::{FallbackCheckpoint, FallbackLimits, FallbackPolicy};
@@ -245,7 +245,7 @@ fn read_document(path: &Path) -> Result<Option<TaskRoutingDocument>, String> {
         ));
     }
     ensure_private_permissions(path, &metadata)?;
-    let file = open_credentials(path).map_err(|error| {
+    let file = open_private_file(path).map_err(|error| {
         format!(
             "cannot read task routing state '{}': {}",
             path.display(),

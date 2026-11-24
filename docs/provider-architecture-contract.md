@@ -152,6 +152,8 @@ The CLI constructs `FallbackDecisionSource` only when automatic routing and an a
 
 The task command resolves an automatic route before constructing its provider source, and explicit `--provider`/`--model` selections retain precedence. A route and its stable reason are emitted to stderr; existing normal task output stays unchanged. Resumed tasks with fallback state must use the matching saved automatic-routing configuration. `krypper setup --reset` removes the catalog cache and all task-scoped routing state along with the existing settings and evidence. The public routing contract is shared with future frontends; no terminal UI or UI-owned credential path is introduced in this phase.
 
+The crate-private `cli::model_routing::ModelRoutingService` is the shared model-selection interface for the CLI and future in-crate frontends. It reads per-user model defaults, catalog metadata, provider credentials, and probe evidence, then returns route and readiness results without exposing credential access. `setup --status` and task execution use the same route-resolution implementation; a future TUI should call this interface rather than reconstructing provider eligibility or selection.
+
 ## Scope of this baseline document
 
 This document records the current structure and staged testable contracts. The implementation includes the trusted built-in descriptor catalog, a crate-private typed factory registry around the five existing protocol families, the P6 capability-evidence path, the P7 routing API, the P8 bounded fallback decision source, and the P9 CLI routing integration above. Evaluation and final consolidation remain P10 work. Dynamic code loading and model feature probes beyond the explicit connection test are not added here.

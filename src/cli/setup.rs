@@ -1,9 +1,12 @@
 //! Interactive, per-user model and provider configuration.
 
-use super::config::{load_model_defaults, ModelDefaults, RoutingMode};
+use super::config::{
+    load_model_defaults, validate_route_settings, ModelDefaults, RoutingMode,
+    MAX_FALLBACK_BUDGET_MICRO_USD,
+};
 use super::help::{usage_error, write_setup_help};
 use super::model_catalog::{cache_path_for_user_settings, load_catalog, CatalogOrigin};
-use super::model_routing::{provider_readiness_for_default, resolve_automatic_route};
+use super::model_routing::ModelRoutingService;
 use super::provider_profiles::load_provider_profiles;
 use super::settings::{
     load_credentials, remove_settings, save_credentials, save_model_configuration,
@@ -143,14 +146,12 @@ fn set_routing_mode(
     let Some(routing_mode) = selected_mode else {
         return usage_error(error, Some("setup"), "--routing-mode is required");
     };
-    if routing_mode == RoutingMode::Manual
-        && (allow_cross_provider_data_transfer || fallback_budget_micro_usd.is_some())
-    {
-        return usage_error(
-            error,
-            Some("setup"),
-            "cross-provider routing and fallback require automatic routing",
-        );
+    if let Err(message) = validate_route_settings(
+        routing_mode,
+        allow_cross_provider_data_transfer,
+        fallback_budget_micro_usd,
+    ) {
+        return usage_error(error, Some("setup"), message);
     }
     let Some(paths) = user_settings_paths().map_err(io::Error::other)? else {
         return usage_error(
@@ -181,10 +182,7 @@ fn set_routing_mode(
     ) {
         return usage_error(error, Some("setup"), &message);
     }
-    let mode_name = match routing_mode {
-        RoutingMode::Manual => "manual",
-        RoutingMode::Automatic => "automatic",
-    };
+    let mode_name = routing_mode.as_str();
     writeln!(output, "Saved {mode_name} routing for this user.")?;
     if routing_mode == RoutingMode::Automatic {
         writeln!(
@@ -233,7 +231,7 @@ fn parse_usd_micro(value: &str) -> Option<u64> {
         fraction.parse::<u64>().ok()? * 10_u64.checked_pow((6 - fraction.len()) as u32)?
     };
     let total = whole.checked_mul(1_000_000)?.checked_add(fractional)?;
-    (total > 0 && total <= 1_000_000_000).then_some(total)
+    (total > 0 && total <= MAX_FALLBACK_BUDGET_MICRO_USD).then_some(total)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -255,7 +253,8 @@ fn show_status(output: &mut dyn Write, json: bool) -> io::Result<i32> {
             return Ok(2);
         }
     };
-    let defaults = match load_model_defaults(&paths.model) {
+    let model_routing = ModelRoutingService::for_user_settings(&paths);
+    let defaults = match model_routing.load_user_defaults() {
         Ok(defaults) => defaults,
         Err(message) => {
             writeln!(output, "krypper setup: {message}")?;
@@ -279,7 +278,7 @@ fn show_status(output: &mut dyn Write, json: bool) -> io::Result<i32> {
     };
 
     let readiness = match defaults.as_ref() {
-        Some(defaults) => match provider_readiness_for_default(defaults, &paths) {
+        Some(defaults) => match model_routing.provider_readiness_for_default(defaults) {
             Ok(readiness) => readiness,
             Err(message) => {
                 writeln!(output, "krypper setup: {message}")?;
@@ -295,25 +294,9 @@ fn show_status(output: &mut dyn Write, json: bool) -> io::Result<i32> {
             return Ok(2);
         }
     };
-    let route: Option<Result<crate::routing::RoutingSelection, String>> = match defaults.as_ref() {
-        Some(defaults) if defaults.routing_mode == RoutingMode::Automatic => Some(
-            resolve_automatic_route(
-                defaults,
-                &paths,
-                defaults.allow_cross_provider_data_transfer,
-                defaults.fallback_budget_micro_usd,
-                false,
-                false,
-            )
-            .map(|resolution| resolution.selection),
-        ),
-        Some(defaults) => Some(Ok(crate::routing::RoutingSelection {
-            provider: Some(defaults.provider.as_deref().unwrap_or("ollama").to_owned()),
-            model: defaults.model.clone(),
-            reason: crate::routing::SelectionReasonCode::ManualOverride,
-        })),
-        None => None,
-    };
+    let route: Option<Result<crate::routing::RoutingSelection, String>> = defaults
+        .as_ref()
+        .map(|defaults| model_routing.configured_route(defaults));
 
     if json {
         let route_value = route.as_ref().map(|route| match route {
@@ -327,7 +310,7 @@ fn show_status(output: &mut dyn Write, json: bool) -> io::Result<i32> {
         let value = serde_json::json!({
             "provider": defaults.as_ref().and_then(|value| value.provider.as_deref()).unwrap_or("ollama"),
             "model": defaults.as_ref().map(|value| value.model.as_str()),
-            "routing_mode": defaults.as_ref().map(|value| match value.routing_mode { RoutingMode::Manual => "manual", RoutingMode::Automatic => "automatic" }),
+            "routing_mode": defaults.as_ref().map(|value| value.routing_mode.as_str()),
             "allow_cross_provider_data_transfer": defaults.as_ref().is_some_and(|value| value.allow_cross_provider_data_transfer),
             "fallback_budget_micro_usd": defaults.as_ref().and_then(|value| value.fallback_budget_micro_usd),
             "provider_readiness": readiness,
@@ -410,14 +393,7 @@ fn write_status(
                 defaults.model,
                 paths.model.display()
             )?;
-            writeln!(
-                output,
-                "Routing: {}",
-                match defaults.routing_mode {
-                    RoutingMode::Manual => "manual",
-                    RoutingMode::Automatic => "automatic",
-                }
-            )?;
+            writeln!(output, "Routing: {}", defaults.routing_mode.as_str())?;
             if defaults.routing_mode == RoutingMode::Automatic {
                 writeln!(
                     output,
