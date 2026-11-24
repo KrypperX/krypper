@@ -1,4 +1,8 @@
 //! HTTP transport for model requests, including streaming helpers.
+//!
+//! The adapters submit each request once. An ambiguous error after request
+//! transmission begins is returned rather than replaying work that a provider
+//! may already have processed or billed.
 
 use std::io::Read;
 use std::net::SocketAddr;
@@ -82,11 +86,20 @@ fn is_loopback_endpoint_host(host: &str) -> bool {
 }
 
 pub(crate) fn model_agent() -> Agent {
+    model_agent_with_connect_timeout(LOOPBACK_CONNECT_TIMEOUT)
+}
+
+pub(crate) fn hosted_model_agent() -> Agent {
+    model_agent_with_connect_timeout(HOSTED_CONNECT_TIMEOUT)
+}
+
+fn model_agent_with_connect_timeout(connect_timeout: std::time::Duration) -> Agent {
     let config = Agent::config_builder()
+        // Model requests go straight to their configured endpoints, not ambient proxies.
         .proxy(None)
         .max_redirects(0)
         .max_response_header_size(MAX_HTTP_HEADER_BYTES)
-        .timeout_connect(Some(CONNECT_TIMEOUT))
+        .timeout_connect(Some(connect_timeout))
         .timeout_global(Some(REQUEST_TIMEOUT))
         .build();
     Agent::new_with_config(config)
@@ -378,4 +391,25 @@ pub(crate) fn post_hosted_with_headers(
         return Err(ModelError::ProviderResponseTooLarge(provider));
     }
     Ok(response_body)
+}
+
+#[cfg(test)]
+mod transport_configuration_tests {
+    use super::*;
+
+    #[test]
+    fn loopback_and_hosted_agents_have_distinct_connection_budgets() {
+        assert_eq!(
+            model_agent().config().timeouts().connect,
+            Some(LOOPBACK_CONNECT_TIMEOUT)
+        );
+        assert_eq!(
+            hosted_model_agent().config().timeouts().connect,
+            Some(HOSTED_CONNECT_TIMEOUT)
+        );
+        assert_eq!(
+            hosted_model_agent().config().timeouts().global,
+            Some(REQUEST_TIMEOUT)
+        );
+    }
 }

@@ -3,12 +3,12 @@ use super::{
     action_from_call, action_from_error, action_from_provider_call,
     build_anthropic_request_with_extensions, build_gemini_request_with_extensions,
     build_responses_request_with_extensions, consume_decision_budget, enable_responses_streaming,
-    encode_model_request, gemini_generate_content_endpoint, model_agent, parse_anthropic_response,
-    parse_gemini_response, parse_responses_response, post_hosted, post_hosted_sse,
-    post_hosted_sse_with_headers, post_hosted_with_headers, post_profile_with_bearer,
-    post_responses_text_stream, tool_definitions, validate_endpoint, validate_model_name,
-    validate_model_name_for_provider, AdvertisedToolNames, ModelError, OllamaDecisionSource,
-    SYSTEM_INSTRUCTIONS,
+    encode_model_request, gemini_generate_content_endpoint, hosted_model_agent,
+    parse_anthropic_response, parse_gemini_response, parse_responses_response, post_hosted,
+    post_hosted_sse, post_hosted_sse_with_headers, post_hosted_with_headers,
+    post_profile_with_bearer, post_responses_text_stream, tool_definitions, validate_endpoint,
+    validate_model_name, validate_model_name_for_provider, AdvertisedToolNames, ModelError,
+    OllamaDecisionSource, SYSTEM_INSTRUCTIONS,
 };
 use crate::agent_loop::{BoundedDecisionSource, WorkspaceAction, WorkspaceObservation};
 use serde_json::{json, Value};
@@ -674,7 +674,7 @@ impl HostedSourceCore {
             model: model.into(),
             api_key: api_key.into(),
             endpoint,
-            agent: model_agent(),
+            agent: hosted_model_agent(),
             remaining_decisions: action_budget,
             extension_declarations: extension_declarations.to_vec(),
         }

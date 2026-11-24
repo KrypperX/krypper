@@ -9,7 +9,9 @@ use std::time::Duration;
 pub(crate) const OLLAMA_ADDRESS: SocketAddr =
     SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 11434));
 
-pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const LOOPBACK_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+
+pub(crate) const HOSTED_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 

@@ -77,7 +77,7 @@ impl OllamaDecisionSource {
             model: model.into(),
             address: OLLAMA_ADDRESS,
             profile_endpoint: Some(endpoint),
-            agent: model_agent(),
+            agent: hosted_model_agent(),
             remaining_decisions: action_budget,
             extension_declarations: Vec::new(),
             repository_context: None,
