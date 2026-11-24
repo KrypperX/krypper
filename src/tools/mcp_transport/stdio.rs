@@ -11,8 +11,11 @@ use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
 use std::thread;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 pub(super) const MAX_RESPONSE_BYTES: usize = 64 * 1024;
@@ -26,9 +29,90 @@ pub(super) struct StdioChild {
     pub child: ManagedChild,
     pub stdin: ChildStdin,
     pub stdout: ChildStdout,
-    pub stderr: ChildStderr,
+    stderr_capture: StderrCapture,
     pub pending: Vec<u8>,
-    pub stderr_used: usize,
+}
+
+#[derive(Default)]
+struct StderrCaptureState {
+    retained: Vec<u8>,
+}
+
+struct StderrCapture {
+    state: Arc<Mutex<StderrCaptureState>>,
+    stop: Arc<AtomicBool>,
+    reader: Option<JoinHandle<()>>,
+}
+
+impl StderrCapture {
+    fn start(mut stderr: ChildStderr) -> Result<Self, McpLifecycleError> {
+        let state = Arc::new(Mutex::new(StderrCaptureState::default()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let reader_state = Arc::clone(&state);
+        let reader_stop = Arc::clone(&stop);
+        let reader = thread::Builder::new()
+            .name("krypper-mcp-stderr-drain".into())
+            .spawn(move || {
+                let mut buffer = [0; 8192];
+                while !reader_stop.load(Ordering::Acquire) {
+                    match stderr.read(&mut buffer) {
+                        Ok(0) => break,
+                        Ok(read) => {
+                            let mut state = reader_state
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            let remaining = MAX_STDERR_BYTES.saturating_sub(state.retained.len());
+                            let retained = read.min(remaining);
+                            state.retained.extend_from_slice(&buffer[..retained]);
+                        }
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                            ) =>
+                        {
+                            thread::sleep(POLL_INTERVAL);
+                        }
+                        Err(_) => break,
+                    }
+                }
+            })
+            .map_err(|_| McpLifecycleError::SpawnFailed)?;
+        Ok(Self {
+            state,
+            stop,
+            reader: Some(reader),
+        })
+    }
+
+    fn stop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
+    }
+
+    #[cfg(test)]
+    fn snapshot(&self) -> Vec<u8> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.retained.clone()
+    }
+}
+
+impl Drop for StderrCapture {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+impl Drop for StdioChild {
+    fn drop(&mut self) {
+        let _ = self.child.terminate();
+        self.stderr_capture.stop();
+    }
 }
 
 pub(super) struct ManagedChild(Option<Child>);
@@ -305,13 +389,13 @@ fn spawn_inner(
     set_nonblocking(stdin.as_raw_fd())?;
     set_nonblocking(stdout.as_raw_fd())?;
     set_nonblocking(stderr.as_raw_fd())?;
+    let stderr_capture = StderrCapture::start(stderr)?;
     Ok(StdioChild {
         child,
         stdin,
         stdout,
-        stderr,
+        stderr_capture,
         pending: Vec::new(),
-        stderr_used: 0,
     })
 }
 
@@ -347,25 +431,16 @@ pub(super) fn write_all(
 pub(super) fn read_line(
     child: &mut ManagedChild,
     stdout: &mut ChildStdout,
-    stderr: &mut ChildStderr,
-    stderr_used: &mut usize,
     pending: &mut Vec<u8>,
     deadline: Instant,
     cancel: &McpCancellation,
 ) -> Result<Vec<u8>, McpLifecycleError> {
     let mut response = std::mem::take(pending);
-    let mut errors = Vec::new();
     loop {
         check(deadline, cancel)?;
         let before = response.len();
         let (stdout_eof, _, _) = drain(stdout, &mut response, MAX_RESPONSE_BYTES)?;
         let progressed = response.len() > before;
-        let stderr_budget = MAX_STDERR_BYTES.saturating_sub(*stderr_used);
-        let (_, stored, read) = drain(stderr, &mut errors, stderr_budget)?;
-        *stderr_used += stored;
-        if read > stderr_budget {
-            return Err(McpLifecycleError::OutputLimitExceeded);
-        }
         if let Some(position) = response.iter().position(|byte| *byte == b'\n') {
             let line: Vec<u8> = response.drain(..=position).collect();
             *pending = response;
@@ -429,5 +504,48 @@ fn drain(
             Ok((false, 0, 0))
         }
         Err(error) => Err(McpLifecycleError::Io(error.kind())),
+    }
+}
+
+#[cfg(test)]
+mod stderr_capture_tests {
+    use super::*;
+
+    #[test]
+    fn stderr_capture_retains_only_its_byte_budget() {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "head -c 1048576 /dev/zero >&2"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn stderr fixture");
+        let stderr = child.stderr.take().expect("stderr pipe");
+        set_nonblocking(stderr.as_raw_fd()).expect("make stderr nonblocking");
+        let mut capture = StderrCapture::start(stderr).expect("start stderr reader");
+
+        let start = Instant::now();
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("poll stderr fixture") {
+                break status;
+            }
+            if start.elapsed() >= Duration::from_secs(2) {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("stderr reader did not drain the fixture");
+            }
+            thread::sleep(POLL_INTERVAL);
+        };
+        assert!(status.success());
+
+        let retained = loop {
+            let snapshot = capture.snapshot();
+            if snapshot.len() == MAX_STDERR_BYTES || start.elapsed() >= Duration::from_secs(2) {
+                break snapshot;
+            }
+            thread::sleep(POLL_INTERVAL);
+        };
+        assert_eq!(retained.len(), MAX_STDERR_BYTES);
+        capture.stop();
     }
 }

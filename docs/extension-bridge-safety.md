@@ -53,11 +53,13 @@ mint a grant, or choose an arbitrary executor.
 - Only `2025-06-18` and `2024-11-05` are accepted. An unknown version, malformed
   JSON-RPC envelope, mismatched id, server error, malformed Initialize Result, or
   more than 16 notifications before the response fails closed.
-- stdout is bounded to 64 KiB per response and stderr to 4 KiB per session across
-  all handshake reads. The host timeout starts before spawn and bounds the spawn
-  result plus later read, write and wait; after an aborted spawn, cleanup
-  confirmation may add a bounded grace. Cancellation is checked on each loop
-  iteration and inside the spawn worker before launch. Timeout or cancellation
+- stdout is bounded to 64 KiB per JSON-RPC line. A dedicated reader drains stderr
+  throughout the child lifetime, retains at most 4 KiB per session, and discards
+  excess bytes without failing an MCP request. The host timeout starts before
+  spawn and bounds the spawn result plus later read, write and wait; after an
+  aborted spawn, cleanup confirmation may add a bounded grace. Cancellation is
+  checked on each loop iteration and inside the spawn worker before launch.
+  Timeout or cancellation
   waits for the worker, terminates any child it created and confirms cleanup
   before returning `Timeout` or `Cancelled`; an unconfirmed cleanup returns
   `CleanupFailed`. A `Command::spawn()` call that never returns remains a bounded
@@ -114,15 +116,17 @@ mint a grant, or choose an arbitrary executor.
   the existing extension authorization gate before any `tools/call` request.
   The wire request uses only the remote tool name, never the provider-facing
   qualified name. The resulting `content` must be bounded text blocks (at most
-  32 blocks and 16 KiB); control characters are removed, the output is prefixed
-  as untrusted data, and error results, non-text content and malformed results
-  fail closed.
+  32 blocks and 16 KiB); control characters are removed and output is prefixed
+  as untrusted data. A valid `isError: true` result is returned with an explicit
+  tool-execution-error marker so the model can adjust its call; it does not
+  invalidate the session. Non-text content and malformed results fail closed.
 - Both operations reuse the same bounded stdio transport with correlated ids,
-  a 16-notification cap, the existing 64 KiB response bound and the host
-  timeout and cancellation signal. Malformed JSON-RPC, mismatched ids,
-  timeouts, cancellation and disconnects fail closed without retries or
-  fallback execution. No second executor, permission model, CLI default,
-  dependency or network transport is introduced.
+  a 16-notification cap, a 64-page discovery cap, a 64-tool aggregate cap,
+  a 4 KiB cursor cap, repeated-cursor rejection, the existing 64 KiB response
+  bound and the host timeout and cancellation signal. Malformed JSON-RPC,
+  mismatched ids, timeouts, cancellation and disconnects fail closed without
+  retries or fallback execution. No second executor, permission model, CLI
+  default, dependency or network transport is introduced.
 
 ### Backward compatibility
 

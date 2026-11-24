@@ -85,18 +85,67 @@ fn list_response(tools: &str) -> String {
     format!(r#"{{"jsonrpc":"2.0","id":2,"result":{{"tools":[{tools}]}}}}"#)
 }
 
+fn advertised_tool(name: &str) -> String {
+    serde_json::json!({
+        "name": name,
+        "description": "Test tool",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"value": {"type": "string"}},
+            "required": ["value"],
+            "additionalProperties": false
+        }
+    })
+    .to_string()
+}
+
+fn list_page_response(id: u64, tools: &[String], next_cursor: Option<&str>) -> String {
+    let tools = tools
+        .iter()
+        .map(|tool| serde_json::from_str(tool).expect("valid tool fixture"))
+        .collect::<Vec<serde_json::Value>>();
+    let mut response = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": {"tools": tools}
+    });
+    if let Some(cursor) = next_cursor {
+        response["result"]["nextCursor"] = serde_json::json!(cursor);
+    }
+    response.to_string()
+}
+
 fn call_response(id: u64, text: &str) -> String {
     format!(
         r#"{{"jsonrpc":"2.0","id":{id},"result":{{"content":[{{"type":"text","text":"{text}"}}]}}}}"#
     )
 }
 
+fn call_error_response(id: u64, text: &str) -> String {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": {
+            "content": [{"type": "text", "text": text}],
+            "isError": true
+        }
+    })
+    .to_string()
+}
+
 fn scripted_server(list: &str, calls: &[(u64, String)]) -> String {
+    scripted_server_pages(&[list.to_owned()], calls)
+}
+
+fn scripted_server_pages(lists: &[String], calls: &[(u64, String)]) -> String {
     let mut script = format!(
-        "IFS= read -r request\nprintf '%s\\n' \"$request\" > \"$1\"\nprintf '%s\\n' '{}'\nIFS= read -r notification\nprintf '%s\\n' \"$notification\" >> \"$1\"\nIFS= read -r request\nprintf '%s\\n' \"$request\" >> \"$1\"\nprintf '%s\\n' '{}'\n",
+        "IFS= read -r request\nprintf '%s\\n' \"$request\" > \"$1\"\nprintf '%s\\n' '{}'\nIFS= read -r notification\nprintf '%s\\n' \"$notification\" >> \"$1\"\n",
         init_response(),
-        list
     );
+    for list in lists {
+        script.push_str("IFS= read -r request\nprintf '%s\\n' \"$request\" >> \"$1\"\n");
+        script.push_str(&format!("printf '%s\\n' '{list}'\n"));
+    }
     for (_, response) in calls {
         script.push_str("IFS= read -r request\nprintf '%s\\n' \"$request\" >> \"$1\"\n");
         script.push_str(&format!("printf '%s\\n' '{response}'\n"));
@@ -232,6 +281,187 @@ fn granted_tools_are_discovered_and_invoked_through_policy() {
     let observed = wait_for_log(&log, "\"method\":\"tools/call\"");
     assert!(observed.contains("\"name\":\"echo\""));
     assert!(!observed.contains("mcp_alpha_echo"));
+    session.shutdown().expect("shutdown");
+}
+
+#[test]
+fn discovery_follows_opaque_tool_list_cursors_with_distinct_request_ids() {
+    let dir = temp_dir("paged-discovery");
+    let log = dir.0.join("log");
+    let cursor = "opaque+/v1?section=2";
+    let pages = [
+        list_page_response(2, &[advertised_tool("echo")], Some(cursor)),
+        list_page_response(3, &[advertised_tool("lookup")], None),
+    ];
+    let stdio_config = config(
+        &scripted_server_pages(&pages, &[]),
+        &log,
+        Duration::from_secs(2),
+    );
+    let task_id = Uuid::new_v4();
+    let mut session = connect(&stdio_config, task_id);
+    let grants = [
+        tool_grant(task_id, 1, "echo"),
+        tool_grant(task_id, 1, "lookup"),
+    ];
+
+    let tools = discover(&mut session, task_id, &grants);
+
+    assert_eq!(
+        tools
+            .iter()
+            .map(McpTool::qualified_name)
+            .collect::<Vec<_>>(),
+        ["mcp_alpha_echo", "mcp_alpha_lookup"]
+    );
+    let requests = wait_for_log(&log, "opaque+/v1?section=2");
+    assert!(requests.contains("\"id\":2"));
+    assert!(requests.contains("\"id\":3"));
+    assert!(requests.contains(&format!("\"cursor\":\"{cursor}\"")));
+    session.shutdown().expect("shutdown");
+}
+
+#[test]
+fn discovery_rejects_a_repeated_tool_list_cursor() {
+    let dir = temp_dir("repeated-cursor");
+    let log = dir.0.join("log");
+    let pages = [
+        list_page_response(2, &[], Some("same-cursor")),
+        list_page_response(3, &[], Some("same-cursor")),
+    ];
+    let stdio_config = config(
+        &scripted_server_pages(&pages, &[]),
+        &log,
+        Duration::from_secs(2),
+    );
+    let task_id = Uuid::new_v4();
+    let mut session = connect(&stdio_config, task_id);
+
+    let result = session.discover_tools_authorized(
+        "alpha",
+        context(task_id, 1),
+        Some(&discovery_grant(task_id, 1)),
+        &[],
+        &McpCancellation::new(),
+    );
+
+    assert_eq!(result, Err(McpToolError::InvalidToolList));
+    let requests = wait_for_log(&log, "same-cursor");
+    assert_eq!(requests.matches("\"method\":\"tools/list\"").count(), 2);
+    session.shutdown().expect("shutdown");
+}
+
+#[test]
+fn discovery_rejects_catalogs_over_the_aggregate_tool_limit() {
+    let dir = temp_dir("aggregate-tool-limit");
+    let log = dir.0.join("log");
+    let first_page = (0..64)
+        .map(|index| advertised_tool(&format!("tool_{index}")))
+        .collect::<Vec<_>>();
+    let pages = [
+        list_page_response(2, &first_page, Some("next-page")),
+        list_page_response(3, &[advertised_tool("tool_64")], None),
+    ];
+    let stdio_config = config(
+        &scripted_server_pages(&pages, &[]),
+        &log,
+        Duration::from_secs(2),
+    );
+    let task_id = Uuid::new_v4();
+    let mut session = connect(&stdio_config, task_id);
+
+    let result = session.discover_tools_authorized(
+        "alpha",
+        context(task_id, 1),
+        Some(&discovery_grant(task_id, 1)),
+        &[],
+        &McpCancellation::new(),
+    );
+
+    assert_eq!(result, Err(McpToolError::InvalidToolList));
+    let requests = wait_for_log(&log, "\"id\":3");
+    assert_eq!(requests.matches("\"method\":\"tools/list\"").count(), 2);
+    session.shutdown().expect("shutdown");
+}
+
+#[test]
+fn discovery_stops_after_the_tool_list_page_cap() {
+    let dir = temp_dir("page-limit");
+    let log = dir.0.join("log");
+    let pages = (0..64)
+        .map(|index| {
+            let cursor = format!("cursor-{index}");
+            list_page_response(index + 2, &[], Some(&cursor))
+        })
+        .collect::<Vec<_>>();
+    let stdio_config = config(
+        &scripted_server_pages(&pages, &[]),
+        &log,
+        Duration::from_secs(3),
+    );
+    let task_id = Uuid::new_v4();
+    let mut session = connect(&stdio_config, task_id);
+
+    let result = session.discover_tools_authorized(
+        "alpha",
+        context(task_id, 1),
+        Some(&discovery_grant(task_id, 1)),
+        &[],
+        &McpCancellation::new(),
+    );
+
+    assert_eq!(result, Err(McpToolError::InvalidToolList));
+    let requests = wait_for_log(&log, "\"id\":65");
+    assert_eq!(requests.matches("\"method\":\"tools/list\"").count(), 64);
+    session.shutdown().expect("shutdown");
+}
+
+#[test]
+fn tool_execution_errors_are_returned_and_leave_the_session_usable() {
+    let dir = temp_dir("tool-error");
+    let log = dir.0.join("log");
+    let stdio_config = config(
+        &scripted_server(
+            &tool_list(""),
+            &[
+                (
+                    3,
+                    call_error_response(3, "invalid date; provide a future date"),
+                ),
+                (4, call_response(4, "recovered")),
+            ],
+        ),
+        &log,
+        Duration::from_secs(2),
+    );
+    let task_id = Uuid::new_v4();
+    let mut session = connect(&stdio_config, task_id);
+    let grants = [tool_grant(task_id, 1, "echo")];
+    let tools = discover(&mut session, task_id, &grants);
+
+    let error = session
+        .invoke_tool_authorized(
+            &tools[0],
+            context(task_id, 1),
+            Some(&grants[0]),
+            &json!({"text": "bad date"}),
+            &McpCancellation::new(),
+        )
+        .expect("MCP execution errors are model-visible tool results");
+    assert!(error.starts_with(RESULT_PREFIX));
+    assert!(error.contains("MCP tool execution error"));
+    assert!(error.contains("invalid date; provide a future date"));
+
+    let recovered = session
+        .invoke_tool_authorized(
+            &tools[0],
+            context(task_id, 1),
+            Some(&grants[0]),
+            &json!({"text": "corrected date"}),
+            &McpCancellation::new(),
+        )
+        .expect("session remains usable after a tool execution error");
+    assert!(recovered.contains("recovered"));
     session.shutdown().expect("shutdown");
 }
 

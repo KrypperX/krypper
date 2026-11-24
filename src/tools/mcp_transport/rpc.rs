@@ -7,6 +7,12 @@ use std::time::Instant;
 
 const MAX_NOTIFICATIONS: usize = 16;
 
+pub(super) fn take_request_id(next_id: &mut u64) -> u64 {
+    let id = *next_id;
+    *next_id = (*next_id).wrapping_add(1);
+    id
+}
+
 pub(super) fn exchange(
     io: &mut StdioChild,
     id: u64,
@@ -23,8 +29,6 @@ pub(super) fn exchange(
         let response = stdio::read_line(
             &mut io.child,
             &mut io.stdout,
-            &mut io.stderr,
-            &mut io.stderr_used,
             &mut io.pending,
             deadline,
             cancel,

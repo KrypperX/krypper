@@ -13,10 +13,13 @@ use crate::tools::extension_contract::{
     EXTENSION_CONTRACT_VERSION,
 };
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::time::Instant;
 use uuid::Uuid;
 
 const MAX_DISCOVERED_TOOLS: usize = 64;
+const MAX_TOOL_LIST_PAGES: usize = 64;
+const MAX_TOOL_LIST_CURSOR_BYTES: usize = 4096;
 
 /// One advertised MCP tool that passed contract, schema and grant checks.
 ///
@@ -84,7 +87,7 @@ struct Candidate {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn list_tools(
     io: &mut StdioChild,
-    id: u64,
+    next_id: &mut u64,
     deadline: Instant,
     cancel: &McpCancellation,
     scope: &str,
@@ -116,20 +119,46 @@ pub(super) fn list_tools(
         return Err(McpToolError::InvalidScope);
     }
 
-    let request = json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "method": "tools/list",
-        "params": {}
-    });
-    let result = rpc::exchange(io, id, request, deadline, cancel)?;
-    let tools = result
-        .get("tools")
-        .and_then(Value::as_array)
-        .ok_or(McpToolError::InvalidToolList)?;
-    if tools.len() > MAX_DISCOVERED_TOOLS {
-        return Err(McpToolError::InvalidToolList);
-    }
+    let mut cursor = None;
+    let mut seen_cursors = HashSet::new();
+    let mut listed_tools = Vec::new();
+    let mut page_count = 0;
+    let tools = 'pages: loop {
+        if page_count >= MAX_TOOL_LIST_PAGES {
+            return Err(McpToolError::InvalidToolList);
+        }
+        page_count += 1;
+        let id = rpc::take_request_id(next_id);
+        let params = match cursor.as_deref() {
+            Some(cursor) => json!({"cursor": cursor}),
+            None => json!({}),
+        };
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/list",
+            "params": params
+        });
+        let result = rpc::exchange(io, id, request, deadline, cancel)?;
+        let page_tools = result
+            .get("tools")
+            .and_then(Value::as_array)
+            .ok_or(McpToolError::InvalidToolList)?;
+        if page_tools.len() > MAX_DISCOVERED_TOOLS.saturating_sub(listed_tools.len()) {
+            return Err(McpToolError::InvalidToolList);
+        }
+        listed_tools.extend(page_tools.iter().cloned());
+        let Some(next_cursor) = result.get("nextCursor") else {
+            break 'pages listed_tools;
+        };
+        let next_cursor = next_cursor.as_str().ok_or(McpToolError::InvalidToolList)?;
+        if next_cursor.len() > MAX_TOOL_LIST_CURSOR_BYTES
+            || !seen_cursors.insert(next_cursor.to_owned())
+        {
+            return Err(McpToolError::InvalidToolList);
+        }
+        cursor = Some(next_cursor.to_owned());
+    };
 
     let mut candidates = Vec::with_capacity(tools.len());
     for value in tools {

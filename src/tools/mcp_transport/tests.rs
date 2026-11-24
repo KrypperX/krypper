@@ -257,16 +257,39 @@ fn oversized_response_is_rejected_without_buffering_without_bound() {
 }
 
 #[test]
-fn cumulative_stderr_limit_is_enforced_across_notifications() {
-    let dir = temp_dir("stderr");
+fn stderr_is_drained_while_the_mcp_session_is_idle() {
+    let dir = temp_dir("stderr-drain");
+    let log = dir.0.join("log");
+    let drained = dir.0.join("stderr-drained");
     let script = format!(
-        "IFS= read -r request\nprintf '%05000d\\n' 0 >&2\nprintf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\"}}'\nprintf '%05000d\\n' 0 >&2\nprintf '%s\\n' '{response}'\nIFS= read -r notification\nwhile IFS= read -r line; do :; done\n",
+        "IFS= read -r request\nprintf '%s\\n' \"$request\" > \"$1\"\nprintf '%s\\n' '{response}'\nIFS= read -r notification\nprintf '%s\\n' \"$notification\" >> \"$1\"\nhead -c 1048576 /dev/zero >&2\nprintf drained > \"$2\"\nwhile IFS= read -r line; do :; done\n",
         response = initialize_response("2024-11-05")
     );
-    let config = config(&script, &dir.0.join("log"), Duration::from_secs(2));
+    let config = McpStdioConfig {
+        executable: PathBuf::from("/bin/sh"),
+        args: vec![
+            "-c".into(),
+            script,
+            "fake-mcp-server".into(),
+            log.display().to_string(),
+            drained.display().to_string(),
+        ],
+        timeout: Duration::from_secs(2),
+    };
 
-    let error = error_of(connect_stdio(&config, &McpCancellation::new()));
-    assert_eq!(error, McpLifecycleError::OutputLimitExceeded);
+    let session = connect_stdio(&config, &McpCancellation::new()).expect("connect");
+    let start = Instant::now();
+    loop {
+        if fs::read_to_string(&drained).is_ok_and(|contents| contents == "drained") {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "server blocked writing stderr while its session was idle"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    session.shutdown().expect("shutdown");
 }
 
 #[test]
