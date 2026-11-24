@@ -272,6 +272,7 @@ mod decision_error_mapping_tests {
             (ModelError::RequestTooLarge, "request_too_large"),
             (ModelError::InvalidEndpoint, "invalid_endpoint"),
             (ModelError::ObservationsTooLarge, "context_too_large"),
+            (ModelError::RepositoryContextTooLarge, "context_too_large"),
             (ModelError::ServiceUnavailable, "provider_unavailable"),
             (
                 ModelError::Transport("connection refused".to_owned()),

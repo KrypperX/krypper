@@ -1,4 +1,4 @@
-use super::{run_task_with_endpoint, run_task_with_selection_loader};
+use super::{read_repository_context_json, run_task_with_endpoint, run_task_with_selection_loader};
 use crate::brain::ModelProvider;
 use serde_json::{json, Value};
 use std::ffi::OsString;
@@ -149,6 +149,90 @@ fn run(args: &[OsString], input: &str, address: SocketAddr) -> (i32, String, Str
         String::from_utf8(output).expect("CLI output UTF-8"),
         String::from_utf8(error).expect("CLI error UTF-8"),
     )
+}
+
+#[test]
+fn repository_context_json_loader_accepts_context_and_rejects_unbounded_input() {
+    let fixture = TempWorkspace::new();
+    let path = fixture.root.join("context.json");
+    let entries = json!([{"name":"slug","declared_in":"src/lib.rs"}]);
+    let entry_bytes = serde_json::to_vec(&entries).expect("encode entries").len();
+    let valid = json!({"bytes":entry_bytes,"modules":entries});
+    fs::write(&path, serde_json::to_vec(&valid).expect("encode context"))
+        .expect("write context fixture");
+    assert_eq!(
+        read_repository_context_json(&path).expect("read context"),
+        valid
+    );
+
+    fs::write(&path, json!({"bytes":4097,"modules":[]}).to_string())
+        .expect("write over-budget context");
+    assert!(read_repository_context_json(&path)
+        .expect_err("reject over-budget context")
+        .contains("byte count must not exceed"));
+
+    let oversized_entries = json!([{"excerpt":"x".repeat(
+        crate::harness::context::MAX_REPOSITORY_CONTEXT_BYTES
+    )}]);
+    let oversized_context = json!({"bytes":0,"snippets":oversized_entries});
+    fs::write(
+        &path,
+        serde_json::to_vec(&oversized_context).expect("encode oversized entries"),
+    )
+    .expect("write oversized entries");
+    assert!(read_repository_context_json(&path)
+        .expect_err("reject entries over the actual byte budget")
+        .contains("entries must not exceed"));
+
+    fs::write(&path, r#"{"bytes":1,"modules":[]}"#).expect("write mismatched byte count");
+    assert!(read_repository_context_json(&path)
+        .expect_err("reject mismatched byte count")
+        .contains("does not match its entries"));
+
+    fs::write(
+        &path,
+        vec![b'x'; crate::harness::context::MAX_REPOSITORY_CONTEXT_JSON_BYTES + 1],
+    )
+    .expect("write oversized context file");
+    assert!(read_repository_context_json(&path)
+        .expect_err("reject oversized file")
+        .contains("must not exceed"));
+}
+
+#[test]
+fn repository_context_json_rejects_local_provider_before_network_access() {
+    let fixture = TempWorkspace::new();
+    let context_path = fixture.root.join("context.json");
+    fs::write(&context_path, r#"{"bytes":2,"modules":[]}"#).expect("write context fixture");
+    let args = [
+        OsString::from("--goal"),
+        OsString::from("Read the brief"),
+        OsString::from("--max-actions"),
+        OsString::from("1"),
+        OsString::from("--workspace"),
+        fixture.workspace.as_os_str().to_owned(),
+        OsString::from("--model"),
+        OsString::from("qwen3"),
+        OsString::from("--no-config"),
+        OsString::from("--repository-context-json"),
+        context_path.into_os_string(),
+    ];
+    let mut input = Cursor::new(Vec::<u8>::new());
+    let mut output = Vec::new();
+    let mut error = Vec::new();
+    let code = run_task_with_endpoint(
+        &args,
+        &mut input,
+        &mut output,
+        &mut error,
+        SocketAddr::from(([127, 0, 0, 1], 0)),
+    )
+    .expect("reject unsupported context provider");
+
+    assert_eq!(code, 2);
+    assert!(String::from_utf8_lossy(&error)
+        .contains("--repository-context-json is supported by OpenAI-compatible providers"));
+    assert!(output.is_empty());
 }
 
 #[test]

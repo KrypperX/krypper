@@ -1,4 +1,5 @@
 use super::*;
+use crate::harness::context::build_task_prompt_with_repository_context_json;
 
 /// Token counts returned by a provider response. Missing fields stay unknown.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -6,6 +7,12 @@ pub struct ModelTokenUsage {
     pub prompt_tokens: Option<u64>,
     pub completion_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
+}
+
+pub(crate) struct CompatibleRequestContext<'a> {
+    pub project_guidance: Option<&'a str>,
+    pub extension_declarations: &'a [Value],
+    pub repository_context: Option<&'a Value>,
 }
 
 /// A provider that uses Krypper's OpenAI-compatible chat protocol.
@@ -244,15 +251,43 @@ pub fn build_compatible_chat_request_with_extensions(
     project_guidance: Option<&str>,
     extension_declarations: &[Value],
 ) -> Result<Vec<u8>, ModelError> {
+    build_compatible_chat_request_with_retrieval_context(
+        model,
+        provider,
+        goal,
+        observations,
+        remaining_decisions,
+        CompatibleRequestContext {
+            project_guidance,
+            extension_declarations,
+            repository_context: None,
+        },
+    )
+}
+
+pub(crate) fn build_compatible_chat_request_with_retrieval_context(
+    model: &str,
+    provider: OpenAiCompatibleProvider,
+    goal: &str,
+    observations: &[WorkspaceObservation],
+    remaining_decisions: usize,
+    context: CompatibleRequestContext<'_>,
+) -> Result<Vec<u8>, ModelError> {
+    let CompatibleRequestContext {
+        project_guidance,
+        extension_declarations,
+        repository_context,
+    } = context;
     crate::brain::provider_bridge::validate_declarations(extension_declarations)
         .map_err(|_| ModelError::InvalidToolCall("invalid extension declarations"))?;
     super::validate_model_name_for_provider(model, ModelProvider::OpenAiCompatible(provider))
         .map_err(ModelError::InvalidModelName)?;
-    let prompt = build_task_prompt_with_project_guidance(
+    let prompt = build_task_prompt_with_repository_context_json(
         goal,
         observations,
         remaining_decisions,
         project_guidance,
+        repository_context,
     )?;
     let tool_choice = if matches!(
         provider,
@@ -403,6 +438,7 @@ pub struct OpenAiCompatibleDecisionSource {
     provider: OpenAiCompatibleProvider,
     extra_headers: Vec<(String, String)>,
     last_token_usage: Option<ModelTokenUsage>,
+    repository_context: Option<Value>,
 }
 
 impl OpenAiCompatibleDecisionSource {
@@ -517,7 +553,12 @@ impl OpenAiCompatibleDecisionSource {
             provider,
             extra_headers: extra_headers.to_vec(),
             last_token_usage: None,
+            repository_context: None,
         }
+    }
+
+    pub(crate) fn set_repository_context(&mut self, context: Value) {
+        self.repository_context = Some(context);
     }
 
     pub(crate) fn take_token_usage(&mut self) -> Option<ModelTokenUsage> {
@@ -532,14 +573,17 @@ impl OpenAiCompatibleDecisionSource {
     ) -> Result<WorkspaceAction, ModelError> {
         self.last_token_usage = None;
         let remaining = self.core.consume_decision_budget()?;
-        let request = build_compatible_chat_request_with_extensions(
+        let request = build_compatible_chat_request_with_retrieval_context(
             &self.core.model,
             self.provider,
             goal,
             observations,
             remaining,
-            project_guidance,
-            &self.core.extension_declarations,
+            CompatibleRequestContext {
+                project_guidance,
+                extension_declarations: &self.core.extension_declarations,
+                repository_context: self.repository_context.as_ref(),
+            },
         )?;
         let provider = ModelProvider::OpenAiCompatible(self.provider);
         let extra_headers = self

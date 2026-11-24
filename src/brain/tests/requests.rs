@@ -87,6 +87,30 @@ fn all_request_builders_share_prompt_and_keep_existing_size_limits() {
 }
 
 #[test]
+fn compatible_request_rejects_oversized_retrieval_context() {
+    let context = serde_json::json!({
+        "bytes": 0,
+        "modules": [],
+        "padding": "x".repeat(
+            crate::harness::context::MAX_REPOSITORY_CONTEXT_JSON_BYTES + 1
+        )
+    });
+    let result = crate::brain::providers::build_compatible_chat_request_with_retrieval_context(
+        "openai/gpt-4.1",
+        OpenAiCompatibleProvider::CloudflareAiGateway,
+        "same task goal",
+        &[],
+        3,
+        crate::brain::providers::CompatibleRequestContext {
+            project_guidance: None,
+            extension_declarations: &[],
+            repository_context: Some(&context),
+        },
+    );
+    assert!(matches!(result, Err(ModelError::RepositoryContextTooLarge)));
+}
+
+#[test]
 fn every_model_provider_keeps_root_guidance_in_the_same_separate_section() {
     let guidance = "Use the project's existing error style.";
     let observations = [WorkspaceObservation::FileRead {
