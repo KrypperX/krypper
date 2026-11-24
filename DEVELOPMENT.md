@@ -111,7 +111,9 @@ Windows without running tests.
   retains the existing flag and environment based provider selection.
   Decision sources return proposed workspace actions through the existing
   decision-source interface; they do not execute those actions. The focused
-  tests in [`tests.rs`](src/brain/tests.rs) use local fixtures.
+  tests in [`tests/mod.rs`](src/brain/tests/mod.rs) use local fixtures. The
+  [provider and model architecture contract](docs/provider-architecture-contract.md)
+  records the current provider-selection structure and staged acceptance rules.
 - [`src/cli/task_args.rs`](src/cli/task_args.rs) contains the pure parser for
   task actions, paths, search arguments, and read ranges, with focused local
   regression tests. [`src/cli.rs`](src/cli.rs) dispatches commands and runs
