@@ -1,6 +1,6 @@
 # Offline model catalog
 
-Krypper uses [models.dev](https://models.dev) as its central, cross-provider model metadata source. The vendored snapshot in `snapshots/models-dev/api.json` keeps only fields used by `ModelSpec`, with its MIT license and provenance in `snapshots/models-dev/metadata.json`. The `sha256` field records the original upstream bytes; `snapshot_sha256` and `generator_version` identify the slim artifact. `src/catalog_data.rs` exposes `models()` and `lookup(provider, id)` using `include_str!`; no network request is made at runtime.
+Krypper uses [models.dev](https://models.dev) as its central, cross-provider model metadata source. The vendored snapshot in `snapshots/models-dev/api.json` keeps only fields used by `ModelSpec`, with its MIT license and provenance in `snapshots/models-dev/metadata.json`. `sha256` records the raw source bytes used for the last generation (currently the original API response); `trusted_input_sha256` identifies the pinned raw input in `upstream-api.json.gz`; `snapshot_sha256` and `generator_version` identify the slim artifact. The checked-in fixture is rendered from immutable `upstream_revision`; CI verifies its raw hash and regenerates the runtime snapshot offline. `src/catalog_data.rs` exposes `models()` and `lookup(provider, id)` using `include_str!`; no network request is made at runtime.
 
 The central catalog distinguishes Workers AI (`cloudflare-workers-ai`) from Cloudflare AI Gateway (`cloudflare-ai-gateway`). `krypper models --provider cloudflare` selects Workers AI records. `krypper models --provider cloudflare-ai-gateway` selects AI Gateway records and Workers AI records, because the unified Gateway API can route both. The output retains the upstream provider ID. Keep Workers AI model IDs in their full `@cf/...` form; third-party models keep their `author/model` IDs. Pass either unchanged with the matching `--provider` to `krypper task`. AI Gateway calls send `cf-aig-gateway-id` and use `CLOUDFLARE_AI_GATEWAY_ID` or the default gateway ID `default`.
 
@@ -8,19 +8,19 @@ This central snapshot is advisory metadata and may lag Cloudflare's live catalog
 
 Model specs are **advisory metadata**, not an allowlist. An unknown model is not rejected by catalog lookup. Existing provider selection, user configuration and model overrides remain authoritative. A model appearing here does not imply that Krypper has credentials, an adapter or permission to call it.
 
-To regenerate the optional normalized JSON artifact from the slim snapshot:
+To validate or rewrite the normalized artifact used by the runtime:
 
     cargo run --locked --example generate_model_catalog
     cargo run --locked --example generate_model_catalog -- --check
-    cargo test
 
-To refresh the snapshot, download the original upstream JSON as an explicit developer action, then pass that file to the generator:
+To refresh the snapshot, select and review an immutable upstream revision, prepare its API JSON, and pass the raw file to the generator:
 
-    curl -fsS https://models.dev/api.json -o /tmp/models-dev-api.json
+    # After preparing /tmp/models-dev-api.json from the selected upstream revision:
+    gzip -n -c /tmp/models-dev-api.json > snapshots/models-dev/upstream-api.json.gz
     cargo run --locked --example generate_model_catalog -- --from-upstream /tmp/models-dev-api.json
     cargo run --locked --example generate_model_catalog -- --check
 
-The --from-upstream mode emits the slim snapshot and updates metadata.json with the SHA-256 of the supplied upstream bytes, the generated snapshot SHA-256, generator version, and provider/model counts. Provider count covers providers represented by models in the slim artifact. It does not fetch data itself. Update retrieved_at, preserve the upstream license notice, and review the generated diff. Increment the generator version when the record schema or field mapping changes. The --check mode verifies the artifact hash, generator version, counts, and parity with the Rust runtime reader. The original upstream JSON is not checked in; the upstream hash is retained as provenance and can be rechecked when the source file is available. The normalized src/catalog_data.json artifact remains optional and is not committed.
+The `--from-upstream` mode emits the runtime snapshot and updates `metadata.json` with the SHA-256 of the supplied upstream bytes, generated snapshot hash, generator version, and provider/model counts. Provider count covers providers represented by models in the slim artifact. It does not fetch data itself. For an upstream refresh, replace the compressed fixture, generate the snapshot, set `upstream_revision` to the selected commit, update `retrieved_at`, preserve the upstream license notice, and review the generated diff. When input bytes change, generation clears the old revision pin so a stale revision cannot be retained accidentally. Increment the generator version when normalization rules or the record schema change. `--check-upstream <path>` verifies the pinned raw input hash, regenerates the slim snapshot, validates metadata consistency, and checks parity with the Rust runtime reader. `--check` verifies the embedded artifact hash, generator version, counts, and runtime parity. Writes use staged temporary files, synced contents, rename replacement, and post-write consistency checks. Display strings have terminal control characters removed; identifiers containing them are rejected.
 
 Do not add implicit network syncing to normal Krypper execution.
 

@@ -1,11 +1,13 @@
 {
-  "generator_version": "1",
+  "generator_version": "2",
   "license": "MIT",
   "model_count": 10005,
   "provider_count": 324,
   "repository": "https://github.com/anomalyco/models.dev",
   "retrieved_at": "2026-11-19T07:53:18.033255+00:00",
   "sha256": "df2b12da367f295d55796f387c8c7028672243a456d2f798b1a7cd353d7ec6f6",
+  "trusted_input_sha256": "e3f24c1445863789803ad5d50edab8018e73e540c247da877289140396c141e4",
+  "upstream_revision": "cca439751cc0559abd8b39bf8a266d41f49e03f2",
   "snapshot_sha256": "7a36f67328c5e51f28c4bdf2d9d05cbcf7e56b1d045c27e3a52fcb19202d6213",
   "source": "https://models.dev/api.json"
 }

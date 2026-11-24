@@ -36,6 +36,10 @@ struct EmbeddedMetadata {
     sha256: String,
     snapshot_sha256: String,
     source: String,
+    #[serde(default)]
+    trusted_input_sha256: Option<String>,
+    #[serde(default)]
+    upstream_revision: Option<String>,
 }
 
 pub(super) fn load_catalog(cache_path: Option<&Path>) -> Result<LoadedCatalog, String> {
@@ -100,6 +104,14 @@ fn embedded_catalog() -> Result<LoadedCatalog, String> {
             .snapshot_sha256
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit())
+        || metadata
+            .trusted_input_sha256
+            .as_deref()
+            .is_some_and(|hash| !is_hex_digest(hash, 64))
+        || metadata
+            .upstream_revision
+            .as_deref()
+            .is_some_and(|revision| !is_hex_digest(revision, 40))
         || metadata.generator_version.is_empty()
         || metadata.model_count == 0
         || metadata.provider_count == 0
@@ -146,7 +158,11 @@ fn embedded_catalog() -> Result<LoadedCatalog, String> {
         providers: Vec::new(),
         models,
     };
-    let _ = metadata.repository;
+    let _ = (
+        metadata.repository,
+        metadata.trusted_input_sha256,
+        metadata.upstream_revision,
+    );
     let stale = crate::catalog_sources::unix_timestamp_now().saturating_sub(retrieved_at_unix)
         > MAX_CATALOG_CACHE_AGE_SECONDS;
     Ok(LoadedCatalog {
@@ -163,6 +179,10 @@ fn embedded_model(model: ModelSpec, provenance: &CatalogProvenance) -> CatalogMo
         features: Default::default(),
         sources: vec![provenance.source.clone()],
     }
+}
+
+fn is_hex_digest(value: &str, length: usize) -> bool {
+    value.len() == length && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn parse_rfc3339_utc(value: &str) -> Option<u64> {

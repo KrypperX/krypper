@@ -37,6 +37,11 @@ jobs:
       - name: Test Rust targets
         if: runner.os != 'Windows'
         run: cargo test --all-targets --locked
+      - name: Verify pinned model catalog input
+        if: matrix.run_catalog
+        run: |
+          gzip -dc snapshots/models-dev/upstream-api.json.gz > "$RUNNER_TEMP/models-dev-api.json"
+          cargo run --locked --example generate_model_catalog -- --check-upstream "$RUNNER_TEMP/models-dev-api.json"
       - name: Check offline model catalog
         if: matrix.run_catalog
         run: cargo run --locked --example generate_model_catalog -- --check
