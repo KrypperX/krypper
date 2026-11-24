@@ -718,14 +718,13 @@ fn verified_cli_rejects_configured_hosted_provider_before_credential_lookup() {
             let Some(defaults) = super::super::config::load_model_defaults(&config_path)? else {
                 return Ok(None);
             };
-            let provider = defaults.provider;
             writeln!(
                 stderr,
                 "using model defaults from {}",
                 defaults.path.display()
             )
             .map_err(|cause| cause.to_string())?;
-            Ok(Some((defaults.model, provider)))
+            Ok(Some(defaults))
         },
     )
     .expect("run configured provider preflight fixture");

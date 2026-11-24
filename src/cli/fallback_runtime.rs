@@ -1,0 +1,428 @@
+//! Task host for the bounded provider fallback decision source.
+
+use super::model_selection::{prepare_model_source_for_selection, ProviderSelection};
+use super::settings::UserSettingsPaths;
+use super::task_routing_state::TaskRoutingStateStore;
+use crate::agent_loop::{
+    BoundedDecisionSource, DecisionFailureCode, WorkspaceAction, WorkspaceObservation,
+};
+use crate::brain::{AdapterId, ModelDecisionSource, ModelProvider};
+use crate::fallback::{
+    FallbackCheckpoint, FallbackDecisionSource, FallbackProviderResponse, FallbackRuntime,
+    FallbackTaskState, ProviderCompletion,
+};
+use crate::routing::{AutomaticRoutingRequest, RoutingCandidate, RoutingSelection};
+use serde_json::Value;
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
+use std::thread;
+use std::time::{Duration, Instant};
+use uuid::Uuid;
+
+const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+static TASK_CANCELLED: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+static TASK_SIGNAL_HANDLER: OnceLock<Result<(), &'static str>> = OnceLock::new();
+
+pub(super) struct CliFallbackRuntime {
+    store: TaskRoutingStateStore,
+    task_state: FallbackTaskState,
+    initial_source: Option<(RoutingSelection, ModelDecisionSource)>,
+    action_budget: usize,
+    ollama_endpoint: SocketAddr,
+    repository_context: Option<Value>,
+    last_token_usage: Option<crate::brain::ModelTokenUsage>,
+    turn_boundary_confirmed: bool,
+    cancellation: Arc<AtomicBool>,
+}
+
+pub(super) struct CliFallbackRuntimeConfig<'a> {
+    pub(super) paths: &'a UserSettingsPaths,
+    pub(super) task_id: Uuid,
+    pub(super) resumed: bool,
+    pub(super) initial_selection: RoutingSelection,
+    pub(super) initial_source: ModelDecisionSource,
+    pub(super) action_budget: usize,
+    pub(super) ollama_endpoint: SocketAddr,
+    pub(super) repository_context: Option<Value>,
+}
+
+impl CliFallbackRuntime {
+    pub(super) fn new(config: CliFallbackRuntimeConfig<'_>) -> Result<Self, String> {
+        let (store, _) = TaskRoutingStateStore::open(config.paths, config.task_id)?;
+        let cancellation = task_cancellation_signal()?;
+        Ok(Self {
+            store,
+            task_state: if config.resumed {
+                FallbackTaskState::ResumedReconciled
+            } else {
+                FallbackTaskState::New
+            },
+            initial_source: Some((config.initial_selection, config.initial_source)),
+            action_budget: config.action_budget,
+            ollama_endpoint: config.ollama_endpoint,
+            repository_context: config.repository_context,
+            last_token_usage: None,
+            turn_boundary_confirmed: false,
+            cancellation,
+        })
+    }
+
+    pub(super) fn take_token_usage(&mut self) -> Option<crate::brain::ModelTokenUsage> {
+        self.last_token_usage.take()
+    }
+
+    fn source_for(
+        &mut self,
+        selection: &RoutingSelection,
+    ) -> Result<ModelDecisionSource, &'static str> {
+        let source = match self.initial_source.take() {
+            Some((initial_selection, source)) if initial_selection == *selection => source,
+            Some((initial_selection, source)) => {
+                self.initial_source = Some((initial_selection, source));
+                self.new_source(selection)?
+            }
+            None => self.new_source(selection)?,
+        };
+        let mut source = source;
+        if let Some(context) = self.repository_context.as_ref() {
+            if source.adapter_id() != AdapterId::OPENAI_COMPATIBLE {
+                return Err("automatic route does not support repository context");
+            }
+            source.set_repository_context(context.clone())?;
+        }
+        Ok(source)
+    }
+
+    fn new_source(
+        &self,
+        selection: &RoutingSelection,
+    ) -> Result<ModelDecisionSource, &'static str> {
+        let provider = selection
+            .provider
+            .as_deref()
+            .and_then(ModelProvider::parse)
+            .ok_or("automatic route has an unsupported provider")?;
+        prepare_model_source_for_selection(
+            Some(selection.model.clone()),
+            Some(ProviderSelection::BuiltIn(provider)),
+            self.action_budget,
+            self.ollama_endpoint,
+            true,
+        )?
+        .ok_or("automatic route could not create a provider adapter")
+    }
+}
+
+impl FallbackRuntime for CliFallbackRuntime {
+    fn task_state(&self) -> FallbackTaskState {
+        self.task_state
+    }
+
+    fn load_checkpoint(&mut self) -> Option<FallbackCheckpoint> {
+        self.store.checkpoint()
+    }
+
+    fn persist_routing_snapshot(
+        &mut self,
+        request: &AutomaticRoutingRequest,
+        candidates: &[RoutingCandidate],
+        policy: &crate::fallback::FallbackPolicy,
+        routing_strategy_id: Option<&str>,
+    ) -> bool {
+        self.store
+            .persist_routing_snapshot(request, candidates, *policy, routing_strategy_id)
+    }
+
+    fn routing_snapshot_matches(
+        &self,
+        request: &AutomaticRoutingRequest,
+        candidates: &[RoutingCandidate],
+        policy: &crate::fallback::FallbackPolicy,
+        routing_strategy_id: Option<&str>,
+    ) -> bool {
+        self.store
+            .routing_snapshot_matches(request, candidates, *policy, routing_strategy_id)
+    }
+
+    fn persist_checkpoint(&mut self, checkpoint: &FallbackCheckpoint) -> bool {
+        self.store.persist_checkpoint(checkpoint)
+    }
+
+    fn reconcile_action_handoff(
+        &mut self,
+        action: &WorkspaceAction,
+        observations: &[WorkspaceObservation],
+    ) -> bool {
+        if self.turn_boundary_confirmed {
+            self.turn_boundary_confirmed = false;
+            return true;
+        }
+        let Some(observation) = observations.last() else {
+            return false;
+        };
+        action_matches_observation(action, observation)
+    }
+
+    fn confirm_turn_boundary(&mut self) {
+        self.turn_boundary_confirmed = true;
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancellation.load(Ordering::SeqCst)
+    }
+
+    fn wait_cancellable(&mut self, delay: Duration) -> bool {
+        wait_until_or_cancelled(&self.cancellation, delay)
+    }
+
+    fn decide(
+        &mut self,
+        selection: &RoutingSelection,
+        goal: &str,
+        observations: &[WorkspaceObservation],
+        root_project_guidance: Option<&str>,
+    ) -> FallbackProviderResponse {
+        let mut source = match self.source_for(selection) {
+            Ok(source) => source,
+            Err(_) => {
+                return FallbackProviderResponse::complete(WorkspaceAction::Unsupported {
+                    action: format!(
+                        "decision_failure:{}",
+                        DecisionFailureCode::InvalidModelName.as_code()
+                    ),
+                })
+            }
+        };
+        let action = source.choose_action_with_root_project_guidance(
+            goal,
+            observations,
+            root_project_guidance,
+        );
+        self.last_token_usage = source.take_token_usage();
+        let completion = match &action {
+            WorkspaceAction::Unsupported { action: label }
+                if matches!(
+                    action.decision_failure_code(),
+                    Some(
+                        DecisionFailureCode::ProviderUnavailable
+                            | DecisionFailureCode::ProviderRateLimited
+                            | DecisionFailureCode::ProviderRejected
+                    )
+                ) =>
+            {
+                if DecisionFailureCode::http_status_from_action_label(label).is_some() {
+                    ProviderCompletion::ExplicitHttpError
+                } else {
+                    ProviderCompletion::Ambiguous
+                }
+            }
+            _ => ProviderCompletion::Complete,
+        };
+        FallbackProviderResponse::failed(action, completion)
+    }
+
+    fn needs_root_project_guidance(&self) -> bool {
+        true
+    }
+}
+
+fn task_cancellation_signal() -> Result<Arc<AtomicBool>, String> {
+    let cancellation = Arc::clone(TASK_CANCELLED.get_or_init(|| Arc::new(AtomicBool::new(false))));
+    let registration = TASK_SIGNAL_HANDLER.get_or_init(|| {
+        signal_hook::flag::register_conditional_shutdown(
+            signal_hook::consts::SIGINT,
+            130,
+            Arc::clone(&cancellation),
+        )
+        .map_err(|_| "could not register task cancellation handler")?;
+        signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&cancellation))
+            .map(|_| ())
+            .map_err(|_| "could not register task cancellation handler")
+    });
+    registration.map_err(str::to_owned)?;
+    Ok(cancellation)
+}
+
+fn wait_until_or_cancelled(cancellation: &AtomicBool, delay: Duration) -> bool {
+    let deadline = Instant::now() + delay;
+    loop {
+        if cancellation.load(Ordering::SeqCst) {
+            return false;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return !cancellation.load(Ordering::SeqCst);
+        }
+        thread::sleep(remaining.min(CANCELLATION_POLL_INTERVAL));
+    }
+}
+
+pub(super) enum TaskDecisionSource {
+    Single {
+        source: ModelDecisionSource,
+        selection: Option<RoutingSelection>,
+    },
+    Fallback(Box<FallbackDecisionSource<CliFallbackRuntime>>),
+}
+
+impl TaskDecisionSource {
+    pub(super) fn take_token_usage(&mut self) -> Option<crate::brain::ModelTokenUsage> {
+        match self {
+            Self::Single { source, .. } => source.take_token_usage(),
+            Self::Fallback(source) => source.runtime_mut().take_token_usage(),
+        }
+    }
+
+    pub(super) fn current_selection(&self) -> Option<RoutingSelection> {
+        match self {
+            Self::Single { selection, .. } => selection.clone(),
+            Self::Fallback(source) => Some(source.current_selection().clone()),
+        }
+    }
+
+    pub(super) fn reconcile_completed_turn(
+        &mut self,
+        observations: &[WorkspaceObservation],
+    ) -> Result<(), String> {
+        match self {
+            Self::Single { .. } => Ok(()),
+            Self::Fallback(source) => {
+                source
+                    .reconcile_completed_turn(observations)
+                    .map_err(|reason| {
+                        format!("fallback task state could not be reconciled: {reason:?}")
+                    })
+            }
+        }
+    }
+}
+
+impl BoundedDecisionSource for TaskDecisionSource {
+    fn choose_action(
+        &mut self,
+        goal: &str,
+        observations: &[WorkspaceObservation],
+    ) -> WorkspaceAction {
+        match self {
+            Self::Single { source, .. } => source.choose_action(goal, observations),
+            Self::Fallback(source) => source.choose_action(goal, observations),
+        }
+    }
+
+    fn needs_root_project_guidance(&self) -> bool {
+        match self {
+            Self::Single { source, .. } => source.needs_root_project_guidance(),
+            Self::Fallback(source) => source.needs_root_project_guidance(),
+        }
+    }
+
+    fn choose_action_with_root_project_guidance(
+        &mut self,
+        goal: &str,
+        observations: &[WorkspaceObservation],
+        guidance: Option<&str>,
+    ) -> WorkspaceAction {
+        match self {
+            Self::Single { source, .. } => {
+                source.choose_action_with_root_project_guidance(goal, observations, guidance)
+            }
+            Self::Fallback(source) => {
+                source.choose_action_with_root_project_guidance(goal, observations, guidance)
+            }
+        }
+    }
+}
+
+fn action_matches_observation(
+    action: &WorkspaceAction,
+    observation: &WorkspaceObservation,
+) -> bool {
+    use WorkspaceAction as A;
+    use WorkspaceObservation as O;
+    match (action, observation) {
+        (A::OfflineCargoTest { .. }, O::ProcessFinished { .. }) => true,
+        (A::ReadFile { path }, O::FileRead { path: observed, .. })
+        | (A::ListDirectory { path }, O::DirectoryListed { path: observed, .. })
+        | (A::CreateDirectory { path }, O::DirectoryCreated { path: observed })
+        | (A::CreateFile { path, .. }, O::FileCreated { path: observed, .. })
+        | (A::ReplaceText { path, .. }, O::TextReplaced { path: observed, .. })
+        | (A::ApplyPatch { path, .. }, O::PatchApplied { path: observed, .. }) => path == observed,
+        (A::ReadRange { path, .. }, O::FileRangeRead { path: observed, .. }) => path == observed,
+        (
+            A::SearchText { directory, .. },
+            O::TextSearched {
+                directory: observed,
+                ..
+            },
+        ) => directory == observed,
+        (
+            A::SearchTreeText { directory, .. },
+            O::TreeTextSearched {
+                directory: observed,
+                ..
+            },
+        ) => directory == observed,
+        (A::Extension { name, .. }, O::ExtensionCompleted { name: observed, .. }) => {
+            name == observed
+        }
+        (
+            action,
+            O::ActionFailed {
+                action: observed, ..
+            },
+        ) => action == observed,
+        (A::CreateFile { path, .. }, O::FileCreationFailed { path: observed, .. }) => {
+            path == observed
+        }
+        (A::CreateDirectory { path }, O::DirectoryCreationFailed { path: observed, .. }) => {
+            path == observed
+        }
+        (A::ReplaceText { path, .. }, O::TextReplacementFailed { path: observed, .. }) => {
+            path == observed
+        }
+        (A::ApplyPatch { path, .. }, O::PatchFailed { path: observed, .. }) => path == observed,
+        (
+            A::SearchText { directory, .. },
+            O::TextSearchFailed {
+                directory: observed,
+                ..
+            },
+        ) => directory == observed,
+        (
+            A::SearchTreeText { directory, .. },
+            O::TreeTextSearchFailed {
+                directory: observed,
+                ..
+            },
+        ) => directory == observed,
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancellable_wait_returns_when_cancelled_and_completes_when_not_cancelled() {
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let signal = Arc::clone(&cancellation);
+        let canceller = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(10));
+            signal.store(true, Ordering::SeqCst);
+        });
+        assert!(!wait_until_or_cancelled(
+            &cancellation,
+            Duration::from_secs(1)
+        ));
+        canceller.join().unwrap();
+
+        let cancellation = AtomicBool::new(false);
+        assert!(wait_until_or_cancelled(
+            &cancellation,
+            Duration::from_millis(1)
+        ));
+    }
+}

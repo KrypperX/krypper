@@ -3,13 +3,20 @@
 use super::checkpoint_files::{
     read_task_checkpoint, validate_checkpoint_output_path, write_task_checkpoint,
 };
+use super::config::{ModelDefaults, RoutingMode};
+use super::fallback_runtime::{CliFallbackRuntime, CliFallbackRuntimeConfig, TaskDecisionSource};
 use super::help::{contains_help_before_terminator, usage_error, write_task_help};
+use super::model_routing::ModelRoutingService;
 use super::model_selection::{
-    configured_model_selection, parse_provider_selection, prepare_model_source_for_selection,
+    configured_model_defaults, parse_provider_selection, prepare_model_source_for_selection,
     ProviderSelection,
 };
 use super::outcome::{write_observation, write_turn_outcome};
+use super::settings::user_settings_paths;
 use super::task_args::parse_task_action;
+use super::task_routing_state::{
+    enabled_fallback_policy, has_task_routing_state, remove_task_routing_state,
+};
 #[path = "verified_task.rs"]
 mod verified_task;
 use self::verified_task::{
@@ -137,7 +144,7 @@ pub(super) fn run_task_with_options(
         error,
         model_endpoint,
         use_config,
-        configured_model_selection,
+        configured_model_defaults,
     )
 }
 
@@ -151,7 +158,7 @@ fn run_task_with_selection_loader<F>(
     mut load_configured_selection: F,
 ) -> io::Result<i32>
 where
-    F: FnMut(&mut dyn Write) -> Result<Option<(String, Option<String>)>, String>,
+    F: FnMut(&mut dyn Write) -> Result<Option<ModelDefaults>, String>,
 {
     if contains_help_before_terminator(arguments) {
         write_task_help(output)?;
@@ -492,15 +499,16 @@ where
     } else if !verify_files.is_empty() {
         return usage_error(error, Some("task"), "--verify-file requires --verified");
     }
-    // Command-line selection always wins: --model or --provider (alone or
-    // together) disables the configured defaults entirely, so a flag never mixes
-    // with a configured provider.
-    if use_config && !no_config && model.is_none() && provider.is_none() {
+    // A command-line selection is a deliberate manual override, even when the
+    // saved user default enables automatic routing.
+    let explicitly_selected = model.is_some() || provider.is_some();
+    let mut configured_defaults = None;
+    if use_config && !no_config && !explicitly_selected {
         match load_configured_selection(error) {
-            Ok(Some((configured_model, configured_provider))) => {
-                model = Some(configured_model);
-                if let Some(name) = configured_provider {
-                    let Some(selection) = parse_provider_selection(&name) else {
+            Ok(Some(defaults)) => {
+                model = Some(defaults.model.clone());
+                if let Some(name) = defaults.provider.as_deref() {
+                    let Some(selection) = parse_provider_selection(name) else {
                         return usage_error(
                             error,
                             Some("task"),
@@ -509,6 +517,7 @@ where
                     };
                     provider = Some(selection);
                 }
+                configured_defaults = Some(defaults);
             }
             Ok(None) => {}
             Err(message) => return usage_error(error, Some("task"), &message),
@@ -532,6 +541,74 @@ where
             "--verified requires the local Ollama provider",
         );
     }
+
+    if verified
+        && configured_defaults
+            .as_ref()
+            .is_some_and(|defaults| defaults.routing_mode == RoutingMode::Automatic)
+    {
+        return usage_error(error, Some("task"), "--verified requires manual routing");
+    }
+
+    let repository_context = if let Some(path) = repository_context_json.as_deref() {
+        match read_repository_context_json(path) {
+            Ok(context) => Some(context),
+            Err(message) => return usage_error(error, Some("task"), &message),
+        }
+    } else {
+        None
+    };
+    let mut automatic_resolution = None;
+    if !explicitly_selected
+        && !verified
+        && configured_defaults
+            .as_ref()
+            .is_some_and(|defaults| defaults.routing_mode == RoutingMode::Automatic)
+    {
+        let defaults = configured_defaults.as_ref().expect("checked above");
+        let Some(model_routing) =
+            ModelRoutingService::for_current_user().map_err(io::Error::other)?
+        else {
+            return usage_error(
+                error,
+                Some("task"),
+                "automatic routing needs a per-user settings directory",
+            );
+        };
+        let resolution = match model_routing.resolve_for_task(
+            defaults,
+            repository_context_json.is_some() || model_usage_jsonl,
+            true,
+        ) {
+            Ok(resolution) => resolution,
+            Err(message) => return usage_error(error, Some("task"), &message),
+        };
+        let Some(provider_name) = resolution.selection.provider.as_deref() else {
+            return usage_error(
+                error,
+                Some("task"),
+                "automatic routing selected no provider",
+            );
+        };
+        let Some(selected_provider) = parse_provider_selection(provider_name) else {
+            return usage_error(
+                error,
+                Some("task"),
+                "automatic routing selected an unknown provider",
+            );
+        };
+        writeln!(
+            error,
+            "krypper: selected route {}/{} ({})",
+            provider_name,
+            resolution.selection.model,
+            resolution.selection.reason.as_str()
+        )?;
+        model = Some(resolution.selection.model.clone());
+        provider = Some(selected_provider);
+        automatic_resolution = Some(resolution);
+    }
+
     let mut model_source = match prepare_model_source_for_selection(
         model,
         provider,
@@ -542,11 +619,7 @@ where
         Ok(source) => source,
         Err(message) => return usage_error(error, Some("task"), message),
     };
-    if let Some(path) = repository_context_json.as_deref() {
-        let context = match read_repository_context_json(path) {
-            Ok(context) => context,
-            Err(message) => return usage_error(error, Some("task"), &message),
-        };
+    if let Some(context) = repository_context.as_ref() {
         let Some(source) = model_source.as_mut() else {
             return usage_error(
                 error,
@@ -554,7 +627,7 @@ where
                 "--repository-context-json requires an OpenAI-compatible model provider",
             );
         };
-        if let Err(message) = source.set_repository_context(context) {
+        if let Err(message) = source.set_repository_context(context.clone()) {
             return usage_error(error, Some("task"), message);
         }
     }
@@ -668,6 +741,85 @@ where
         };
         (session, task_id, turn_id, goal)
     };
+    if resume.is_some() {
+        if let Some(paths) = user_settings_paths().map_err(io::Error::other)? {
+            let has_fallback_state =
+                has_task_routing_state(&paths, task_id).map_err(io::Error::other)?;
+            if has_fallback_state
+                && (automatic_resolution.is_none()
+                    || configured_defaults
+                        .as_ref()
+                        .and_then(|defaults| defaults.fallback_budget_micro_usd)
+                        .is_none())
+            {
+                return usage_error(
+                    error,
+                    Some("task"),
+                    "this task has bounded-routing state; resume with its saved automatic routing settings and no explicit provider/model override",
+                );
+            }
+        }
+    }
+    let mut task_decision_source = None;
+    let mut fallback_task_id = None;
+    if !verified {
+        if let Some(source) = model_source.take() {
+            let automatic_selection = automatic_resolution
+                .as_ref()
+                .map(|resolution| resolution.selection.clone());
+            let fallback_budget = configured_defaults
+                .as_ref()
+                .and_then(|defaults| defaults.fallback_budget_micro_usd);
+            if let (Some(mut resolution), Some(budget)) =
+                (automatic_resolution.take(), fallback_budget)
+            {
+                let Some(paths) = user_settings_paths().map_err(io::Error::other)? else {
+                    return usage_error(
+                        error,
+                        Some("task"),
+                        "bounded fallback needs a per-user settings directory",
+                    );
+                };
+                let cross_provider = configured_defaults
+                    .as_ref()
+                    .is_some_and(|defaults| defaults.allow_cross_provider_data_transfer);
+                let policy = match enabled_fallback_policy(budget, cross_provider) {
+                    Ok(policy) => policy,
+                    Err(message) => return usage_error(error, Some("task"), &message),
+                };
+                let runtime = match CliFallbackRuntime::new(CliFallbackRuntimeConfig {
+                    paths: &paths,
+                    task_id,
+                    resumed: resume.is_some(),
+                    initial_selection: resolution.selection.clone(),
+                    initial_source: source,
+                    action_budget: max_actions,
+                    ollama_endpoint: model_endpoint,
+                    repository_context: repository_context.clone(),
+                }) {
+                    Ok(runtime) => runtime,
+                    Err(message) => return usage_error(error, Some("task"), &message),
+                };
+                let fallback = match crate::fallback::FallbackDecisionSource::new(
+                    policy,
+                    resolution.request,
+                    resolution.selection,
+                    std::mem::take(&mut resolution.candidates),
+                    runtime,
+                ) {
+                    Ok(source) => source,
+                    Err(message) => return usage_error(error, Some("task"), &message.to_string()),
+                };
+                fallback_task_id = Some(task_id);
+                task_decision_source = Some(TaskDecisionSource::Fallback(Box::new(fallback)));
+            } else {
+                task_decision_source = Some(TaskDecisionSource::Single {
+                    source,
+                    selection: automatic_selection,
+                });
+            }
+        }
+    }
     let mut reader = BufReader::new(input);
     let mut line = Vec::new();
     let mut observation_number = 0;
@@ -681,6 +833,9 @@ where
     // The emitter's sequence is scoped to this CLI invocation, not TaskSession history.
     let mut stream_event_sequence = 1_u64;
     let mut last_stream_positions = Vec::new();
+    let mut last_reported_selection = automatic_resolution
+        .as_ref()
+        .map(|resolution| resolution.selection.clone());
     loop {
         let mut displayed_observations = 0;
         let (result, stop_reason, reconcile_after_run, iteration_actions) = if verified {
@@ -739,7 +894,7 @@ where
         } else {
             let result = {
                 let mut decision_source = CliDecisionSource {
-                    needs_project_guidance: model_source.is_some(),
+                    needs_project_guidance: task_decision_source.is_some(),
                     decide: |decision_goal: &str,
                              observations: &[WorkspaceObservation],
                              project_guidance: Option<&str>| {
@@ -765,7 +920,7 @@ where
                         }
 
                         decisions += 1;
-                        if let Some(model_source) = model_source.as_mut() {
+                        if let Some(decision_source) = task_decision_source.as_mut() {
                             if let Err(cause) =
                                 writeln!(error, "model decision {decisions}/{max_actions}")
                                     .and_then(|()| error.flush())
@@ -776,14 +931,26 @@ where
                                 };
                             }
                             let model_started = Instant::now();
-                            let action = model_source.choose_action_with_root_project_guidance(
+                            let action = decision_source.choose_action_with_root_project_guidance(
                                 decision_goal,
                                 observations,
                                 project_guidance,
                             );
+                            if let Some(selection) = decision_source.current_selection() {
+                                if last_reported_selection.as_ref() != Some(&selection) {
+                                    let _ = writeln!(
+                                        error,
+                                        "krypper: selected route {}/{} ({})",
+                                        selection.provider.as_deref().unwrap_or("unknown"),
+                                        selection.model,
+                                        selection.reason.as_str()
+                                    );
+                                    last_reported_selection = Some(selection);
+                                }
+                            }
                             if model_usage_jsonl {
                                 let elapsed_ms = model_started.elapsed().as_millis() as u64;
-                                let usage = model_source.take_token_usage();
+                                let usage = decision_source.take_token_usage();
                                 let event = serde_json::json!({
                                     "type": "model_token_usage",
                                     "decision": decisions,
@@ -870,6 +1037,11 @@ where
         actions_taken += iteration_actions;
 
         if reconcile_after_run {
+            if let Some(decision_source) = task_decision_source.as_mut() {
+                decision_source
+                    .reconcile_completed_turn(result.observations())
+                    .map_err(io::Error::other)?;
+            }
             reconcile_task_state(&mut session, task_id, stop_reason)?;
         }
         if activity_jsonl {
@@ -1042,6 +1214,12 @@ where
                 event.sequence(),
                 event.summary()
             )?;
+        }
+    }
+
+    if fallback_task_id.is_some() && task_state != TaskState::Running {
+        if let Some(paths) = user_settings_paths().map_err(io::Error::other)? {
+            remove_task_routing_state(&paths, task_id).map_err(io::Error::other)?;
         }
     }
 

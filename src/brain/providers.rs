@@ -111,7 +111,7 @@ pub(crate) enum DecisionProtocol {
 }
 
 impl DecisionProtocol {
-    fn adapter_id(self) -> AdapterId {
+    pub(crate) fn adapter_id(self) -> AdapterId {
         match self {
             Self::OllamaChat => AdapterId::OLLAMA,
             Self::GeminiGenerateContent => AdapterId::GEMINI,

@@ -1,7 +1,7 @@
 //! Per-user persistence for explicit provider probes and runtime capability evidence.
 
 use super::settings::{
-    ensure_private_permissions, open_credentials, write_private_file, UserSettingsPaths,
+    ensure_private_permissions, open_private_file, write_private_file, UserSettingsPaths,
 };
 use crate::brain::capability_evidence::{
     configuration_revision, new_configuration_revision_key, now_unix_secs, CapabilityFreshness,
@@ -24,6 +24,29 @@ pub(super) fn configuration_revision_for_probe(
     Ok(configuration_revision(&key, provider, model, config_values))
 }
 
+pub(super) fn existing_configuration_revision_for_probe(
+    path: &Path,
+    provider: &str,
+    model: &str,
+    config_values: &[(&str, &str)],
+) -> Result<Option<String>, String> {
+    match read_revision_key(path) {
+        Ok(key) => Ok(Some(configuration_revision(
+            &key,
+            provider,
+            model,
+            config_values,
+        ))),
+        Err(RevisionKeyError::Missing) => Ok(None),
+        Err(RevisionKeyError::Invalid) => Err(
+            "provider evidence key is invalid; reset per-user settings to replace it".to_owned(),
+        ),
+        Err(RevisionKeyError::Io) => {
+            Err("cannot read the private provider evidence key".to_owned())
+        }
+    }
+}
+
 pub(super) fn record_probe(
     path: &Path,
     record: ProviderEvidenceRecord,
@@ -42,6 +65,10 @@ pub(super) fn record_probe(
     }
     write_private_file(path, &bytes, "provider evidence")?;
     Ok(store.freshness(&provider, &model, &revision, now_unix_secs()))
+}
+
+pub(super) fn records(path: &Path) -> Result<Vec<ProviderEvidenceRecord>, String> {
+    Ok(load(path)?.records().to_vec())
 }
 
 fn load(path: &Path) -> Result<ProviderEvidenceStore, String> {
@@ -65,7 +92,7 @@ fn load(path: &Path) -> Result<ProviderEvidenceStore, String> {
         ));
     }
     ensure_private_permissions(path, &metadata)?;
-    let file = open_credentials(path).map_err(|cause| {
+    let file = open_private_file(path).map_err(|cause| {
         format!(
             "cannot read provider evidence '{}': {}",
             path.display(),
@@ -128,7 +155,7 @@ fn read_revision_key(path: &Path) -> Result<[u8; 32], RevisionKeyError> {
     if !metadata.file_type().is_file() || ensure_private_permissions(path, &metadata).is_err() {
         return Err(RevisionKeyError::Invalid);
     }
-    let file = open_credentials(path).map_err(|_| RevisionKeyError::Io)?;
+    let file = open_private_file(path).map_err(|_| RevisionKeyError::Io)?;
     let mut bytes = Vec::new();
     file.take((REVISION_KEY_BYTES + 1) as u64)
         .read_to_end(&mut bytes)

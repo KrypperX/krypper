@@ -100,6 +100,11 @@ pub trait FallbackRuntime {
         false
     }
 
+    /// Mark that the host completed its task-turn boundary after receiving and
+    /// recording the returned action. The default keeps the observation check
+    /// required between decisions.
+    fn confirm_turn_boundary(&mut self) {}
+
     /// Whether the owning task has been cancelled.
     fn is_cancelled(&self) -> bool;
 
@@ -163,7 +168,8 @@ pub enum FallbackTaskState {
 }
 
 /// Durable state of the last provider request for one task.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FallbackCheckpointState {
     /// No provider request or action handoff is unresolved.
     Ready,
@@ -188,7 +194,8 @@ pub enum FallbackCheckpointState {
 /// after the host reports reconciliation, at which point it is committed as
 /// `Ready`. `RequestInFlight`, `DecisionInProgress`, and
 /// `ReconciliationRequired` fail closed on resume.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct FallbackCheckpoint {
     usage: FallbackUsage,
     current_selection: RoutingSelection,
@@ -413,6 +420,22 @@ where
     /// Mutable access to the host runtime for status or shutdown handling.
     pub const fn runtime_mut(&mut self) -> &mut R {
         &mut self.runtime
+    }
+
+    /// Confirm that the last returned action was accepted by the host's completed
+    /// task turn. Call only after the authoritative task loop has returned.
+    pub fn reconcile_completed_turn(
+        &mut self,
+        observations: &[WorkspaceObservation],
+    ) -> Result<(), FallbackStopReason> {
+        self.runtime.confirm_turn_boundary();
+        if self.checkpoint.state == FallbackCheckpointState::ActionPendingReconciliation {
+            self.reconcile_pending_action(observations)
+        } else if self.checkpoint.state == FallbackCheckpointState::Ready {
+            Ok(())
+        } else {
+            Err(FallbackStopReason::UnresolvedProviderRequest)
+        }
     }
 
     fn decide_with_context(

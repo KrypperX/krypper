@@ -510,6 +510,48 @@ Cloudflare Workers AI direct and Cloudflare AI Gateway are separate choices.
 The catalog is informational and offline; a model ID can also be entered
 manually.
 
+`krypper models` remains offline and uses the embedded snapshot or the user's
+last refreshed cache. `krypper models --refresh` explicitly contacts the
+configured public catalog feeds and atomically saves a verified cache;
+`--provenance` shows origin, age, source license, and retrieval metadata.
+`--json --provenance` emits `{ "catalog": ..., "models": [...] }`. Plain
+`--json` retains its existing model-array format.
+
+Use `krypper setup --status` to show provider readiness, the selected route and
+reason, and catalog provenance without printing credentials. Add `--json` for
+a machine-readable status object.
+
+Automatic model choice is per-user and opt-in:
+
+```sh
+krypper setup --routing-mode automatic
+```
+
+The saved provider/model remains the provider scope anchor. By default, route
+choices stay within that provider. To permit routing across configured
+providers, explicitly add `--allow-cross-provider`; this also authorizes
+sending task context to those providers. Automatic choices require a current
+successful probe for the exact provider, model, account configuration, and
+credential revision, plus known tool-call support. Explicit `task --model` or
+`task --provider` always selects that exact route.
+
+Bounded fallback is a separate opt-in and needs an aggregate estimated-cost
+ceiling:
+
+```sh
+krypper setup --routing-mode automatic --fallback-budget-usd 0.25
+```
+
+The CLI bounds a fallback chain to two additional routes and three provider
+requests per task. Cost estimates use the maximum declared input and output
+limits with catalog prices, so a missing price or token limit blocks fallback
+before the first request. Only explicit rate-limit and server-error statuses
+can trigger a switch; ambiguous or partial replies require reconciliation.
+Each fallback task stores only its route, policy, and aggregate request/cost
+counters under the user's private settings directory. Safe pause/resume requires
+the routing snapshot to match exactly. `setup --reset` removes those task
+routing records and the model catalog cache.
+
 Credential prompts do not echo the value. Krypper stores credentials separately
 from `config.toml`, in `credentials.json` in the user's Krypper configuration
 directory. On Unix, the directory is restricted to the current user (`0700`)
@@ -606,13 +648,18 @@ unknown.
 ### Default model from a user configuration file (opt in)
 
 Creating the file below is your opt-in: when it exists and you pass neither
-`--model` nor `--provider`, `krypper task` uses its model selection, exactly as
-if you had typed those flags. Without the file, nothing changes.
+`--model` nor `--provider`, `krypper task` uses its model selection. Manual
+mode preserves the configured provider/model exactly; automatic mode uses the
+saved provider as its scope anchor and reports a selected route and reason.
+Without the file, nothing changes.
 
 ```toml
 # ~/.config/krypper/config.toml
 provider = "ollama"   # optional; built-in selector or enabled profile ID
 model = "qwen3"       # required when the file sets anything
+# routing_mode = "automatic"
+# allow_cross_provider_data_transfer = "true"
+# fallback_budget_micro_usd = "250000"
 ```
 
 - **Location:** `$KRYPPER_CONFIG` (absolute path), else
@@ -626,8 +673,10 @@ model = "qwen3"       # required when the file sets anything
   `krypper: using model '...' (provider: ...) from <path>` to standard error
   before the task starts.
 - **Format:** a small TOML subset: `key = "value"` lines, blank lines, and `#`
-  comments. Only `provider` and `model` are accepted; tables, escapes, duplicate
-  or unknown keys, files over 16 KiB, and non-UTF-8 files are rejected. A
+  comments. `provider`, `model`, `routing_mode`,
+  `allow_cross_provider_data_transfer`, and `fallback_budget_micro_usd` are
+  accepted; tables, escapes, duplicate or unknown keys, files over 16 KiB, and
+  non-UTF-8 files are rejected. Routing settings require a model default. A
   present but invalid file fails the command with status 2 instead of being
   skipped.
 - **Credentials:** never stored in this TOML file. Hosted providers read each

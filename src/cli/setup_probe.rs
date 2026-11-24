@@ -1,5 +1,6 @@
 //! Explicit live provider probes and their bounded local evidence.
 
+use super::model_catalog::{cache_path_for_user_settings, load_catalog};
 use super::model_evidence::{configuration_revision_for_probe, record_probe};
 use super::settings::{
     effective_credential_value, valid_credential, CredentialStore, EffectiveCredentialValue,
@@ -28,27 +29,7 @@ pub(super) fn test_connection(
     credentials: &CredentialStore,
     output: &mut dyn Write,
 ) -> io::Result<()> {
-    let mut config_values = vec![
-        ("adapter", Some(provider.adapter_id.as_str().to_owned())),
-        ("endpoint_policy", Some(format!("{:?}", provider.endpoint))),
-        (
-            "native_sse_decisions",
-            Some(provider.native_sse_decisions.to_string()),
-        ),
-    ];
-    config_values.extend(provider.auth_fields.iter().map(|field| {
-        let value = match effective_credential_value(
-            std::env::var(field.name),
-            credentials.get(field.name),
-        ) {
-            EffectiveCredentialValue::Configured(value) => Some(value),
-            EffectiveCredentialValue::Missing => None,
-            EffectiveCredentialValue::InvalidEnvironment => {
-                Some("\0invalid-non-utf8-environment-value".to_owned())
-            }
-        };
-        (field.name, value)
-    }));
+    let config_values = provider_config_values(provider, credentials);
     let configured = provider_is_configured(provider, &config_values);
     let discoverable = provider_descriptor_by_selector(provider.selector).is_some();
     let executable = ProviderDecisionSourceRegistry::with_builtins().contains(provider.adapter_id);
@@ -70,23 +51,24 @@ pub(super) fn test_connection(
         return Ok(());
     }
 
-    let config_values = config_values
-        .iter()
-        .map(|(name, value)| {
-            let value = value
-                .as_deref()
-                .map(|value| format!("set:{value}"))
-                .unwrap_or_else(|| "unset:".to_owned());
-            (*name, value)
-        })
-        .collect::<Vec<_>>();
-    let config_values = config_values
-        .iter()
-        .map(|(name, value)| (*name, value.as_str()))
-        .collect::<Vec<_>>();
-    let revision =
-        configuration_revision_for_probe(paths, provider.selector, model, &config_values)
-            .map_err(io::Error::other)?;
+    // Resolve optional catalog facts before the live request. A broken local catalog must not
+    // turn a successful provider probe into an error after the provider has already been called.
+    let model_spec = load_catalog(Some(&cache_path_for_user_settings(&paths.model)))
+        .ok()
+        .and_then(|catalog| {
+            catalog
+                .view
+                .models
+                .into_iter()
+                .find(|entry| {
+                    crate::catalog_data::provider_matches(provider.selector, &entry.model.provider)
+                        && entry.model.id == model
+                })
+                .map(|entry| entry.model)
+        });
+
+    let (revision, _) = configuration_revision_for_provider(paths, provider, model, credentials)
+        .map_err(io::Error::other)?;
 
     let workspace = TempWorkspace::new()?;
     let mut arguments = vec![
@@ -147,9 +129,6 @@ pub(super) fn test_connection(
             CapabilityProvenance::Declared,
         )
         .map_err(io::Error::other)?;
-    let model_spec = crate::catalog_data::lookup(provider.selector, model)
-        .ok()
-        .flatten();
     record
         .add_capability_fact(
             CapabilityName::ToolCalling,
@@ -230,7 +209,89 @@ fn model_declares_image_input(model: &crate::catalog_data::ModelSpec) -> Option<
     )
 }
 
-fn provider_is_configured(
+pub(super) fn configuration_revision_for_provider(
+    paths: &UserSettingsPaths,
+    provider: ProviderDescriptor,
+    model: &str,
+    credentials: &CredentialStore,
+) -> Result<(String, bool), String> {
+    let values = provider_config_values(provider, credentials);
+    let configured = provider_is_configured(provider, &values);
+    let encoded = revision_references(&values);
+    let references = encoded
+        .iter()
+        .map(|(name, value)| (*name, value.as_str()))
+        .collect::<Vec<_>>();
+    let revision = configuration_revision_for_probe(paths, provider.selector, model, &references)?;
+    Ok((revision, configured))
+}
+
+pub(super) fn existing_provider_configuration_revision(
+    paths: &UserSettingsPaths,
+    provider: ProviderDescriptor,
+    model: &str,
+    credentials: &CredentialStore,
+) -> Result<(Option<String>, bool), String> {
+    let values = provider_config_values(provider, credentials);
+    let configured = provider_is_configured(provider, &values);
+    let encoded = revision_references(&values);
+    let references = encoded
+        .iter()
+        .map(|(name, value)| (*name, value.as_str()))
+        .collect::<Vec<_>>();
+    let revision = super::model_evidence::existing_configuration_revision_for_probe(
+        &paths.model_evidence_key,
+        provider.selector,
+        model,
+        &references,
+    )?;
+    Ok((revision, configured))
+}
+
+fn revision_references(values: &[(&'static str, Option<String>)]) -> Vec<(&'static str, String)> {
+    values
+        .iter()
+        .map(|(name, value)| {
+            (
+                *name,
+                value
+                    .as_deref()
+                    .map(|value| format!("set:{value}"))
+                    .unwrap_or_else(|| "unset:".to_owned()),
+            )
+        })
+        .collect()
+}
+
+fn provider_config_values(
+    provider: ProviderDescriptor,
+    credentials: &CredentialStore,
+) -> Vec<(&'static str, Option<String>)> {
+    let mut values = vec![
+        ("adapter", Some(provider.adapter_id.as_str().to_owned())),
+        ("endpoint_policy", Some(format!("{:?}", provider.endpoint))),
+        (
+            "native_sse_decisions",
+            Some(provider.native_sse_decisions.to_string()),
+        ),
+    ];
+    values.extend(provider.auth_fields.iter().map(|field| {
+        let value = match effective_credential_value(
+            std::env::var(field.name),
+            credentials.get(field.name),
+        ) {
+            EffectiveCredentialValue::Configured(value) => Some(value),
+            EffectiveCredentialValue::Missing => None,
+            EffectiveCredentialValue::InvalidEnvironment => {
+                Some("\0invalid-non-utf8-environment-value".to_owned())
+            }
+        };
+        (field.name, value)
+    }));
+    values
+}
+
+pub(super) fn provider_is_configured(
     provider: ProviderDescriptor,
     values: &[(&'static str, Option<String>)],
 ) -> bool {

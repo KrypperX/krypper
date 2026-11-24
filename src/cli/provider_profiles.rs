@@ -1,6 +1,6 @@
 //! Trusted, per-user provider profile definitions.
 
-use super::settings::{ensure_private_permissions, open_credentials};
+use super::settings::{ensure_private_permissions, open_private_file};
 #[cfg(test)]
 use super::settings::{
     load_credentials, remove_file_if_present, save_credentials, write_private_file, CredentialStore,
@@ -37,7 +37,7 @@ pub(super) enum ProfileProtocol {
 }
 
 impl ProfileProtocol {
-    fn decision_protocol(self) -> DecisionProtocol {
+    pub(super) fn decision_protocol(self) -> DecisionProtocol {
         match self {
             Self::OllamaChat => DecisionProtocol::OllamaChat,
             Self::GeminiGenerateContent => DecisionProtocol::GeminiGenerateContent,
@@ -47,7 +47,7 @@ impl ProfileProtocol {
         }
     }
 
-    fn has_api_key(self) -> bool {
+    pub(super) fn has_api_key(self) -> bool {
         !matches!(self, Self::OllamaChat)
     }
 
@@ -116,7 +116,7 @@ pub(super) fn load_provider_profiles(path: &Path) -> Result<Vec<ProviderProfile>
         ));
     }
     ensure_private_permissions(path, &metadata)?;
-    let file = open_credentials(path).map_err(|cause| {
+    let file = open_private_file(path).map_err(|cause| {
         format!(
             "cannot read provider profiles '{}': {}",
             path.display(),

@@ -1,6 +1,8 @@
 //! Per-user model defaults and provider credentials used by `krypper setup`.
 
-use super::config::config_path;
+use super::config::{
+    config_path, validate_route_settings, RoutingMode, MAX_FALLBACK_BUDGET_MICRO_USD,
+};
 use crate::brain::{is_provider_credential_name, validate_model_name_for_provider, ModelProvider};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
@@ -68,6 +70,7 @@ impl CredentialStore {
     }
 }
 
+#[derive(Clone)]
 pub(super) struct UserSettingsPaths {
     pub(super) model: PathBuf,
     pub(super) credentials: PathBuf,
@@ -107,7 +110,7 @@ pub(super) fn load_credentials(path: &Path) -> Result<Option<CredentialStore>, S
     }
     ensure_private_permissions(path, &metadata)?;
 
-    let file = open_credentials(path)
+    let file = open_private_file(path)
         .map_err(|cause| file_error("cannot read credential store", path, cause))?;
     let mut bytes = Vec::new();
     file.take(MAX_CREDENTIAL_BYTES + 1)
@@ -137,13 +140,47 @@ pub(super) fn load_credentials(path: &Path) -> Result<Option<CredentialStore>, S
     Ok(Some(CredentialStore { values }))
 }
 
+#[cfg(test)]
 pub(super) fn save_model_defaults(path: &Path, provider: &str, model: &str) -> Result<(), String> {
+    save_model_configuration(path, provider, model, RoutingMode::Manual, false, None)
+}
+
+pub(super) fn save_model_configuration(
+    path: &Path,
+    provider: &str,
+    model: &str,
+    routing_mode: RoutingMode,
+    allow_cross_provider_data_transfer: bool,
+    fallback_budget_micro_usd: Option<u64>,
+) -> Result<(), String> {
     let Some(provider_kind) = ModelProvider::parse(provider) else {
         return Err("unsupported provider".to_owned());
     };
     validate_model_name_for_provider(model, provider_kind)
         .map_err(|_| "invalid model ID".to_owned())?;
-    let contents = format!("provider = \"{provider}\"\nmodel = \"{model}\"\n");
+    validate_route_settings(
+        routing_mode,
+        allow_cross_provider_data_transfer,
+        fallback_budget_micro_usd,
+    )
+    .map_err(str::to_owned)?;
+    if fallback_budget_micro_usd
+        .is_some_and(|budget| budget == 0 || budget > MAX_FALLBACK_BUDGET_MICRO_USD)
+    {
+        return Err(format!(
+            "fallback budget must be between 1 and {MAX_FALLBACK_BUDGET_MICRO_USD} micro-USD"
+        ));
+    }
+    let mut contents = format!("provider = \"{provider}\"\nmodel = \"{model}\"\n");
+    if routing_mode == RoutingMode::Automatic {
+        contents.push_str("routing_mode = \"automatic\"\n");
+    }
+    if allow_cross_provider_data_transfer {
+        contents.push_str("allow_cross_provider_data_transfer = \"true\"\n");
+    }
+    if let Some(budget) = fallback_budget_micro_usd {
+        contents.push_str(&format!("fallback_budget_micro_usd = \"{budget}\"\n"));
+    }
     write_private_file(path, contents.as_bytes(), "model configuration")
 }
 
@@ -161,6 +198,11 @@ pub(super) fn remove_settings(paths: &UserSettingsPaths) -> Result<(), String> {
     remove_file_if_present(&paths.provider_profiles, "provider profiles")?;
     remove_file_if_present(&paths.model_evidence, "provider evidence")?;
     remove_file_if_present(&paths.model_evidence_key, "provider evidence key")?;
+    remove_file_if_present(
+        &paths.model.with_file_name("model-catalog-cache.json"),
+        "model catalog cache",
+    )?;
+    super::task_routing_state::remove_task_routing_states(paths)?;
     remove_file_if_present(&paths.model, "model configuration")
 }
 
@@ -321,7 +363,7 @@ fn set_private_file_permissions(path: &Path) -> Result<(), String> {
 }
 
 #[cfg(unix)]
-pub(super) fn open_credentials(path: &Path) -> io::Result<File> {
+pub(super) fn open_private_file(path: &Path) -> io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
     OpenOptions::new()
         .read(true)
@@ -330,7 +372,7 @@ pub(super) fn open_credentials(path: &Path) -> io::Result<File> {
 }
 
 #[cfg(not(unix))]
-pub(super) fn open_credentials(path: &Path) -> io::Result<File> {
+pub(super) fn open_private_file(path: &Path) -> io::Result<File> {
     File::open(path)
 }
 

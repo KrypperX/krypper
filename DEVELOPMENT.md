@@ -280,7 +280,10 @@ Treat these boundaries as a revisable direction and introduce them incrementally
   requests but does not grant permissions or replace local validation.
 - **CLI and future interfaces** present data and consume runtime snapshots
   without owning task state. Moving the current CLI to that role must preserve
-  its existing syntax and defaults.
+  its existing syntax and defaults. Provider integrations may keep bounded
+  route and request-reconciliation metadata keyed by a task ID; that metadata
+  does not replace Core's authoritative task lifecycle, action history, or
+  observations.
 
 ## Read-only observability
 

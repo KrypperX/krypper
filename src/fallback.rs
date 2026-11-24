@@ -202,7 +202,8 @@ impl FallbackFailure {
 }
 
 /// Aggregate provider usage already consumed by the task.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct FallbackUsage {
     /// All provider requests, including the failed current request.
     pub total_provider_requests: u8,
