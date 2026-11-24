@@ -4,6 +4,217 @@ use super::{
 };
 
 #[test]
+fn decision_source_registry_rejects_duplicate_adapter_ids() {
+    use super::{
+        AdapterId, ProviderDecisionSource, ProviderDecisionSourceRegistry, ProviderSourceConfig,
+    };
+
+    fn unused_factory(
+        _config: ProviderSourceConfig,
+    ) -> Result<Box<dyn ProviderDecisionSource>, &'static str> {
+        Err("duplicate factory must not be called")
+    }
+
+    let mut registry = ProviderDecisionSourceRegistry::new();
+    registry
+        .register(AdapterId::new("fake"), unused_factory)
+        .expect("first registration succeeds");
+
+    assert_eq!(
+        registry.register(AdapterId::new("fake"), unused_factory),
+        Err(super::ProviderDecisionSourceRegistryError::DuplicateAdapter(AdapterId::new("fake")))
+    );
+}
+
+#[test]
+fn decision_source_registry_rejects_missing_adapter_ids() {
+    use super::{AdapterId, ProviderDecisionSourceRegistry, ProviderSourceConfig};
+
+    let registry = ProviderDecisionSourceRegistry::new();
+    let error = match registry.create_with_adapter(
+        AdapterId::new("missing"),
+        ProviderSourceConfig::new(
+            super::ModelProvider::Ollama,
+            "fake-model".to_owned(),
+            1,
+            "127.0.0.1:11434".parse().expect("socket address"),
+            super::ProviderSourceCredentials::None,
+        ),
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("missing adapter is rejected"),
+    };
+
+    assert_eq!(
+        error,
+        super::ProviderDecisionSourceRegistryError::MissingAdapter(AdapterId::new("missing"))
+    );
+}
+
+#[test]
+fn decision_source_registry_builds_and_forwards_a_fake_adapter() {
+    use super::{
+        AdapterId, ModelDecisionSource, ProviderDecisionSource, ProviderDecisionSourceRegistry,
+        ProviderSourceConfig,
+    };
+    use crate::agent_loop::{BoundedDecisionSource, WorkspaceAction, WorkspaceObservation};
+
+    struct FakeDecisionSource;
+
+    impl BoundedDecisionSource for FakeDecisionSource {
+        fn choose_action(
+            &mut self,
+            _goal: &str,
+            _observations: &[WorkspaceObservation],
+        ) -> WorkspaceAction {
+            WorkspaceAction::Cancel
+        }
+    }
+
+    impl ProviderDecisionSource for FakeDecisionSource {
+        fn supports_token_usage(&self) -> bool {
+            true
+        }
+
+        fn take_token_usage(&mut self) -> Option<super::ModelTokenUsage> {
+            Some(super::ModelTokenUsage {
+                prompt_tokens: Some(3),
+                completion_tokens: Some(2),
+                total_tokens: Some(5),
+            })
+        }
+    }
+
+    fn fake_source_factory(
+        _config: ProviderSourceConfig,
+    ) -> Result<Box<dyn ProviderDecisionSource>, &'static str> {
+        Ok(Box::new(FakeDecisionSource))
+    }
+
+    let adapter_id = AdapterId::new("fake");
+    let mut registry = ProviderDecisionSourceRegistry::new();
+    registry
+        .register(adapter_id, fake_source_factory)
+        .expect("fake adapter registration succeeds");
+    let mut source: ModelDecisionSource = registry
+        .create_with_adapter(
+            adapter_id,
+            ProviderSourceConfig::new(
+                super::ModelProvider::Ollama,
+                "fake-model".to_owned(),
+                1,
+                "127.0.0.1:11434".parse().expect("socket address"),
+                super::ProviderSourceCredentials::None,
+            ),
+        )
+        .expect("fake adapter is built");
+
+    assert_eq!(source.adapter_id(), adapter_id);
+    assert_eq!(
+        source.choose_action("ignored", &[]),
+        WorkspaceAction::Cancel
+    );
+    assert!(source.supports_token_usage());
+    assert_eq!(
+        source.take_token_usage(),
+        Some(super::ModelTokenUsage {
+            prompt_tokens: Some(3),
+            completion_tokens: Some(2),
+            total_tokens: Some(5),
+        })
+    );
+}
+
+#[test]
+fn decision_source_registry_builds_each_builtin_protocol_adapter() {
+    use super::{
+        AdapterId, ModelDecisionSource, ModelProvider, OpenAiCompatibleCredentials,
+        OpenAiCompatibleProvider, ProviderDecisionSourceRegistry, ProviderSourceConfig,
+        ProviderSourceCredentials,
+    };
+
+    let registry = ProviderDecisionSourceRegistry::with_builtins();
+    let socket = "127.0.0.1:11434".parse().expect("socket address");
+    let cases = [
+        (
+            ModelProvider::Ollama,
+            ProviderSourceCredentials::None,
+            AdapterId::OLLAMA,
+        ),
+        (
+            ModelProvider::Gemini,
+            ProviderSourceCredentials::HostedApiKey("local-test-key".to_owned()),
+            AdapterId::GEMINI,
+        ),
+        (
+            ModelProvider::OpenAi,
+            ProviderSourceCredentials::HostedApiKey("local-test-key".to_owned()),
+            AdapterId::RESPONSES,
+        ),
+        (
+            ModelProvider::Xai,
+            ProviderSourceCredentials::HostedApiKey("local-test-key".to_owned()),
+            AdapterId::RESPONSES,
+        ),
+        (
+            ModelProvider::Anthropic,
+            ProviderSourceCredentials::HostedApiKey("local-test-key".to_owned()),
+            AdapterId::ANTHROPIC,
+        ),
+        (
+            ModelProvider::OpenAiCompatible(OpenAiCompatibleProvider::Groq),
+            ProviderSourceCredentials::OpenAiCompatible(OpenAiCompatibleCredentials::Groq {
+                api_key: "local-test-key".to_owned(),
+            }),
+            AdapterId::OPENAI_COMPATIBLE,
+        ),
+    ];
+
+    for (provider, credentials, expected_adapter) in cases {
+        let source: ModelDecisionSource = registry
+            .create(ProviderSourceConfig::new(
+                provider,
+                "test-model".to_owned(),
+                2,
+                socket,
+                credentials,
+            ))
+            .expect("built-in factory creates its source");
+        assert_eq!(source.adapter_id(), expected_adapter);
+    }
+}
+
+#[test]
+fn decision_source_registry_rejects_credentials_for_a_different_provider() {
+    use super::{
+        ModelProvider, OpenAiCompatibleCredentials, OpenAiCompatibleProvider,
+        ProviderDecisionSourceRegistry, ProviderDecisionSourceRegistryError, ProviderSourceConfig,
+        ProviderSourceCredentials,
+    };
+
+    let registry = ProviderDecisionSourceRegistry::with_builtins();
+    let error = match registry.create(ProviderSourceConfig::new(
+        ModelProvider::OpenAiCompatible(OpenAiCompatibleProvider::Groq),
+        "test-model".to_owned(),
+        1,
+        "127.0.0.1:11434".parse().expect("socket address"),
+        ProviderSourceCredentials::OpenAiCompatible(OpenAiCompatibleCredentials::OpenRouter {
+            api_key: "local-test-key".to_owned(),
+        }),
+    )) {
+        Err(error) => error,
+        Ok(_) => panic!("credentials cannot select a different compatible provider"),
+    };
+
+    assert_eq!(
+        error,
+        ProviderDecisionSourceRegistryError::BuildFailed(
+            "compatible provider credentials do not match the selected provider"
+        )
+    );
+}
+
+#[test]
 fn cloudflare_ai_gateway_credentials_add_the_gateway_header() {
     let credentials = OpenAiCompatibleCredentials::CloudflareAiGateway {
         account_id: CloudflareAccountId::try_from("account-123").expect("valid account ID"),
@@ -340,7 +551,8 @@ fn xai_responses_stream_rejects_truncated_tool_call() {
 
 #[test]
 fn provider_capability_registry_covers_every_cli_provider() {
-    use super::{DecisionProtocol, ModelProvider};
+    use super::{DecisionProtocol, ModelProvider, ProviderDecisionSourceRegistry};
+    let source_registry = ProviderDecisionSourceRegistry::with_builtins();
     for name in [
         "ollama",
         "gemini",
@@ -357,6 +569,10 @@ fn provider_capability_registry_covers_every_cli_provider() {
     ] {
         let provider = ModelProvider::parse(name).expect("registered provider");
         let capabilities = provider.capabilities();
+        assert!(
+            source_registry.contains(capabilities.protocol.adapter_id()),
+            "{name} has a source factory"
+        );
         assert_eq!(
             capabilities.native_sse_decisions,
             matches!(

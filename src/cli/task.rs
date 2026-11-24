@@ -670,7 +670,10 @@ where
     loop {
         let mut displayed_observations = 0;
         let (result, stop_reason, reconcile_after_run, iteration_actions) = if verified {
-            let Some(ModelDecisionSource::Ollama(source)) = model_source.as_mut() else {
+            let Some(source) = model_source
+                .as_mut()
+                .and_then(ModelDecisionSource::ollama_source_mut)
+            else {
                 return Err(io::Error::other(
                     "verified mode requires a local Ollama model",
                 ));

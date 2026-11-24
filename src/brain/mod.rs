@@ -48,7 +48,9 @@ pub use providers::{
     ResponsesDecisionSource, ResponsesProvider,
 };
 pub(crate) use providers::{
-    CloudflareAccountId, CloudflareGatewayId, ModelDecisionSource, OpenAiCompatibleCredentials,
+    AdapterId, CloudflareAccountId, CloudflareGatewayId, ModelDecisionSource,
+    OpenAiCompatibleCredentials, ProviderDecisionSourceRegistry, ProviderSourceConfig,
+    ProviderSourceCredentials,
 };
 #[cfg(test)]
 pub(crate) use request::{build_anthropic_request, build_gemini_request, build_responses_request};

@@ -159,6 +159,18 @@ pub(crate) struct OpenAiCompatibleParts {
 }
 
 impl OpenAiCompatibleCredentials {
+    pub(super) fn provider(&self) -> OpenAiCompatibleProvider {
+        match self {
+            Self::Cloudflare { .. } => OpenAiCompatibleProvider::Cloudflare,
+            Self::CloudflareAiGateway { .. } => OpenAiCompatibleProvider::CloudflareAiGateway,
+            Self::Groq { .. } => OpenAiCompatibleProvider::Groq,
+            Self::OpenRouter { .. } => OpenAiCompatibleProvider::OpenRouter,
+            Self::DeepSeek { .. } => OpenAiCompatibleProvider::DeepSeek,
+            Self::Zai { .. } => OpenAiCompatibleProvider::Zai,
+            Self::Mistral { .. } => OpenAiCompatibleProvider::Mistral,
+        }
+    }
+
     pub(super) fn into_parts(self) -> Result<OpenAiCompatibleParts, &'static str> {
         match self {
             Self::Cloudflare {
