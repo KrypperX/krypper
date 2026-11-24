@@ -531,12 +531,18 @@ manually.
 
 `krypper models` remains offline and uses the embedded snapshot or the user's
 last refreshed cache. `krypper models --refresh` explicitly contacts the
-configured public catalog feeds and atomically saves a verified cache;
-`--provenance` shows origin, age, source license, and retrieval metadata.
-`--json --provenance` emits `{ "catalog": ..., "models": [...] }`, with
-optional per-model source IDs, prices, and declared features. Plain `--json`
-retains its existing model-array format. Missing catalog prices remain unknown;
-catalog rates support estimates and do not represent provider invoices. See the
+configured public catalog feeds and atomically saves a verified cache.
+Use `--refresh` to update optional reference prices and feature metadata when
+the sources report them; the ordinary command makes no network requests.
+Human-readable `krypper models` output groups rows into provider tables with
+model names and IDs, context/output limits, declared tool/reasoning support,
+modalities, reference prices, available features, and status. Unknown values
+stay marked as unknown. `--provenance` also shows catalog origin, age, source
+license, and retrieval metadata. `--json --provenance` emits
+`{ "catalog": ..., "models": [...] }`, with optional per-model source IDs,
+prices, and declared features. Plain `--json` retains its existing model-array
+format. Missing catalog prices remain unknown; catalog rates support estimates
+and do not represent provider invoices. See the
 [provider routing migration guide](provider-routing-migration.md) for the
 backward-compatible config changes.
 
