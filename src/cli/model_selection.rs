@@ -273,12 +273,10 @@ fn configured_value_from_sources(
     saved_value: Option<&str>,
     missing_message: &'static str,
 ) -> Result<String, &'static str> {
-    match environment_value {
-        Ok(value) => Ok(value),
-        Err(std::env::VarError::NotPresent) => {
-            saved_value.map(str::to_owned).ok_or(missing_message)
-        }
-        Err(std::env::VarError::NotUnicode(_)) => Err(missing_message),
+    match super::settings::effective_credential_value(environment_value, saved_value) {
+        super::settings::EffectiveCredentialValue::Configured(value) => Ok(value),
+        super::settings::EffectiveCredentialValue::Missing
+        | super::settings::EffectiveCredentialValue::InvalidEnvironment => Err(missing_message),
     }
 }
 

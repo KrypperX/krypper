@@ -16,6 +16,7 @@ use std::net::SocketAddr;
 use ureq::Agent;
 
 mod anthropic;
+pub(crate) mod capability_evidence;
 mod compatible;
 mod gemini;
 mod provider_catalog;
@@ -29,6 +30,7 @@ pub(crate) use provider_catalog::{
 };
 
 pub use anthropic::AnthropicDecisionSource;
+pub(crate) use anthropic::AnthropicWorkspaceId;
 #[cfg(test)]
 pub(crate) use compatible::parse_compatible_chat_response;
 #[cfg(test)]
@@ -153,6 +155,10 @@ impl AdapterId {
 
     pub(crate) const fn new(value: &'static str) -> Self {
         Self(value)
+    }
+
+    pub(crate) const fn as_str(self) -> &'static str {
+        self.0
     }
 }
 
@@ -344,7 +350,6 @@ impl ProviderDecisionSourceRegistry {
         Ok(())
     }
 
-    #[cfg(test)]
     pub(crate) fn contains(&self, id: AdapterId) -> bool {
         self.factories.contains_key(&id)
     }

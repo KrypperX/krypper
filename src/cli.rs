@@ -6,12 +6,14 @@ mod checkpoint_files;
 mod config;
 mod context;
 mod help;
+mod model_evidence;
 mod model_selection;
 mod models;
 mod outcome;
 mod provider_profiles;
 mod settings;
 mod setup;
+mod setup_probe;
 mod task;
 mod task_args;
 use self::help::{

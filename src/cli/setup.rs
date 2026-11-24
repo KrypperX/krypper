@@ -7,12 +7,15 @@ use super::settings::{
     load_credentials, remove_settings, save_credentials, save_model_defaults, user_settings_paths,
     valid_credential, CredentialStore, UserSettingsPaths,
 };
+use super::setup_probe::test_connection;
 use crate::brain::{
     provider_descriptor_by_selector, provider_descriptors, validate_model_name_for_provider,
-    AuthFieldRole, CloudflareAccountId, CloudflareGatewayId, ProviderDescriptor,
+    AnthropicWorkspaceId, AuthFieldRole, CloudflareAccountId, CloudflareGatewayId,
+    ProviderDescriptor,
 };
 use std::ffi::OsString;
 use std::io::{self, IsTerminal, Read, Write};
+#[cfg(test)]
 use std::path::PathBuf;
 
 pub(super) fn run(
@@ -179,7 +182,7 @@ fn reset_settings(
     if !prompt_yes_no(
         input,
         output,
-        "Remove saved defaults, provider profiles, and stored credentials from this user account? [y/N] ",
+        "Remove saved defaults, provider profiles, stored credentials, and local provider evidence from this user account? [y/N] ",
         false,
     )? {
         writeln!(output, "No settings removed.")?;
@@ -187,7 +190,10 @@ fn reset_settings(
     }
     match remove_settings(paths) {
         Ok(()) => {
-            writeln!(output, "Per-user provider settings removed.")?;
+            writeln!(
+                output,
+                "Per-user provider settings and runtime evidence removed."
+            )?;
             Ok(0)
         }
         Err(message) => usage_error(error, Some("setup"), &message),
@@ -287,7 +293,7 @@ fn configure(
         "Send one short request to test this provider? It sends a prompt to the selected service and may incur charges. [y/N] "
     };
     if prompt_yes_no(input, output, test_prompt, false)? {
-        test_connection(provider, &model, output)?;
+        test_connection(provider, &model, paths, &credentials, output)?;
     }
     Ok(0)
 }
@@ -514,11 +520,7 @@ fn collect_credentials(
                     credentials.remove(field.name);
                 } else {
                     let workspace_id = workspace_id.trim();
-                    if workspace_id.len() > 128
-                        || !workspace_id
-                            .bytes()
-                            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
-                    {
+                    if AnthropicWorkspaceId::try_from(workspace_id).is_err() {
                         return Err("invalid Anthropic Workspace ID".to_owned());
                     }
                     credentials.insert(field.name, workspace_id.to_owned());
@@ -620,64 +622,6 @@ fn escape_terminal_text(value: &str) -> String {
     escaped
 }
 
-fn test_connection(
-    provider: ProviderDescriptor,
-    model: &str,
-    output: &mut dyn Write,
-) -> io::Result<()> {
-    let workspace = TempWorkspace::new()?;
-    let arguments = [
-        OsString::from("--goal"),
-        OsString::from("Reply with a short confirmation and finish immediately."),
-        OsString::from("--max-actions"),
-        OsString::from("1"),
-        OsString::from("--provider"),
-        OsString::from(provider.selector),
-        OsString::from("--model"),
-        OsString::from(model),
-        OsString::from("--workspace"),
-        workspace.0.as_os_str().to_owned(),
-    ];
-    let mut input = io::empty();
-    let mut test_output = io::sink();
-    let mut test_error = io::sink();
-    match super::task::run_task(&arguments, &mut input, &mut test_output, &mut test_error) {
-        Ok(0) => writeln!(output, "The provider test request completed."),
-        _ => writeln!(
-            output,
-            "The provider test did not complete. Settings remain saved; no credential value was displayed."
-        ),
-    }
-}
-
-struct TempWorkspace(PathBuf);
-
-impl TempWorkspace {
-    fn new() -> io::Result<Self> {
-        for attempt in 0..16_u8 {
-            let path = std::env::temp_dir().join(format!(
-                "krypper-setup-test-{}-{attempt}",
-                std::process::id()
-            ));
-            match std::fs::create_dir(&path) {
-                Ok(()) => return Ok(Self(path)),
-                Err(cause) if cause.kind() == io::ErrorKind::AlreadyExists => continue,
-                Err(cause) => return Err(cause),
-            }
-        }
-        Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            "could not create a temporary provider test workspace",
-        ))
-    }
-}
-
-impl Drop for TempWorkspace {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -732,6 +676,8 @@ mod tests {
             model: PathBuf::from("/user/config/krypper/config.toml"),
             credentials: PathBuf::from("/user/config/krypper/credentials.json"),
             provider_profiles: PathBuf::from("/user/config/krypper/provider-profiles.json"),
+            model_evidence: PathBuf::from("/user/config/krypper/model-evidence.json"),
+            model_evidence_key: PathBuf::from("/user/config/krypper/model-evidence.key"),
         };
         let defaults = ModelDefaults {
             model: "test-model".to_owned(),
@@ -762,6 +708,8 @@ mod tests {
             model: PathBuf::from("/user/config/krypper/config.toml"),
             credentials: PathBuf::from("/user/config/krypper/credentials.json"),
             provider_profiles: PathBuf::from("/user/config/krypper/provider-profiles.json"),
+            model_evidence: PathBuf::from("/user/config/krypper/model-evidence.json"),
+            model_evidence_key: PathBuf::from("/user/config/krypper/model-evidence.key"),
         };
         let provider = provider_descriptors()
             .iter()

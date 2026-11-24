@@ -10,11 +10,34 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 const CREDENTIALS_FILE: &str = "credentials.json";
 const PROVIDER_PROFILES_FILE: &str = "provider-profiles.json";
+const MODEL_EVIDENCE_FILE: &str = "model-evidence.json";
+const MODEL_EVIDENCE_KEY_FILE: &str = "model-evidence.key";
 const MAX_CREDENTIAL_BYTES: u64 = 64 * 1024;
 static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 
 pub(super) struct CredentialStore {
     values: BTreeMap<String, String>,
+}
+
+/// Credential resolution without a `Debug` implementation so values stay redacted.
+pub(super) enum EffectiveCredentialValue {
+    Configured(String),
+    Missing,
+    InvalidEnvironment,
+}
+
+pub(super) fn effective_credential_value(
+    environment_value: Result<String, std::env::VarError>,
+    saved_value: Option<&str>,
+) -> EffectiveCredentialValue {
+    match environment_value {
+        Ok(value) => EffectiveCredentialValue::Configured(value),
+        Err(std::env::VarError::NotPresent) => saved_value.map(str::to_owned).map_or(
+            EffectiveCredentialValue::Missing,
+            EffectiveCredentialValue::Configured,
+        ),
+        Err(std::env::VarError::NotUnicode(_)) => EffectiveCredentialValue::InvalidEnvironment,
+    }
 }
 
 impl CredentialStore {
@@ -49,6 +72,8 @@ pub(super) struct UserSettingsPaths {
     pub(super) model: PathBuf,
     pub(super) credentials: PathBuf,
     pub(super) provider_profiles: PathBuf,
+    pub(super) model_evidence: PathBuf,
+    pub(super) model_evidence_key: PathBuf,
 }
 
 /// Returns the ordinary per-user paths. This deliberately ignores
@@ -62,6 +87,8 @@ pub(super) fn user_settings_paths() -> Result<Option<UserSettingsPaths>, String>
     Ok(Some(UserSettingsPaths {
         credentials: model.with_file_name(CREDENTIALS_FILE),
         provider_profiles: model.with_file_name(PROVIDER_PROFILES_FILE),
+        model_evidence: model.with_file_name(MODEL_EVIDENCE_FILE),
+        model_evidence_key: model.with_file_name(MODEL_EVIDENCE_KEY_FILE),
         model,
     }))
 }
@@ -132,6 +159,8 @@ pub(super) fn save_credentials(path: &Path, credentials: &CredentialStore) -> Re
 pub(super) fn remove_settings(paths: &UserSettingsPaths) -> Result<(), String> {
     remove_file_if_present(&paths.credentials, "credential store")?;
     remove_file_if_present(&paths.provider_profiles, "provider profiles")?;
+    remove_file_if_present(&paths.model_evidence, "provider evidence")?;
+    remove_file_if_present(&paths.model_evidence_key, "provider evidence key")?;
     remove_file_if_present(&paths.model, "model configuration")
 }
 
