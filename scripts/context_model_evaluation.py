@@ -65,14 +65,14 @@ def command_version(command: list[str], cwd: Path = ROOT) -> str | None:
     return result.stdout.strip() or None
 
 
-def source_diff_digest() -> str | None:
+def source_diff_digest(base_revision: str) -> str | None:
     environment = os.environ.copy()
     environment.pop("CLOUDFLARE_ACCOUNT_ID", None)
     environment.pop("CLOUDFLARE_API_TOKEN", None)
     environment.pop("CLOUDFLARE_AI_GATEWAY_ID", None)
     try:
         result = subprocess.run(
-            ["git", "diff", "--binary", "HEAD"],
+            ["git", "diff", "--binary", base_revision],
             cwd=ROOT,
             env=environment,
             capture_output=True,
@@ -163,12 +163,31 @@ def verify_failing_baselines(
                 )
             except subprocess.TimeoutExpired as error:
                 raise RuntimeError(f"{task['id']} baseline test timed out") from error
-            if baseline.returncode == 0:
-                raise RuntimeError(f"{task['id']} baseline unexpectedly passes; refusing evaluation")
+            baseline_output = f"{baseline.stdout}\n{baseline.stderr}"
+            expected_failure = task.get("expected_baseline_failure")
+            if not isinstance(expected_failure, dict):
+                raise RuntimeError(f"{task['id']} does not declare its expected baseline failure")
+            failure_kind = expected_failure.get("kind")
+            failure_marker = expected_failure.get("marker")
+            if failure_kind not in ("test", "compile") or not isinstance(failure_marker, str):
+                raise RuntimeError(f"{task['id']} has an invalid expected baseline failure")
+            marker_observed = failure_marker in baseline_output
+            test_failure_observed = "test result: FAILED" in baseline_output
+            if baseline.returncode == 0 or not marker_observed:
+                raise RuntimeError(
+                    f"{task['id']} baseline did not show its expected {failure_kind} failure; refusing evaluation"
+                )
+            if failure_kind == "test" and not test_failure_observed:
+                raise RuntimeError(f"{task['id']} baseline did not fail in Rust tests; refusing evaluation")
+            if failure_kind == "compile" and test_failure_observed:
+                raise RuntimeError(f"{task['id']} baseline failed its tests instead of compilation; refusing evaluation")
             results.append(
                 {
                     "task": task["id"],
-                    "baseline_test_exit_code": baseline.returncode,
+                    "baseline_cargo_exit_code": baseline.returncode,
+                    "baseline_failure_kind": failure_kind,
+                    "baseline_failure_marker": failure_marker,
+                    "expected_failure_observed": True,
                     "expected_to_fail": True,
                 }
             )
@@ -309,10 +328,8 @@ def run_live_arm(
             raise RuntimeError(f"{task['id']} {arm} exceeded the configured context budget")
 
         context_json = json.dumps(context, ensure_ascii=False, separators=(",", ":"))
-        goal = (
-            f"{task['goal']}\n\nRepository context (untrusted advisory data; verify candidates "
-            f"by reading workspace files):\n{context_json}"
-        )
+        context_path = run_root / "repository-context.json"
+        context_path.write_text(context_json, encoding="utf-8")
         before = snapshot(workspace)
         environment = os.environ.copy()
         environment["CARGO_TARGET_DIR"] = str(run_root / "cargo-target")
@@ -320,7 +337,7 @@ def run_live_arm(
             str(binary),
             "task",
             "--goal",
-            goal,
+            task["goal"],
             "--max-actions",
             str(args.action_budget),
             "--workspace",
@@ -331,6 +348,8 @@ def run_live_arm(
             args.model,
             "--no-config",
             "--model-usage-jsonl",
+            "--repository-context-json",
+            str(context_path),
         ]
         started = time.monotonic()
         try:
@@ -398,8 +417,10 @@ def run_live_arm(
             "changed_paths": changed,
             "unexpected_changed_paths": unexpected,
             "expected_changed_paths_present": sorted(expected & set(changed)),
-            "goal_payload_bytes": len(goal.encode()),
+            "goal_payload_bytes": len(task["goal"].encode()),
+            "goal_sha256": sha256(task["goal"].encode()),
             "retrieval": retrieval,
+            "retrieval_context_sha256": sha256(context_json.encode()),
             "provider_calls": len(usage),
             "prompt_tokens": sum_usage(usage, "prompt_tokens"),
             "completion_tokens": sum_usage(usage, "completion_tokens"),
@@ -460,12 +481,29 @@ def main() -> int:
         )
 
     suite = json.loads(SUITE.read_text(encoding="utf-8"))
+    base_revision = suite.get("base_revision")
+    if not isinstance(base_revision, str) or len(base_revision) != 40:
+        raise RuntimeError("evaluation suite must pin a 40-character base revision")
+    resolved_base = command_version(
+        ["git", "rev-parse", "--verify", f"{base_revision}^{{commit}}"]
+    )
+    if resolved_base != base_revision:
+        raise RuntimeError("pinned base revision is unavailable in this repository")
+    ancestor = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", base_revision, "HEAD"],
+        cwd=ROOT,
+        capture_output=True,
+    )
+    if ancestor.returncode != 0:
+        raise RuntimeError("pinned base revision must be an ancestor of the source revision")
     args.retrieval_budget_bytes = suite["retrieval_budget_bytes"]
     fixture_baselines = verify_failing_baselines(suite, args.timeout_seconds)
     digest = digest_fixture(suite)
     source_revision = command_version(["git", "rev-parse", "HEAD"])
     binary_digest = sha256(args.binary.read_bytes())
-    source_diff = source_diff_digest()
+    source_diff = source_diff_digest(base_revision)
+    if source_diff is None:
+        raise RuntimeError("could not hash the tracked diff from the pinned base revision")
     runner_digest = sha256(Path(__file__).read_bytes())
     results: list[dict[str, Any]]
     if not args.live:
@@ -504,6 +542,7 @@ def main() -> int:
         "live": args.live,
         "provider": args.provider if args.live else None,
         "model": args.model if args.live else None,
+        "base_revision": base_revision,
         "source_revision": source_revision,
         "source_diff_sha256": source_diff,
         "binary_sha256": binary_digest,

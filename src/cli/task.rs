@@ -19,20 +19,83 @@ use crate::agent_loop::{
 };
 use crate::brain::ModelDecisionSource;
 use crate::brain::{ModelProvider, OLLAMA_ADDRESS};
+use crate::harness::context::{MAX_REPOSITORY_CONTEXT_BYTES, MAX_REPOSITORY_CONTEXT_JSON_BYTES};
 use crate::harness::execution::workspace_action_name;
 use crate::harness::recovery::{
     prepare_checkpoint_for_pause, prepare_resumed_session, ResumeError,
 };
 use crate::harness::verification::{reconcile_task_state, MAX_COMPLETION_CHECKS};
 use crate::task_lifecycle::{TaskSession, TaskState, TurnState};
+use serde_json::Value;
 use std::ffi::OsString;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 // Leave room for the action command and path beside a maximum-size file body.
 const MAX_TASK_ACTION_LINE_BYTES: usize = MAX_FILE_SIZE + 4096;
+
+fn read_repository_context_json(path: &Path) -> Result<Value, String> {
+    let file = std::fs::File::open(path).map_err(|cause| {
+        format!(
+            "cannot read repository context file '{}': {cause}",
+            path.display()
+        )
+    })?;
+    let mut bytes = Vec::new();
+    file.take((MAX_REPOSITORY_CONTEXT_JSON_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|cause| {
+            format!(
+                "cannot read repository context file '{}': {cause}",
+                path.display()
+            )
+        })?;
+    if bytes.len() > MAX_REPOSITORY_CONTEXT_JSON_BYTES {
+        return Err(format!(
+            "repository context JSON must not exceed {MAX_REPOSITORY_CONTEXT_JSON_BYTES} bytes"
+        ));
+    }
+
+    let context: Value = serde_json::from_slice(&bytes)
+        .map_err(|_| "repository context file must contain valid JSON".to_owned())?;
+    if !context.is_object() {
+        return Err("repository context JSON must be an object".to_owned());
+    }
+    let context_entries = match (
+        context.get("snippets").filter(|value| value.is_array()),
+        context.get("modules").filter(|value| value.is_array()),
+    ) {
+        (Some(entries), None) | (None, Some(entries)) => entries,
+        _ => {
+            return Err(
+                "repository context JSON must contain exactly one snippets or modules array"
+                    .to_owned(),
+            )
+        }
+    };
+    let Some(context_bytes) = context.get("bytes").and_then(Value::as_u64) else {
+        return Err("repository context JSON must include a byte count".to_owned());
+    };
+    if context_bytes > MAX_REPOSITORY_CONTEXT_BYTES as u64 {
+        return Err(format!(
+            "repository context byte count must not exceed {MAX_REPOSITORY_CONTEXT_BYTES}"
+        ));
+    }
+    let measured_bytes = serde_json::to_vec(context_entries)
+        .map_err(|_| "repository context entries could not be encoded".to_owned())?
+        .len();
+    if measured_bytes > MAX_REPOSITORY_CONTEXT_BYTES {
+        return Err(format!(
+            "repository context entries must not exceed {MAX_REPOSITORY_CONTEXT_BYTES} bytes"
+        ));
+    }
+    if context_bytes != measured_bytes as u64 {
+        return Err("repository context byte count does not match its entries".to_owned());
+    }
+    Ok(context)
+}
 
 pub(super) fn run_task(
     arguments: &[OsString],
@@ -103,6 +166,7 @@ where
     let mut activity_jsonl = false;
     let mut stream_events_jsonl = false;
     let mut model_usage_jsonl = false;
+    let mut repository_context_json = None;
     let mut verified = false;
     let mut verify_files = Vec::new();
     let mut position = 0;
@@ -285,6 +349,31 @@ where
                 }
                 model_usage_jsonl = true;
             }
+            "--repository-context-json" => {
+                if repository_context_json.is_some() {
+                    return usage_error(
+                        error,
+                        Some("task"),
+                        "--repository-context-json may be provided only once",
+                    );
+                }
+                let Some(value) = arguments.get(position) else {
+                    return usage_error(
+                        error,
+                        Some("task"),
+                        "the following argument is required: --repository-context-json",
+                    );
+                };
+                let Some(value) = value.to_str() else {
+                    return usage_error(
+                        error,
+                        Some("task"),
+                        "repository context path must be valid UTF-8",
+                    );
+                };
+                repository_context_json = Some(PathBuf::from(value));
+                position += 1;
+            }
             "--verified" => {
                 if verified {
                     return usage_error(
@@ -365,6 +454,13 @@ where
             "--goal cannot be used with --resume; the checkpoint stores the task description",
         );
     }
+    if repository_context_json.is_some() && (resume.is_some() || checkpoint_out.is_some()) {
+        return usage_error(
+            error,
+            Some("task"),
+            "--repository-context-json cannot be combined with --resume or --checkpoint-out",
+        );
+    }
     if resume.is_none() {
         let Some(goal) = goal.as_deref() else {
             return usage_error(
@@ -432,6 +528,22 @@ where
         Ok(source) => source,
         Err(message) => return usage_error(error, Some("task"), message),
     };
+    if let Some(path) = repository_context_json.as_deref() {
+        let context = match read_repository_context_json(path) {
+            Ok(context) => context,
+            Err(message) => return usage_error(error, Some("task"), &message),
+        };
+        let Some(source) = model_source.as_mut() else {
+            return usage_error(
+                error,
+                Some("task"),
+                "--repository-context-json requires an OpenAI-compatible model provider",
+            );
+        };
+        if let Err(message) = source.set_repository_context(context) {
+            return usage_error(error, Some("task"), message);
+        }
+    }
     if model_usage_jsonl {
         match model_source.as_ref() {
             None => {

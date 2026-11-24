@@ -23,6 +23,8 @@ pub enum ModelError {
     InvalidEndpoint,
     /// Prior observations exceeded the allowed context size.
     ObservationsTooLarge,
+    /// Retrieved repository context exceeded its bounded prompt size.
+    RepositoryContextTooLarge,
     /// The local model service is unavailable.
     ServiceUnavailable,
     /// The local model request failed in transit.
@@ -79,7 +81,9 @@ impl ModelError {
             Self::RequestEncoding => DecisionFailureCode::RequestEncodingFailed,
             Self::RequestTooLarge => DecisionFailureCode::RequestTooLarge,
             Self::InvalidEndpoint => DecisionFailureCode::InvalidEndpoint,
-            Self::ObservationsTooLarge => DecisionFailureCode::ContextTooLarge,
+            Self::ObservationsTooLarge | Self::RepositoryContextTooLarge => {
+                DecisionFailureCode::ContextTooLarge
+            }
             Self::ServiceUnavailable | Self::Transport(_) | Self::ProviderTransport(_) => {
                 DecisionFailureCode::ProviderUnavailable
             }
@@ -110,6 +114,7 @@ impl From<ContextError> for ModelError {
         match error {
             ContextError::RequestEncoding => Self::RequestEncoding,
             ContextError::ObservationsTooLarge => Self::ObservationsTooLarge,
+            ContextError::RepositoryContextTooLarge => Self::RepositoryContextTooLarge,
         }
     }
 }
@@ -127,6 +132,9 @@ impl fmt::Display for ModelError {
             Self::ObservationsTooLarge => {
                 formatter.write_str("task observations exceeded the 2 MiB model context limit")
             }
+            Self::RepositoryContextTooLarge => formatter.write_str(
+                "retrieved repository context exceeded the 8 KiB model context limit",
+            ),
             Self::ServiceUnavailable => write!(
                 formatter,
                 "local Ollama service at {OLLAMA_ADDRESS} is unavailable"

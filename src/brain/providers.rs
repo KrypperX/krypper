@@ -1,6 +1,4 @@
 use super::limits::MAX_STREAMED_TOOL_ARGUMENT_BYTES;
-use crate::harness::context::build_task_prompt_with_project_guidance;
-
 use super::{
     action_from_error, action_from_provider_call, build_anthropic_request_with_extensions,
     build_gemini_request_with_extensions, build_responses_request_with_extensions,
@@ -27,6 +25,10 @@ pub(crate) use compatible::{build_compatible_chat_request, OpenAiCompatibleParts
 pub use compatible::{
     build_compatible_chat_request_with_extensions, ModelTokenUsage, OpenAiCompatibleDecisionSource,
     OpenAiCompatibleProvider,
+};
+#[cfg(test)]
+pub(crate) use compatible::{
+    build_compatible_chat_request_with_retrieval_context, CompatibleRequestContext,
 };
 pub(crate) use compatible::{
     CloudflareAccountId, CloudflareGatewayId, OpenAiCompatibleCredentials,
@@ -171,6 +173,16 @@ pub(crate) enum ModelDecisionSource {
 }
 
 impl ModelDecisionSource {
+    pub(crate) fn set_repository_context(&mut self, context: Value) -> Result<(), &'static str> {
+        match self {
+            Self::OpenAiCompatible(source) => {
+                source.set_repository_context(context);
+                Ok(())
+            }
+            _ => Err("--repository-context-json is supported by OpenAI-compatible providers"),
+        }
+    }
+
     pub(crate) fn supports_token_usage(&self) -> bool {
         matches!(self, Self::OpenAiCompatible(_))
     }

@@ -61,13 +61,29 @@ _krypper_set_cloudflare_env() {
   unset account_id api_token gateway_id entered_account_id entered_api_token entered_gateway_id
 }
 
+_krypper_cloudflare_xtrace_enabled=0
+case $- in
+  *x*)
+    _krypper_cloudflare_xtrace_enabled=1
+    set +x
+    ;;
+esac
+
+_krypper_cloudflare_status=0
 if _krypper_set_cloudflare_env; then
   printf 'Cloudflare credentials and AI Gateway selection are exported in this shell.\n'
   printf 'Use --provider cloudflare for Workers AI or --provider cloudflare-ai-gateway for Gateway routing.\n'
   printf 'Unset CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, and CLOUDFLARE_AI_GATEWAY_ID when finished.\n'
-  unset -f _krypper_set_cloudflare_env
 else
-  _krypper_status=$?
-  unset -f _krypper_set_cloudflare_env
-  return "$_krypper_status"
+  _krypper_cloudflare_status=$?
 fi
+unset -f _krypper_set_cloudflare_env
+if (( _krypper_cloudflare_xtrace_enabled )); then
+  set -x
+fi
+unset _krypper_cloudflare_xtrace_enabled
+if (( _krypper_cloudflare_status != 0 )); then
+  unset _krypper_cloudflare_status
+  return 1
+fi
+unset _krypper_cloudflare_status
