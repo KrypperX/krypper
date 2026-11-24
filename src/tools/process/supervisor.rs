@@ -14,7 +14,7 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard, TryLockError};
 use std::thread;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
@@ -152,13 +152,28 @@ struct HostLease {
     _lock: File,
     receipt: PathBuf,
 }
+
+#[derive(Debug)]
+enum HostLeaseError {
+    Unavailable(io::Error),
+    CleanupUnconfirmed(io::Error),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PreviousUnitState {
+    NotLoaded,
+    Stopped,
+}
+
 impl HostLease {
-    fn acquire() -> io::Result<Self> {
+    fn acquire() -> Result<Self, HostLeaseError> {
         let uid = super::effective_uid();
         let directory = PathBuf::from(format!("/run/user/{uid}"));
-        let metadata = fs::symlink_metadata(&directory)?;
+        let metadata = fs::symlink_metadata(&directory).map_err(HostLeaseError::Unavailable)?;
         if !metadata.is_dir() || metadata.uid() != uid || metadata.mode() & 0o022 != 0 {
-            return Err(io::Error::other("untrusted runtime directory"));
+            return Err(HostLeaseError::Unavailable(io::Error::other(
+                "untrusted runtime directory",
+            )));
         }
         let file = OpenOptions::new()
             .read(true)
@@ -167,87 +182,119 @@ impl HostLease {
             .truncate(false)
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(directory.join("krypper-offline-cargo.lock"))?;
-        let metadata = file.metadata()?;
+            .open(directory.join("krypper-offline-cargo.lock"))
+            .map_err(HostLeaseError::Unavailable)?;
+        let metadata = file.metadata().map_err(HostLeaseError::Unavailable)?;
         if !metadata.is_file()
             || metadata.uid() != uid
             || metadata.nlink() != 1
             || metadata.len() > 4096
         {
-            return Err(io::Error::other("untrusted execution lease"));
+            return Err(HostLeaseError::Unavailable(io::Error::other(
+                "untrusted execution lease",
+            )));
         }
         // SAFETY: `file` owns a live descriptor for the duration of the call, and `flock`
         // takes only that descriptor and an integer operation.
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return Err(io::Error::other("another offline profile is active"));
+            return Err(HostLeaseError::Unavailable(io::Error::other(
+                "another offline profile is active",
+            )));
         }
         let mut lease = Self {
             _lock: file,
             receipt: directory.join("krypper-offline-cargo.receipt"),
         };
+        lease.recover_previous()?;
+        Ok(lease)
+    }
+
+    fn recover_previous(&mut self) -> Result<(), HostLeaseError> {
+        let uid = super::effective_uid();
         let mut previous = String::new();
-        match OpenOptions::new()
+        let receipt = match OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(&lease.receipt)
+            .open(&self.receipt)
         {
             Ok(mut receipt) => {
-                let metadata = receipt.metadata()?;
+                let metadata = receipt
+                    .metadata()
+                    .map_err(HostLeaseError::CleanupUnconfirmed)?;
                 if !metadata.is_file()
                     || metadata.uid() != uid
                     || metadata.nlink() != 1
                     || metadata.len() > 4096
                 {
-                    return Err(io::Error::other("untrusted cleanup receipt"));
+                    return Err(HostLeaseError::CleanupUnconfirmed(io::Error::other(
+                        "untrusted cleanup receipt",
+                    )));
                 }
-                (&mut receipt).take(4097).read_to_string(&mut previous)?;
-                if previous.is_empty() {
-                    return Err(io::Error::other("incomplete cleanup receipt"));
-                }
+                (&mut receipt)
+                    .take(4097)
+                    .read_to_string(&mut previous)
+                    .map_err(HostLeaseError::CleanupUnconfirmed)?;
+                receipt
             }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(HostLeaseError::CleanupUnconfirmed(error)),
+        };
+        if previous.is_empty() {
+            return Err(HostLeaseError::CleanupUnconfirmed(io::Error::other(
+                "incomplete cleanup receipt",
+            )));
         }
-        if !previous.is_empty() {
-            let mut lines = previous.lines();
-            let unit = lines.next().unwrap_or("");
-            let id = unit
-                .strip_prefix("krypper-test-")
-                .and_then(|s| s.strip_suffix(".service"));
-            if id.and_then(|s| Uuid::parse_str(s).ok()).is_none() {
-                return Err(io::Error::other("unconfirmed execution lease"));
-            }
-            let state = bounded_host(host_command("/usr/bin/systemctl").args([
-                "--user",
-                "show",
-                unit,
-                "--property=ActiveState",
-                "--value",
-            ]))?;
-            if !matches!(state.trim(), "inactive" | "failed") {
-                return Err(io::Error::other("previous process cleanup is unconfirmed"));
-            }
-            if let Some(group) = lines.next() {
-                let group = Path::new(group);
-                if !group.starts_with("/sys/fs/cgroup")
-                    || group.file_name().and_then(|s| s.to_str()) != Some(unit)
-                    || group
-                        .components()
-                        .any(|c| matches!(c, std::path::Component::ParentDir))
-                {
-                    return Err(io::Error::other("untrusted cleanup identity"));
-                }
-                if group.exists()
-                    && !fs::read_to_string(group.join("cgroup.events"))?
-                        .lines()
-                        .any(|l| l == "populated 0")
-                {
-                    return Err(io::Error::other("previous cgroup is not empty"));
-                }
-            }
-            lease.record("")?;
+
+        let mut lines = previous.lines();
+        let unit = lines.next().unwrap_or("");
+        let id = unit
+            .strip_prefix("krypper-test-")
+            .and_then(|s| s.strip_suffix(".service"));
+        if id.and_then(|s| Uuid::parse_str(s).ok()).is_none() {
+            return Err(HostLeaseError::CleanupUnconfirmed(io::Error::other(
+                "unconfirmed execution lease",
+            )));
         }
-        Ok(lease)
+        let group = lines.next();
+        if lines.next().is_some() {
+            return Err(HostLeaseError::CleanupUnconfirmed(io::Error::other(
+                "invalid cleanup receipt",
+            )));
+        }
+
+        let state = bounded_host(host_command("/usr/bin/systemctl").args([
+            "--user",
+            "show",
+            unit,
+            "--property=LoadState,ActiveState",
+        ]))
+        .map_err(HostLeaseError::CleanupUnconfirmed)?;
+        parse_previous_unit_state(&state).map_err(HostLeaseError::CleanupUnconfirmed)?;
+        if let Some(group) = group {
+            let group = Path::new(group);
+            if !group.starts_with("/sys/fs/cgroup")
+                || group.file_name().and_then(|s| s.to_str()) != Some(unit)
+                || group
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                return Err(HostLeaseError::CleanupUnconfirmed(io::Error::other(
+                    "untrusted cleanup identity",
+                )));
+            }
+            if group.exists()
+                && !fs::read_to_string(group.join("cgroup.events"))
+                    .map_err(HostLeaseError::CleanupUnconfirmed)?
+                    .lines()
+                    .any(|l| l == "populated 0")
+            {
+                return Err(HostLeaseError::CleanupUnconfirmed(io::Error::other(
+                    "previous cgroup is not empty",
+                )));
+            }
+        }
+        drop(receipt);
+        self.record("").map_err(HostLeaseError::CleanupUnconfirmed)
     }
     fn record(&mut self, text: &str) -> io::Result<()> {
         let directory = self.receipt.parent().unwrap();
@@ -277,6 +324,48 @@ impl HostLease {
         }
         File::open(directory)?.sync_all()
     }
+}
+
+fn parse_previous_unit_state(output: &str) -> io::Result<PreviousUnitState> {
+    let mut load_state = None;
+    let mut active_state = None;
+    for line in output.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            return Err(io::Error::other("invalid previous systemd unit state"));
+        };
+        match key {
+            "LoadState" if load_state.replace(value).is_none() => {}
+            "ActiveState" if active_state.replace(value).is_none() => {}
+            _ => return Err(io::Error::other("invalid previous systemd unit state")),
+        }
+    }
+
+    match (load_state, active_state) {
+        (Some("not-found"), Some("inactive")) => Ok(PreviousUnitState::NotLoaded),
+        (Some("loaded"), Some("inactive" | "failed")) => Ok(PreviousUnitState::Stopped),
+        _ => Err(io::Error::other("previous process cleanup is unconfirmed")),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ActiveLockError {
+    Busy,
+    Poisoned,
+}
+
+fn try_active_lock(lock: &Mutex<()>) -> Result<MutexGuard<'_, ()>, ActiveLockError> {
+    match lock.try_lock() {
+        Ok(guard) => Ok(guard),
+        Err(TryLockError::WouldBlock) => Err(ActiveLockError::Busy),
+        Err(TryLockError::Poisoned(_)) => Err(ActiveLockError::Poisoned),
+    }
+}
+
+fn hold_for_recovery(result: &mut ProcessResult, diagnostic: impl Into<String>) {
+    result.outcome = ProcessOutcome::OutcomeUnknown;
+    result.cleanup_confirmed = false;
+    result.recovery_hold = true;
+    result.diagnostic = Some(diagnostic.into());
 }
 
 pub(super) struct Supervisor {
@@ -544,14 +633,21 @@ fn run_with_containment(
         return result;
     }
     if UNCERTAIN_CLEANUP.load(Ordering::SeqCst) {
-        result.outcome = ProcessOutcome::OutcomeUnknown;
-        result.cleanup_confirmed = false;
-        result.recovery_hold = true;
-        result.diagnostic = Some("previous process cleanup is unconfirmed".into());
+        hold_for_recovery(&mut result, "previous process cleanup is unconfirmed");
         return result;
     }
-    let Ok(_guard) = ACTIVE.try_lock() else {
-        return ProcessResult::empty_with_filter(ProcessOutcome::Denied, test_filter);
+    let _guard = match try_active_lock(&ACTIVE) {
+        Ok(guard) => guard,
+        Err(ActiveLockError::Busy) => {
+            return ProcessResult::empty_with_filter(ProcessOutcome::Denied, test_filter);
+        }
+        Err(ActiveLockError::Poisoned) => {
+            hold_for_recovery(
+                &mut result,
+                "process supervisor lock is poisoned; restart to recheck the persisted cleanup receipt",
+            );
+            return result;
+        }
     };
     if policy.cancelled.load(Ordering::SeqCst) {
         result.outcome = ProcessOutcome::Cancelled;
@@ -565,8 +661,12 @@ fn run_with_containment(
     }
     let mut lease = match HostLease::acquire() {
         Ok(lease) => lease,
-        Err(e) => {
-            result.diagnostic = Some(e.to_string());
+        Err(HostLeaseError::Unavailable(error)) => {
+            result.diagnostic = Some(error.to_string());
+            return result;
+        }
+        Err(HostLeaseError::CleanupUnconfirmed(error)) => {
+            hold_for_recovery(&mut result, error.to_string());
             return result;
         }
     };
@@ -725,4 +825,60 @@ fn run_with_containment(
         let _ = lease.record("");
     }
     result
+}
+
+#[cfg(test)]
+mod recovery_state_tests {
+    use super::{parse_previous_unit_state, try_active_lock, ActiveLockError, PreviousUnitState};
+    use std::sync::Mutex;
+
+    #[test]
+    fn previous_unit_state_distinguishes_not_loaded_from_unknown() {
+        assert_eq!(
+            parse_previous_unit_state("LoadState=not-found\nActiveState=inactive\n").unwrap(),
+            PreviousUnitState::NotLoaded
+        );
+        assert_eq!(
+            parse_previous_unit_state("LoadState=loaded\nActiveState=inactive\n").unwrap(),
+            PreviousUnitState::Stopped
+        );
+        assert_eq!(
+            parse_previous_unit_state("LoadState=loaded\nActiveState=failed\n").unwrap(),
+            PreviousUnitState::Stopped
+        );
+
+        for unknown in [
+            "LoadState=error\nActiveState=inactive\n",
+            "LoadState=not-found\nActiveState=active\n",
+            "LoadState=loaded\nActiveState=active\n",
+            "LoadState=loaded\nActiveState=activating\n",
+            "ActiveState=inactive\n",
+            "LoadState=loaded\nActiveState=inactive\nExtra=value\n",
+        ] {
+            assert!(
+                parse_previous_unit_state(unknown).is_err(),
+                "unrecognized state must retain the recovery hold: {unknown:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn active_lock_reports_busy_and_poisoned_as_different_states() {
+        let busy = Mutex::new(());
+        let _guard = busy.lock().unwrap();
+        assert!(matches!(try_active_lock(&busy), Err(ActiveLockError::Busy)));
+
+        let poisoned = Mutex::new(());
+        std::thread::scope(|scope| {
+            let join = scope.spawn(|| {
+                let _guard = poisoned.lock().unwrap();
+                panic!("simulate a supervisor panic while holding the lock");
+            });
+            assert!(join.join().is_err());
+        });
+        assert!(matches!(
+            try_active_lock(&poisoned),
+            Err(ActiveLockError::Poisoned)
+        ));
+    }
 }
