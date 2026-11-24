@@ -7,7 +7,8 @@ use super::{
     parse_gemini_response, parse_responses_response, post_hosted, post_hosted_sse,
     post_hosted_sse_with_headers, post_hosted_with_headers, post_profile_with_bearer,
     post_responses_text_stream, tool_definitions, validate_endpoint, validate_model_name,
-    validate_model_name_for_provider, ModelError, OllamaDecisionSource, SYSTEM_INSTRUCTIONS,
+    validate_model_name_for_provider, AdvertisedToolNames, ModelError, OllamaDecisionSource,
+    SYSTEM_INSTRUCTIONS,
 };
 use crate::agent_loop::{BoundedDecisionSource, WorkspaceAction, WorkspaceObservation};
 use serde_json::{json, Value};

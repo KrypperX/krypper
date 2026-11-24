@@ -19,6 +19,10 @@ use uuid::Uuid;
 const MAX_DISCOVERED_TOOLS: usize = 64;
 
 /// One advertised MCP tool that passed contract, schema and grant checks.
+///
+/// Its grant effect is host-side authorization metadata for advertising and
+/// dispatch. It does not confine behavior inside the MCP server process, which
+/// retains the OS-user permissions described by the stdio transport contract.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct McpTool {
     pub(super) namespace: String,

@@ -90,6 +90,7 @@ impl ResponsesDecisionSource {
             &self.core.extension_declarations,
         )?;
         let request = super::enable_responses_streaming(&request)?;
+        let advertised_tools = AdvertisedToolNames::from_request(&request)?;
         let mut assembly =
             crate::streaming::ResponsesFinalActions::new(1, MAX_STREAMED_TOOL_ARGUMENT_BYTES);
         let mut final_calls = None;
@@ -156,7 +157,7 @@ impl ResponsesDecisionSource {
                     provider,
                     "missing tool call",
                 ))?;
-        action_from_provider_call(provider, &name, &arguments)
+        action_from_provider_call(provider, &name, &arguments, &advertised_tools)
     }
 
     pub(crate) fn new(
@@ -280,6 +281,7 @@ impl ResponsesDecisionSource {
             project_guidance,
             &self.core.extension_declarations,
         )?;
+        let advertised_tools = AdvertisedToolNames::from_request(&request)?;
         let response = post_hosted(
             &self.core.agent,
             provider,
@@ -288,7 +290,7 @@ impl ResponsesDecisionSource {
             None,
             &request,
         )?;
-        parse_responses_response(&response, provider)
+        parse_responses_response(&response, provider, &advertised_tools)
     }
 
     #[cfg(test)]

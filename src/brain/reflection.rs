@@ -1,8 +1,8 @@
 use super::{
     consume_decision_budget, encode_model_request, parse_model_plan_response, post_chat,
-    validate_model_name_for_provider, workspace_tool_definitions, ModelError, ModelProvider,
-    OllamaChatResponse, OllamaDecisionSource, OllamaMessageRole, WorkspacePlan, WorkspacePlanError,
-    MAX_PLAN_OPERATIONS,
+    validate_model_name_for_provider, workspace_tool_definitions, AdvertisedToolNames, ModelError,
+    ModelProvider, OllamaChatResponse, OllamaDecisionSource, OllamaMessageRole, WorkspacePlan,
+    WorkspacePlanError, MAX_PLAN_OPERATIONS,
 };
 use crate::agent_loop::{GoalTurnResult, GoalTurnStopReason, WorkspaceObservation};
 use crate::harness::context::{
@@ -216,10 +216,13 @@ fn create_plan_with_verification(
         },
     )
     .map_err(|_| BrainReflectionError::ModelRequestFailed)?;
+    let advertised_tools = AdvertisedToolNames::from_request(&proposal_request)
+        .map_err(|_| BrainReflectionError::ModelRequestFailed)?;
     let proposal_response = post_chat(&source.agent, source.address, &proposal_request)
         .map_err(|_| BrainReflectionError::ModelRequestFailed)?;
-    let proposal = parse_model_plan_response(&proposal_response, maximum_operations)
-        .map_err(BrainReflectionError::InvalidPlan)?;
+    let proposal =
+        parse_model_plan_response(&proposal_response, maximum_operations, &advertised_tools)
+            .map_err(BrainReflectionError::InvalidPlan)?;
     let proposal_targets = reflective_plan_mutation_targets(&proposal);
     let proposed_guidance = if proposal_targets.is_empty() {
         root_project_guidance.clone()
@@ -246,9 +249,11 @@ fn create_plan_with_verification(
             },
         )
         .map_err(|_| BrainReflectionError::ModelRequestFailed)?;
+        let advertised_tools = AdvertisedToolNames::from_request(&plan_request)
+            .map_err(|_| BrainReflectionError::ModelRequestFailed)?;
         let plan_response = post_chat(&source.agent, source.address, &plan_request)
             .map_err(|_| BrainReflectionError::ModelRequestFailed)?;
-        let plan = parse_model_plan_response(&plan_response, maximum_operations)
+        let plan = parse_model_plan_response(&plan_response, maximum_operations, &advertised_tools)
             .map_err(BrainReflectionError::InvalidPlan)?;
         let final_targets = reflective_plan_mutation_targets(&plan);
         let final_guidance = session

@@ -8,8 +8,12 @@ use super::dto::*;
 use super::errors::*;
 use super::plan::*;
 use super::providers::*;
+use super::tool_set::AdvertisedToolNames;
 
-pub(crate) fn parse_model_response(response: &[u8]) -> Result<WorkspaceAction, ModelError> {
+pub(crate) fn parse_model_response(
+    response: &[u8],
+    advertised_tools: &AdvertisedToolNames,
+) -> Result<WorkspaceAction, ModelError> {
     let response: OllamaChatResponse =
         serde_json::from_slice(response).map_err(|_| ModelError::InvalidJson)?;
     let message = response
@@ -29,12 +33,17 @@ pub(crate) fn parse_model_response(response: &[u8]) -> Result<WorkspaceAction, M
     let call = calls.into_iter().next().ok_or(ModelError::InvalidToolCall(
         "expected exactly one tool call",
     ))?;
-    action_from_call(&call.function.name, &call.function.arguments)
+    action_from_call(
+        &call.function.name,
+        &call.function.arguments,
+        advertised_tools,
+    )
 }
 
 pub(crate) fn parse_model_plan_response(
     response: &[u8],
     maximum_operations: usize,
+    advertised_tools: &AdvertisedToolNames,
 ) -> Result<WorkspacePlan, WorkspacePlanError> {
     let response: OllamaChatResponse =
         serde_json::from_slice(response).map_err(|_| WorkspacePlanError::InvalidResponse)?;
@@ -57,12 +66,17 @@ pub(crate) fn parse_model_plan_response(
         .tool_calls
         .into_iter()
         .map(|call| {
-            action_from_call(&call.function.name, &call.function.arguments).map_err(|error| {
-                match error {
-                    ModelError::UnsupportedTool { .. } => WorkspacePlanError::UnsupportedOperation,
-                    ModelError::InvalidArguments(_) => WorkspacePlanError::InvalidOperation,
-                    _ => WorkspacePlanError::InvalidResponse,
+            action_from_call(
+                &call.function.name,
+                &call.function.arguments,
+                advertised_tools,
+            )
+            .map_err(|error| match error {
+                ModelError::UnsupportedTool { .. } | ModelError::InvalidToolCall(_) => {
+                    WorkspacePlanError::UnsupportedOperation
                 }
+                ModelError::InvalidArguments(_) => WorkspacePlanError::InvalidOperation,
+                _ => WorkspacePlanError::InvalidResponse,
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -72,6 +86,7 @@ pub(crate) fn parse_model_plan_response(
 pub(crate) fn parse_responses_response(
     response: &[u8],
     provider: ModelProvider,
+    advertised_tools: &AdvertisedToolNames,
 ) -> Result<WorkspaceAction, ModelError> {
     let response: Value =
         serde_json::from_slice(response).map_err(|_| ModelError::ProviderInvalidJson(provider))?;
@@ -137,5 +152,5 @@ pub(crate) fn parse_responses_response(
     let arguments: Value = serde_json::from_str(arguments).map_err(|_| {
         ModelError::ProviderInvalidToolCall(provider, "tool arguments are invalid JSON")
     })?;
-    action_from_provider_call(provider, name, &arguments)
+    action_from_provider_call(provider, name, &arguments, advertised_tools)
 }

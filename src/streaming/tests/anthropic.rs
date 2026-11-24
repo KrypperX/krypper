@@ -85,8 +85,11 @@ fn assert_anthropic_stream_decision(truncated: bool, duplicate_stop: bool, misma
                 "input": {"path": "README.md"}
             }]
         });
-        let nonstreamed = crate::brain::parse_anthropic_response(response.to_string().as_bytes())
-            .expect("equivalent non-streaming decision");
+        let nonstreamed = crate::brain::parse_anthropic_response(
+            response.to_string().as_bytes(),
+            &crate::brain::AdvertisedToolNames::all_builtins(),
+        )
+        .expect("equivalent non-streaming decision");
         assert_eq!(format!("{streamed:?}"), format!("{nonstreamed:?}"));
     }
     server.join().expect("server");

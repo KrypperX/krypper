@@ -3,6 +3,8 @@
 //! Each submodule owns one responsibility: POSIX syscalls, containment decisions,
 //! path resolution, reading, listing, creation and atomic replacement. This file is
 //! a facade so every existing `crate::tools::workspace_safety::*` path keeps working.
+//! Model-controlled mutations reject `.git` and `.krypper` path components;
+//! reads retain their existing containment and symlink policy.
 
 mod create;
 mod listing;

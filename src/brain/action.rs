@@ -8,13 +8,15 @@ use std::path::PathBuf;
 use super::errors::*;
 use super::limits::*;
 use super::providers::*;
+use super::tool_set::AdvertisedToolNames;
 
 pub(crate) fn action_from_provider_call(
     provider: ModelProvider,
     name: &str,
     arguments: &Value,
+    advertised_tools: &AdvertisedToolNames,
 ) -> Result<WorkspaceAction, ModelError> {
-    action_from_call(name, arguments).map_err(|error| match error {
+    action_from_call(name, arguments, advertised_tools).map_err(|error| match error {
         ModelError::InvalidToolCall(message) => {
             ModelError::ProviderInvalidToolCall(provider, message)
         }
@@ -33,7 +35,12 @@ pub(crate) fn action_from_provider_call(
 pub(crate) fn action_from_call(
     name: &str,
     arguments: &Value,
+    advertised_tools: &AdvertisedToolNames,
 ) -> Result<WorkspaceAction, ModelError> {
+    if !advertised_tools.contains(name) {
+        return Err(ModelError::InvalidToolCall("tool was not advertised"));
+    }
+
     match name {
         "offline_cargo_test" => {
             let arguments = checked_arguments(arguments, &["test_filter"], &[])?;

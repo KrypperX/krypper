@@ -51,6 +51,23 @@ pub(crate) fn open_workspace_relative_with_resolved_path(
     open_root_relative_with_resolved_path(descriptor, &root.path, path, directory)
 }
 
+/// Reject model-controlled mutations beneath repository and Krypper metadata.
+/// Callers still have to use the descriptor walk below: its no-symlink
+/// mutation path rejects aliases instead of following them into protected
+/// directories.
+pub(super) fn validate_workspace_mutation_path(path: &OsStr) -> Result<(), CliError> {
+    if !is_relative_workspace_path(path) {
+        return Err(CliError::new("absolute paths are not allowed"));
+    }
+
+    if Path::new(path).components().any(|component| {
+        matches!(component, Component::Normal(name) if name == OsStr::new(".git") || name == OsStr::new(".krypper"))
+    }) {
+        return Err(CliError::WorkspaceMetadataMutationDenied);
+    }
+    Ok(())
+}
+
 pub(super) fn open_root_relative(
     root: DirHandle,
     root_path: &Path,
@@ -166,7 +183,10 @@ pub(super) fn open_root_relative_with_resolved_path(
         directories.push(DirHandle::from_file(opened));
     }
 
-    let file = duplicate_directory_file(&directories[0])
+    let current_directory = directories
+        .last()
+        .expect("invariant: the root handle remains on the stack");
+    let file = duplicate_directory_file(current_directory)
         .map_err(|error| CliError::from_io(&error, "unable to read file"))?;
     Ok((file, resolved_components.into_iter().collect()))
 }
@@ -191,9 +211,7 @@ pub(super) fn open_workspace_parent(
     root: &WorkspaceRoot,
     path: &OsStr,
 ) -> Result<(DirHandle, OsString), CliError> {
-    if !is_relative_workspace_path(path) {
-        return Err(CliError::new("absolute paths are not allowed"));
-    }
+    validate_workspace_mutation_path(path)?;
     let mut components = split_components(path);
     let Some(name) = components.pop_back() else {
         return Err(CliError::new("invalid file path"));

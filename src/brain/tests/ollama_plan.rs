@@ -20,7 +20,8 @@ fn ollama_plan_fixture_preserves_workspace_call_order() {
     });
     let response = serde_json::to_vec(&response).expect("encode response fixture");
 
-    let plan = parse_model_plan_response(&response, 2).expect("parse bounded plan");
+    let plan = parse_model_plan_response(&response, 2, &all_advertised_tools())
+        .expect("parse bounded plan");
 
     assert_eq!(
         plan.operations(),
@@ -48,7 +49,7 @@ fn ollama_plan_fixtures_reject_malformed_unsupported_and_over_limit_calls() {
     }))
     .expect("encode malformed fixture");
     assert_eq!(
-        parse_model_plan_response(&malformed, 2),
+        parse_model_plan_response(&malformed, 2, &all_advertised_tools()),
         Err(WorkspacePlanError::InvalidOperation)
     );
 
@@ -62,7 +63,7 @@ fn ollama_plan_fixtures_reject_malformed_unsupported_and_over_limit_calls() {
     }))
     .expect("encode unsupported fixture");
     assert_eq!(
-        parse_model_plan_response(&unsupported, 2),
+        parse_model_plan_response(&unsupported, 2, &all_advertised_tools()),
         Err(WorkspacePlanError::UnsupportedOperation)
     );
 
@@ -77,7 +78,7 @@ fn ollama_plan_fixtures_reject_malformed_unsupported_and_over_limit_calls() {
     }))
     .expect("encode over-limit fixture");
     assert_eq!(
-        parse_model_plan_response(&over_limit, 1),
+        parse_model_plan_response(&over_limit, 1, &all_advertised_tools()),
         Err(WorkspacePlanError::TooManyOperations { maximum: 1 })
     );
 }

@@ -21,7 +21,16 @@ pub enum AuthorizedConnectError {
 /// has been validated. This is the only exported connection path; the raw
 /// handshake is module-private so callers cannot skip the grant check. This
 /// does not grant access to discovered MCP tools: each tool invocation must
-/// still pass its own policy and sandbox checks.
+/// still pass its own host-side policy checks.
+///
+/// On supported Unix hosts, the grant authorizes Krypper to spawn the configured
+/// process. The stdio transport clears the inherited environment except for a
+/// minimal `PATH` and `LANG`, and groups the child for bounded cleanup, but it
+/// adds no filesystem or network confinement. The server runs as the Krypper
+/// process's OS user, subject to external OS policy. Host grants and discovered
+/// tool effects gate Krypper's calls; they do not constrain other behavior of
+/// the server process. Windows currently returns `PlatformUnavailable` before
+/// spawning a child.
 ///
 /// The host owns `config`, `context` and `grant` as one authorized launch
 /// decision; never deserialize them from model output or untrusted MCP server

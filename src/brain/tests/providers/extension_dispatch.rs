@@ -22,6 +22,22 @@ enum Expected {
     Failure,
 }
 
+fn external_read_declarations() -> [Value; 1] {
+    [serde_json::json!({
+        "type": "function",
+        "function": {
+            "name": "external_read",
+            "description": "Read an external path",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+                "additionalProperties": false
+            }
+        }
+    })]
+}
+
 fn assert_extension_call<S: BoundedDecisionSource>(
     session: &mut TaskSession,
     task_id: Uuid,
@@ -116,7 +132,9 @@ fn ollama_extension_arguments_reach_harness_dispatch() {
         ok(tool_response("complete_task", json!({"result": "done"}))),
     ]);
     let (mut session, task_id, turn_id) = running_turn();
-    let mut source = OllamaDecisionSource::with_endpoint("test-model", 2, address);
+    let declarations = external_read_declarations();
+    let mut source =
+        OllamaDecisionSource::with_endpoint_and_extensions("test-model", 2, address, &declarations);
     assert_extension_call(
         &mut session,
         task_id,
@@ -131,7 +149,9 @@ fn ollama_extension_arguments_reach_harness_dispatch() {
 fn ollama_extension_without_required_arguments_fails_closed() {
     let (address, server) = mock_server(vec![ok(tool_response("external_read", json!({})))]);
     let (mut session, task_id, turn_id) = running_turn();
-    let mut source = OllamaDecisionSource::with_endpoint("test-model", 2, address);
+    let declarations = external_read_declarations();
+    let mut source =
+        OllamaDecisionSource::with_endpoint_and_extensions("test-model", 2, address, &declarations);
     assert_extension_call(
         &mut session,
         task_id,
@@ -154,12 +174,14 @@ fn openai_compatible_extension_arguments_reach_harness_dispatch() {
     )]);
     let (address, server) = mock_server(vec![ok(response), ok(completion)]);
     let (mut session, task_id, turn_id) = running_turn();
-    let mut source = OpenAiCompatibleDecisionSource::with_endpoint(
+    let declarations = external_read_declarations();
+    let mut source = OpenAiCompatibleDecisionSource::with_endpoint_and_extensions(
         "test-model",
         OpenAiCompatibleProvider::DeepSeek,
         "local-key",
         2,
         format!("http://{address}/v1/chat/completions"),
+        &declarations,
     );
     assert_extension_call(
         &mut session,
@@ -179,12 +201,14 @@ fn openai_compatible_extension_without_required_arguments_fails_closed() {
     )]);
     let (address, server) = mock_server(vec![ok(response)]);
     let (mut session, task_id, turn_id) = running_turn();
-    let mut source = OpenAiCompatibleDecisionSource::with_endpoint(
+    let declarations = external_read_declarations();
+    let mut source = OpenAiCompatibleDecisionSource::with_endpoint_and_extensions(
         "test-model",
         OpenAiCompatibleProvider::DeepSeek,
         "local-key",
         2,
         format!("http://{address}/v1/chat/completions"),
+        &declarations,
     );
     assert_extension_call(
         &mut session,
@@ -210,12 +234,14 @@ fn responses_extension_arguments_reach_harness_dispatch() {
     .to_string();
     let (address, server) = mock_server(vec![ok(response), ok(completion)]);
     let (mut session, task_id, turn_id) = running_turn();
-    let mut source = ResponsesDecisionSource::with_endpoint(
+    let declarations = external_read_declarations();
+    let mut source = ResponsesDecisionSource::with_endpoint_and_extensions(
         "test-model",
         ResponsesProvider::OpenAi,
         "local-key",
         2,
         format!("http://{address}/v1/responses"),
+        &declarations,
     );
     assert_extension_call(
         &mut session,
@@ -236,12 +262,14 @@ fn responses_extension_without_required_arguments_fails_closed() {
     .to_string();
     let (address, server) = mock_server(vec![ok(response)]);
     let (mut session, task_id, turn_id) = running_turn();
-    let mut source = ResponsesDecisionSource::with_endpoint(
+    let declarations = external_read_declarations();
+    let mut source = ResponsesDecisionSource::with_endpoint_and_extensions(
         "test-model",
         ResponsesProvider::OpenAi,
         "local-key",
         2,
         format!("http://{address}/v1/responses"),
+        &declarations,
     );
     assert_extension_call(
         &mut session,
@@ -267,11 +295,13 @@ fn anthropic_extension_arguments_reach_harness_dispatch() {
     .to_string();
     let (address, server) = mock_server(vec![ok(response), ok(completion)]);
     let (mut session, task_id, turn_id) = running_turn();
-    let mut source = AnthropicDecisionSource::with_endpoint(
+    let declarations = external_read_declarations();
+    let mut source = AnthropicDecisionSource::with_endpoint_and_extensions(
         "test-model:cloud",
         "local-key",
         2,
         format!("http://{address}/v1/messages"),
+        &declarations,
     );
     assert_extension_call(
         &mut session,
@@ -292,11 +322,13 @@ fn anthropic_extension_without_required_arguments_fails_closed() {
     .to_string();
     let (address, server) = mock_server(vec![ok(response)]);
     let (mut session, task_id, turn_id) = running_turn();
-    let mut source = AnthropicDecisionSource::with_endpoint(
+    let declarations = external_read_declarations();
+    let mut source = AnthropicDecisionSource::with_endpoint_and_extensions(
         "test-model:cloud",
         "local-key",
         2,
         format!("http://{address}/v1/messages"),
+        &declarations,
     );
     assert_extension_call(
         &mut session,
@@ -320,11 +352,13 @@ fn gemini_extension_arguments_reach_harness_dispatch() {
     )]);
     let (address, server) = mock_server(vec![ok(response), ok(completion)]);
     let (mut session, task_id, turn_id) = running_turn();
-    let mut source = GeminiDecisionSource::with_endpoint(
+    let declarations = external_read_declarations();
+    let mut source = GeminiDecisionSource::with_endpoint_and_extensions(
         "test-model",
         "local-key",
         2,
         format!("http://{address}/v1beta/models/test-model:generateContent"),
+        &declarations,
     );
     assert_extension_call(
         &mut session,
@@ -341,11 +375,13 @@ fn gemini_extension_without_required_arguments_fails_closed() {
     let response = gemini_response(vec![gemini_function_call("external_read", json!({}))]);
     let (address, server) = mock_server(vec![ok(response)]);
     let (mut session, task_id, turn_id) = running_turn();
-    let mut source = GeminiDecisionSource::with_endpoint(
+    let declarations = external_read_declarations();
+    let mut source = GeminiDecisionSource::with_endpoint_and_extensions(
         "test-model",
         "local-key",
         2,
         format!("http://{address}/v1beta/models/test-model:generateContent"),
+        &declarations,
     );
     assert_extension_call(
         &mut session,

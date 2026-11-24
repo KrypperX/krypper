@@ -232,7 +232,7 @@ fn anthropic_messages_parser_rejects_malformed_unsupported_and_multiple_calls() 
     ];
 
     for response in invalid_responses {
-        assert!(parse_anthropic_response(&response).is_err());
+        assert!(parse_anthropic_response(&response, &all_advertised_tools()).is_err());
     }
 }
 
@@ -283,7 +283,10 @@ fn anthropic_schema_drops_provider_unsupported_bounds_but_runtime_validation_rem
             "stop_reason":"tool_use",
             "content":[anthropic_tool_use(name, input)]
         });
-        assert!(parse_anthropic_response(response.to_string().as_bytes()).is_err());
+        assert!(
+            parse_anthropic_response(response.to_string().as_bytes(), &all_advertised_tools())
+                .is_err()
+        );
     }
 }
 

@@ -5,6 +5,10 @@ pub struct SseFrame {
     pub data: String,
 }
 
+/// Maximum number of complete SSE frames accepted from one provider response.
+/// The byte budget is independent and remains the existing 2 MiB response cap.
+pub(crate) const MAX_SSE_FRAME_COUNT: usize = 65_536;
+
 /// Incremental, bounded SSE framing. Does not execute or authorize model actions.
 pub struct SseDecoder {
     pending: Vec<u8>,
@@ -12,6 +16,7 @@ pub struct SseDecoder {
     data: Vec<String>,
     limit: usize,
     frame_bytes: usize,
+    completed_frames: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -29,6 +34,7 @@ impl SseDecoder {
             data: Vec::new(),
             limit,
             frame_bytes: 0,
+            completed_frames: 0,
         }
     }
 
@@ -64,6 +70,7 @@ impl SseDecoder {
             }
             if line.is_empty() {
                 self.frame_bytes = 0;
+                self.completed_frames = self.completed_frames.saturating_add(1);
                 if !self.data.is_empty() {
                     frames.push(SseFrame {
                         event: self.event.take(),
@@ -97,34 +104,55 @@ impl SseDecoder {
         }
         Ok(frames)
     }
+
+    fn completed_frames(&self) -> usize {
+        self.completed_frames
+    }
 }
 
 /// Read SSE frames directly from a streaming HTTP response body or any reader.
 ///
 /// Frames are delivered immediately as they arrive; the entire response is
-/// never buffered. The callback's error stops consumption (for cancellation,
-/// sink backpressure, or a disconnected consumer). Callers must validate
-/// provider-specific event payloads before using them for model decisions.
+/// never buffered. `max_stream_bytes` limits both an individual frame and the
+/// complete response body. At most 65,536 complete frames, including empty and
+/// heartbeat frames, are accepted. The callback's error
+/// stops consumption (for cancellation, sink backpressure, or a disconnected
+/// consumer). Callers must validate provider-specific event payloads before
+/// using them for model decisions.
 pub fn consume_sse<R, F, E>(
     reader: &mut R,
-    max_frame_bytes: usize,
+    max_stream_bytes: usize,
     mut on_frame: F,
 ) -> Result<(), SseReadError<E>>
 where
     R: std::io::Read + ?Sized,
     F: FnMut(SseFrame) -> Result<(), E>,
 {
-    let mut decoder = SseDecoder::new(max_frame_bytes);
+    let mut decoder = SseDecoder::new(max_stream_bytes);
     let mut buffer = [0u8; 4096];
+    let mut total_bytes = 0usize;
     loop {
-        let count = reader.read(&mut buffer).map_err(SseReadError::Io)?;
+        let read_limit = max_stream_bytes
+            .saturating_sub(total_bytes)
+            .saturating_add(1)
+            .min(buffer.len());
+        let count = reader
+            .read(&mut buffer[..read_limit])
+            .map_err(SseReadError::Io)?;
         if count == 0 {
             return decoder.finish().map_err(SseReadError::Decode);
         }
-        for frame in decoder
+        total_bytes = total_bytes.saturating_add(count);
+        if total_bytes > max_stream_bytes {
+            return Err(SseReadError::StreamTooLarge);
+        }
+        let frames = decoder
             .push(&buffer[..count])
-            .map_err(SseReadError::Decode)?
-        {
+            .map_err(SseReadError::Decode)?;
+        if decoder.completed_frames() > MAX_SSE_FRAME_COUNT {
+            return Err(SseReadError::TooManyFrames);
+        }
+        for frame in frames {
             on_frame(frame).map_err(SseReadError::Consumer)?;
         }
     }
@@ -134,6 +162,8 @@ where
 pub enum SseReadError<E> {
     Io(std::io::Error),
     Decode(SseDecodeError),
+    StreamTooLarge,
+    TooManyFrames,
     Consumer(E),
 }
 

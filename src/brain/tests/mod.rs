@@ -202,6 +202,10 @@ fn request_body(request: &[u8]) -> Value {
     serde_json::from_slice(&request[body_start..]).expect("decode provider request")
 }
 
+fn all_advertised_tools() -> AdvertisedToolNames {
+    AdvertisedToolNames::all_builtins()
+}
+
 mod completion;
 #[cfg(unix)]
 mod correction;

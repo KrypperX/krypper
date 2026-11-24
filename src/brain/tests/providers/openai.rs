@@ -104,6 +104,11 @@ fn openai_responses_parser_rejects_malformed_unsupported_and_multiple_calls() {
     ];
 
     for response in invalid_responses {
-        assert!(parse_responses_response(&response, ModelProvider::OpenAi).is_err());
+        assert!(parse_responses_response(
+            &response,
+            ModelProvider::OpenAi,
+            &all_advertised_tools()
+        )
+        .is_err());
     }
 }

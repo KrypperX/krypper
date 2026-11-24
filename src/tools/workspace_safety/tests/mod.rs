@@ -12,6 +12,7 @@ pub(super) use super::types::RootGuidanceReadError;
 static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 
 mod guidance;
+mod mutation;
 mod other;
 mod replace;
 mod search;

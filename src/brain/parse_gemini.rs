@@ -6,8 +6,12 @@ use serde_json::Value;
 use super::action::*;
 use super::errors::*;
 use super::providers::*;
+use super::tool_set::AdvertisedToolNames;
 
-pub(crate) fn parse_gemini_response(response: &[u8]) -> Result<WorkspaceAction, ModelError> {
+pub(crate) fn parse_gemini_response(
+    response: &[u8],
+    advertised_tools: &AdvertisedToolNames,
+) -> Result<WorkspaceAction, ModelError> {
     let provider = ModelProvider::Gemini;
     let response: Value =
         serde_json::from_slice(response).map_err(|_| ModelError::ProviderInvalidJson(provider))?;
@@ -98,5 +102,5 @@ pub(crate) fn parse_gemini_response(response: &[u8]) -> Result<WorkspaceAction, 
         provider,
         "function call has no arguments",
     ))?;
-    action_from_provider_call(provider, name, arguments)
+    action_from_provider_call(provider, name, arguments, advertised_tools)
 }

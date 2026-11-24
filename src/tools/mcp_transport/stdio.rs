@@ -1,4 +1,9 @@
 //! Bounded stdio launch, nonblocking I/O and process cleanup for MCP clients.
+//!
+//! The child starts with a cleared, minimal environment and its own process
+//! group. Those controls support predictable launch and cleanup; they do not
+//! sandbox the child. It runs with the Krypper process's OS-user permissions
+//! and has no filesystem or network confinement from this transport.
 
 use super::config::McpStdioConfig;
 use super::lifecycle::{McpCancellation, McpLifecycleError};

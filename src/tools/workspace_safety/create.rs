@@ -1,6 +1,6 @@
 //! Creation of files and directories inside a verified workspace parent.
 
-use super::paths::open_workspace_parent;
+use super::paths::{open_workspace_parent, validate_workspace_mutation_path};
 use super::syscalls::{
     close_file, contains_nul, duplicate_directory, fstat_file, is_already_exists, is_directory,
     is_interrupted, is_not_found, is_relative_workspace_path, is_symlink, mkdir_at, open_at,
@@ -59,6 +59,7 @@ where
     F: FnMut(&mut File, &[u8]) -> io::Result<usize>,
 {
     validate_output_path(path, "invalid file path")?;
+    validate_workspace_mutation_path(path)?;
     let mut components = split_components(path);
     let Some(name) = components.pop_back() else {
         return Err(CliError::new("invalid file path"));
