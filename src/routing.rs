@@ -307,6 +307,16 @@ pub struct RoutingSelection {
 pub trait ModelRouter: Send + Sync {
     /// Select a provider/model or return reason-coded candidate rejections.
     fn route(&self, request: &RoutingRequest, candidates: &[RoutingCandidate]) -> RoutingDecision;
+
+    /// Return a stable, non-secret identifier for this strategy and its behavior.
+    ///
+    /// A durable task that may use automatic fallback must persist this value
+    /// and return the same value after restart. Change it when strategy behavior
+    /// or behavior-affecting configuration changes. Return `None` when the
+    /// strategy cannot provide a task-stable identity.
+    fn task_stable_id(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Manual policy that preserves the exact explicit provider/model choice.
@@ -326,6 +336,10 @@ impl ModelRouter for ManualModelRouter {
             RoutingRequest::Automatic(_) => mode_mismatch(),
         }
     }
+
+    fn task_stable_id(&self) -> Option<String> {
+        Some("manual-model-router-v1".to_owned())
+    }
 }
 
 /// Built-in deterministic policy for explicit automatic requests.
@@ -338,6 +352,10 @@ impl ModelRouter for DeterministicModelRouter {
             return mode_mismatch();
         };
         self.route_automatic(request, candidates)
+    }
+
+    fn task_stable_id(&self) -> Option<String> {
+        Some("deterministic-model-router-v1".to_owned())
     }
 }
 
