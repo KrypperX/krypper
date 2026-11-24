@@ -13,10 +13,11 @@ use crate::core::task::{
     TurnCompletionError, TurnOutcome, TurnState,
 };
 use crate::tools::{
-    apply_patch_file_at, capture_workspace_root, capture_workspace_root_at_with_error,
-    create_directory_at, create_text_file_at, list_task_directory_names_at,
-    read_project_guidance_at, read_root_agents_md_at, read_text_file_at, replace_text_file_at,
-    search_text_files_at, search_tree_text_files_at, PatchEvidence, WorkspaceRoot,
+    apply_patch_file_at_with_revision, capture_workspace_root,
+    capture_workspace_root_at_with_error, create_directory_at, create_text_file_at,
+    list_task_directory_names_at, read_project_guidance_at, read_root_agents_md_at,
+    read_text_file_at, replace_text_file_at_with_revision, search_text_files_at,
+    search_tree_text_files_at, PatchEvidence, WorkspaceRoot,
 };
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -710,6 +711,25 @@ impl TaskSession {
         match_text: &str,
         replacement_text: &str,
     ) -> Result<usize, WorkspaceReplaceError> {
+        self.replace_workspace_text_with_revision(
+            task_id,
+            turn_id,
+            path,
+            match_text,
+            replacement_text,
+            None,
+        )
+    }
+
+    pub(crate) fn replace_workspace_text_with_revision(
+        &self,
+        task_id: Uuid,
+        turn_id: Uuid,
+        path: &Path,
+        match_text: &str,
+        replacement_text: &str,
+        expected_revision: Option<&str>,
+    ) -> Result<usize, WorkspaceReplaceError> {
         let task = self
             .running_workspace_task(task_id, turn_id)
             .map_err(WorkspaceReplaceError::from)?;
@@ -719,11 +739,16 @@ impl TaskSession {
             .map_err(|message| WorkspaceReplaceError::File {
                 message: format!("task workspace could not be resolved: {message}"),
             })?;
-        replace_text_file_at(root, path.as_os_str(), match_text, replacement_text).map_err(
-            |error| WorkspaceReplaceError::File {
-                message: error.message().to_owned(),
-            },
+        replace_text_file_at_with_revision(
+            root,
+            path.as_os_str(),
+            match_text,
+            replacement_text,
+            expected_revision,
         )
+        .map_err(|error| WorkspaceReplaceError::File {
+            message: error.message().to_owned(),
+        })
     }
 
     /// Applies one context-checked unified diff to an existing UTF-8 file in a running task.
@@ -731,12 +756,13 @@ impl TaskSession {
     /// The patch is resolved beneath the task's captured workspace. It preserves the file's line
     /// endings and supported permission bits, and succeeds only after atomic replacement and
     /// exact readback verification.
-    pub(crate) fn apply_workspace_patch(
+    pub(crate) fn apply_workspace_patch_with_revision(
         &self,
         task_id: Uuid,
         turn_id: Uuid,
         path: &Path,
         patch: &str,
+        expected_revision: Option<&str>,
     ) -> Result<PatchEvidence, WorkspaceReplaceError> {
         let task = self
             .running_workspace_task(task_id, turn_id)
@@ -747,11 +773,11 @@ impl TaskSession {
             .map_err(|message| WorkspaceReplaceError::File {
                 message: format!("task workspace could not be resolved: {message}"),
             })?;
-        apply_patch_file_at(root, path.as_os_str(), patch).map_err(|error| {
-            WorkspaceReplaceError::File {
+        apply_patch_file_at_with_revision(root, path.as_os_str(), patch, expected_revision).map_err(
+            |error| WorkspaceReplaceError::File {
                 message: error.message().to_owned(),
-            }
-        })
+            },
+        )
     }
 
     /// Returns the tasks in creation order as a read-only slice.

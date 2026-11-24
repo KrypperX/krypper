@@ -244,6 +244,15 @@ pub enum TurnActivitySummary {
         succeeded: bool,
         output_bytes: usize,
     },
+    /// Metadata needed to re-evaluate an offline test result after later turns or checkpoint restore.
+    OfflineCargoTestFinished {
+        /// SHA-256 identity of the selected test filter; `None` represents the full suite.
+        filter_hash: Option<[u8; 32]>,
+        /// Whether complete, non-empty passing evidence was produced.
+        passed: bool,
+        /// A determinate `NoTestsMatched` failure permits a later filter choice.
+        retry_any_filter: bool,
+    },
     /// A file was read; only its byte count is retained.
     FileRead { bytes_read: usize },
     /// A file range was read; only its range and excerpt byte count are retained.
@@ -266,6 +275,8 @@ pub enum TurnActivitySummary {
     TreeTextSearched { location_count: usize },
     /// The decision source explicitly completed the turn; its result is not retained here.
     Completed,
+    /// A registered extension completed; its workspace effects are not known to the harness.
+    ExtensionCompleted,
     /// The caller requested another turn for the same task.
     Continued,
     /// The loop exhausted its action budget.

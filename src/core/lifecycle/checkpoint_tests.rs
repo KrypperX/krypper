@@ -104,6 +104,12 @@ fn checkpoint_preserves_only_metadata_for_workspace_activity() {
         TurnActivitySummary::TextReplaced {
             bytes_written: replacement_secret.len(),
         },
+        TurnActivitySummary::OfflineCargoTestFinished {
+            filter_hash: Some([7; 32]),
+            passed: true,
+            retry_any_filter: false,
+        },
+        TurnActivitySummary::ExtensionCompleted,
         TurnActivitySummary::BudgetExhausted { actions: 5 },
     ];
     session
@@ -314,4 +320,54 @@ proptest! {
         let result = TaskSession::restore_checkpoint_in_workspace(&corrupted, &workspace.0);
         prop_assert_eq!(result.unwrap_err(), TaskSessionCheckpointError::InvalidCheckpoint);
     }
+}
+
+#[test]
+fn checkpoint_restores_version_one_sessions() {
+    let mut checkpoint: serde_json::Value =
+        serde_json::from_slice(&TaskSession::new().export_checkpoint().unwrap()).unwrap();
+    checkpoint["version"] = serde_json::json!(1);
+    let bytes = serde_json::to_vec(&checkpoint).unwrap();
+
+    TaskSession::restore_checkpoint(&bytes).expect("restore legacy version 1 checkpoint");
+}
+
+#[test]
+fn version_one_process_evidence_requires_fresh_full_suite_verification() {
+    let workspace = TempWorkspace::new();
+    let mut session = TaskSession::new_in_workspace(&workspace.0).unwrap();
+    let (task_id, turn_id) = {
+        let task = session.create_task("resume legacy test evidence");
+        task.transition(TaskState::Running).unwrap();
+        let task_id = task.id();
+        let turn_id = task.create_turn().unwrap();
+        task.transition_turn(turn_id, TurnState::Running).unwrap();
+        (task_id, turn_id)
+    };
+    session
+        .complete_turn_with_activity(
+            task_id,
+            turn_id,
+            TurnOutcome::Success {
+                result: "continued".to_owned(),
+            },
+            &[
+                TurnActivitySummary::ProcessFinished {
+                    succeeded: true,
+                    output_bytes: 0,
+                },
+                TurnActivitySummary::Continued,
+            ],
+        )
+        .unwrap();
+    let mut checkpoint: serde_json::Value =
+        serde_json::from_slice(&session.export_checkpoint().unwrap()).unwrap();
+    checkpoint["version"] = serde_json::json!(1);
+    let bytes = serde_json::to_vec(&checkpoint).unwrap();
+    let restored = TaskSession::restore_checkpoint_in_workspace(&bytes, &workspace.0).unwrap();
+
+    assert_eq!(
+        crate::harness::execution::task_test_verification(&restored, task_id, None),
+        Some(crate::harness::execution::ProcessTestVerificationStatus::Failed)
+    );
 }

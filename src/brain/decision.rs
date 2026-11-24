@@ -8,6 +8,7 @@ use crate::harness::execution::{
     CompletionCorrectionError, CompletionCorrectionResult, ProcessFailureCorrectionError,
     ProcessFailureCorrectionResult,
 };
+use crate::harness::impact::ImpactReport;
 use crate::harness::verification::{
     CompletionCheckEvidence, CompletionVerification, RequiredCompletionCheck,
 };
@@ -27,6 +28,65 @@ use super::reflection;
 use super::reflection::*;
 use super::request::*;
 use super::tool_set::AdvertisedToolNames;
+
+fn encode_plan_for_impact_review(plan: &WorkspacePlan) -> Result<String, WorkspacePlanError> {
+    let operations = plan
+        .operations()
+        .iter()
+        .map(|action| {
+            let path_text = |path: &PathBuf| {
+                path.to_str()
+                    .map(str::to_owned)
+                    .ok_or(WorkspacePlanError::UnsupportedOperation)
+            };
+            let (name, arguments) = match action {
+                WorkspaceAction::OfflineCargoTest { test_filter } => (
+                    "offline_cargo_test",
+                    serde_json::json!({ "test_filter": test_filter }),
+                ),
+                WorkspaceAction::ReadFile { path } => (
+                    "read_file",
+                    serde_json::json!({ "path": path_text(path)? }),
+                ),
+                WorkspaceAction::ReadRange { path, start_line, max_lines } => (
+                    "read_range",
+                    serde_json::json!({ "path": path_text(path)?, "start_line": start_line, "max_lines": max_lines }),
+                ),
+                WorkspaceAction::ListDirectory { path } => (
+                    "list_directory",
+                    serde_json::json!({ "path": path_text(path)? }),
+                ),
+                WorkspaceAction::CreateDirectory { path } => (
+                    "create_directory",
+                    serde_json::json!({ "path": path_text(path)? }),
+                ),
+                WorkspaceAction::SearchText { directory, query } => (
+                    "search_text",
+                    serde_json::json!({ "directory": path_text(directory)?, "query": query }),
+                ),
+                WorkspaceAction::SearchTreeText { directory, query } => (
+                    "search_tree_text",
+                    serde_json::json!({ "directory": path_text(directory)?, "query": query }),
+                ),
+                WorkspaceAction::CreateFile { path, contents } => (
+                    "create_file",
+                    serde_json::json!({ "path": path_text(path)?, "contents": contents }),
+                ),
+                WorkspaceAction::ReplaceText { path, match_text, replacement_text } => (
+                    "replace_text",
+                    serde_json::json!({ "path": path_text(path)?, "match_text": match_text, "replacement_text": replacement_text }),
+                ),
+                WorkspaceAction::ApplyPatch { path, patch } => (
+                    "apply_patch",
+                    serde_json::json!({ "path": path_text(path)?, "patch": patch }),
+                ),
+                _ => return Err(WorkspacePlanError::UnsupportedOperation),
+            };
+            Ok(serde_json::json!({ "tool": name, "arguments": arguments }))
+        })
+        .collect::<Result<Vec<_>, WorkspacePlanError>>()?;
+    serde_json::to_string(&operations).map_err(|_| WorkspacePlanError::ModelRequestFailed)
+}
 
 pub struct OllamaDecisionSource {
     pub(super) model: String,
@@ -196,6 +256,128 @@ impl OllamaDecisionSource {
             .remaining_decisions
             .saturating_sub(plan.operations().len());
         Ok(plan.with_project_guidance_context(project_guidance_context))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn review_impact_plan(
+        &mut self,
+        goal: &str,
+        observations: &[WorkspaceObservation],
+        action_budget: usize,
+        proposed_plan: &WorkspacePlan,
+        report: &ImpactReport,
+        project_guidance: Option<&str>,
+        review_slots_used_before: usize,
+    ) -> Result<WorkspacePlan, WorkspacePlanError> {
+        let maximum = action_budget
+            .min(self.remaining_decisions)
+            .saturating_sub(2 + review_slots_used_before)
+            .min(MAX_PLAN_OPERATIONS);
+        if maximum == 0 {
+            return Err(WorkspacePlanError::ActionBudgetExhausted);
+        }
+        let proposed_plan_json = encode_plan_for_impact_review(proposed_plan)?;
+        let impact_report_json =
+            serde_json::to_string(report).map_err(|_| WorkspacePlanError::ModelRequestFailed)?;
+        if proposed_plan_json.len() > 48 * 1024 || impact_report_json.len() > 24 * 1024 {
+            return Err(WorkspacePlanError::ModelRequestFailed);
+        }
+        let request = build_impact_review_request(
+            &self.model,
+            goal,
+            observations,
+            maximum,
+            project_guidance,
+            ImpactReviewContext {
+                proposed_plan_json: &proposed_plan_json,
+                impact_report_json: &impact_report_json,
+            },
+            self.repository_context.as_ref(),
+        )
+        .map_err(|_| WorkspacePlanError::ModelRequestFailed)?;
+        let response = post_chat(&self.agent, self.address, &request)
+            .map_err(|_| WorkspacePlanError::ModelRequestFailed)?;
+        parse_model_plan_response(&response, maximum)
+    }
+
+    pub(crate) fn review_correction_impact_plan(
+        &mut self,
+        goal: &str,
+        observations: &[WorkspaceObservation],
+        proposed_plan: &WorkspacePlan,
+        report: &ImpactReport,
+        project_guidance: Option<&str>,
+        maximum_operations: usize,
+    ) -> Result<WorkspacePlan, WorkspacePlanError> {
+        if self.remaining_decisions == 0 || maximum_operations == 0 {
+            return Err(WorkspacePlanError::ActionBudgetExhausted);
+        }
+        let proposed_plan_json = encode_plan_for_impact_review(proposed_plan)?;
+        let impact_report_json =
+            serde_json::to_string(report).map_err(|_| WorkspacePlanError::ModelRequestFailed)?;
+        if proposed_plan_json.len() > 48 * 1024 || impact_report_json.len() > 24 * 1024 {
+            return Err(WorkspacePlanError::ModelRequestFailed);
+        }
+        let request = build_impact_review_request(
+            &self.model,
+            goal,
+            observations,
+            maximum_operations.min(MAX_PLAN_OPERATIONS),
+            project_guidance,
+            ImpactReviewContext {
+                proposed_plan_json: &proposed_plan_json,
+                impact_report_json: &impact_report_json,
+            },
+            self.repository_context.as_ref(),
+        )
+        .map_err(|_| WorkspacePlanError::ModelRequestFailed)?;
+        let response = post_chat(&self.agent, self.address, &request)
+            .map_err(|_| WorkspacePlanError::ModelRequestFailed)?;
+        parse_model_plan_response(&response, maximum_operations.min(MAX_PLAN_OPERATIONS))
+    }
+
+    pub(crate) fn accept_impact_reviewed_plan(
+        &mut self,
+        plan: WorkspacePlan,
+        action_budget: usize,
+        project_guidance_context: Option<String>,
+        review_slots_used: usize,
+    ) -> Result<WorkspacePlan, WorkspacePlanError> {
+        let maximum = action_budget
+            .min(self.remaining_decisions)
+            .saturating_sub(1 + review_slots_used)
+            .min(MAX_PLAN_OPERATIONS);
+        if maximum == 0 {
+            return Err(WorkspacePlanError::ActionBudgetExhausted);
+        }
+        if plan.operations().len() > maximum {
+            return Err(WorkspacePlanError::TooManyOperations { maximum });
+        }
+        self.remaining_decisions = self
+            .remaining_decisions
+            .saturating_sub(review_slots_used + plan.operations().len());
+        Ok(plan.with_project_guidance_context(project_guidance_context))
+    }
+
+    pub(crate) fn accept_impact_reviewed_correction_plan(
+        &mut self,
+        plan: WorkspacePlan,
+        original_operation_count: usize,
+        review_slots_used: usize,
+    ) -> Result<WorkspacePlan, WorkspacePlanError> {
+        if plan.operations().len() > original_operation_count {
+            return Err(WorkspacePlanError::TooManyOperations {
+                maximum: original_operation_count,
+            });
+        }
+        if self.remaining_decisions < review_slots_used {
+            return Err(WorkspacePlanError::ActionBudgetExhausted);
+        }
+        self.remaining_decisions = self
+            .remaining_decisions
+            .saturating_sub(review_slots_used)
+            .saturating_add(original_operation_count - plan.operations().len());
+        Ok(plan)
     }
 
     /// Uses one verified prior Harness result to inform a bounded workspace-only plan.

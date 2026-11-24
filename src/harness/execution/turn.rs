@@ -1,6 +1,6 @@
 //! The bounded goal-turn loop that drives decisions, actions and turn completion.
 
-use super::action::{execute_action, summarize_observation};
+use super::action::{execute_action_with_revision, summarize_observation_activity};
 use super::types::{
     workspace_mutation_target, ActionExecution, BoundedDecisionSource, DecisionSource,
     GoalTurnError, GoalTurnResult, GoalTurnStopReason, TurnCompletionData, WorkspaceObservation,
@@ -25,6 +25,7 @@ fn execute_with_extensions(
     turn_id: Uuid,
     action: &super::WorkspaceAction,
     extensions: Option<&TurnExtensions<'_>>,
+    expected_revision: Option<&str>,
 ) -> Result<ActionExecution, GoalTurnError> {
     if let (super::WorkspaceAction::Extension { name, arguments }, Some(extensions)) =
         (action, extensions)
@@ -45,10 +46,12 @@ fn execute_with_extensions(
                     result,
                 },
             )),
-            Err(_) => execute_action(session, task_id, turn_id, action),
+            Err(_) => {
+                execute_action_with_revision(session, task_id, turn_id, action, expected_revision)
+            }
         };
     }
-    execute_action(session, task_id, turn_id, action)
+    execute_action_with_revision(session, task_id, turn_id, action, expected_revision)
 }
 
 /// Runs one decision-selected action for an already running, task-owned turn.
@@ -81,7 +84,7 @@ pub fn run_goal_turn_with_extensions<D: DecisionSource + ?Sized>(
         .map_err(GoalTurnError::WorkspaceRead)?;
 
     let action = decision_source.choose_action(goal);
-    match execute_with_extensions(session, task_id, turn_id, &action, extensions)? {
+    match execute_with_extensions(session, task_id, turn_id, &action, extensions, None)? {
         ActionExecution::Complete(result) => finish_turn(
             session,
             task_id,
@@ -146,14 +149,14 @@ pub fn run_goal_turn_with_extensions<D: DecisionSource + ?Sized>(
                 | WorkspaceObservation::TreeTextSearchFailed { .. }
                 | WorkspaceObservation::ActionFailed { .. } => String::new(),
             };
-            let activity = summarize_observation(&observation);
+            let activity = summarize_observation_activity(&observation);
             finish_turn(
                 session,
                 task_id,
                 turn_id,
                 vec![observation],
                 TurnCompletionData {
-                    activity: vec![activity],
+                    activity,
                     actions_taken: 1,
                     stop_reason: GoalTurnStopReason::ActionCompleted,
                     outcome: TurnOutcome::Success { result },
@@ -162,7 +165,7 @@ pub fn run_goal_turn_with_extensions<D: DecisionSource + ?Sized>(
         }
         ActionExecution::Failed { observation, error } => {
             let detail = error.to_string();
-            let activity = summarize_observation(&observation);
+            let activity = summarize_observation_activity(&observation);
             let returns_failed_result = matches!(
                 &observation,
                 WorkspaceObservation::DirectoryCreationFailed { .. }
@@ -173,7 +176,7 @@ pub fn run_goal_turn_with_extensions<D: DecisionSource + ?Sized>(
                 turn_id,
                 vec![observation],
                 TurnCompletionData {
-                    activity: vec![activity],
+                    activity,
                     actions_taken: 1,
                     stop_reason: GoalTurnStopReason::ActionFailed,
                     outcome: TurnOutcome::Failure { detail },
@@ -295,7 +298,15 @@ pub fn run_goal_turn_with_budget_and_extensions<D: BoundedDecisionSource + ?Size
             }
             break action;
         };
-        match execute_with_extensions(session, task_id, turn_id, &action, extensions)? {
+        let expected_revision = decision_source.expected_file_revision(&action);
+        match execute_with_extensions(
+            session,
+            task_id,
+            turn_id,
+            &action,
+            extensions,
+            expected_revision.as_deref(),
+        )? {
             ActionExecution::Complete(result) => {
                 activity.push(TurnActivitySummary::Completed);
                 return finish_turn(
@@ -360,12 +371,12 @@ pub fn run_goal_turn_with_budget_and_extensions<D: BoundedDecisionSource + ?Size
                 );
             }
             ActionExecution::Observation(observation) => {
-                activity.push(summarize_observation(&observation));
+                activity.extend(summarize_observation_activity(&observation));
                 observations.push(observation);
             }
             ActionExecution::Failed { observation, error } => {
                 let detail = error.to_string();
-                activity.push(summarize_observation(&observation));
+                activity.extend(summarize_observation_activity(&observation));
                 observations.push(observation);
                 return finish_turn(
                     session,

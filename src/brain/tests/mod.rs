@@ -211,6 +211,7 @@ mod completion;
 mod correction;
 mod endpoint;
 mod guidance;
+mod impact;
 mod ollama_plan;
 mod parser;
 mod planner;

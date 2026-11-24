@@ -1,4 +1,6 @@
 use super::{read_repository_context_json, run_task_with_endpoint, run_task_with_selection_loader};
+use crate::brain::ModelProvider;
+use crate::task_lifecycle::{TaskSession, TaskState, TurnActivitySummary, TurnOutcome, TurnState};
 use serde_json::{json, Value};
 use std::ffi::OsString;
 use std::fs;
@@ -369,14 +371,14 @@ fn verified_cli_corrects_unknown_file_evidence_once_within_the_original_budget()
     ]);
 
     let (code, output, error) = run(
-        &verified_args(fixture.path(), "5", "expected.txt"),
+        &verified_args(fixture.path(), "7", "expected.txt"),
         "complete initial plan\ncomplete corrected plan\n",
         address,
     );
     assert_eq!(code, 0, "{error}");
     assert!(output.contains("Verification: Passed"));
     assert!(output.contains("Correction: attempted once"));
-    assert!(output.contains("Actions: 4/5"));
+    assert!(output.contains("Actions: 4/7"));
     assert_eq!(
         fs::read(fixture.path().join("expected.txt")).unwrap(),
         b"corrected"
@@ -414,14 +416,14 @@ fn verified_cli_reports_failed_file_evidence_without_retrying_the_failed_action(
         json!({"path":"expected.txt"}),
     )]);
 
-    let (code, output, _) = run(
+    let (code, output, error) = run(
         &verified_args(fixture.path(), "5", "expected.txt"),
         "",
         address,
     );
     assert_eq!(code, 1);
     assert!(output.contains("Task outcome: failed"));
-    assert!(output.contains("Verification: Failed"));
+    assert!(output.contains("Verification: Failed"), "{error}\n{output}");
     assert!(output.contains("Correction: skipped; initial turn did not complete normally"));
     assert!(output.contains("Stop reason: ActionFailed"));
     assert_eq!(server.join().unwrap().len(), 1);
@@ -432,13 +434,14 @@ fn verified_cli_prefers_failed_file_evidence_over_success_in_the_same_turn() {
     let fixture = TempWorkspace::new();
     let path = fixture.path().join("expected.txt");
     fs::write(&path, "existing").expect("write existing file");
-    let (address, server) = mock_server(vec![model_tools(vec![
+    let proposed = model_tools(vec![
         ("read_file", json!({"path":"expected.txt"})),
         (
             "create_file",
             json!({"path":"expected.txt","contents":"replace is not allowed"}),
         ),
-    ])]);
+    ]);
+    let (address, server) = mock_server(vec![proposed.clone(), proposed]);
 
     let (code, output, error) = run(
         &verified_args(fixture.path(), "5", "expected.txt"),
@@ -447,10 +450,10 @@ fn verified_cli_prefers_failed_file_evidence_over_success_in_the_same_turn() {
     );
 
     assert_eq!(code, 1, "{error}");
-    assert!(output.contains("Verification: Failed"));
+    assert!(output.contains("Verification: Failed"), "{error}\n{output}");
     assert!(output.contains("Stop reason: ActionFailed"));
     assert_eq!(fs::read(path).unwrap(), b"existing");
-    assert_eq!(server.join().unwrap().len(), 1);
+    assert_eq!(server.join().unwrap().len(), 2);
 }
 
 #[test]
@@ -592,6 +595,164 @@ fn verified_cli_resume_requires_fresh_file_observation_and_repeated_options() {
 }
 
 #[test]
+fn verified_cli_resume_rechecks_tests_after_a_later_turn_mutates_the_workspace() {
+    let fixture = TempWorkspace::new();
+    let checkpoint = fixture.root.join("after-passing-test.json");
+    let mut session = TaskSession::new_in_workspace(fixture.path()).unwrap();
+    let (task_id, turn_id) = {
+        let task = session.create_task("Create the requested output");
+        task.transition(TaskState::Running).unwrap();
+        let task_id = task.id();
+        let turn_id = task.create_turn().unwrap();
+        task.transition_turn(turn_id, TurnState::Running).unwrap();
+        (task_id, turn_id)
+    };
+    session
+        .complete_turn_with_activity(
+            task_id,
+            turn_id,
+            TurnOutcome::Success {
+                result: "continued after tests".to_owned(),
+            },
+            &[
+                TurnActivitySummary::ProcessFinished {
+                    succeeded: true,
+                    output_bytes: 0,
+                },
+                TurnActivitySummary::OfflineCargoTestFinished {
+                    filter_hash: None,
+                    passed: true,
+                    retry_any_filter: false,
+                },
+                TurnActivitySummary::Continued,
+            ],
+        )
+        .unwrap();
+    fs::write(&checkpoint, session.export_checkpoint().unwrap()).unwrap();
+
+    let (address, server) = mock_server(vec![model_tool(
+        "create_file",
+        json!({"path":"expected.txt","contents":"created after tests"}),
+    )]);
+    let mut args = vec![
+        "--resume",
+        checkpoint.to_str().unwrap(),
+        "--max-actions",
+        "2",
+        "--workspace",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect::<Vec<_>>();
+    args.push(fixture.path().as_os_str().to_owned());
+    args.extend(
+        [
+            "--model",
+            "fixture-model",
+            "--verified",
+            "--verify-file",
+            "expected.txt",
+        ]
+        .into_iter()
+        .map(OsString::from),
+    );
+
+    let (code, output, error) = run(&args, "complete output created\n", address);
+
+    assert_eq!(code, 1, "{error}\n{output}");
+    assert!(output.contains("Task outcome: failed"));
+    assert!(output.contains("Verification: Passed"));
+    assert!(output.contains("Test verification: Failed"));
+    assert_eq!(
+        fs::read(fixture.path().join("expected.txt")).unwrap(),
+        b"created after tests"
+    );
+    assert_eq!(server.join().unwrap().len(), 1);
+}
+
+#[test]
+fn verified_cli_resume_keeps_failed_test_filter_after_unrelated_pass_and_continue() {
+    let fixture = TempWorkspace::new();
+    let checkpoint = fixture.root.join("after-filter-mismatch.json");
+    let mut session = TaskSession::new_in_workspace(fixture.path()).unwrap();
+    let (task_id, turn_id) = {
+        let task = session.create_task("Create the requested output");
+        task.transition(TaskState::Running).unwrap();
+        let task_id = task.id();
+        let turn_id = task.create_turn().unwrap();
+        task.transition_turn(turn_id, TurnState::Running).unwrap();
+        (task_id, turn_id)
+    };
+    session
+        .complete_turn_with_activity(
+            task_id,
+            turn_id,
+            TurnOutcome::Success {
+                result: "continued after a mismatched test rerun".to_owned(),
+            },
+            &[
+                TurnActivitySummary::ProcessFinished {
+                    succeeded: false,
+                    output_bytes: 0,
+                },
+                TurnActivitySummary::OfflineCargoTestFinished {
+                    filter_hash: Some([1; 32]),
+                    passed: false,
+                    retry_any_filter: false,
+                },
+                TurnActivitySummary::TextReplaced { bytes_written: 18 },
+                TurnActivitySummary::ProcessFinished {
+                    succeeded: true,
+                    output_bytes: 0,
+                },
+                TurnActivitySummary::OfflineCargoTestFinished {
+                    filter_hash: Some([2; 32]),
+                    passed: true,
+                    retry_any_filter: false,
+                },
+                TurnActivitySummary::Continued,
+            ],
+        )
+        .unwrap();
+    fs::write(&checkpoint, session.export_checkpoint().unwrap()).unwrap();
+
+    let (address, server) = mock_server(vec![model_tool(
+        "create_file",
+        json!({"path":"expected.txt","contents":"created after mismatch"}),
+    )]);
+    let mut args = vec![
+        "--resume",
+        checkpoint.to_str().unwrap(),
+        "--max-actions",
+        "2",
+        "--workspace",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect::<Vec<_>>();
+    args.push(fixture.path().as_os_str().to_owned());
+    args.extend(
+        [
+            "--model",
+            "fixture-model",
+            "--verified",
+            "--verify-file",
+            "expected.txt",
+        ]
+        .into_iter()
+        .map(OsString::from),
+    );
+
+    let (code, output, error) = run(&args, "complete output created\n", address);
+
+    assert_eq!(code, 1, "{error}\n{output}");
+    assert!(output.contains("Task outcome: failed"));
+    assert!(output.contains("Verification: Passed"));
+    assert!(output.contains("Test verification: Failed"));
+    assert_eq!(server.join().unwrap().len(), 1);
+}
+
+#[test]
 fn verified_cli_checkpoint_after_correction_keeps_the_invocation_allowance_used() {
     let fixture = TempWorkspace::new();
     let checkpoint = fixture.root.join("pause-after-correction.json");
@@ -608,7 +769,7 @@ fn verified_cli_checkpoint_after_correction_keeps_the_invocation_allowance_used(
         model_tool("read_file", json!({"path":"expected.txt"})),
     ]);
 
-    let mut first_args = verified_args(fixture.path(), "5", "expected.txt");
+    let mut first_args = verified_args(fixture.path(), "7", "expected.txt");
     first_args.extend([
         OsString::from("--checkpoint-out"),
         checkpoint.as_os_str().to_owned(),

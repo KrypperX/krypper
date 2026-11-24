@@ -3086,14 +3086,14 @@ fn task_resume_rejects_unsupported_terminal_and_ambiguous_checkpoints() {
     let running = checkpoint_with_tasks(&workspace, 1, false);
 
     let mut unsupported: serde_json::Value = serde_json::from_slice(&running).unwrap();
-    unsupported["version"] = serde_json::json!(2);
+    unsupported["version"] = serde_json::json!(3);
     let terminal = checkpoint_with_tasks(&workspace, 1, true);
     let ambiguous = checkpoint_with_tasks(&workspace, 2, false);
     let cases = [
         (
             "unsupported.json",
             serde_json::to_vec(&unsupported).unwrap(),
-            "unsupported TaskSession checkpoint version 2",
+            "unsupported TaskSession checkpoint version 3",
         ),
         (
             "terminal.json",

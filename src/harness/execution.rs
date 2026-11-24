@@ -21,9 +21,16 @@ mod types;
 #[path = "execution/extension_tests.rs"]
 mod extension_tests;
 
+pub(crate) use self::action::summarize_observation_activity;
+pub(crate) use self::planned::process_test_verification;
+pub(crate) use self::planned::review_existing_impact_plan;
+pub(crate) use self::planned::stop_reason_after_test_verification;
+pub(crate) use self::planned::task_test_verification;
 pub use self::planned::{
-    create_plan_with_repository_context, create_plan_with_workspace_context,
-    run_goal_turn_with_completion_correction, run_goal_turn_with_plan,
+    create_impact_checked_plan, create_plan_with_repository_context,
+    create_plan_with_workspace_context, run_goal_turn_with_completion_correction,
+    run_goal_turn_with_impact_checked_completion_correction,
+    run_goal_turn_with_impact_checked_plan, run_goal_turn_with_plan,
     run_goal_turn_with_process_failure_correction, CompletionCorrectionError,
     CompletionCorrectionResult, ProcessFailureCorrectionError, ProcessFailureCorrectionResult,
     ProcessTestVerificationStatus,
@@ -37,7 +44,6 @@ pub use self::types::{
     GoalTurnStopReason, WorkspaceAction, WorkspaceObservation,
 };
 
-pub(crate) use self::action::summarize_observation;
 pub use self::dispatch::{
     dispatch_registered_extension_with_arguments_for_turn, ExtensionDispatchError,
     RegisteredExtensionWithArguments,

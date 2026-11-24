@@ -21,21 +21,104 @@ use super::types::{
     MAX_FILE_SIZE,
 };
 
+#[cfg(test)]
 pub(crate) fn replace_text_file_at(
     root: &WorkspaceRoot,
     path: &OsStr,
     match_text: &str,
     replacement_text: &str,
 ) -> Result<usize, CliError> {
-    replace_text_file_at_with_writer(root, path, match_text, replacement_text, write_to_file)
+    replace_text_file_at_with_revision(root, path, match_text, replacement_text, None)
 }
 
+pub(crate) fn replace_text_file_at_with_revision(
+    root: &WorkspaceRoot,
+    path: &OsStr,
+    match_text: &str,
+    replacement_text: &str,
+    expected_revision: Option<&str>,
+) -> Result<usize, CliError> {
+    replace_text_file_at_with_writer_and_revision(
+        root,
+        path,
+        match_text,
+        replacement_text,
+        expected_revision,
+        write_to_file,
+    )
+}
+
+pub(crate) fn preview_replace_text(
+    contents: &str,
+    match_text: &str,
+    replacement_text: &str,
+) -> Result<String, CliError> {
+    if match_text.is_empty() {
+        return Err(CliError::new("match text must not be empty"));
+    }
+    if match_text.len() > MAX_FILE_SIZE || replacement_text.len() > MAX_FILE_SIZE {
+        return Err(CliError::new("replacement text exceeds 1 MiB"));
+    }
+    let range = unique_match_range(contents, match_text)?;
+    let output_length = contents
+        .len()
+        .checked_sub(match_text.len())
+        .and_then(|length| length.checked_add(replacement_text.len()))
+        .filter(|length| *length <= MAX_FILE_SIZE)
+        .ok_or_else(|| CliError::new("replacement would exceed 1 MiB"))?;
+    let mut replacement = String::with_capacity(output_length);
+    replacement.push_str(&contents[..range.start]);
+    replacement.push_str(replacement_text);
+    replacement.push_str(&contents[range.end..]);
+    Ok(replacement)
+}
+
+pub(crate) fn preview_workspace_patch(
+    path: &str,
+    contents: &str,
+    patch_text: &str,
+) -> Result<String, CliError> {
+    patch::apply_unified_diff(path, contents, patch_text)
+        .map(|result| result.contents)
+        .map_err(CliError::new)
+}
+
+pub(crate) fn text_revision(contents: &str) -> String {
+    ring::digest::digest(&ring::digest::SHA256, contents.as_bytes())
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+#[cfg(test)]
 pub(super) fn replace_text_file_at_with_writer<F>(
     root: &WorkspaceRoot,
     path: &OsStr,
     match_text: &str,
     replacement_text: &str,
     writer: F,
+) -> Result<usize, CliError>
+where
+    F: FnMut(&mut File, &[u8]) -> io::Result<usize>,
+{
+    replace_text_file_at_with_writer_and_revision(
+        root,
+        path,
+        match_text,
+        replacement_text,
+        None,
+        writer,
+    )
+}
+
+fn replace_text_file_at_with_writer_and_revision<F>(
+    root: &WorkspaceRoot,
+    path: &OsStr,
+    match_text: &str,
+    replacement_text: &str,
+    expected_revision: Option<&str>,
+    mut writer: F,
 ) -> Result<usize, CliError>
 where
     F: FnMut(&mut File, &[u8]) -> io::Result<usize>,
@@ -83,17 +166,11 @@ where
     }
 
     let contents = read_open_text_file(original_file)?;
-    let range = unique_match_range(&contents, match_text)?;
-    let output_length = contents
-        .len()
-        .checked_sub(match_text.len())
-        .and_then(|length| length.checked_add(replacement_text.len()))
-        .filter(|length| *length <= MAX_FILE_SIZE)
-        .ok_or_else(|| CliError::new("replacement would exceed 1 MiB"))?;
-    let mut replacement = String::with_capacity(output_length);
-    replacement.push_str(&contents[..range.start]);
-    replacement.push_str(replacement_text);
-    replacement.push_str(&contents[range.end..]);
+    if expected_revision.is_some_and(|expected| text_revision(&contents) != expected) {
+        return Err(CliError::new("file revision changed since impact analysis"));
+    }
+    let replacement = preview_replace_text(&contents, match_text, replacement_text)?;
+    let output_length = replacement.len();
 
     let mut operations = ReplacementOperations {
         writer,
@@ -369,21 +446,33 @@ pub(super) fn unique_match_range(
     Ok(start..start + match_text.len())
 }
 
+#[cfg(test)]
 pub(crate) fn apply_patch_file_at(
     root: &WorkspaceRoot,
     path: &OsStr,
     patch_text: &str,
 ) -> Result<PatchEvidence, CliError> {
-    apply_patch_file_at_with_ops(
+    apply_patch_file_at_with_revision(root, path, patch_text, None)
+}
+
+pub(crate) fn apply_patch_file_at_with_revision(
+    root: &WorkspaceRoot,
+    path: &OsStr,
+    patch_text: &str,
+    expected_revision: Option<&str>,
+) -> Result<PatchEvidence, CliError> {
+    apply_patch_file_at_with_ops_and_revision(
         root,
         path,
         patch_text,
+        expected_revision,
         write_to_file,
         rename_file_at,
         read_file_contents_at_for_verification,
     )
 }
 
+#[cfg(test)]
 pub(super) fn apply_patch_file_at_with_ops<W, C, R>(
     root: &WorkspaceRoot,
     path: &OsStr,
@@ -391,6 +480,25 @@ pub(super) fn apply_patch_file_at_with_ops<W, C, R>(
     writer: W,
     committer: C,
     readback: R,
+) -> Result<PatchEvidence, CliError>
+where
+    W: FnMut(&mut File, &[u8]) -> io::Result<usize>,
+    C: FnMut(&DirHandle, &OsStr, &OsStr) -> Result<(), RenameFileError>,
+    R: FnMut(&DirHandle, &OsStr) -> Result<Vec<u8>, CliError>,
+{
+    apply_patch_file_at_with_ops_and_revision(
+        root, path, patch_text, None, writer, committer, readback,
+    )
+}
+
+fn apply_patch_file_at_with_ops_and_revision<W, C, R>(
+    root: &WorkspaceRoot,
+    path: &OsStr,
+    patch_text: &str,
+    expected_revision: Option<&str>,
+    mut writer: W,
+    mut committer: C,
+    mut readback: R,
 ) -> Result<PatchEvidence, CliError>
 where
     W: FnMut(&mut File, &[u8]) -> io::Result<usize>,
@@ -442,6 +550,9 @@ where
         return Err(CliError::new("file changed while patching it"));
     }
     let original = read_open_text_file(original_file)?;
+    if expected_revision.is_some_and(|expected| text_revision(&original) != expected) {
+        return Err(CliError::new("file revision changed since impact analysis"));
+    }
     let result =
         patch::apply_unified_diff(path_text, &original, patch_text).map_err(CliError::new)?;
     if result.contents.len() > MAX_FILE_SIZE {

@@ -5,14 +5,20 @@ use super::{
 };
 use crate::brain::{OllamaDecisionSource, WorkspacePlan, WorkspacePlanError};
 use crate::harness::context::collect_repository_context;
+use crate::harness::impact::{
+    analyze_plan, ImpactAnalysisError, ImpactCheckedPlan, ImpactCoverage, ImpactReport,
+    PublicApiStatus,
+};
 use crate::harness::verification::{
     reconcile_task_state_with_checks, verify_completion_checks, CompletionCheckEvidence,
     CompletionVerification, CompletionVerificationStatus, RequiredCompletionCheck,
 };
-use crate::task_lifecycle::{TaskSession, TaskState, TurnOutcome, TurnState};
+use crate::task_lifecycle::{
+    TaskSession, TaskState, TurnActivityAction, TurnActivitySummary, TurnOutcome, TurnState,
+};
 use crate::tools::registry::workspace_operations;
 use crate::{ProcessOutcome, ProcessResult};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io;
 use uuid::Uuid;
@@ -33,6 +39,26 @@ pub fn create_plan_with_workspace_context(
     observations: &[WorkspaceObservation],
     action_budget: usize,
 ) -> Result<WorkspacePlan, WorkspacePlanError> {
+    let plan = propose_plan_with_workspace_context(
+        session,
+        task_id,
+        decision_source,
+        goal,
+        observations,
+        action_budget,
+    )?;
+    let guidance = plan.project_guidance_context().map(str::to_owned);
+    decision_source.accept_plan_with_project_guidance(plan, action_budget, guidance)
+}
+
+fn propose_plan_with_workspace_context(
+    session: &TaskSession,
+    task_id: Uuid,
+    decision_source: &mut OllamaDecisionSource,
+    goal: &str,
+    observations: &[WorkspaceObservation],
+    action_budget: usize,
+) -> Result<WorkspacePlan, WorkspacePlanError> {
     let root_guidance = session
         .read_root_project_guidance(task_id)
         .map_err(WorkspacePlanError::RootGuidanceRead)?;
@@ -45,22 +71,14 @@ pub fn create_plan_with_workspace_context(
     )?;
     let proposal_targets = plan_mutation_targets(&proposal);
     if proposal_targets.is_empty() {
-        return decision_source.accept_plan_with_project_guidance(
-            proposal,
-            action_budget,
-            root_guidance,
-        );
+        return Ok(proposal.with_project_guidance_context(root_guidance));
     }
 
     let proposed_guidance = session
         .read_project_guidance_for_targets(task_id, &proposal_targets)
         .map_err(WorkspacePlanError::RootGuidanceRead)?;
     if proposed_guidance == root_guidance {
-        return decision_source.accept_plan_with_project_guidance(
-            proposal,
-            action_budget,
-            proposed_guidance,
-        );
+        return Ok(proposal.with_project_guidance_context(proposed_guidance));
     }
 
     let final_plan = decision_source.propose_plan_with_project_guidance(
@@ -78,7 +96,297 @@ pub fn create_plan_with_workspace_context(
         return Err(WorkspacePlanError::GuidanceTargetsChanged);
     }
 
-    decision_source.accept_plan_with_project_guidance(final_plan, action_budget, final_guidance)
+    Ok(final_plan.with_project_guidance_context(final_guidance))
+}
+
+/// Proposes, analyzes, model-reviews, then re-analyzes a bounded workspace plan before execution.
+/// A material change in the reviewed report receives one bounded confirmation review. Each
+/// existing file may be mutated once in the plan so its full SHA-256 precondition remains
+/// unambiguous at the atomic write boundary.
+pub fn create_impact_checked_plan(
+    session: &TaskSession,
+    task_id: Uuid,
+    turn_id: Uuid,
+    decision_source: &mut OllamaDecisionSource,
+    goal: &str,
+    observations: &[WorkspaceObservation],
+    action_budget: usize,
+) -> Result<ImpactCheckedPlan, WorkspacePlanError> {
+    let proposal = propose_plan_with_workspace_context(
+        session,
+        task_id,
+        decision_source,
+        goal,
+        observations,
+        action_budget,
+    )?;
+    check_and_review_impact_plan(
+        session,
+        task_id,
+        turn_id,
+        decision_source,
+        goal,
+        observations,
+        action_budget,
+        proposal,
+        false,
+    )
+}
+
+/// Analyzes and, when the report requires it, sends a prebuilt correction plan and its impact
+/// report through the same model review before returning a guarded plan.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn review_existing_impact_plan(
+    session: &TaskSession,
+    task_id: Uuid,
+    turn_id: Uuid,
+    decision_source: &mut OllamaDecisionSource,
+    goal: &str,
+    observations: &[WorkspaceObservation],
+    action_budget: usize,
+    proposed_plan: WorkspacePlan,
+) -> Result<ImpactCheckedPlan, WorkspacePlanError> {
+    check_and_review_impact_plan(
+        session,
+        task_id,
+        turn_id,
+        decision_source,
+        goal,
+        observations,
+        action_budget,
+        proposed_plan,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_and_review_impact_plan(
+    session: &TaskSession,
+    task_id: Uuid,
+    turn_id: Uuid,
+    decision_source: &mut OllamaDecisionSource,
+    goal: &str,
+    observations: &[WorkspaceObservation],
+    action_budget: usize,
+    proposal: WorkspacePlan,
+    correction_operations_already_charged: bool,
+) -> Result<ImpactCheckedPlan, WorkspacePlanError> {
+    let guidance = proposal.project_guidance_context().map(str::to_owned);
+    let proposal_targets = plan_mutation_targets(&proposal);
+    let current_guidance = if proposal_targets.is_empty() {
+        session.read_root_project_guidance(task_id)
+    } else {
+        session.read_project_guidance_for_targets(task_id, &proposal_targets)
+    }
+    .map_err(WorkspacePlanError::RootGuidanceRead)?;
+    if current_guidance != guidance {
+        return Err(WorkspacePlanError::GuidanceTargetsChanged);
+    }
+    let proposal = proposal.with_project_guidance_context(current_guidance);
+    let (initial_report, _) =
+        analyze_plan(session, task_id, turn_id, &proposal).map_err(map_impact_error)?;
+    let guidance = proposal.project_guidance_context().map(str::to_owned);
+    if initial_report.files.is_empty() {
+        let plan = if correction_operations_already_charged {
+            proposal
+        } else {
+            decision_source.accept_plan_with_project_guidance(
+                proposal,
+                action_budget,
+                guidance.clone(),
+            )?
+        };
+        return Ok(ImpactCheckedPlan {
+            plan,
+            report: initial_report,
+            expected_revisions: Default::default(),
+        });
+    }
+
+    let mut review_slots_used = 0;
+    let mut report_sent = None;
+    let mut reviewed = proposal.clone();
+    if impact_needs_model_review(&initial_report) {
+        reviewed = request_impact_review(
+            decision_source,
+            goal,
+            observations,
+            action_budget,
+            &reviewed,
+            &initial_report,
+            guidance.as_deref(),
+            correction_operations_already_charged,
+            review_slots_used,
+        )?;
+        review_slots_used = 1;
+        report_sent = Some(initial_report.clone());
+        reviewed = reviewed.with_project_guidance_context(guidance.clone());
+    }
+
+    let (mut report, mut expected_revisions) =
+        analyze_reviewed_plan(session, task_id, turn_id, &reviewed, &guidance)?;
+    if report_sent.is_none() && impact_needs_model_review(&report) {
+        reviewed = request_impact_review(
+            decision_source,
+            goal,
+            observations,
+            action_budget,
+            &reviewed,
+            &report,
+            guidance.as_deref(),
+            correction_operations_already_charged,
+            review_slots_used,
+        )?;
+        review_slots_used = 1;
+        report_sent = Some(report.clone());
+        reviewed = reviewed.with_project_guidance_context(guidance.clone());
+        (report, expected_revisions) =
+            analyze_reviewed_plan(session, task_id, turn_id, &reviewed, &guidance)?;
+    }
+    if report_sent.as_ref().is_some_and(|sent| sent != &report) {
+        if review_slots_used >= 2 {
+            return Err(WorkspacePlanError::InvalidOperation);
+        }
+        let confirmation = request_impact_review(
+            decision_source,
+            goal,
+            observations,
+            action_budget,
+            &reviewed,
+            &report,
+            guidance.as_deref(),
+            correction_operations_already_charged,
+            review_slots_used,
+        )?;
+        if confirmation.operations() != reviewed.operations() {
+            return Err(WorkspacePlanError::InvalidOperation);
+        }
+        let confirmation = confirmation.with_project_guidance_context(guidance.clone());
+        review_slots_used += 1;
+        let (confirmed_report, confirmed_revisions) =
+            analyze_reviewed_plan(session, task_id, turn_id, &confirmation, &guidance)?;
+        if confirmed_report != report || confirmed_revisions != expected_revisions {
+            return Err(WorkspacePlanError::InvalidOperation);
+        }
+        reviewed = confirmation;
+        report = confirmed_report;
+        expected_revisions = confirmed_revisions;
+    }
+
+    let plan = if correction_operations_already_charged {
+        decision_source.accept_impact_reviewed_correction_plan(
+            reviewed,
+            proposal.operations().len(),
+            review_slots_used,
+        )?
+    } else if review_slots_used > 0 {
+        decision_source.accept_impact_reviewed_plan(
+            reviewed,
+            action_budget,
+            guidance,
+            review_slots_used,
+        )?
+    } else {
+        decision_source.accept_plan_with_project_guidance(reviewed, action_budget, guidance)?
+    };
+    Ok(ImpactCheckedPlan {
+        plan,
+        report,
+        expected_revisions,
+    })
+}
+
+fn impact_needs_model_review(report: &ImpactReport) -> bool {
+    let mutation_paths = report
+        .mutation_targets
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    report.mutation_targets.len() > 1
+        || report.truncated
+        || !report.unknowns.is_empty()
+        || report.coverage != Some(ImpactCoverage::Complete)
+        || report
+            .references
+            .iter()
+            .any(|reference| !mutation_paths.contains(reference.path.as_str()))
+        || report.files.iter().any(|file| {
+            matches!(
+                file.public_api_status,
+                PublicApiStatus::Changed | PublicApiStatus::Unknown
+            )
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn request_impact_review(
+    decision_source: &mut OllamaDecisionSource,
+    goal: &str,
+    observations: &[WorkspaceObservation],
+    action_budget: usize,
+    plan: &WorkspacePlan,
+    report: &ImpactReport,
+    guidance: Option<&str>,
+    correction_operations_already_charged: bool,
+    review_slots_used_before: usize,
+) -> Result<WorkspacePlan, WorkspacePlanError> {
+    if correction_operations_already_charged {
+        decision_source.review_correction_impact_plan(
+            goal,
+            observations,
+            plan,
+            report,
+            guidance,
+            plan.operations().len(),
+        )
+    } else {
+        decision_source.review_impact_plan(
+            goal,
+            observations,
+            action_budget,
+            plan,
+            report,
+            guidance,
+            review_slots_used_before,
+        )
+    }
+}
+
+fn analyze_reviewed_plan(
+    session: &TaskSession,
+    task_id: Uuid,
+    turn_id: Uuid,
+    plan: &WorkspacePlan,
+    expected_guidance: &Option<String>,
+) -> Result<
+    (
+        crate::harness::impact::ImpactReport,
+        BTreeMap<std::path::PathBuf, String>,
+    ),
+    WorkspacePlanError,
+> {
+    let targets = plan_mutation_targets(plan);
+    let current_guidance = if targets.is_empty() {
+        session.read_root_project_guidance(task_id)
+    } else {
+        session.read_project_guidance_for_targets(task_id, &targets)
+    }
+    .map_err(WorkspacePlanError::RootGuidanceRead)?;
+    if &current_guidance != expected_guidance {
+        return Err(WorkspacePlanError::GuidanceTargetsChanged);
+    }
+    analyze_plan(session, task_id, turn_id, plan).map_err(map_impact_error)
+}
+
+fn map_impact_error(error: ImpactAnalysisError) -> WorkspacePlanError {
+    match error {
+        ImpactAnalysisError::ConflictingEdits
+        | ImpactAnalysisError::WorkspaceRead
+        | ImpactAnalysisError::UnsupportedMutation
+        | ImpactAnalysisError::TooManyFiles
+        | ImpactAnalysisError::InvalidPreview
+        | ImpactAnalysisError::StaleDuringAnalysis => WorkspacePlanError::InvalidOperation,
+    }
 }
 
 /// Opt-in bounded repository retrieval followed by the existing guidance-aware planner.
@@ -154,6 +462,79 @@ where
     D: BoundedDecisionSource + ?Sized,
     E: fmt::Display,
 {
+    run_goal_turn_with_plan_and_revisions(
+        session,
+        task_id,
+        turn_id,
+        goal,
+        max_actions,
+        plan,
+        None,
+        control_source,
+    )
+}
+
+/// Executes a model-reviewed impact-checked plan through the existing workspace operation path.
+pub fn run_goal_turn_with_impact_checked_plan<D: BoundedDecisionSource + ?Sized>(
+    session: &mut TaskSession,
+    task_id: Uuid,
+    turn_id: Uuid,
+    goal: &str,
+    max_actions: usize,
+    plan: Result<ImpactCheckedPlan, WorkspacePlanError>,
+    control_source: &mut D,
+) -> Result<GoalTurnResult, GoalTurnError> {
+    match plan {
+        Ok(checked) => {
+            let fresh = analyze_plan(session, task_id, turn_id, &checked.plan).is_ok_and(
+                |(report, revisions)| {
+                    report == checked.report && revisions == checked.expected_revisions
+                },
+            );
+            let execution_plan = if fresh {
+                Ok(checked.plan)
+            } else {
+                Err(WorkspacePlanError::InvalidOperation)
+            };
+            let revisions = fresh.then_some(&checked.expected_revisions);
+            run_goal_turn_with_plan_and_revisions::<D, WorkspacePlanError>(
+                session,
+                task_id,
+                turn_id,
+                goal,
+                max_actions,
+                execution_plan,
+                revisions,
+                control_source,
+            )
+        }
+        Err(error) => run_goal_turn_with_plan_result(
+            session,
+            task_id,
+            turn_id,
+            goal,
+            max_actions,
+            Err(error),
+            control_source,
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // Session ownership, plan bounds, revisions, and the existing control source stay explicit.
+fn run_goal_turn_with_plan_and_revisions<D, E>(
+    session: &mut TaskSession,
+    task_id: Uuid,
+    turn_id: Uuid,
+    goal: &str,
+    max_actions: usize,
+    plan: Result<WorkspacePlan, E>,
+    expected_revisions: Option<&BTreeMap<std::path::PathBuf, String>>,
+    control_source: &mut D,
+) -> Result<GoalTurnResult, GoalTurnError>
+where
+    D: BoundedDecisionSource + ?Sized,
+    E: fmt::Display,
+{
     let operations = match plan {
         Ok(plan) => {
             let targets = plan_mutation_targets(&plan);
@@ -183,8 +564,18 @@ where
             action: error.to_string(),
         }],
     };
+    let revisions = operations
+        .iter()
+        .map(|action| {
+            workspace_mutation_target(action)
+                .and_then(|path| expected_revisions.and_then(|items| items.get(path)))
+                .cloned()
+        })
+        .collect::<Vec<_>>();
     let mut source = PlanDecisionSource {
         operations: operations.into_iter(),
+        expected_revisions: revisions.into_iter(),
+        pending_revision: None,
         control_source,
     };
 
@@ -212,6 +603,205 @@ pub fn run_goal_turn_with_completion_correction<D, E, P, PE>(
     max_actions: usize,
     initial_plan: Option<Result<WorkspacePlan, WorkspacePlanError>>,
     required_checks: &[RequiredCompletionCheck],
+    check_evidence: E,
+    correction_plan: P,
+    decision_source: &mut D,
+) -> Result<CompletionCorrectionResult, CompletionCorrectionError>
+where
+    D: BoundedDecisionSource + ?Sized,
+    E: FnMut(&TaskSession, &GoalTurnResult) -> Vec<CompletionCheckEvidence>,
+    P: FnMut(
+        &mut D,
+        &TaskSession,
+        &GoalTurnResult,
+        &CompletionVerification,
+        &str,
+        usize,
+    ) -> Result<WorkspacePlan, PE>,
+    PE: fmt::Display,
+{
+    run_goal_turn_with_completion_correction_inner(
+        session,
+        task_id,
+        turn_id,
+        goal,
+        max_actions,
+        initial_plan.map(InitialPlan::Workspace),
+        required_checks,
+        check_evidence,
+        correction_plan,
+        decision_source,
+    )
+}
+
+/// Runs the independent-check flow using an impact-reviewed initial plan and at most one
+/// bounded correction.
+#[allow(clippy::too_many_arguments)] // Inputs mirror the existing completion-correction API.
+pub fn run_goal_turn_with_impact_checked_completion_correction<D, E, P, PE>(
+    session: &mut TaskSession,
+    task_id: Uuid,
+    turn_id: Uuid,
+    goal: &str,
+    max_actions: usize,
+    initial_plan: Option<Result<ImpactCheckedPlan, WorkspacePlanError>>,
+    required_checks: &[RequiredCompletionCheck],
+    mut check_evidence: E,
+    mut correction_plan: P,
+    decision_source: &mut D,
+) -> Result<CompletionCorrectionResult, CompletionCorrectionError>
+where
+    D: BoundedDecisionSource + ?Sized,
+    E: FnMut(&TaskSession, &GoalTurnResult) -> Vec<CompletionCheckEvidence>,
+    P: FnMut(
+        &mut D,
+        &TaskSession,
+        Uuid,
+        Uuid,
+        Option<&ProcessResult>,
+        &GoalTurnResult,
+        &CompletionVerification,
+        &str,
+        usize,
+    ) -> Result<ImpactCheckedPlan, PE>,
+    PE: fmt::Display,
+{
+    let initial_result = run_goal_turn_with_impact_checked_plan(
+        session,
+        task_id,
+        turn_id,
+        goal,
+        max_actions,
+        initial_plan.unwrap_or(Err(WorkspacePlanError::InvalidResponse)),
+        decision_source,
+    )
+    .map_err(CompletionCorrectionError::Execution)?;
+    let initial_is_complete = matches!(
+        initial_result.stop_reason(),
+        GoalTurnStopReason::Completed | GoalTurnStopReason::ActionCompleted
+    );
+    let initial_evidence = if initial_is_complete {
+        check_evidence(session, &initial_result)
+    } else {
+        Vec::new()
+    };
+    let initial_verification = verify_completion_checks(required_checks, &initial_evidence);
+    let process_failure = last_correctable_process_failure(&initial_result);
+    if (!initial_is_complete && process_failure.is_none())
+        || (process_failure.is_none()
+            && initial_verification.status == CompletionVerificationStatus::Passed)
+    {
+        return finish_completion_without_correction(
+            session,
+            task_id,
+            initial_result,
+            initial_verification,
+            required_checks,
+            &initial_evidence,
+        );
+    }
+
+    let remaining_actions = max_actions.saturating_sub(initial_result.actions_taken());
+    let minimum_correction_actions = if process_failure.is_some() {
+        MIN_PROCESS_CORRECTION_ACTIONS + 2
+    } else {
+        MIN_COMPLETION_CORRECTION_ACTIONS + 2
+    };
+    if remaining_actions < minimum_correction_actions {
+        return finish_completion_without_correction(
+            session,
+            task_id,
+            initial_result,
+            initial_verification,
+            required_checks,
+            &initial_evidence,
+        );
+    }
+
+    let correction_turn_id = match create_follow_up_turn(session, task_id) {
+        Ok(id) => id,
+        Err(error) => {
+            fail_correction_task(session, task_id, None)
+                .map_err(CompletionCorrectionError::Session)?;
+            return Err(CompletionCorrectionError::Session(error));
+        }
+    };
+    let plan = correction_plan(
+        decision_source,
+        session,
+        task_id,
+        correction_turn_id,
+        process_failure,
+        &initial_result,
+        &initial_verification,
+        goal,
+        remaining_actions,
+    )
+    .map_err(|_| WorkspacePlanError::InvalidResponse);
+    let correction_result = match run_goal_turn_with_impact_checked_plan(
+        session,
+        task_id,
+        correction_turn_id,
+        goal,
+        remaining_actions,
+        plan,
+        decision_source,
+    ) {
+        Ok(result) => result,
+        Err(error) => {
+            fail_correction_task(session, task_id, Some(correction_turn_id))
+                .map_err(CompletionCorrectionError::Session)?;
+            return Err(CompletionCorrectionError::Execution(error));
+        }
+    };
+    let test_was_requested = initial_result
+        .observations()
+        .iter()
+        .chain(correction_result.observations())
+        .any(|observation| matches!(observation, WorkspaceObservation::ProcessFinished { .. }));
+    let current_test_verification = if test_was_requested {
+        Some(process_test_verification(
+            &correction_result,
+            true,
+            process_failure,
+        ))
+    } else {
+        None
+    };
+    let test_verification = task_test_verification(session, task_id, current_test_verification);
+    let final_evidence = check_evidence(session, &correction_result);
+    let final_stop_reason =
+        stop_reason_after_test_verification(correction_result.stop_reason(), test_verification);
+    let final_verification = reconcile_task_state_with_checks(
+        session,
+        task_id,
+        final_stop_reason,
+        required_checks,
+        &final_evidence,
+    )
+    .map_err(CompletionCorrectionError::Session)?;
+    Ok(CompletionCorrectionResult {
+        initial_result,
+        initial_verification,
+        correction_result: Some(correction_result),
+        final_verification,
+        test_verification,
+        final_stop_reason,
+    })
+}
+
+enum InitialPlan {
+    Workspace(Result<WorkspacePlan, WorkspacePlanError>),
+}
+
+#[allow(clippy::too_many_arguments)] // Mirrors the public correction inputs while sharing lifecycle logic.
+fn run_goal_turn_with_completion_correction_inner<D, E, P, PE>(
+    session: &mut TaskSession,
+    task_id: Uuid,
+    turn_id: Uuid,
+    goal: &str,
+    max_actions: usize,
+    initial_plan: Option<InitialPlan>,
+    required_checks: &[RequiredCompletionCheck],
     mut check_evidence: E,
     mut correction_plan: P,
     decision_source: &mut D,
@@ -230,7 +820,7 @@ where
     PE: fmt::Display,
 {
     let initial_result = match initial_plan {
-        Some(plan) => run_goal_turn_with_plan_result(
+        Some(InitialPlan::Workspace(plan)) => run_goal_turn_with_plan_result(
             session,
             task_id,
             turn_id,
@@ -316,10 +906,13 @@ where
         }
     };
     let final_evidence = check_evidence(session, &correction_result);
+    let test_verification = task_test_verification(session, task_id, None);
+    let final_stop_reason =
+        stop_reason_after_test_verification(correction_result.stop_reason(), test_verification);
     let final_verification = reconcile_task_state_with_checks(
         session,
         task_id,
-        correction_result.stop_reason(),
+        final_stop_reason,
         required_checks,
         &final_evidence,
     )
@@ -330,6 +923,8 @@ where
         initial_verification,
         correction_result: Some(correction_result),
         final_verification,
+        test_verification,
+        final_stop_reason,
     })
 }
 
@@ -393,7 +988,7 @@ where
     };
     let initial_verification = verify_completion_checks(required_checks, &initial_evidence);
     let Some(failure) = last_correctable_process_failure(&initial_result) else {
-        let test_verification = process_test_verification(&initial_result, false);
+        let test_verification = process_test_verification(&initial_result, false, None);
         return finish_process_without_correction(
             session,
             task_id,
@@ -451,13 +1046,21 @@ where
             return Err(ProcessFailureCorrectionError::Execution(error));
         }
     };
-    let test_verification = process_test_verification(&correction_result, true);
+    let test_verification = task_test_verification(
+        session,
+        task_id,
+        Some(process_test_verification(
+            &correction_result,
+            true,
+            Some(failure),
+        )),
+    )
+    .unwrap_or(ProcessTestVerificationStatus::Failed);
     let final_evidence = check_evidence(session, &correction_result);
-    let final_stop_reason = if test_verification == ProcessTestVerificationStatus::Passed {
-        correction_result.stop_reason()
-    } else {
-        GoalTurnStopReason::ActionFailed
-    };
+    let final_stop_reason = stop_reason_after_test_verification(
+        correction_result.stop_reason(),
+        Some(test_verification),
+    );
     let final_verification = reconcile_task_state_with_checks(
         session,
         task_id,
@@ -473,6 +1076,7 @@ where
         correction_result: Some(correction_result),
         final_verification,
         test_verification,
+        final_stop_reason,
     })
 }
 
@@ -495,11 +1099,12 @@ fn last_correctable_process_failure(result: &GoalTurnResult) -> Option<&ProcessR
     (complete && determinate_failure).then_some(result)
 }
 
-fn process_test_verification(
+pub(crate) fn process_test_verification(
     result: &GoalTurnResult,
     required_after_correction: bool,
+    failed_test: Option<&ProcessResult>,
 ) -> ProcessTestVerificationStatus {
-    if successful_test_follows_workspace_changes(result) {
+    if successful_test_follows_workspace_changes(result, failed_test) {
         return ProcessTestVerificationStatus::Passed;
     }
     if required_after_correction
@@ -514,7 +1119,177 @@ fn process_test_verification(
     }
 }
 
-fn successful_test_follows_workspace_changes(result: &GoalTurnResult) -> bool {
+pub(crate) fn stop_reason_after_test_verification(
+    stop_reason: GoalTurnStopReason,
+    test_verification: Option<ProcessTestVerificationStatus>,
+) -> GoalTurnStopReason {
+    if matches!(
+        stop_reason,
+        GoalTurnStopReason::Completed | GoalTurnStopReason::ActionCompleted
+    ) && test_verification == Some(ProcessTestVerificationStatus::Failed)
+    {
+        GoalTurnStopReason::ActionFailed
+    } else {
+        stop_reason
+    }
+}
+
+pub(crate) fn task_test_verification(
+    session: &TaskSession,
+    task_id: Uuid,
+    current_turn_status: Option<ProcessTestVerificationStatus>,
+) -> Option<ProcessTestVerificationStatus> {
+    let task = session.get_task(task_id)?;
+    let mut test_requested = false;
+    let mut passed_after_latest_change = false;
+    let mut workspace_revision = 0_u64;
+    let mut requirements = TestVerificationRequirements::default();
+    let activity = task.activity_history();
+    for (index, event) in activity.iter().enumerate() {
+        match event.summary() {
+            TurnActivitySummary::OfflineCargoTestFinished {
+                filter_hash,
+                passed,
+                retry_any_filter,
+            } => {
+                test_requested = true;
+                if passed {
+                    requirements.record_pass(filter_hash, workspace_revision);
+                    passed_after_latest_change = requirements.is_satisfied(workspace_revision);
+                } else {
+                    passed_after_latest_change = false;
+                    requirements.record_failure(filter_hash, retry_any_filter);
+                }
+            }
+            TurnActivitySummary::ActionFailed {
+                action: TurnActivityAction::OfflineCargoTest,
+            } => {
+                test_requested = true;
+                passed_after_latest_change = false;
+                requirements.require_full_suite();
+            }
+            TurnActivitySummary::DirectoryCreated
+            | TurnActivitySummary::FileCreated { .. }
+            | TurnActivitySummary::TextReplaced { .. }
+            | TurnActivitySummary::ExtensionCompleted => {
+                workspace_revision = workspace_revision.saturating_add(1);
+                if test_requested {
+                    passed_after_latest_change = false;
+                }
+            }
+            TurnActivitySummary::ActionFailed { .. } => {
+                if test_requested {
+                    workspace_revision = workspace_revision.saturating_add(1);
+                    passed_after_latest_change = false;
+                }
+            }
+            TurnActivitySummary::ProcessFinished { .. } => {
+                let has_durable_test_summary = activity.get(index + 1).is_some_and(|next| {
+                    next.turn_id() == event.turn_id()
+                        && matches!(
+                            next.summary(),
+                            TurnActivitySummary::OfflineCargoTestFinished { .. }
+                        )
+                });
+                if !has_durable_test_summary {
+                    // Version 1 checkpoints kept only process success and byte counts. Treat that
+                    // legacy evidence as unknown and require a fresh full-suite pass.
+                    test_requested = true;
+                    passed_after_latest_change = false;
+                    requirements.require_full_suite();
+                    workspace_revision = workspace_revision.saturating_add(1);
+                }
+            }
+            TurnActivitySummary::FileRead { .. }
+            | TurnActivitySummary::FileRangeRead { .. }
+            | TurnActivitySummary::DirectoryListed { .. }
+            | TurnActivitySummary::TextSearched { .. }
+            | TurnActivitySummary::TreeTextSearched { .. }
+            | TurnActivitySummary::Completed
+            | TurnActivitySummary::Continued
+            | TurnActivitySummary::BudgetExhausted { .. }
+            | TurnActivitySummary::Cancelled => {}
+        }
+    }
+
+    if current_turn_status == Some(ProcessTestVerificationStatus::Failed) {
+        return Some(ProcessTestVerificationStatus::Failed);
+    }
+    if test_requested {
+        Some(
+            if passed_after_latest_change && requirements.is_satisfied(workspace_revision) {
+                ProcessTestVerificationStatus::Passed
+            } else {
+                ProcessTestVerificationStatus::Failed
+            },
+        )
+    } else {
+        current_turn_status
+    }
+}
+
+#[derive(Default)]
+struct TestVerificationRequirements {
+    any_filter: bool,
+    any_filter_passed_revision: Option<u64>,
+    failed_filters: BTreeMap<[u8; 32], Option<u64>>,
+    full_suite: bool,
+    full_suite_passed_revision: Option<u64>,
+}
+
+impl TestVerificationRequirements {
+    fn record_failure(&mut self, filter_hash: Option<[u8; 32]>, retry_any_filter: bool) {
+        if self.full_suite {
+            self.full_suite_passed_revision = None;
+        }
+        if retry_any_filter {
+            self.any_filter = true;
+            self.any_filter_passed_revision = None;
+        } else if let Some(filter_hash) = filter_hash {
+            self.failed_filters.insert(filter_hash, None);
+        } else {
+            self.full_suite = true;
+            self.full_suite_passed_revision = None;
+        }
+    }
+
+    fn record_pass(&mut self, filter_hash: Option<[u8; 32]>, workspace_revision: u64) {
+        if self.any_filter {
+            self.any_filter_passed_revision = Some(workspace_revision);
+        }
+        if let Some(filter_hash) = filter_hash {
+            if let Some(passed_revision) = self.failed_filters.get_mut(&filter_hash) {
+                *passed_revision = Some(workspace_revision);
+            }
+        } else {
+            if self.full_suite {
+                self.full_suite_passed_revision = Some(workspace_revision);
+            }
+            for passed_revision in self.failed_filters.values_mut() {
+                *passed_revision = Some(workspace_revision);
+            }
+        }
+    }
+
+    fn require_full_suite(&mut self) {
+        self.full_suite = true;
+        self.full_suite_passed_revision = None;
+    }
+
+    fn is_satisfied(&self, workspace_revision: u64) -> bool {
+        (!self.any_filter || self.any_filter_passed_revision == Some(workspace_revision))
+            && self
+                .failed_filters
+                .values()
+                .all(|passed_revision| *passed_revision == Some(workspace_revision))
+            && (!self.full_suite || self.full_suite_passed_revision == Some(workspace_revision))
+    }
+}
+
+fn successful_test_follows_workspace_changes(
+    result: &GoalTurnResult,
+    failed_test: Option<&ProcessResult>,
+) -> bool {
     if !matches!(
         result.stop_reason(),
         GoalTurnStopReason::Completed | GoalTurnStopReason::ActionCompleted
@@ -536,6 +1311,11 @@ fn successful_test_follows_workspace_changes(result: &GoalTurnResult) -> bool {
     let ran_complete_test = process_result.succeeded()
         && process_result.tests_ran
         && process_result.executed_tests.is_some_and(|count| count > 0);
+    let filter_matches = failed_test.is_none_or(|failure| {
+        matches!(failure.outcome, ProcessOutcome::NoTestsMatched)
+            || process_result.test_filter.is_none()
+            || process_result.test_filter == failure.test_filter
+    });
     let later_workspace_change =
         result
             .observations()
@@ -551,7 +1331,7 @@ fn successful_test_follows_workspace_changes(result: &GoalTurnResult) -> bool {
                             | WorkspaceObservation::PatchApplied { .. }
                     )
             });
-    ran_complete_test && !later_workspace_change
+    ran_complete_test && filter_matches && !later_workspace_change
 }
 
 /// The outcome of the test evidence carried by a process-correction flow.
@@ -573,6 +1353,7 @@ pub struct ProcessFailureCorrectionResult {
     correction_result: Option<GoalTurnResult>,
     final_verification: CompletionVerification,
     test_verification: ProcessTestVerificationStatus,
+    final_stop_reason: GoalTurnStopReason,
 }
 
 impl ProcessFailureCorrectionResult {
@@ -599,6 +1380,11 @@ impl ProcessFailureCorrectionResult {
     /// Returns whether complete test evidence passed after any correction.
     pub fn test_verification(&self) -> ProcessTestVerificationStatus {
         self.test_verification
+    }
+
+    /// Returns the effective stop reason after test evidence has been applied.
+    pub fn final_stop_reason(&self) -> GoalTurnStopReason {
+        self.final_stop_reason
     }
 }
 
@@ -682,6 +1468,8 @@ pub struct CompletionCorrectionResult {
     initial_verification: CompletionVerification,
     correction_result: Option<GoalTurnResult>,
     final_verification: CompletionVerification,
+    test_verification: Option<ProcessTestVerificationStatus>,
+    final_stop_reason: GoalTurnStopReason,
 }
 
 impl CompletionCorrectionResult {
@@ -703,6 +1491,16 @@ impl CompletionCorrectionResult {
     /// Returns the independent checks that determine the final task state.
     pub fn final_verification(&self) -> &CompletionVerification {
         &self.final_verification
+    }
+
+    /// Returns test evidence when either turn requested an offline Cargo test.
+    pub fn test_verification(&self) -> Option<ProcessTestVerificationStatus> {
+        self.test_verification
+    }
+
+    /// Returns the effective stop reason after test evidence has been applied.
+    pub fn final_stop_reason(&self) -> GoalTurnStopReason {
+        self.final_stop_reason
     }
 }
 
@@ -741,10 +1539,18 @@ fn finish_completion_without_correction(
     required_checks: &[RequiredCompletionCheck],
     initial_evidence: &[CompletionCheckEvidence],
 ) -> Result<CompletionCorrectionResult, CompletionCorrectionError> {
+    let current_test_verification = initial_result
+        .observations()
+        .iter()
+        .any(|observation| matches!(observation, WorkspaceObservation::ProcessFinished { .. }))
+        .then(|| process_test_verification(&initial_result, false, None));
+    let test_verification = task_test_verification(session, task_id, current_test_verification);
+    let final_stop_reason =
+        stop_reason_after_test_verification(initial_result.stop_reason(), test_verification);
     let final_verification = reconcile_task_state_with_checks(
         session,
         task_id,
-        initial_result.stop_reason(),
+        final_stop_reason,
         required_checks,
         initial_evidence,
     )
@@ -755,6 +1561,8 @@ fn finish_completion_without_correction(
         initial_verification,
         correction_result: None,
         final_verification,
+        test_verification,
+        final_stop_reason,
     })
 }
 
@@ -767,10 +1575,14 @@ fn finish_process_without_correction(
     initial_evidence: &[CompletionCheckEvidence],
     test_verification: ProcessTestVerificationStatus,
 ) -> Result<ProcessFailureCorrectionResult, ProcessFailureCorrectionError> {
+    let test_verification = task_test_verification(session, task_id, Some(test_verification))
+        .unwrap_or(ProcessTestVerificationStatus::Failed);
+    let final_stop_reason =
+        stop_reason_after_test_verification(initial_result.stop_reason(), Some(test_verification));
     let final_verification = reconcile_task_state_with_checks(
         session,
         task_id,
-        initial_result.stop_reason(),
+        final_stop_reason,
         required_checks,
         initial_evidence,
     )
@@ -782,11 +1594,14 @@ fn finish_process_without_correction(
         correction_result: None,
         final_verification,
         test_verification,
+        final_stop_reason,
     })
 }
 
 struct PlanDecisionSource<'a, D: ?Sized> {
     operations: std::vec::IntoIter<WorkspaceAction>,
+    expected_revisions: std::vec::IntoIter<Option<String>>,
+    pending_revision: Option<Option<String>>,
     control_source: &'a mut D,
 }
 
@@ -797,15 +1612,28 @@ impl<D: BoundedDecisionSource + ?Sized> BoundedDecisionSource for PlanDecisionSo
         observations: &[WorkspaceObservation],
     ) -> WorkspaceAction {
         match self.operations.next() {
-            Some(action) if is_registered_workspace_operation(&action) => action,
-            Some(action) => unsupported_action(action),
-            None => match self.control_source.choose_action(goal, observations) {
-                action @ (WorkspaceAction::Complete { .. }
-                | WorkspaceAction::Continue
-                | WorkspaceAction::Cancel) => action,
-                action => unsupported_action(action),
-            },
+            Some(action) => {
+                self.pending_revision = Some(self.expected_revisions.next().unwrap_or(None));
+                if is_registered_workspace_operation(&action) {
+                    action
+                } else {
+                    unsupported_action(action)
+                }
+            }
+            None => {
+                self.pending_revision = Some(None);
+                match self.control_source.choose_action(goal, observations) {
+                    action @ (WorkspaceAction::Complete { .. }
+                    | WorkspaceAction::Continue
+                    | WorkspaceAction::Cancel) => action,
+                    action => unsupported_action(action),
+                }
+            }
         }
+    }
+
+    fn expected_file_revision(&mut self, _action: &WorkspaceAction) -> Option<String> {
+        self.pending_revision.take().flatten()
     }
 }
 
@@ -838,14 +1666,17 @@ fn unsupported_action(action: WorkspaceAction) -> WorkspaceAction {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_goal_turn_with_process_failure_correction, ProcessTestVerificationStatus};
+    use super::{
+        finish_completion_without_correction, run_goal_turn_with_process_failure_correction,
+        ProcessTestVerificationStatus,
+    };
     use crate::brain::{WorkspacePlan, WorkspacePlanError};
     use crate::harness::execution::{
         BoundedDecisionSource, GoalTurnStopReason, WorkspaceAction, WorkspaceObservation,
     };
     use crate::harness::verification::{
-        CompletionCheckEvidence, CompletionCheckEvidenceStatus, CompletionEvidenceSource,
-        CompletionVerificationStatus, RequiredCompletionCheck,
+        verify_completion_checks, CompletionCheckEvidence, CompletionCheckEvidenceStatus,
+        CompletionEvidenceSource, CompletionVerificationStatus, RequiredCompletionCheck,
     };
     use crate::task_lifecycle::{TaskSession, TaskState, TurnState};
     use crate::{OfflineCargoPolicy, ProcessOutcome, ProcessResource, ProcessResult};
@@ -1100,6 +1931,186 @@ mod tests {
         assert_eq!(
             fs::read_to_string(&outside).expect("read canary"),
             "unchanged outside canary"
+        );
+    }
+
+    #[test]
+    fn passing_test_before_final_workspace_edit_fails_no_correction_completion() {
+        let fixture = TempWorkspace::new();
+        let passed_test = process_result(
+            ProcessOutcome::Exited(0),
+            "running 1 test\ntest focused_test ... ok\n",
+            "",
+            Some(FILTER),
+            true,
+            Some(1),
+        );
+        let (mut session, task_id, turn_id) = running_session(&fixture.workspace, [passed_test]);
+        let mut decisions = ScriptedDecisions(VecDeque::from([
+            focused_test_action(),
+            WorkspaceAction::CreateFile {
+                path: PathBuf::from("correction.txt"),
+                contents: "written after the test".to_owned(),
+            },
+            WorkspaceAction::Complete {
+                result: "finish after writing the file".to_owned(),
+            },
+        ]));
+        let initial_result = crate::harness::execution::run_goal_turn_with_budget(
+            &mut session,
+            task_id,
+            turn_id,
+            GOAL,
+            3,
+            &mut decisions,
+        )
+        .expect("run test then final workspace edit");
+        let required_checks = [required_check()];
+        let evidence = evidence_for_correction_file(&fixture.workspace, &initial_result);
+        assert_eq!(
+            verify_completion_checks(&required_checks, &evidence).status,
+            CompletionVerificationStatus::Passed
+        );
+        let initial_verification = verify_completion_checks(&required_checks, &evidence);
+
+        let result = finish_completion_without_correction(
+            &mut session,
+            task_id,
+            initial_result,
+            initial_verification,
+            &required_checks,
+            &evidence,
+        )
+        .expect("reconcile test evidence without correction");
+
+        assert_eq!(
+            result.test_verification(),
+            Some(ProcessTestVerificationStatus::Failed)
+        );
+        assert_eq!(result.final_stop_reason(), GoalTurnStopReason::ActionFailed);
+        assert_eq!(
+            result.final_verification().status,
+            CompletionVerificationStatus::Passed
+        );
+        assert_eq!(
+            session.get_task(task_id).expect("task").state(),
+            TaskState::Failed
+        );
+    }
+
+    #[test]
+    fn incomplete_turn_with_test_evidence_remains_resumable() {
+        let fixture = TempWorkspace::new();
+        let passed_test = process_result(
+            ProcessOutcome::Exited(0),
+            "running 1 test\ntest focused_test ... ok\n",
+            "",
+            Some(FILTER),
+            true,
+            Some(1),
+        );
+        let (mut session, task_id, turn_id) = running_session(&fixture.workspace, [passed_test]);
+        let mut decisions = ScriptedDecisions(VecDeque::from([
+            focused_test_action(),
+            WorkspaceAction::Continue,
+        ]));
+        let initial_result = crate::harness::execution::run_goal_turn_with_budget(
+            &mut session,
+            task_id,
+            turn_id,
+            GOAL,
+            3,
+            &mut decisions,
+        )
+        .expect("stop the turn as resumable");
+        assert_eq!(initial_result.stop_reason(), GoalTurnStopReason::Continued);
+        let required_checks = [required_check()];
+        let initial_verification = verify_completion_checks(&required_checks, &[]);
+
+        let result = finish_completion_without_correction(
+            &mut session,
+            task_id,
+            initial_result,
+            initial_verification,
+            &required_checks,
+            &[],
+        )
+        .expect("keep incomplete task resumable");
+
+        assert_eq!(
+            result.test_verification(),
+            Some(ProcessTestVerificationStatus::Failed)
+        );
+        assert_eq!(result.final_stop_reason(), GoalTurnStopReason::Continued);
+        assert_eq!(
+            session.get_task(task_id).expect("task").state(),
+            TaskState::Running
+        );
+    }
+
+    #[test]
+    fn correction_must_rerun_failed_filter_or_full_suite() {
+        let fixture = TempWorkspace::new();
+        let first_failure = process_result(
+            ProcessOutcome::Exited(101),
+            "running 1 test\ntest focused_test ... FAILED\n",
+            "",
+            Some(FILTER),
+            true,
+            Some(1),
+        );
+        let unrelated_pass = process_result(
+            ProcessOutcome::Exited(0),
+            "running 1 test\ntest unrelated_test ... ok\n",
+            "",
+            Some("unrelated_test"),
+            true,
+            Some(1),
+        );
+        let (mut session, task_id, turn_id) =
+            running_session(&fixture.workspace, [first_failure, unrelated_pass]);
+        let mut decisions = ScriptedDecisions(VecDeque::from([
+            focused_test_action(),
+            WorkspaceAction::Complete {
+                result: "an unrelated test passed".to_owned(),
+            },
+        ]));
+
+        let result = run_goal_turn_with_process_failure_correction(
+            &mut session,
+            task_id,
+            turn_id,
+            GOAL,
+            5,
+            &[required_check()],
+            |_, turn_result| evidence_for_correction_file(&fixture.workspace, turn_result),
+            |_, _, _, failure, _, _, remaining| {
+                assert_eq!(failure.test_filter.as_deref(), Some(FILTER));
+                WorkspacePlan::try_from_actions(
+                    vec![
+                        WorkspaceAction::CreateFile {
+                            path: PathBuf::from("correction.txt"),
+                            contents: "created before the unrelated test".to_owned(),
+                        },
+                        WorkspaceAction::OfflineCargoTest {
+                            test_filter: Some("unrelated_test".to_owned()),
+                        },
+                    ],
+                    remaining,
+                )
+            },
+            &mut decisions,
+        )
+        .expect("record a correction that ran the wrong test filter");
+
+        assert_eq!(
+            result.test_verification(),
+            ProcessTestVerificationStatus::Failed
+        );
+        assert_eq!(result.final_stop_reason(), GoalTurnStopReason::ActionFailed);
+        assert_eq!(
+            session.get_task(task_id).expect("task").state(),
+            TaskState::Failed
         );
     }
 
@@ -1555,5 +2566,178 @@ mod correction_error_lifecycle_tests {
         let task = session.get_task(task_id).unwrap();
         assert_eq!(task.state(), TaskState::Failed);
         assert_eq!(task.get_turn(turn_id).unwrap().state(), TurnState::Failed);
+    }
+}
+
+#[cfg(test)]
+mod task_test_verification_tests {
+    use super::{task_test_verification, ProcessTestVerificationStatus};
+    use crate::task_lifecycle::{
+        TaskSession, TaskState, TurnActivityAction, TurnActivitySummary, TurnOutcome, TurnState,
+    };
+
+    fn verification_for(activity: &[TurnActivitySummary]) -> ProcessTestVerificationStatus {
+        let mut session = TaskSession::new();
+        let task_id = session.create_task("check test verification history").id();
+        let task = session.get_task_mut(task_id).expect("created task");
+        task.transition(TaskState::Running).expect("start task");
+        let turn_id = task.create_turn().expect("create turn");
+        task.transition_turn(turn_id, TurnState::Running)
+            .expect("start turn");
+        session
+            .complete_turn_with_activity(
+                task_id,
+                turn_id,
+                TurnOutcome::Success {
+                    result: "recorded test history".to_owned(),
+                },
+                activity,
+            )
+            .expect("complete turn with activity");
+
+        task_test_verification(&session, task_id, None).expect("test history is present")
+    }
+
+    fn record_test(
+        activity: &mut Vec<TurnActivitySummary>,
+        filter_hash: Option<[u8; 32]>,
+        passed: bool,
+        retry_any_filter: bool,
+    ) {
+        activity.push(TurnActivitySummary::ProcessFinished {
+            succeeded: passed,
+            output_bytes: 0,
+        });
+        activity.push(TurnActivitySummary::OfflineCargoTestFinished {
+            filter_hash,
+            passed,
+            retry_any_filter,
+        });
+    }
+
+    #[test]
+    fn all_failed_filters_must_be_rerun_or_covered_by_a_full_suite() {
+        let filter_b = [2; 32];
+        let filter_c = [3; 32];
+        let mut activity = Vec::new();
+        record_test(&mut activity, Some(filter_b), false, false);
+        activity.push(TurnActivitySummary::TextReplaced { bytes_written: 10 });
+        record_test(&mut activity, Some(filter_c), false, false);
+        record_test(&mut activity, Some(filter_c), true, false);
+
+        assert_eq!(
+            verification_for(&activity),
+            ProcessTestVerificationStatus::Failed,
+            "passing C must not clear the outstanding failure from B"
+        );
+
+        record_test(&mut activity, Some(filter_b), true, false);
+        assert_eq!(
+            verification_for(&activity),
+            ProcessTestVerificationStatus::Passed,
+            "matching passes for both failed filters should clear both obligations"
+        );
+    }
+
+    #[test]
+    fn passing_filter_evidence_expires_after_a_later_workspace_change() {
+        let mut activity = Vec::new();
+        record_test(&mut activity, Some([2; 32]), false, false);
+        record_test(&mut activity, Some([2; 32]), true, false);
+        activity.push(TurnActivitySummary::TextReplaced { bytes_written: 12 });
+        record_test(&mut activity, Some([3; 32]), true, false);
+
+        assert_eq!(
+            verification_for(&activity),
+            ProcessTestVerificationStatus::Failed,
+            "a passing unrelated filter after an edit cannot revive stale B evidence"
+        );
+
+        record_test(&mut activity, Some([2; 32]), true, false);
+        assert_eq!(
+            verification_for(&activity),
+            ProcessTestVerificationStatus::Passed,
+            "rerunning B after the edit should refresh its evidence"
+        );
+    }
+
+    #[test]
+    fn no_tests_matched_retry_cannot_weaken_an_outstanding_filter() {
+        let filter_b = [2; 32];
+        let mut activity = Vec::new();
+        record_test(&mut activity, Some(filter_b), false, false);
+        activity.push(TurnActivitySummary::OfflineCargoTestFinished {
+            filter_hash: Some([3; 32]),
+            passed: false,
+            retry_any_filter: true,
+        });
+        record_test(&mut activity, Some([4; 32]), true, false);
+
+        assert_eq!(
+            verification_for(&activity),
+            ProcessTestVerificationStatus::Failed,
+            "a different passing filter may satisfy NoTestsMatched but not filter B"
+        );
+    }
+
+    #[test]
+    fn filtered_reruns_cannot_weaken_legacy_full_suite_requirement() {
+        let mut activity = vec![TurnActivitySummary::ProcessFinished {
+            succeeded: true,
+            output_bytes: 0,
+        }];
+        record_test(&mut activity, Some([3; 32]), false, false);
+        record_test(&mut activity, Some([3; 32]), true, false);
+
+        assert_eq!(
+            verification_for(&activity),
+            ProcessTestVerificationStatus::Failed,
+            "legacy process evidence requires a fresh full-suite pass"
+        );
+
+        record_test(&mut activity, None, true, false);
+        assert_eq!(
+            verification_for(&activity),
+            ProcessTestVerificationStatus::Passed
+        );
+
+        activity.push(TurnActivitySummary::TextReplaced { bytes_written: 9 });
+        record_test(&mut activity, Some([3; 32]), true, false);
+        assert_eq!(
+            verification_for(&activity),
+            ProcessTestVerificationStatus::Failed,
+            "filtered evidence after an edit cannot replace the legacy full-suite proof"
+        );
+
+        record_test(&mut activity, None, true, false);
+        assert_eq!(
+            verification_for(&activity),
+            ProcessTestVerificationStatus::Passed
+        );
+    }
+
+    #[test]
+    fn failed_test_action_keeps_full_suite_requirement_after_filter_summary() {
+        let mut activity = vec![TurnActivitySummary::ActionFailed {
+            action: TurnActivityAction::OfflineCargoTest,
+        }];
+        activity.push(TurnActivitySummary::OfflineCargoTestFinished {
+            filter_hash: Some([2; 32]),
+            passed: false,
+            retry_any_filter: false,
+        });
+        record_test(&mut activity, Some([2; 32]), true, false);
+
+        assert_eq!(
+            verification_for(&activity),
+            ProcessTestVerificationStatus::Failed,
+            "detailed filter metadata must not overwrite the conservative action failure"
+        );
+
+        record_test(&mut activity, None, true, false);
+        assert_eq!(
+            verification_for(&activity),
+            ProcessTestVerificationStatus::Passed
+        );
     }
 }

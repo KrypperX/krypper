@@ -216,7 +216,7 @@ fn task_session_checkpoint_restore_rejects_malformed_unsupported_oversized_and_d
     let bytes = session.export_checkpoint().unwrap();
 
     let mut unsupported: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    unsupported["version"] = serde_json::json!(2);
+    unsupported["version"] = serde_json::json!(3);
     let unsupported = serde_json::to_vec(&unsupported).unwrap();
     assert!(TaskSession::restore_checkpoint(&unsupported).is_err());
 
