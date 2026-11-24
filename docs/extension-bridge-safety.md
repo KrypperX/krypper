@@ -67,6 +67,11 @@ mint a grant, or choose an arbitrary executor.
   direct child and polls until the group is empty within the bounded grace;
   otherwise it reports `CleanupFailed`. Descendants that deliberately leave the
   group are outside this guarantee.
+- The child starts with a cleared, minimal environment, but the transport does
+  not create a filesystem or network sandbox. The configured server runs with
+  the Krypper process's OS-user permissions, subject to external OS policy.
+  Process grouping limits cleanup scope; it does not reduce the server's
+  authority. Windows currently returns `PlatformUnavailable` before spawning.
 - Config validation is not execution authorization. The only exported connect
   entry point is `connect_stdio_authorized`; it requires a host-owned,
   task-scoped `mcp/connect_stdio` grant with `ExecuteProcess` before validation
@@ -102,6 +107,9 @@ mint a grant, or choose an arbitrary executor.
   schemas must pass the existing provider-bridge JSON Schema subset; descriptions
   are bounded to 512 bytes, have control characters removed, and are prefixed as
   untrusted data that must not be followed as instructions.
+- A discovered grant's `ReadWorkspace` or `MutateWorkspace` effect describes
+  which host-side invocation policy is checked. It does not constrain the
+  separate MCP server process or sandbox its implementation.
 - Invocation arguments are revalidated against the discovered schema through
   the existing extension authorization gate before any `tools/call` request.
   The wire request uses only the remote tool name, never the provider-facing
