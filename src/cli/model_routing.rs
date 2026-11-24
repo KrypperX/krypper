@@ -362,7 +362,7 @@ fn format_no_candidate(reason: crate::routing::NoCandidate, catalog: &LoadedCata
             .join(", ")
     };
     format!(
-        "automatic routing found no eligible model: {details}; catalog {}{}; run `krypper setup --test` for the model you want Krypper to verify",
+        "automatic routing found no eligible model: {details}; catalog {}{}; run `krypper setup` and accept its connection-test prompt for the model you want Krypper to verify",
         match catalog.origin {
             super::model_catalog::CatalogOrigin::Embedded => "embedded",
             super::model_catalog::CatalogOrigin::RefreshedCache => "refreshed",
@@ -378,7 +378,8 @@ mod tests {
         now_unix_secs, EvidenceHealth, ProviderEvidenceObservation, ProviderEvidenceRecord,
     };
     use crate::routing::{
-        CapabilitySupport, CapabilityVerification, RoutingDecision, RoutingRequest,
+        CapabilitySupport, CapabilityVerification, NoCandidate, NoCandidateReasonCode,
+        RoutingDecision, RoutingRequest,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -488,6 +489,20 @@ mod tests {
             compatible_only: false,
             create_revision_key: false,
         }
+    }
+
+    #[test]
+    fn automatic_route_error_points_to_the_interactive_probe_flow() {
+        let catalog = load_catalog(None).unwrap();
+        let message = format_no_candidate(
+            NoCandidate {
+                reason: NoCandidateReasonCode::AllCandidatesRejected,
+                rejected: Vec::new(),
+            },
+            &catalog,
+        );
+        assert!(message.contains("run `krypper setup` and accept its connection-test prompt"));
+        assert!(!message.contains("setup --test"));
     }
 
     #[test]

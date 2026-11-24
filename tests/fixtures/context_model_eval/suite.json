@@ -6,6 +6,7 @@
     {
       "id": "bug_slug_separator",
       "class": "bug_location",
+      "categories": ["coding", "tool_use"],
       "workspace": "bug_slug_separator",
       "goal": "Fix the slug normalization defect where Hello_World stays hello_world. Use hyphens, preserve trimming and lowercasing, and make the existing tests pass.",
       "expected_baseline_failure": {
@@ -18,6 +19,7 @@
     {
       "id": "bug_clock_minutes",
       "class": "bug_location",
+      "categories": ["coding", "tool_use"],
       "workspace": "bug_clock_minutes",
       "goal": "Fix the timer display defect where an elapsed duration of 61 seconds is shown as 01:01; keep seconds zero-padded but do not pad the minute count, and make the existing tests pass.",
       "expected_baseline_failure": {
@@ -30,6 +32,7 @@
     {
       "id": "multi_file_record_field",
       "class": "multi_file",
+      "categories": ["coding", "reasoning", "tool_use"],
       "workspace": "multi_file_record_field",
       "goal": "For the record module, rename the public grouping field from group to category while preserving parsing behavior. Update its source and integration tests together so the crate compiles and all tests pass.",
       "expected_baseline_failure": {
@@ -42,6 +45,7 @@
     {
       "id": "multi_file_settings_field",
       "class": "multi_file",
+      "categories": ["coding", "reasoning", "tool_use"],
       "workspace": "multi_file_settings_field",
       "goal": "For settings, rename the public retry_limit field to max_retries without changing parsing behavior. Update the settings source module and its integration tests together, then make all tests pass.",
       "expected_baseline_failure": {

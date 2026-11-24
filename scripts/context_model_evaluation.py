@@ -46,8 +46,12 @@ def digest_fixture(suite: dict[str, Any]) -> str:
     return digest.hexdigest()
 
 
-def command_version(command: list[str], cwd: Path = ROOT) -> str | None:
-    environment = os.environ.copy()
+def command_version(
+    command: list[str],
+    cwd: Path = ROOT,
+    base_environment: dict[str, str] | None = None,
+) -> str | None:
+    environment = (os.environ if base_environment is None else base_environment).copy()
     environment.pop("CLOUDFLARE_ACCOUNT_ID", None)
     environment.pop("CLOUDFLARE_API_TOKEN", None)
     environment.pop("CLOUDFLARE_AI_GATEWAY_ID", None)
@@ -65,8 +69,10 @@ def command_version(command: list[str], cwd: Path = ROOT) -> str | None:
     return result.stdout.strip() or None
 
 
-def source_diff_digest(base_revision: str) -> str | None:
-    environment = os.environ.copy()
+def source_diff_digest(
+    base_revision: str, base_environment: dict[str, str] | None = None
+) -> str | None:
+    environment = (os.environ if base_environment is None else base_environment).copy()
     environment.pop("CLOUDFLARE_ACCOUNT_ID", None)
     environment.pop("CLOUDFLARE_API_TOKEN", None)
     environment.pop("CLOUDFLARE_AI_GATEWAY_ID", None)
@@ -97,11 +103,17 @@ def snapshot(workspace: Path) -> dict[str, str]:
     return files
 
 
-def read_context(binary: Path, workspace: Path, goal: str, arm: str) -> dict[str, Any]:
+def read_context(
+    binary: Path,
+    workspace: Path,
+    goal: str,
+    arm: str,
+    base_environment: dict[str, str] | None = None,
+) -> dict[str, Any]:
     command = [str(binary), "context", "--goal", goal, "--workspace", str(workspace)]
     if arm == "module_map":
         command.append("--repository-map")
-    environment = os.environ.copy()
+    environment = (os.environ if base_environment is None else base_environment).copy()
     environment.pop("CLOUDFLARE_ACCOUNT_ID", None)
     environment.pop("CLOUDFLARE_API_TOKEN", None)
     environment.pop("CLOUDFLARE_AI_GATEWAY_ID", None)
@@ -139,12 +151,12 @@ def retrieval_metrics(context: dict[str, Any], task: dict[str, Any]) -> dict[str
 
 
 def verify_failing_baselines(
-    suite: dict[str, Any], timeout_seconds: int
+    suite: dict[str, Any], timeout_seconds: int, base_environment: dict[str, str] | None = None
 ) -> list[dict[str, Any]]:
     results = []
     with tempfile.TemporaryDirectory(prefix="krypper-context-baselines-") as temporary:
         root = Path(temporary)
-        environment = os.environ.copy()
+        environment = (os.environ if base_environment is None else base_environment).copy()
         environment.pop("CLOUDFLARE_ACCOUNT_ID", None)
         environment.pop("CLOUDFLARE_API_TOKEN", None)
         environment.pop("CLOUDFLARE_AI_GATEWAY_ID", None)

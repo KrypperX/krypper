@@ -342,6 +342,13 @@ Pass `--model-usage-jsonl` to a model-backed task to emit one `KRYPPER_MODEL_USA
 
 For controlled evaluations, pass `--repository-context-json PATH` with a JSON file written by `krypper context`. Krypper adds it as a separate, untrusted advisory block without changing the task goal. It accepts context objects containing a `snippets` or `modules` array, caps the declared context at 4 KiB and the encoded JSON at 8 KiB, and supports OpenAI-compatible providers. The file's context is sent with the task request. This option cannot be combined with checkpoint or resume options.
 
+To compare saved manual routing with automatic routing on isolated fixture
+tasks, see the [model routing evaluation guide](model-routing-evaluation.md).
+Its default mode is offline; hosted requests require the explicit `--live`
+flag, provider credentials in the environment, and a fresh accepted provider
+probe. The report distinguishes token-usage price estimates and router-reserved
+estimates from actual billed cost, which model usage telemetry does not provide.
+
 Krypper uses fixed HTTPS endpoints and does not accept custom API URLs:
 
 | Provider | Required environment variables | Fixed endpoint |
@@ -514,8 +521,12 @@ manually.
 last refreshed cache. `krypper models --refresh` explicitly contacts the
 configured public catalog feeds and atomically saves a verified cache;
 `--provenance` shows origin, age, source license, and retrieval metadata.
-`--json --provenance` emits `{ "catalog": ..., "models": [...] }`. Plain
-`--json` retains its existing model-array format.
+`--json --provenance` emits `{ "catalog": ..., "models": [...] }`, with
+optional per-model source IDs, prices, and declared features. Plain `--json`
+retains its existing model-array format. Missing catalog prices remain unknown;
+catalog rates support estimates and do not represent provider invoices. See the
+[provider routing migration guide](provider-routing-migration.md) for the
+backward-compatible config changes.
 
 Use `krypper setup --status` to show provider readiness, the selected route and
 reason, and catalog provenance without printing credentials. Add `--json` for

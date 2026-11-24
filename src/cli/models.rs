@@ -31,7 +31,7 @@ pub(super) fn run(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -
                 )?;
                 writeln!(
                     out,
-                    "Use --provenance to include catalog age and source metadata."
+                    "Use --provenance for catalog sources; --json --provenance also includes per-model sources, pricing, and feature metadata."
                 )?;
                 writeln!(
                     out,
@@ -105,7 +105,16 @@ pub(super) fn run(args: &[OsString], out: &mut dyn Write, err: &mut dyn Write) -
         .collect();
 
     if json {
-        let values: Vec<_> = selected.iter().map(|entry| model_json(entry)).collect();
+        let values: Vec<_> = selected
+            .iter()
+            .map(|entry| {
+                if provenance {
+                    model_json_with_provenance(entry)
+                } else {
+                    model_json(entry)
+                }
+            })
+            .collect();
         if provenance {
             let catalog = serde_json::json!({
                 "origin": origin_name(loaded.origin),
@@ -172,6 +181,14 @@ fn model_json(entry: &crate::catalog_sources::CatalogModel) -> serde_json::Value
         "tool_calling": model.tool_calling, "reasoning": model.reasoning,
         "modalities": model.modalities, "status": model.status
     })
+}
+
+fn model_json_with_provenance(entry: &crate::catalog_sources::CatalogModel) -> serde_json::Value {
+    let mut value = model_json(entry);
+    value["pricing"] = serde_json::to_value(&entry.pricing).expect("pricing is serializable");
+    value["features"] = serde_json::to_value(&entry.features).expect("features are serializable");
+    value["sources"] = serde_json::to_value(&entry.sources).expect("sources are serializable");
+    value
 }
 
 fn origin_name(origin: CatalogOrigin) -> &'static str {
@@ -273,7 +290,8 @@ mod tests {
             run(&[OsString::from("--json")], &mut output, &mut Vec::new()).unwrap(),
             0
         );
-        assert!(serde_json::from_slice::<Vec<serde_json::Value>>(&output).is_ok());
+        let plain: Vec<serde_json::Value> = serde_json::from_slice(&output).unwrap();
+        assert!(plain.iter().all(|model| model.get("pricing").is_none()));
 
         output.clear();
         assert_eq!(
@@ -288,5 +306,48 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
         assert!(value["catalog"]["provenance"].is_array());
         assert!(value["models"].is_array());
+        assert!(value["models"].as_array().unwrap().iter().all(|model| {
+            model.get("pricing").is_some()
+                && model.get("features").is_some()
+                && model.get("sources").is_some()
+        }));
+    }
+
+    #[test]
+    fn model_pricing_and_features_are_only_in_provenance_json() {
+        let entry = crate::catalog_sources::CatalogModel {
+            model: crate::catalog_data::ModelSpec {
+                provider: "test-provider".to_owned(),
+                id: "test-model".to_owned(),
+                name: "Test model".to_owned(),
+                context_window: Some(4096),
+                max_output_tokens: Some(1024),
+                tool_calling: Some(true),
+                reasoning: Some(true),
+                status: None,
+                modalities: None,
+            },
+            pricing: Some(crate::catalog_sources::ModelPricing {
+                input_usd_per_million_tokens: Some(serde_json::Number::from(2)),
+                output_usd_per_million_tokens: Some(serde_json::Number::from(8)),
+            }),
+            features: crate::catalog_sources::ModelFeatures {
+                structured_output: Some(true),
+                ..Default::default()
+            },
+            sources: vec![crate::catalog_sources::CatalogSourceId::new("test-source")
+                .expect("valid source id")],
+        };
+
+        let plain = model_json(&entry);
+        assert!(plain.get("pricing").is_none());
+        assert!(plain.get("features").is_none());
+        assert!(plain.get("sources").is_none());
+
+        let detailed = model_json_with_provenance(&entry);
+        assert_eq!(detailed["pricing"]["input_usd_per_million_tokens"], 2);
+        assert_eq!(detailed["pricing"]["output_usd_per_million_tokens"], 8);
+        assert_eq!(detailed["features"]["structured_output"], true);
+        assert_eq!(detailed["sources"][0], "test-source");
     }
 }

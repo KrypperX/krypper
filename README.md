@@ -65,6 +65,8 @@ It prompts for the account ID, a hidden API token, and an optional AI Gateway ID
 
 - [CLI and runtime reference](docs/CLI_REFERENCE.md) — commands, model providers, checkpoints, streaming, and safety constraints
 - [Context model evaluation](docs/context-model-evaluation.md) — offline preflight and opt-in same-model comparison runner
+- [Model routing evaluation](docs/model-routing-evaluation.md) — offline preflight and opt-in manual/automatic route comparison
+- [Provider routing migration](docs/provider-routing-migration.md) — compatibility, automatic routing setup, and rollback
 - [Development guide](DEVELOPMENT.md) — code layout, architectural boundaries, and migration notes
 - [Documentation directory](docs/) — focused technical guides
 
