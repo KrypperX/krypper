@@ -59,3 +59,6 @@ pub mod extensions {
         EXTENSION_CONTRACT_VERSION,
     };
 }
+
+/// Opt-in, bounded planning for safe model fallback and provider switching.
+pub mod fallback;
