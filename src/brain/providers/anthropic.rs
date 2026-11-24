@@ -50,13 +50,11 @@ fn map_anthropic_assembly_error(error: crate::streaming::AnthropicAssemblyError)
 
 impl AnthropicDecisionSource {
     pub(crate) fn new(model: impl Into<String>, api_key: String, action_budget: usize) -> Self {
-        Self::with_url(
-            model,
-            api_key,
-            action_budget,
-            ANTHROPIC_MESSAGES_URL.to_owned(),
-            &[],
-        )
+        let endpoint = match provider_descriptor(ModelProvider::Anthropic).endpoint {
+            ProviderEndpoint::Fixed(url) => url,
+            _ => unreachable!("Anthropic provider descriptor uses a fixed endpoint"),
+        };
+        Self::with_url(model, api_key, action_budget, endpoint.to_owned(), &[])
     }
 
     #[cfg(test)]
@@ -122,9 +120,12 @@ impl AnthropicDecisionSource {
     }
 
     fn workspace_headers(&self) -> Vec<(&'static str, &str)> {
+        let header = AuthFieldRole::AnthropicWorkspaceId
+            .request_header()
+            .expect("Anthropic workspace ID has a request header");
         self.workspace_id
             .iter()
-            .map(|id| (ANTHROPIC_WORKSPACE_HEADER, id.as_str()))
+            .map(|id| (header, id.as_str()))
             .collect()
     }
 

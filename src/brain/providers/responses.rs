@@ -18,9 +18,9 @@ impl ResponsesProvider {
     }
 
     pub(in crate::brain) fn endpoint(self) -> &'static str {
-        match self {
-            Self::OpenAi => OPENAI_RESPONSES_URL,
-            Self::Xai => XAI_RESPONSES_URL,
+        match provider_descriptor(self.model_provider()).endpoint {
+            ProviderEndpoint::Fixed(url) => url,
+            _ => unreachable!("Responses provider descriptors use fixed endpoints"),
         }
     }
 }

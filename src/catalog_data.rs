@@ -2,19 +2,10 @@
 //! User configuration and provider routing remain authoritative.
 use serde_json::Value;
 
-/// Match a Krypper provider selector to provider IDs in the central catalog.
-/// The Cloudflare Gateway selector can use both its unified third-party models
-/// and Cloudflare-hosted Workers AI models.
+/// Match a built-in provider selector to catalog IDs from its trusted
+/// descriptor. Catalog records remain descriptive only.
 pub fn provider_matches(selector: &str, catalog_provider: &str) -> bool {
-    selector == catalog_provider
-        || match selector {
-            "cloudflare" => catalog_provider == "cloudflare-workers-ai",
-            "cloudflare-ai-gateway" => matches!(
-                catalog_provider,
-                "cloudflare-ai-gateway" | "cloudflare-workers-ai"
-            ),
-            _ => false,
-        }
+    crate::brain::provider_catalog_matches(selector, catalog_provider)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,5 +120,11 @@ mod tests {
             "cloudflare-workers-ai"
         ));
         assert!(!provider_matches("cloudflare-ai-gateway", "openai"));
+    }
+
+    #[test]
+    fn gemini_selector_matches_google_catalog_records() {
+        assert!(provider_matches("gemini", "google"));
+        assert!(!provider_matches("gemini", "google-vertex"));
     }
 }

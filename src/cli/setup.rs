@@ -6,67 +6,13 @@ use super::settings::{
     load_credentials, remove_settings, save_credentials, save_model_defaults, user_settings_paths,
     valid_credential, CredentialStore, UserSettingsPaths,
 };
-use crate::brain::{validate_model_name_for_provider, CloudflareAccountId, CloudflareGatewayId};
+use crate::brain::{
+    provider_descriptor_by_selector, provider_descriptors, validate_model_name_for_provider,
+    AuthFieldRole, CloudflareAccountId, CloudflareGatewayId, ProviderDescriptor,
+};
 use std::ffi::OsString;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::PathBuf;
-
-#[derive(Clone, Copy)]
-struct ProviderChoice {
-    id: &'static str,
-    label: &'static str,
-}
-
-const PROVIDERS: &[ProviderChoice] = &[
-    ProviderChoice {
-        id: "ollama",
-        label: "Ollama (local)",
-    },
-    ProviderChoice {
-        id: "gemini",
-        label: "Google Gemini",
-    },
-    ProviderChoice {
-        id: "openai",
-        label: "OpenAI",
-    },
-    ProviderChoice {
-        id: "xai",
-        label: "xAI",
-    },
-    ProviderChoice {
-        id: "anthropic",
-        label: "Anthropic",
-    },
-    ProviderChoice {
-        id: "cloudflare",
-        label: "Cloudflare Workers AI (direct)",
-    },
-    ProviderChoice {
-        id: "cloudflare-ai-gateway",
-        label: "Cloudflare AI Gateway",
-    },
-    ProviderChoice {
-        id: "groq",
-        label: "Groq",
-    },
-    ProviderChoice {
-        id: "openrouter",
-        label: "OpenRouter",
-    },
-    ProviderChoice {
-        id: "deepseek",
-        label: "DeepSeek",
-    },
-    ProviderChoice {
-        id: "zai",
-        label: "Z.AI",
-    },
-    ProviderChoice {
-        id: "mistral",
-        label: "Mistral",
-    },
-];
 
 pub(super) fn run(
     arguments: &[OsString],
@@ -267,9 +213,10 @@ fn configure(
         return usage_error(error, Some("setup"), &message);
     }
 
-    let selected_credential_count = provider_secret_names(provider.id)
+    let selected_credential_count = provider
+        .auth_fields
         .iter()
-        .filter(|name| credentials.get(name).is_some())
+        .filter(|field| credentials.get(field.name).is_some())
         .count();
     write_review(output, paths, provider, &model, selected_credential_count)?;
     if !prompt_yes_no(
@@ -287,16 +234,16 @@ fn configure(
             return usage_error(error, Some("setup"), &message);
         }
     }
-    if let Err(message) = save_model_defaults(&paths.model, provider.id, &model) {
+    if let Err(message) = save_model_defaults(&paths.model, provider.selector, &model) {
         return usage_error(error, Some("setup"), &message);
     }
     writeln!(
         output,
         "Saved {} with model `{model}` for this user.\nModel defaults: {}",
-        provider.label,
+        provider.setup_label,
         paths.model.display()
     )?;
-    if !provider_secret_names(provider.id).is_empty() {
+    if !provider.auth_fields.is_empty() {
         writeln!(
             output,
             "Credentials were saved locally. Unix restricts access to your user; other systems use permissions inherited from the per-user config directory. The credential file is not encrypted."
@@ -315,7 +262,7 @@ fn configure(
         )?;
     }
 
-    let test_prompt = if provider.id == "ollama" {
+    let test_prompt = if provider.selector == "ollama" {
         "Send one short request to the local Ollama instance to test it? [y/N] "
     } else {
         "Send one short request to test this provider? It sends a prompt to the selected service and may incur charges. [y/N] "
@@ -329,12 +276,12 @@ fn configure(
 fn write_review(
     output: &mut dyn Write,
     paths: &UserSettingsPaths,
-    provider: ProviderChoice,
+    provider: ProviderDescriptor,
     model: &str,
     credential_count: usize,
 ) -> io::Result<()> {
     writeln!(output, "\nReview your setup:")?;
-    writeln!(output, "  Provider: {}", provider.label)?;
+    writeln!(output, "  Provider: {}", provider.setup_label)?;
     writeln!(output, "  Model: {model}")?;
     if credential_count == 0 {
         writeln!(output, "  Credentials: none required")?;
@@ -360,10 +307,10 @@ fn has_config_override() -> bool {
 fn choose_provider(
     input: &mut dyn Read,
     output: &mut dyn Write,
-) -> io::Result<Option<ProviderChoice>> {
+) -> io::Result<Option<ProviderDescriptor>> {
     writeln!(output, "Choose a model provider:")?;
-    for (index, provider) in PROVIDERS.iter().enumerate() {
-        writeln!(output, "  {}. {}", index + 1, provider.label)?;
+    for (index, provider) in provider_descriptors().iter().enumerate() {
+        writeln!(output, "  {}. {}", index + 1, provider.setup_label)?;
     }
     loop {
         let Some(value) = prompt_line(input, output, "Provider [1; q cancels]: ")? else {
@@ -373,17 +320,20 @@ fn choose_provider(
             return Ok(None);
         }
         if value.trim().is_empty() {
-            return Ok(Some(PROVIDERS[0]));
+            return Ok(provider_descriptors().first().copied());
         }
         if let Ok(index) = value.trim().parse::<usize>() {
-            if let Some(provider) = index.checked_sub(1).and_then(|index| PROVIDERS.get(index)) {
+            if let Some(provider) = index
+                .checked_sub(1)
+                .and_then(|index| provider_descriptors().get(index))
+            {
                 return Ok(Some(*provider));
             }
         }
         writeln!(
             output,
             "Choose a number from 1 to {} or enter q.",
-            PROVIDERS.len()
+            provider_descriptors().len()
         )?;
     }
 }
@@ -391,7 +341,7 @@ fn choose_provider(
 fn choose_model(
     input: &mut dyn Read,
     output: &mut dyn Write,
-    provider: ProviderChoice,
+    provider: ProviderDescriptor,
 ) -> io::Result<Option<String>> {
     let Some(query) = prompt_line(
         input,
@@ -412,17 +362,17 @@ fn choose_model(
     }
     let all_models = crate::catalog_data::models().map_err(io::Error::other)?;
     if let Some(exact) = all_models.iter().find(|model| {
-        crate::catalog_data::provider_matches(provider.id, &model.provider)
+        crate::catalog_data::provider_matches(provider.selector, &model.provider)
             && model.id.eq_ignore_ascii_case(&query)
     }) {
-        return validate_model(provider.id, &exact.id)
+        return validate_model(provider.selector, &exact.id)
             .map(Some)
             .map_err(io::Error::other);
     }
     let query = query.to_ascii_lowercase();
     let candidates: Vec<_> = all_models
         .iter()
-        .filter(|model| crate::catalog_data::provider_matches(provider.id, &model.provider))
+        .filter(|model| crate::catalog_data::provider_matches(provider.selector, &model.provider))
         .filter(|model| {
             model.id.to_ascii_lowercase().contains(&query)
                 || model.name.to_ascii_lowercase().contains(&query)
@@ -471,7 +421,7 @@ fn choose_model(
                 return Ok(Some(candidate.id.clone()));
             }
         }
-        match validate_model(provider.id, selection) {
+        match validate_model(provider.selector, selection) {
             Ok(model) => return Ok(Some(model)),
             Err(message) => writeln!(output, "{message}")?,
         }
@@ -481,7 +431,7 @@ fn choose_model(
 fn prompt_model_id(
     input: &mut dyn Read,
     output: &mut dyn Write,
-    provider: ProviderChoice,
+    provider: ProviderDescriptor,
 ) -> io::Result<Option<String>> {
     loop {
         let Some(model) = prompt_line(input, output, "Model ID (q cancels): ")? else {
@@ -491,7 +441,7 @@ fn prompt_model_id(
         if model.eq_ignore_ascii_case("q") {
             return Ok(None);
         }
-        match validate_model(provider.id, model) {
+        match validate_model(provider.selector, model) {
             Ok(model) => return Ok(Some(model)),
             Err(message) => writeln!(output, "{message}")?,
         }
@@ -507,120 +457,60 @@ fn validate_model(provider: &str, model: &str) -> Result<String, &'static str> {
 fn collect_credentials(
     input: &mut dyn Read,
     output: &mut dyn Write,
-    provider: ProviderChoice,
+    provider: ProviderDescriptor,
     credentials: &mut CredentialStore,
 ) -> Result<(), String> {
-    match provider.id {
-        "ollama" => Ok(()),
-        "cloudflare" | "cloudflare-ai-gateway" => {
-            let account_id = prompt_required_line(input, output, "Cloudflare Account ID: ")?;
-            CloudflareAccountId::try_from(account_id.as_str())
-                .map_err(|_| "invalid Cloudflare Account ID".to_owned())?;
-            credentials.insert("CLOUDFLARE_ACCOUNT_ID", account_id);
-            let token = prompt_required_secret(output, "Cloudflare API token: ")?;
-            credentials.insert("CLOUDFLARE_API_TOKEN", token);
-            if provider.id == "cloudflare-ai-gateway" {
-                let gateway_id = prompt_line(input, output, "AI Gateway ID [default]: ")
+    for field in provider.auth_fields {
+        match field.role {
+            AuthFieldRole::ApiKey if field.secret => {
+                credentials.insert(
+                    field.name,
+                    prompt_required_secret(output, field.setup_prompt)?,
+                );
+            }
+            AuthFieldRole::CloudflareAccountId => {
+                let account_id = prompt_required_line(input, output, field.setup_prompt)?;
+                CloudflareAccountId::try_from(account_id.as_str())
+                    .map_err(|_| "invalid Cloudflare Account ID".to_owned())?;
+                credentials.insert(field.name, account_id);
+            }
+            AuthFieldRole::CloudflareGatewayId => {
+                let gateway_id = prompt_line(input, output, field.setup_prompt)
                     .map_err(|_| "could not read interactive input".to_owned())?
                     .ok_or_else(|| "setup cancelled; no settings were changed".to_owned())?;
-                let gateway_id = if gateway_id.trim().is_empty() {
-                    credentials.remove("CLOUDFLARE_AI_GATEWAY_ID");
-                    None
+                if gateway_id.trim().is_empty() {
+                    credentials.remove(field.name);
                 } else {
                     let gateway_id = gateway_id.trim().to_owned();
                     CloudflareGatewayId::try_from(gateway_id.as_str())
                         .map_err(|_| "invalid Cloudflare AI Gateway ID".to_owned())?;
-                    Some(gateway_id)
-                };
-                if let Some(gateway_id) = gateway_id {
-                    credentials.insert("CLOUDFLARE_AI_GATEWAY_ID", gateway_id);
+                    credentials.insert(field.name, gateway_id);
                 }
             }
-            Ok(())
-        }
-        "anthropic" => {
-            let key = prompt_required_secret(output, "Anthropic API key: ")?;
-            credentials.insert("ANTHROPIC_API_KEY", key);
-            let workspace_id = prompt_line(
-                input,
-                output,
-                "Anthropic Workspace ID (optional; Enter to skip): ",
-            )
-            .map_err(|_| "could not read interactive input".to_owned())?
-            .ok_or_else(|| "setup cancelled; no settings were changed".to_owned())?;
-            if workspace_id.trim().is_empty() {
-                credentials.remove("ANTHROPIC_WORKSPACE_ID");
-            } else {
-                let workspace_id = workspace_id.trim();
-                if workspace_id.len() > 128
-                    || !workspace_id
-                        .bytes()
-                        .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
-                {
-                    return Err("invalid Anthropic Workspace ID".to_owned());
+            AuthFieldRole::AnthropicWorkspaceId => {
+                let workspace_id = prompt_line(input, output, field.setup_prompt)
+                    .map_err(|_| "could not read interactive input".to_owned())?
+                    .ok_or_else(|| "setup cancelled; no settings were changed".to_owned())?;
+                if workspace_id.trim().is_empty() {
+                    credentials.remove(field.name);
+                } else {
+                    let workspace_id = workspace_id.trim();
+                    if workspace_id.len() > 128
+                        || !workspace_id
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+                    {
+                        return Err("invalid Anthropic Workspace ID".to_owned());
+                    }
+                    credentials.insert(field.name, workspace_id.to_owned());
                 }
-                credentials.insert("ANTHROPIC_WORKSPACE_ID", workspace_id.to_owned());
             }
-            Ok(())
+            AuthFieldRole::ApiKey => {
+                return Err("provider API key metadata is invalid".to_owned());
+            }
         }
-        "gemini" => {
-            credentials.insert(
-                "GEMINI_API_KEY",
-                prompt_required_secret(output, "Gemini API key: ")?,
-            );
-            Ok(())
-        }
-        "openai" => {
-            credentials.insert(
-                "OPENAI_API_KEY",
-                prompt_required_secret(output, "OpenAI API key: ")?,
-            );
-            Ok(())
-        }
-        "xai" => {
-            credentials.insert(
-                "XAI_API_KEY",
-                prompt_required_secret(output, "xAI API key: ")?,
-            );
-            Ok(())
-        }
-        "groq" => {
-            credentials.insert(
-                "GROQ_API_KEY",
-                prompt_required_secret(output, "Groq API key: ")?,
-            );
-            Ok(())
-        }
-        "openrouter" => {
-            credentials.insert(
-                "OPENROUTER_API_KEY",
-                prompt_required_secret(output, "OpenRouter API key: ")?,
-            );
-            Ok(())
-        }
-        "deepseek" => {
-            credentials.insert(
-                "DEEPSEEK_API_KEY",
-                prompt_required_secret(output, "DeepSeek API key: ")?,
-            );
-            Ok(())
-        }
-        "zai" => {
-            credentials.insert(
-                "ZAI_API_KEY",
-                prompt_required_secret(output, "Z.AI API key: ")?,
-            );
-            Ok(())
-        }
-        "mistral" => {
-            credentials.insert(
-                "MISTRAL_API_KEY",
-                prompt_required_secret(output, "Mistral API key: ")?,
-            );
-            Ok(())
-        }
-        _ => Err("unsupported provider".to_owned()),
     }
+    Ok(())
 }
 
 fn prompt_required_secret(output: &mut dyn Write, prompt: &str) -> Result<String, String> {
@@ -695,32 +585,8 @@ fn prompt_line(
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "input must be UTF-8"))
 }
 
-fn provider_secret_names(provider: &str) -> &'static [&'static str] {
-    match provider {
-        "gemini" => &["GEMINI_API_KEY"],
-        "openai" => &["OPENAI_API_KEY"],
-        "xai" => &["XAI_API_KEY"],
-        "anthropic" => &["ANTHROPIC_API_KEY", "ANTHROPIC_WORKSPACE_ID"],
-        "cloudflare" => &["CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_API_TOKEN"],
-        "cloudflare-ai-gateway" => &[
-            "CLOUDFLARE_ACCOUNT_ID",
-            "CLOUDFLARE_API_TOKEN",
-            "CLOUDFLARE_AI_GATEWAY_ID",
-        ],
-        "groq" => &["GROQ_API_KEY"],
-        "openrouter" => &["OPENROUTER_API_KEY"],
-        "deepseek" => &["DEEPSEEK_API_KEY"],
-        "zai" => &["ZAI_API_KEY"],
-        "mistral" => &["MISTRAL_API_KEY"],
-        _ => &[],
-    }
-}
-
 fn provider_label(provider: &str) -> &str {
-    PROVIDERS
-        .iter()
-        .find(|choice| choice.id == provider)
-        .map_or(provider, |choice| choice.label)
+    provider_descriptor_by_selector(provider).map_or(provider, |descriptor| descriptor.setup_label)
 }
 
 fn escape_terminal_text(value: &str) -> String {
@@ -736,7 +602,7 @@ fn escape_terminal_text(value: &str) -> String {
 }
 
 fn test_connection(
-    provider: ProviderChoice,
+    provider: ProviderDescriptor,
     model: &str,
     output: &mut dyn Write,
 ) -> io::Result<()> {
@@ -747,7 +613,7 @@ fn test_connection(
         OsString::from("--max-actions"),
         OsString::from("1"),
         OsString::from("--provider"),
-        OsString::from(provider.id),
+        OsString::from(provider.selector),
         OsString::from("--model"),
         OsString::from(model),
         OsString::from("--workspace"),
@@ -799,23 +665,23 @@ mod tests {
 
     #[test]
     fn provider_list_matches_every_supported_cli_provider() {
-        for provider in PROVIDERS {
-            assert!(crate::brain::ModelProvider::parse(provider.id).is_some());
+        for provider in provider_descriptors() {
+            assert!(crate::brain::ModelProvider::parse(provider.selector).is_some());
         }
         assert_eq!(
-            PROVIDERS
+            provider_descriptors()
                 .iter()
-                .find(|provider| provider.id == "cloudflare")
+                .find(|provider| provider.selector == "cloudflare")
                 .unwrap()
-                .label,
+                .setup_label,
             "Cloudflare Workers AI (direct)"
         );
         assert_eq!(
-            PROVIDERS
+            provider_descriptors()
                 .iter()
-                .find(|provider| provider.id == "cloudflare-ai-gateway")
+                .find(|provider| provider.selector == "cloudflare-ai-gateway")
                 .unwrap()
-                .label,
+                .setup_label,
             "Cloudflare AI Gateway"
         );
     }
@@ -875,12 +741,12 @@ mod tests {
             model: PathBuf::from("/user/config/krypper/config.toml"),
             credentials: PathBuf::from("/user/config/krypper/credentials.json"),
         };
-        let provider = *PROVIDERS
+        let provider = provider_descriptors()
             .iter()
-            .find(|provider| provider.id == "openai")
+            .find(|provider| provider.selector == "openai")
             .unwrap();
         let mut output = Vec::new();
-        write_review(&mut output, &paths, provider, "gpt-4.1", credentials.len()).unwrap();
+        write_review(&mut output, &paths, *provider, "gpt-4.1", credentials.len()).unwrap();
         let output = String::from_utf8(output).unwrap();
         assert!(output.contains("OpenAI"));
         assert!(output.contains("gpt-4.1"));
