@@ -371,10 +371,11 @@ disables environment-configured proxies, so `HTTP_PROXY`, `HTTPS_PROXY`,
 `ALL_PROXY`, and `NO_PROXY` do not change model traffic. Networks that require
 an HTTP proxy cannot use hosted providers with this version. Connection setup is
 limited to 10 seconds for hosted endpoints and 2 seconds for local Ollama; each
-request has a 120-second total limit. Requests are not replayed after
-transmission begins, since a provider may already have processed or billed an
-ambiguous request. Automatic route fallback is a separate, explicitly
-configured routing policy.
+request has a 120-second total limit. Krypper retries at most once for a known
+DNS or connection-setup failure before sending request bytes. It does not replay
+requests after transmission begins, since a provider may already have processed
+or billed an ambiguous request. Automatic route fallback is a separate,
+explicitly configured routing policy.
 
 Anthropic requires the `anthropic-workspace-id` request header for API keys that
 are not scoped to a workspace; it is optional for workspace-scoped keys. When
