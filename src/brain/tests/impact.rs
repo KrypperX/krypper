@@ -91,7 +91,8 @@ fn impact_checked_planner_sends_references_to_same_model_before_accepting_plan()
     assert_eq!(source.remaining_decisions, 1);
     assert!(matches!(
         plan.plan().operations().first(),
-        Some(WorkspaceAction::ApplyPatch { path, .. }) if path == "src/lib.rs"
+        Some(WorkspaceAction::ApplyPatch { path, .. })
+            if path == std::path::Path::new("src/lib.rs")
     ));
 }
 
