@@ -7,7 +7,7 @@ use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
-use super::super::syscalls::OpenRequest;
+use super::super::syscalls::{OpenRequest, RenameFileError};
 use super::super::types::{CreateMode, DirHandle, FileIdentity, FileKind, FileStatus};
 
 fn c_string(value: &OsStr) -> io::Result<CString> {
@@ -195,9 +195,21 @@ pub(crate) fn rename_file_at(
     parent: &DirHandle,
     temporary_name: &OsStr,
     name: &OsStr,
-) -> io::Result<()> {
-    let temporary_name = c_string(temporary_name)?;
-    let name = c_string(name)?;
+) -> Result<(), RenameFileError> {
+    rename_file_at_with_sync(parent, temporary_name, name, sync_directory)
+}
+
+fn rename_file_at_with_sync<F>(
+    parent: &DirHandle,
+    temporary_name: &OsStr,
+    name: &OsStr,
+    sync: F,
+) -> Result<(), RenameFileError>
+where
+    F: FnOnce(&DirHandle) -> io::Result<()>,
+{
+    let temporary_name = c_string(temporary_name).map_err(|_| RenameFileError::NotCommitted)?;
+    let name = c_string(name).map_err(|_| RenameFileError::NotCommitted)?;
     // SAFETY: both names are NUL-terminated components and `parent` is an open directory.
     if unsafe {
         libc::renameat(
@@ -208,9 +220,9 @@ pub(crate) fn rename_file_at(
         )
     } != 0
     {
-        return Err(io::Error::last_os_error());
+        return Err(RenameFileError::NotCommitted);
     }
-    sync_directory(parent)
+    sync(parent).map_err(|_| RenameFileError::CommittedButUnverified)
 }
 
 pub(crate) fn unlink_created_file(
@@ -411,4 +423,37 @@ fn python_codepoints(bytes: &[u8]) -> Vec<u32> {
         }
     }
     codepoints
+}
+
+#[cfg(test)]
+mod rename_tests {
+    use std::ffi::OsStr;
+    use std::fs;
+    use std::io;
+
+    use super::{open_directory_path, rename_file_at_with_sync, RenameFileError};
+
+    #[test]
+    fn reports_committed_when_directory_sync_fails_after_rename() {
+        let directory =
+            std::env::temp_dir().join(format!("krypper-rename-sync-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&directory).unwrap();
+        let staged = directory.join(".staged");
+        let target = directory.join("target");
+        fs::write(&staged, b"new").unwrap();
+        fs::write(&target, b"old").unwrap();
+        let parent = open_directory_path(&directory).unwrap();
+
+        let result =
+            rename_file_at_with_sync(&parent, OsStr::new(".staged"), OsStr::new("target"), |_| {
+                Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "simulated sync failure",
+                ))
+            });
+
+        assert_eq!(result, Err(RenameFileError::CommittedButUnverified));
+        assert_eq!(fs::read(&target).unwrap(), b"new");
+        fs::remove_dir_all(directory).unwrap();
+    }
 }

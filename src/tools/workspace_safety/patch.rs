@@ -603,11 +603,14 @@ mod tests {
             patch,
             super::super::write_to_file,
             |_parent: &super::super::DirHandle, _temporary: &OsStr, _target: &OsStr| {
-                Err(io::Error::other("simulated uncertain commit"))
+                Err(super::super::syscalls::RenameFileError::NotCommitted)
             },
             super::super::read_file_contents_at_for_verification,
         );
-        assert!(commit_failure.is_err());
+        assert_eq!(
+            commit_failure.unwrap_err().message(),
+            "unable to replace file"
+        );
         assert_eq!(fs::read(&file).unwrap(), b"old\n");
 
         let readback_failure = super::super::apply_patch_file_at_with_ops(
@@ -617,11 +620,19 @@ mod tests {
             super::super::write_to_file,
             |parent: &super::super::DirHandle, temporary: &OsStr, target: &OsStr| {
                 super::super::rename_file_at(parent, temporary, target)?;
-                Err(io::Error::other("simulated lost commit response"))
+                Err(super::super::syscalls::RenameFileError::CommittedButUnverified)
             },
             super::super::read_file_contents_at_for_verification,
         );
-        assert!(readback_failure.is_err());
+        let error = readback_failure.unwrap_err();
+        assert!(matches!(
+            &error,
+            super::super::CliError::WorkspaceMutationCommittedButUnverified
+        ));
+        assert_eq!(
+            error.message(),
+            "workspace file replacement committed but could not be verified; inspect it before retrying"
+        );
         assert_eq!(fs::read(&file).unwrap(), b"new\n");
 
         fs::write(&file, "old\n").unwrap();
@@ -635,7 +646,35 @@ mod tests {
                 Err(super::super::CliError::new("simulated readback failure"))
             },
         );
-        assert!(uncertain_readback.is_err());
+        let error = uncertain_readback.unwrap_err();
+        assert!(matches!(
+            &error,
+            super::super::CliError::WorkspaceMutationCommittedButUnverified
+        ));
+        assert_eq!(
+            error.message(),
+            "workspace file replacement committed but could not be verified; inspect it before retrying"
+        );
+        assert_eq!(fs::read(&file).unwrap(), b"new\n");
+
+        fs::write(&file, "old\n").unwrap();
+        let mismatched_readback = super::super::apply_patch_file_at_with_ops(
+            &root,
+            OsStr::new("note.txt"),
+            patch,
+            super::super::write_to_file,
+            super::super::rename_file_at,
+            |_parent: &super::super::DirHandle, _target: &OsStr| Ok(b"different\n".to_vec()),
+        );
+        let error = mismatched_readback.unwrap_err();
+        assert!(matches!(
+            &error,
+            super::super::CliError::WorkspaceMutationCommittedButUnverified
+        ));
+        assert_eq!(
+            error.message(),
+            "workspace file replacement committed but could not be verified; inspect it before retrying"
+        );
         assert_eq!(fs::read(&file).unwrap(), b"new\n");
 
         fs::remove_dir_all(directory).unwrap();

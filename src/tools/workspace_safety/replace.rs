@@ -12,7 +12,7 @@ use super::syscalls::{
     close_file, contains_nul, fstat_file, is_already_exists, is_not_found, is_regular_file,
     is_relative_workspace_path, is_symlink, open_at, path_has_trailing_separator, rename_file_at,
     same_inode, set_mode, stat_at, sync_file, unlink_created_file, write_all_to_file,
-    write_to_file, OpenRequest,
+    write_to_file, OpenRequest, RenameFileError,
 };
 use super::types::{
     CliError, CreateMode, DirHandle, OriginalFileState, PatchEvidence, WorkspaceRoot, MAX_FILE_SIZE,
@@ -118,7 +118,7 @@ pub(super) fn replace_file_contents_atomically<W, C, R>(
 ) -> Result<(), CliError>
 where
     W: FnMut(&mut File, &[u8]) -> io::Result<usize>,
-    C: FnMut(&DirHandle, &OsStr, &OsStr) -> io::Result<()>,
+    C: FnMut(&DirHandle, &OsStr, &OsStr) -> Result<(), RenameFileError>,
     R: FnMut(&DirHandle, &OsStr) -> Result<Vec<u8>, CliError>,
 {
     let (temporary_name, temporary_file) = (0..3)
@@ -181,16 +181,20 @@ where
         return Err(CliError::new("file changed while replacing it"));
     }
 
-    if committer(parent, &temporary_name, name).is_err() {
-        unlink_created_file(parent, &temporary_name, identity.as_ref());
-        return Err(CliError::new("unable to replace file"));
+    match committer(parent, &temporary_name, name) {
+        Ok(()) => {}
+        Err(RenameFileError::NotCommitted) => {
+            unlink_created_file(parent, &temporary_name, identity.as_ref());
+            return Err(CliError::new("unable to replace file"));
+        }
+        Err(RenameFileError::CommittedButUnverified) => {
+            return Err(CliError::WorkspaceMutationCommittedButUnverified);
+        }
     }
     let stored_contents =
-        readback(parent, name).map_err(|_| CliError::new("unable to verify stored file"))?;
+        readback(parent, name).map_err(|_| CliError::WorkspaceMutationCommittedButUnverified)?;
     if stored_contents != contents {
-        return Err(CliError::new(
-            "stored file did not match the expected contents",
-        ));
+        return Err(CliError::WorkspaceMutationCommittedButUnverified);
     }
     Ok(())
 }
@@ -273,7 +277,7 @@ pub(super) fn apply_patch_file_at_with_ops<W, C, R>(
 ) -> Result<PatchEvidence, CliError>
 where
     W: FnMut(&mut File, &[u8]) -> io::Result<usize>,
-    C: FnMut(&DirHandle, &OsStr, &OsStr) -> io::Result<()>,
+    C: FnMut(&DirHandle, &OsStr, &OsStr) -> Result<(), RenameFileError>,
     R: FnMut(&DirHandle, &OsStr) -> Result<Vec<u8>, CliError>,
 {
     if contains_nul(path) {

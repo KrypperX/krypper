@@ -16,6 +16,7 @@ pub(super) const MAX_TASK_DIRECTORY_ENTRIES: usize = 1024;
 pub(crate) enum CliError {
     Message(String),
     WorkspaceMetadataMutationDenied,
+    WorkspaceMutationCommittedButUnverified,
     PlatformUnavailable,
 }
 
@@ -125,6 +126,9 @@ impl CliError {
         match self {
             Self::Message(message) => message,
             Self::WorkspaceMetadataMutationDenied => "workspace metadata paths cannot be modified",
+            Self::WorkspaceMutationCommittedButUnverified => {
+                "workspace file replacement committed but could not be verified; inspect it before retrying"
+            }
             Self::PlatformUnavailable => "workspace operations are unavailable on this platform",
         }
     }
