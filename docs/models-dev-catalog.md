@@ -25,3 +25,36 @@ The --from-upstream mode emits the slim snapshot and updates metadata.json with 
 Do not add implicit network syncing to normal Krypper execution.
 
 The catalog is not a provider allowlist. The CLI and provider router continue to accept caller-supplied model IDs that are absent from this snapshot.
+
+## Explicit source adapters and cache
+
+The Rust library exposes a catalog_sources module for callers that explicitly
+refresh or import catalog data. ModelsDevSource normalizes the cross-provider
+source; CloudflareWorkersAiSource adds Cloudflare-specific task, capability,
+and deprecation metadata while preserving full @cf/... model IDs. Optional
+prices are represented as USD per million input or output tokens. Missing
+prices and features remain unknown.
+
+Each contribution records its fixed source URL, adapter schema version, raw
+SHA-256, retrieval time, license, and license URL. Models.dev records retain
+the upstream MIT attribution. Cloudflare Workers AI records retain the
+Cloudflare docs CC BY 4.0 attribution. Cloudflare's feed is not a versioned API;
+unknown feed fields are ignored, while a changed required shape fails the
+refresh and leaves the last-known-good cache in place. Provider metadata is
+descriptive only: it cannot supply request endpoints, credentials, or routing
+authority.
+
+The explicit refresh_catalog and import_catalog_payload APIs validate source
+size, HTTPS-only fixed URLs, bounded request time, record identity, schema
+version, and checksums before replacing a cache file atomically. A failed
+refresh returns the previous verified snapshot, including when it is stale;
+callers can inspect the typed failure and age. Invalid imports do not replace
+a valid cache. read_catalog_cache rejects noncanonical, corrupt, or unsupported
+cache files. The cache is advisory data and is not consulted by
+catalog_data::models(), task setup, or ordinary CLI execution. P9 owns the
+future CLI presentation of explicit refresh and cache status.
+
+The HTTP transport sends unauthenticated GET requests only to the adapters'
+fixed HTTPS URLs, follows no redirects, and has no API-key or custom-header
+surface. Tests inject a local transport fixture; routine tests do not contact
+either upstream service.

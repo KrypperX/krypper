@@ -1,6 +1,7 @@
 //! Deterministic offline normalizer for the pinned models.dev snapshot.
 //! Default mode writes the optional normalized JSON artifact.
 //! Use --check to validate it, or --from-upstream <path> to refresh the slim snapshot.
+use krypper::catalog_sources::{CatalogSource, ModelsDevSource};
 use ring::digest::{digest, SHA256};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -57,66 +58,46 @@ fn pretty_json(value: &impl Serialize) -> Result<Vec<u8>, String> {
     Ok(output)
 }
 
-/// Keep only the fields used by ModelSpec and preserve deterministic provider/model ordering.
-fn normalize(raw: &Value) -> Result<Vec<ModelRecord>, String> {
-    let providers = raw.as_object().ok_or("snapshot root must be an object")?;
-    let mut records = Vec::new();
-    for (provider_id, provider) in providers {
-        let Some(models) = provider.get("models").and_then(Value::as_object) else {
-            continue;
-        };
-        if provider_id.is_empty() {
-            return Err("provider ID must not be empty".into());
-        }
-        for (model_id, model) in models {
-            if model_id.is_empty() {
-                return Err(format!(
-                    "model ID for provider `{provider_id}` must not be empty"
-                ));
+/// Keep the generated slim snapshot aligned with the runtime source adapter.
+fn records_from_contribution(
+    contribution: krypper::catalog_sources::CatalogContribution,
+) -> Vec<ModelRecord> {
+    let mut records: Vec<_> = contribution
+        .models
+        .into_iter()
+        .map(|entry| {
+            let model = entry.model;
+            ModelRecord {
+                provider: model.provider,
+                id: model.id,
+                name: model.name,
+                context_window: model.context_window,
+                max_output_tokens: model.max_output_tokens,
+                tool_calling: model.tool_calling,
+                reasoning: model.reasoning,
+                modalities: model.modalities,
+                status: model.status,
             }
-            let model = model.as_object();
-            let limits = model
-                .and_then(|model| model.get("limit"))
-                .and_then(Value::as_object);
-            let record = ModelRecord {
-                provider: provider_id.clone(),
-                id: model_id.clone(),
-                name: model
-                    .and_then(|model| model.get("name"))
-                    .and_then(Value::as_str)
-                    .unwrap_or(model_id)
-                    .to_owned(),
-                context_window: limits
-                    .and_then(|limits| limits.get("context"))
-                    .and_then(Value::as_u64),
-                max_output_tokens: limits
-                    .and_then(|limits| limits.get("output"))
-                    .and_then(Value::as_u64),
-                tool_calling: model
-                    .and_then(|model| model.get("tool_call"))
-                    .and_then(Value::as_bool),
-                reasoning: model
-                    .and_then(|model| model.get("reasoning"))
-                    .and_then(Value::as_bool),
-                modalities: model.and_then(|model| model.get("modalities")).cloned(),
-                status: model
-                    .and_then(|model| model.get("status"))
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-            };
-            records.push(record);
-        }
-    }
+        })
+        .collect();
     records.sort_by(|left, right| (&left.provider, &left.id).cmp(&(&right.provider, &right.id)));
-    if records.is_empty() {
-        return Err("No models found; verify upstream schema".into());
-    }
-    Ok(records)
+    records
+}
+
+#[cfg(test)]
+fn normalize(raw: &Value) -> Result<Vec<ModelRecord>, String> {
+    let bytes = serde_json::to_vec(raw).map_err(|error| error.to_string())?;
+    let contribution = ModelsDevSource
+        .parse(&bytes, 0)
+        .map_err(|error| error.to_string())?;
+    Ok(records_from_contribution(contribution))
 }
 
 fn generate_from_upstream(source: &[u8], metadata: &mut Value) -> Result<Vec<u8>, String> {
-    let raw: Value = serde_json::from_slice(source).map_err(|error| error.to_string())?;
-    let records = normalize(&raw)?;
+    let contribution = ModelsDevSource
+        .parse(source, 0)
+        .map_err(|error| error.to_string())?;
+    let records = records_from_contribution(contribution);
     let snapshot = pretty_json(&records)?;
     let providers = records
         .iter()
@@ -305,15 +286,9 @@ mod tests {
     #[test]
     fn normalization_rejects_empty_provider_and_model_ids() {
         let empty_provider = json!({ "": { "models": { "model": {} } } });
-        assert_eq!(
-            normalize(&empty_provider).unwrap_err(),
-            "provider ID must not be empty"
-        );
+        assert!(normalize(&empty_provider).is_err());
 
         let empty_model = json!({ "openai": { "models": { "": {} } } });
-        assert_eq!(
-            normalize(&empty_model).unwrap_err(),
-            "model ID for provider `openai` must not be empty"
-        );
+        assert!(normalize(&empty_model).is_err());
     }
 }
