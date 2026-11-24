@@ -81,7 +81,8 @@ impl CapabilityAssertion {
 /// Provider verification and catalog freshness are separate evidence. A fresh
 /// provider probe cannot make stale or unavailable model capability claims
 /// suitable for automatic selection.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum CapabilityEvidenceFreshness {
     /// Capability facts come from a current trusted source or fresh evidence record.
@@ -93,7 +94,8 @@ pub enum CapabilityEvidenceFreshness {
 }
 
 /// Current state of provider and model verification for one configuration.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum CapabilityVerification {
     /// No explicit verification is available.
@@ -110,7 +112,8 @@ pub enum CapabilityVerification {
 ///
 /// This is selection evidence only. A selected route must still pass through
 /// the ordinary credential resolver, adapter registry, and request checks.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProviderReadiness {
     /// The provider is known to this caller.
     pub discoverable: bool,
@@ -123,7 +126,8 @@ pub struct ProviderReadiness {
 }
 
 /// Preference order used to rank otherwise eligible automatic candidates.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum SelectionPreference {
     /// Prefer the lowest caller-computed estimated request cost.
@@ -150,7 +154,8 @@ pub enum RoutingRequest {
 }
 
 /// Requirements and preferences for an explicitly requested automatic route.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct AutomaticRoutingRequest {
     /// Capabilities required by the task.
     pub required_capabilities: Vec<CapabilityName>,
@@ -165,7 +170,8 @@ pub struct AutomaticRoutingRequest {
 }
 
 /// A configured provider/model candidate with metadata and evidence supplied by the caller.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct RoutingCandidate {
     /// Executable provider selector or configured profile ID.
     pub provider: String,
@@ -187,7 +193,8 @@ pub struct RoutingCandidate {
 }
 
 /// Why an automatic route selected the winning candidate.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum SelectionReasonCode {
     /// A manual provider/model selection bypassed automatic ranking.
@@ -202,6 +209,20 @@ pub enum SelectionReasonCode {
     HighestQualityPreference,
     /// Preferences tied or were absent, so the stable provider/model key won.
     StableTieBreak,
+}
+
+impl SelectionReasonCode {
+    /// Stable identifier for logs, CLI output, and UI integrations.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ManualOverride => "manual_override",
+            Self::OnlyEligibleCandidate => "only_eligible_candidate",
+            Self::LowestCostPreference => "lowest_cost_preference",
+            Self::LowestLatencyPreference => "lowest_latency_preference",
+            Self::HighestQualityPreference => "highest_quality_preference",
+            Self::StableTieBreak => "stable_tie_break",
+        }
+    }
 }
 
 /// Why an automatic candidate was rejected.
@@ -293,7 +314,8 @@ pub enum RoutingDecision {
 }
 
 /// Selected provider/model and the reason that won.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct RoutingSelection {
     /// Selected provider selector; manual selection may leave it unset.
     pub provider: Option<String>,

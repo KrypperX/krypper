@@ -1,7 +1,7 @@
 //! Optional user-level defaults for `krypper task`.
 //!
 //! The file uses a small TOML subset: `key = "value"` lines, blank lines, and
-//! `#` comments. Only `provider` and `model` are recognized. Credentials are kept
+//! `#` comments. Credentials are kept
 //! in a separate per-user credential store; environment variables override the
 //! stored values.
 //!
@@ -23,13 +23,27 @@ const CONFIG_FILE: &str = "config.toml";
 pub(super) struct ModelDefaults {
     pub(super) model: String,
     pub(super) provider: Option<String>,
+    pub(super) routing_mode: RoutingMode,
+    pub(super) allow_cross_provider_data_transfer: bool,
+    /// A configured ceiling enables bounded fallback; `None` keeps it disabled.
+    pub(super) fallback_budget_micro_usd: Option<u64>,
     pub(super) path: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) enum RoutingMode {
+    #[default]
+    Manual,
+    Automatic,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
 struct ParsedConfig {
     provider: Option<String>,
     model: Option<String>,
+    routing_mode: Option<RoutingMode>,
+    allow_cross_provider_data_transfer: Option<bool>,
+    fallback_budget_micro_usd: Option<u64>,
 }
 
 /// Chooses the configuration file location.
@@ -82,18 +96,44 @@ pub(super) fn load_model_defaults(path: &Path) -> Result<Option<ModelDefaults>, 
     };
     let parsed = parse_config(&text)
         .map_err(|cause| format!("invalid config file '{}': {cause}", path.display()))?;
-    match (parsed.model, parsed.provider) {
-        (None, None) => Ok(None),
-        (None, Some(_)) => Err(format!(
-            "invalid config file '{}': provider requires model",
+    let has_routing_settings = parsed.routing_mode.is_some()
+        || parsed.allow_cross_provider_data_transfer.is_some()
+        || parsed.fallback_budget_micro_usd.is_some();
+    let Some(model) = parsed.model else {
+        if parsed.provider.is_some() {
+            return Err(format!(
+                "invalid config file '{}': provider requires model",
+                path.display()
+            ));
+        }
+        if has_routing_settings {
+            return Err(format!(
+                "invalid config file '{}': routing settings require a model default",
+                path.display()
+            ));
+        }
+        return Ok(None);
+    };
+    let routing_mode = parsed.routing_mode.unwrap_or_default();
+    let allow_cross_provider_data_transfer =
+        parsed.allow_cross_provider_data_transfer.unwrap_or(false);
+    let fallback_budget_micro_usd = parsed.fallback_budget_micro_usd;
+    if routing_mode == RoutingMode::Manual
+        && (allow_cross_provider_data_transfer || fallback_budget_micro_usd.is_some())
+    {
+        return Err(format!(
+            "invalid config file '{}': cross-provider routing and fallback require automatic routing",
             path.display()
-        )),
-        (Some(model), provider) => Ok(Some(ModelDefaults {
-            model,
-            provider,
-            path: path.to_path_buf(),
-        })),
+        ));
     }
+    Ok(Some(ModelDefaults {
+        model,
+        provider: parsed.provider,
+        routing_mode,
+        allow_cross_provider_data_transfer,
+        fallback_budget_micro_usd,
+        path: path.to_path_buf(),
+    }))
 }
 
 fn read_config_text(path: &Path) -> Result<Option<String>, String> {
@@ -159,21 +199,68 @@ fn parse_config(text: &str) -> Result<ParsedConfig, String> {
         let key = key.trim();
         let value =
             parse_quoted_value(value.trim()).map_err(|cause| format!("line {number}: {cause}"))?;
-        let slot = match key {
-            "provider" => &mut parsed.provider,
-            "model" => &mut parsed.model,
+        match key {
+            "provider" => set_value(&mut parsed.provider, key, value, number)?,
+            "model" => set_value(&mut parsed.model, key, value, number)?,
+            "routing_mode" => {
+                let mode = match value.as_str() {
+                    "manual" => RoutingMode::Manual,
+                    "automatic" => RoutingMode::Automatic,
+                    _ => {
+                        return Err(format!(
+                            "line {number}: routing_mode must be manual or automatic"
+                        ));
+                    }
+                };
+                set_value(&mut parsed.routing_mode, key, mode, number)?;
+            }
+            "allow_cross_provider_data_transfer" => {
+                let enabled = match value.as_str() {
+                    "true" => true,
+                    "false" => false,
+                    _ => {
+                        return Err(format!(
+                            "line {number}: allow_cross_provider_data_transfer must be true or false"
+                        ));
+                    }
+                };
+                set_value(
+                    &mut parsed.allow_cross_provider_data_transfer,
+                    key,
+                    enabled,
+                    number,
+                )?;
+            }
+            "fallback_budget_micro_usd" => {
+                let budget = value
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|budget| *budget > 0 && *budget <= MAX_FALLBACK_BUDGET_MICRO_USD)
+                    .ok_or_else(|| {
+                        format!(
+                            "line {number}: fallback budget must be between 1 and {MAX_FALLBACK_BUDGET_MICRO_USD} micro-USD"
+                        )
+                    })?;
+                set_value(&mut parsed.fallback_budget_micro_usd, key, budget, number)?;
+            }
             _ => {
                 return Err(format!(
-                    "line {number}: unknown key (supported keys: provider, model)"
+                    "line {number}: unknown key (supported keys: provider, model, routing_mode, allow_cross_provider_data_transfer, fallback_budget_micro_usd)"
                 ));
             }
-        };
-        if slot.is_some() {
-            return Err(format!("line {number}: duplicate key '{key}'"));
         }
-        *slot = Some(value);
     }
     Ok(parsed)
+}
+
+const MAX_FALLBACK_BUDGET_MICRO_USD: u64 = 1_000_000_000;
+
+fn set_value<T>(slot: &mut Option<T>, key: &str, value: T, line: usize) -> Result<(), String> {
+    if slot.is_some() {
+        return Err(format!("line {line}: duplicate key '{key}'"));
+    }
+    *slot = Some(value);
+    Ok(())
 }
 
 fn parse_quoted_value(value: &str) -> Result<String, &'static str> {
@@ -331,6 +418,35 @@ mod tests {
         let path = directory.write(b"provider = \"openai\"\nmodel = \"m\"\n");
         let defaults = load_model_defaults(&path).unwrap().unwrap();
         assert_eq!(defaults.provider.as_deref(), Some("openai"));
+    }
+
+    #[test]
+    fn loads_automatic_routing_preferences_without_changing_manual_defaults() {
+        let directory = TempDir::new();
+        let path = directory.write(
+            b"provider = \"openai\"\nmodel = \"gpt-4.1\"\nrouting_mode = \"automatic\"\nallow_cross_provider_data_transfer = \"true\"\nfallback_budget_micro_usd = \"2500000\"\n",
+        );
+        let defaults = load_model_defaults(&path).unwrap().unwrap();
+        assert_eq!(defaults.routing_mode, RoutingMode::Automatic);
+        assert!(defaults.allow_cross_provider_data_transfer);
+        assert_eq!(defaults.fallback_budget_micro_usd, Some(2_500_000));
+
+        let path = directory.write(b"provider = \"openai\"\nmodel = \"gpt-4.1\"\n");
+        let defaults = load_model_defaults(&path).unwrap().unwrap();
+        assert_eq!(defaults.routing_mode, RoutingMode::Manual);
+        assert!(!defaults.allow_cross_provider_data_transfer);
+        assert_eq!(defaults.fallback_budget_micro_usd, None);
+    }
+
+    #[test]
+    fn rejects_fallback_settings_without_automatic_routing() {
+        let directory = TempDir::new();
+        let path = directory.write(
+            b"provider = \"openai\"\nmodel = \"gpt-4.1\"\nfallback_budget_micro_usd = \"1000000\"\n",
+        );
+        assert!(load_model_defaults(&path)
+            .unwrap_err()
+            .contains("require automatic routing"));
     }
 
     #[test]

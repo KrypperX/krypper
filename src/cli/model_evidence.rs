@@ -24,6 +24,29 @@ pub(super) fn configuration_revision_for_probe(
     Ok(configuration_revision(&key, provider, model, config_values))
 }
 
+pub(super) fn existing_configuration_revision_for_probe(
+    path: &Path,
+    provider: &str,
+    model: &str,
+    config_values: &[(&str, &str)],
+) -> Result<Option<String>, String> {
+    match read_revision_key(path) {
+        Ok(key) => Ok(Some(configuration_revision(
+            &key,
+            provider,
+            model,
+            config_values,
+        ))),
+        Err(RevisionKeyError::Missing) => Ok(None),
+        Err(RevisionKeyError::Invalid) => Err(
+            "provider evidence key is invalid; reset per-user settings to replace it".to_owned(),
+        ),
+        Err(RevisionKeyError::Io) => {
+            Err("cannot read the private provider evidence key".to_owned())
+        }
+    }
+}
+
 pub(super) fn record_probe(
     path: &Path,
     record: ProviderEvidenceRecord,
@@ -42,6 +65,10 @@ pub(super) fn record_probe(
     }
     write_private_file(path, &bytes, "provider evidence")?;
     Ok(store.freshness(&provider, &model, &revision, now_unix_secs()))
+}
+
+pub(super) fn records(path: &Path) -> Result<Vec<ProviderEvidenceRecord>, String> {
+    Ok(load(path)?.records().to_vec())
 }
 
 fn load(path: &Path) -> Result<ProviderEvidenceStore, String> {

@@ -5,8 +5,11 @@ use std::io::{self, Read, Write};
 mod checkpoint_files;
 mod config;
 mod context;
+mod fallback_runtime;
 mod help;
+mod model_catalog;
 mod model_evidence;
+mod model_routing;
 mod model_selection;
 mod models;
 mod outcome;
@@ -16,6 +19,7 @@ mod setup;
 mod setup_probe;
 mod task;
 mod task_args;
+mod task_routing_state;
 use self::help::{
     contains_help_before_terminator, starts_with_option, unrecognized_arguments, usage_error,
     write_list_help, write_root_help, write_show_help, write_write_help,

@@ -302,7 +302,6 @@ impl ProviderEvidenceStore {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn records(&self) -> &[ProviderEvidenceRecord] {
         &self.records
     }

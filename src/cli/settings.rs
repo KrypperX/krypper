@@ -1,6 +1,6 @@
 //! Per-user model defaults and provider credentials used by `krypper setup`.
 
-use super::config::config_path;
+use super::config::{config_path, RoutingMode};
 use crate::brain::{is_provider_credential_name, validate_model_name_for_provider, ModelProvider};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
@@ -137,13 +137,42 @@ pub(super) fn load_credentials(path: &Path) -> Result<Option<CredentialStore>, S
     Ok(Some(CredentialStore { values }))
 }
 
+#[cfg(test)]
 pub(super) fn save_model_defaults(path: &Path, provider: &str, model: &str) -> Result<(), String> {
+    save_model_configuration(path, provider, model, RoutingMode::Manual, false, None)
+}
+
+pub(super) fn save_model_configuration(
+    path: &Path,
+    provider: &str,
+    model: &str,
+    routing_mode: RoutingMode,
+    allow_cross_provider_data_transfer: bool,
+    fallback_budget_micro_usd: Option<u64>,
+) -> Result<(), String> {
     let Some(provider_kind) = ModelProvider::parse(provider) else {
         return Err("unsupported provider".to_owned());
     };
     validate_model_name_for_provider(model, provider_kind)
         .map_err(|_| "invalid model ID".to_owned())?;
-    let contents = format!("provider = \"{provider}\"\nmodel = \"{model}\"\n");
+    if routing_mode == RoutingMode::Manual
+        && (allow_cross_provider_data_transfer || fallback_budget_micro_usd.is_some())
+    {
+        return Err("cross-provider routing and fallback require automatic routing".to_owned());
+    }
+    if fallback_budget_micro_usd.is_some_and(|budget| budget == 0 || budget > 1_000_000_000) {
+        return Err("fallback budget must be between 1 and 1000000000 micro-USD".to_owned());
+    }
+    let mut contents = format!("provider = \"{provider}\"\nmodel = \"{model}\"\n");
+    if routing_mode == RoutingMode::Automatic {
+        contents.push_str("routing_mode = \"automatic\"\n");
+    }
+    if allow_cross_provider_data_transfer {
+        contents.push_str("allow_cross_provider_data_transfer = \"true\"\n");
+    }
+    if let Some(budget) = fallback_budget_micro_usd {
+        contents.push_str(&format!("fallback_budget_micro_usd = \"{budget}\"\n"));
+    }
     write_private_file(path, contents.as_bytes(), "model configuration")
 }
 
@@ -161,6 +190,11 @@ pub(super) fn remove_settings(paths: &UserSettingsPaths) -> Result<(), String> {
     remove_file_if_present(&paths.provider_profiles, "provider profiles")?;
     remove_file_if_present(&paths.model_evidence, "provider evidence")?;
     remove_file_if_present(&paths.model_evidence_key, "provider evidence key")?;
+    remove_file_if_present(
+        &paths.model.with_file_name("model-catalog-cache.json"),
+        "model catalog cache",
+    )?;
+    super::task_routing_state::remove_task_routing_states(paths)?;
     remove_file_if_present(&paths.model, "model configuration")
 }
 

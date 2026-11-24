@@ -1,6 +1,6 @@
 //! Model selection: the user configuration defaults and the provider decision source.
 
-use super::config::{config_path, load_model_defaults};
+use super::config::{config_path, load_model_defaults, ModelDefaults};
 use super::provider_profiles::{is_profile_id_candidate, load_provider_profiles, selected_profile};
 use super::settings::{load_credentials, user_settings_paths, CredentialStore};
 use crate::brain::{
@@ -16,9 +16,17 @@ use std::net::SocketAddr;
 ///
 /// The notice goes to standard error so a configured default can never start
 /// model requests without the person seeing which model and file selected it.
+#[cfg(test)]
 pub(super) fn configured_model_selection(
     error: &mut dyn Write,
 ) -> Result<Option<(String, Option<String>)>, String> {
+    configured_model_defaults(error)
+        .map(|defaults| defaults.map(|defaults| (defaults.model, defaults.provider)))
+}
+
+pub(super) fn configured_model_defaults(
+    error: &mut dyn Write,
+) -> Result<Option<ModelDefaults>, String> {
     let Some(path) = config_path(
         std::env::var_os("KRYPPER_CONFIG"),
         std::env::var_os("XDG_CONFIG_HOME"),
@@ -45,7 +53,6 @@ pub(super) fn configured_model_selection(
             );
         }
     }
-    let provider = defaults.provider.clone();
     let _ = writeln!(
         error,
         "krypper: using model '{}' (provider: {}) from {}; pass --no-config to ignore it",
@@ -53,7 +60,7 @@ pub(super) fn configured_model_selection(
         defaults.provider.as_deref().unwrap_or("ollama"),
         defaults.path.display()
     );
-    Ok(Some((defaults.model, provider)))
+    Ok(Some(defaults))
 }
 
 #[cfg(test)]
