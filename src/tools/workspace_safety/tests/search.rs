@@ -5,6 +5,7 @@ use super::super::search::{
     MAX_SEARCH_QUERY_BYTES, MAX_TREE_DIRECTORY_DEPTH,
 };
 use super::super::{
+    list_task_directory_names_at,
     types::{DirHandle, MAX_FILE_SIZE},
     WorkspaceRoot,
 };
@@ -686,6 +687,76 @@ fn ignore_rules_from_left_directories_do_not_apply_after_parent_components() {
             (PathBuf::from("child/../root.txt"), 1),
         ]
     );
+    fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn parent_components_select_the_resolved_directory_for_listing_and_search() {
+    let path = tree_temp_path();
+    fs::create_dir_all(path.join("a/b")).unwrap();
+    fs::write(path.join("root.txt"), "needle at root\n").unwrap();
+    fs::write(path.join("a/.gitignore"), "b/\n").unwrap();
+    fs::write(path.join("a/a.txt"), "needle in a\n").unwrap();
+    fs::write(path.join("a/b/b.txt"), "needle in b\n").unwrap();
+    let root = tree_workspace_root(&path);
+
+    let cases = [
+        (
+            "a/b/..",
+            vec![".gitignore", "a.txt", "b"],
+            vec![PathBuf::from("a/b/../a.txt")],
+            vec![PathBuf::from("a/b/../a.txt")],
+        ),
+        (
+            "a/..",
+            vec!["a", "root.txt"],
+            vec![PathBuf::from("a/../root.txt")],
+            vec![
+                PathBuf::from("a/../a/a.txt"),
+                PathBuf::from("a/../root.txt"),
+            ],
+        ),
+        (
+            ".",
+            vec!["a", "root.txt"],
+            vec![PathBuf::from("root.txt")],
+            vec![PathBuf::from("a/a.txt"), PathBuf::from("root.txt")],
+        ),
+        (
+            "a/./b/..",
+            vec![".gitignore", "a.txt", "b"],
+            vec![PathBuf::from("a/b/../a.txt")],
+            vec![PathBuf::from("a/b/../a.txt")],
+        ),
+    ];
+
+    for (requested, expected_entries, expected_flat, expected_tree) in cases {
+        let entries = list_task_directory_names_at(&root, Path::new(requested).as_os_str())
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(entries, expected_entries, "listing {requested:?}");
+        assert_eq!(
+            search_text_files_at(&root, Path::new(requested).as_os_str(), "needle")
+                .unwrap()
+                .into_iter()
+                .map(|(path, _)| path)
+                .collect::<Vec<_>>(),
+            expected_flat,
+            "flat search {requested:?}"
+        );
+        assert_eq!(
+            search_tree_text_files_at(&root, Path::new(requested).as_os_str(), "needle")
+                .unwrap()
+                .into_iter()
+                .map(|(path, _)| path)
+                .collect::<Vec<_>>(),
+            expected_tree,
+            "tree search {requested:?}"
+        );
+    }
+
     fs::remove_dir_all(path).unwrap();
 }
 

@@ -166,7 +166,10 @@ pub(super) fn open_root_relative_with_resolved_path(
         directories.push(DirHandle::from_file(opened));
     }
 
-    let file = duplicate_directory_file(&directories[0])
+    let current_directory = directories
+        .last()
+        .expect("invariant: the root handle remains on the stack");
+    let file = duplicate_directory_file(current_directory)
         .map_err(|error| CliError::from_io(&error, "unable to read file"))?;
     Ok((file, resolved_components.into_iter().collect()))
 }
