@@ -25,6 +25,27 @@ fn real_sandbox_limits_and_cancellation_stay_bounded() {
         "{no_match:?}"
     );
     assert!(!no_match.tests_ran);
+
+    fs::write(
+        path.join("src/lib.rs"),
+        "#[test] fn leaves_a_grandchild_holding_output_pipes() { let _ = std::process::Command::new(\"/usr/bin/sleep\").arg(\"30\").spawn().unwrap(); }\n",
+    )
+    .unwrap();
+    let inherited_pipe = run_with_bounds(
+        &root,
+        &policy,
+        None,
+        Duration::from_secs(10),
+        limits.output_bytes,
+        limits.cpu_ms.saturating_mul(1_000),
+    );
+    assert_eq!(
+        inherited_pipe.outcome,
+        ProcessOutcome::Exited(0),
+        "a child that exits while a grandchild holds its pipes must keep the child exit status: {inherited_pipe:?}"
+    );
+    assert!(inherited_pipe.cleanup_confirmed, "{inherited_pipe:?}");
+
     for (source, wall, cap, expected) in [
         (
             "#[test] fn fails() { panic!(\"fixture failure\"); }",

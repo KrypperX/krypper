@@ -12,7 +12,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus};
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, TryLockError};
 use std::thread;
@@ -21,6 +21,7 @@ use uuid::Uuid;
 
 static ACTIVE: Mutex<()> = Mutex::new(());
 static UNCERTAIN_CLEANUP: AtomicBool = AtomicBool::new(false);
+const POST_EXIT_PIPE_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 // All system-manager commands have fixed executables, bounded output and a hard wait.
 // No caller-provided command, bus address, environment, or shell is accepted.
@@ -144,6 +145,74 @@ fn drain(pipe: &mut impl Read, bytes: &mut Vec<u8>, remaining: usize) -> io::Res
         }
         Err(e) => Err(e),
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PostExitDrain {
+    Complete,
+    OutputLimit,
+    Cancelled,
+    DeadlineExpired,
+}
+
+fn drain_after_child_exit(
+    stdout_pipe: &mut impl Read,
+    stderr_pipe: &mut impl Read,
+    stdout: &mut Vec<u8>,
+    stderr: &mut Vec<u8>,
+    output_limit: usize,
+    timeout: Duration,
+    mut cancelled: impl FnMut() -> bool,
+) -> io::Result<PostExitDrain> {
+    let started = Instant::now();
+    let mut stdout_eof = false;
+    let mut stderr_eof = false;
+    loop {
+        let remaining = output_limit.saturating_sub(stdout.len() + stderr.len());
+        stdout_eof |= drain(stdout_pipe, stdout, remaining)?;
+        let remaining = output_limit.saturating_sub(stdout.len() + stderr.len());
+        stderr_eof |= drain(stderr_pipe, stderr, remaining)?;
+        if stdout.len() + stderr.len() >= output_limit {
+            return Ok(PostExitDrain::OutputLimit);
+        }
+        if cancelled() {
+            return Ok(PostExitDrain::Cancelled);
+        }
+        if stdout_eof && stderr_eof {
+            return Ok(PostExitDrain::Complete);
+        }
+        if started.elapsed() >= timeout {
+            return Ok(PostExitDrain::DeadlineExpired);
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn record_cgroup_limit_events(group: &Path, events: &mut Vec<ProcessResource>) {
+    for (name, field, resource) in [
+        ("memory.events", "max", ProcessResource::Memory),
+        ("pids.events", "max", ProcessResource::Processes),
+    ] {
+        if fs::read_to_string(group.join(name)).is_ok_and(|contents| {
+            contents.lines().any(|line| {
+                line.split_once(' ').is_some_and(|(key, value)| {
+                    key == field && value.parse::<u64>().is_ok_and(|count| count > 0)
+                })
+            })
+        }) {
+            record_event(events, resource);
+        }
+    }
+}
+
+fn cpu_usage_usec(group: &Path) -> io::Result<u64> {
+    fs::read_to_string(group.join("cpu.stat"))?
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("usage_usec ")
+                .and_then(|value| value.parse::<u64>().ok())
+        })
+        .ok_or_else(|| io::Error::other("CPU accounting unavailable"))
 }
 
 // One host-wide lease survives caller crashes. A later process must establish that the
@@ -724,9 +793,11 @@ fn run_with_containment(
         nonblocking(&err)?;
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let mut status: Option<ExitStatus> = None;
         let mut out_eof = false;
         let mut err_eof = false;
+        let mut events = Vec::new();
+        let mut cgroup_events_recorded = false;
+        let mut output_drain_confirmed = true;
         loop {
             let remaining = output.saturating_sub(stdout.len() + stderr.len());
             out_eof |= drain(&mut out, &mut stdout, remaining)?;
@@ -741,52 +812,66 @@ fn run_with_containment(
                 stop = StopReason::Cancelled;
                 break;
             }
+            if let Some(exit) = child.try_wait()? {
+                let cpu_budget_exceeded = cpu_usage_usec(&supervisor.group)? >= cpu_budget;
+                // Read kernel counters before cleanup removes the cgroup files.
+                record_cgroup_limit_events(&supervisor.group, &mut events);
+                cgroup_events_recorded = true;
+                // A descendant can keep the inherited pipe handles open after the leader exits.
+                // Kill the whole cgroup first, then wait only for a bounded pipe drain.
+                let _ = supervisor.clean();
+                let post_exit_drain = if out_eof && err_eof {
+                    PostExitDrain::Complete
+                } else {
+                    drain_after_child_exit(
+                        &mut out,
+                        &mut err,
+                        &mut stdout,
+                        &mut stderr,
+                        output,
+                        POST_EXIT_PIPE_DRAIN_TIMEOUT,
+                        || policy.cancelled.load(Ordering::SeqCst),
+                    )?
+                };
+                stop = match post_exit_drain {
+                    PostExitDrain::Complete => {
+                        if cpu_budget_exceeded {
+                            StopReason::CpuBudget
+                        } else if let Some(code) = exit.code() {
+                            StopReason::Exited(code)
+                        } else {
+                            StopReason::Signaled(exit.signal().unwrap_or(0))
+                        }
+                    }
+                    PostExitDrain::OutputLimit => {
+                        result.truncated = true;
+                        StopReason::OutputLimit
+                    }
+                    PostExitDrain::Cancelled => StopReason::Cancelled,
+                    PostExitDrain::DeadlineExpired => {
+                        result.truncated = true;
+                        output_drain_confirmed = false;
+                        result.diagnostic =
+                            Some("output pipes remained open after bounded cgroup cleanup".into());
+                        StopReason::Unknown
+                    }
+                };
+                break;
+            }
             if started.elapsed() >= wall {
                 stop = StopReason::WallTimeout;
                 break;
             }
-            let cpu = fs::read_to_string(supervisor.group.join("cpu.stat"))?;
-            let usage = cpu
-                .lines()
-                .find_map(|line| {
-                    line.strip_prefix("usage_usec ")
-                        .and_then(|s| s.parse::<u64>().ok())
-                })
-                .ok_or_else(|| io::Error::other("CPU accounting unavailable"))?;
-            if usage >= cpu_budget {
+            if cpu_usage_usec(&supervisor.group)? >= cpu_budget {
                 stop = StopReason::CpuBudget;
                 break;
-            }
-            if status.is_none() {
-                status = child.try_wait()?;
-            }
-            if let Some(exit) = status {
-                if out_eof && err_eof {
-                    stop = if let Some(code) = exit.code() {
-                        StopReason::Exited(code)
-                    } else {
-                        StopReason::Signaled(exit.signal().unwrap_or(0))
-                    };
-                    break;
-                }
             }
             thread::sleep(Duration::from_millis(5));
         }
         // Check kernel counters before removing the group. A killed process with a quota event
         // must not be confused with an ordinary exit or an invented successful result.
-        let mut events = Vec::new();
-        for (name, field, resource) in [
-            ("memory.events", "max", ProcessResource::Memory),
-            ("pids.events", "max", ProcessResource::Processes),
-        ] {
-            if fs::read_to_string(supervisor.group.join(name)).is_ok_and(|s| {
-                s.lines().any(|l| {
-                    l.split_once(' ')
-                        .is_some_and(|(k, v)| k == field && v.parse::<u64>().is_ok_and(|n| n > 0))
-                })
-            }) {
-                record_event(&mut events, resource);
-            }
+        if !cgroup_events_recorded {
+            record_cgroup_limit_events(&supervisor.group, &mut events);
         }
         if matches!(stop, StopReason::Signaled(libc::SIGXCPU)) {
             record_event(&mut events, ProcessResource::Cpu);
@@ -794,7 +879,7 @@ fn run_with_containment(
         if matches!(stop, StopReason::Signaled(libc::SIGXFSZ)) {
             record_event(&mut events, ProcessResource::FileSize);
         }
-        result.cleanup_confirmed = supervisor.clean();
+        result.cleanup_confirmed = supervisor.clean() && output_drain_confirmed;
         // cgroup.kill terminates bwrap as well as descendants; reap our direct child.
         if !reap(&mut child) {
             result.cleanup_confirmed = false;
@@ -880,5 +965,76 @@ mod recovery_state_tests {
             try_active_lock(&poisoned),
             Err(ActiveLockError::Poisoned)
         ));
+    }
+}
+
+#[cfg(test)]
+mod post_exit_drain_tests {
+    use super::{drain_after_child_exit, nonblocking, PostExitDrain};
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    struct ProcessGroup(libc::pid_t);
+
+    impl Drop for ProcessGroup {
+        fn drop(&mut self) {
+            // SAFETY: this test created the process group with the child PID as its ID.
+            unsafe {
+                libc::kill(-self.0, libc::SIGKILL);
+            }
+        }
+    }
+
+    #[test]
+    fn inherited_pipe_writer_does_not_extend_the_post_exit_deadline() {
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "(sleep 30) & printf 'leader output\\n'; exit 0"])
+            .process_group(0)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().unwrap();
+        let _process_group = ProcessGroup(child.id() as libc::pid_t);
+        let mut stdout_pipe = child.stdout.take().unwrap();
+        let mut stderr_pipe = child.stderr.take().unwrap();
+        nonblocking(&stdout_pipe).unwrap();
+        nonblocking(&stderr_pipe).unwrap();
+        assert_eq!(child.wait().unwrap().code(), Some(0));
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let started = Instant::now();
+        let drain = drain_after_child_exit(
+            &mut stdout_pipe,
+            &mut stderr_pipe,
+            &mut stdout,
+            &mut stderr,
+            1024,
+            Duration::from_millis(100),
+            || false,
+        )
+        .unwrap();
+
+        assert_eq!(drain, PostExitDrain::DeadlineExpired);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(stdout, b"leader output\n");
+
+        // SAFETY: this test created the isolated group and its sleeping descendant.
+        let killed = unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL) };
+        assert_eq!(killed, 0);
+        assert_eq!(
+            drain_after_child_exit(
+                &mut stdout_pipe,
+                &mut stderr_pipe,
+                &mut stdout,
+                &mut stderr,
+                1024,
+                Duration::from_secs(1),
+                || false,
+            )
+            .unwrap(),
+            PostExitDrain::Complete
+        );
     }
 }
