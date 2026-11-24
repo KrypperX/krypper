@@ -15,6 +15,7 @@ pub(super) const MAX_TASK_DIRECTORY_ENTRIES: usize = 1024;
 #[derive(Debug)]
 pub(crate) enum CliError {
     Message(String),
+    WorkspaceMetadataMutationDenied,
     PlatformUnavailable,
 }
 
@@ -123,6 +124,7 @@ impl CliError {
     pub(crate) fn message(&self) -> &str {
         match self {
             Self::Message(message) => message,
+            Self::WorkspaceMetadataMutationDenied => "workspace metadata paths cannot be modified",
             Self::PlatformUnavailable => "workspace operations are unavailable on this platform",
         }
     }
