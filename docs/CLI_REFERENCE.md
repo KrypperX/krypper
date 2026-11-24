@@ -533,7 +533,7 @@ To connect an endpoint that uses one of Krypper's existing protocols, create
 (`$XDG_CONFIG_HOME/krypper/` or `$HOME/.config/krypper/`). This file is never
 read from `KRYPPER_CONFIG` or the task workspace. On Unix, keep it private with
 mode `0600`; `krypper setup --status` reports the profile count, and
-`krypper setup --reset` removes profiles, defaults, and saved credentials.
+`krypper setup --reset` removes profiles, defaults, saved credentials, and local provider evidence.
 
 Example OpenAI-compatible profile:
 
@@ -588,12 +588,20 @@ before a provider request when a profile is invalid or disabled.
 Use `krypper setup --status` to show the saved provider/model and whether a
 credential file exists. It never displays credential values. Use
 `krypper setup --reset` to confirm and remove the per-user defaults, provider
-profiles, and credential file. Removing a file does not erase copies retained
+profiles, credential file, and local provider evidence. Removing a file does not erase copies retained
 by filesystem snapshots or backups.
 
 Setup offers a connection test only after saving the settings. If accepted, it
 sends one short request using an empty temporary workspace. Hosted requests may
-incur provider charges.
+incur provider charges. Krypper records bounded local health, latency, typed
+failure, rate-limit, and available token-usage evidence for that provider,
+model, and configuration revision. A keyed fingerprint distinguishes account
+or credential changes without writing credential values into the evidence.
+Evidence expires for readiness decisions after one hour. It contains no prompt
+or response text. This phase records the 429 rate-limit indicator but leaves
+retry delay unknown. `setup --reset` removes the evidence and its local revision key.
+Compatible providers can report token counts; other providers may leave them
+unknown.
 
 ### Default model from a user configuration file (opt in)
 

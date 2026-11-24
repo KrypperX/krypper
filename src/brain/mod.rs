@@ -41,7 +41,7 @@ pub(crate) use parse::{parse_model_plan_response, parse_responses_response};
 pub(crate) use parse_anthropic::parse_anthropic_response;
 pub(crate) use parse_gemini::parse_gemini_response;
 pub(crate) use plan::MAX_PLAN_OPERATIONS;
-#[cfg(test)]
+pub(crate) use providers::capability_evidence;
 pub(crate) use providers::ModelTokenUsage;
 pub use providers::{
     build_compatible_chat_request_with_extensions, AnthropicDecisionSource, GeminiDecisionSource,
@@ -50,8 +50,8 @@ pub use providers::{
 };
 pub(crate) use providers::{
     is_provider_credential_name, provider_catalog_matches, provider_descriptor,
-    provider_descriptor_by_selector, provider_descriptors, AdapterId, AuthFieldRole,
-    CloudflareAccountId, CloudflareGatewayId, DecisionProtocol, ModelDecisionSource,
+    provider_descriptor_by_selector, provider_descriptors, AdapterId, AnthropicWorkspaceId,
+    AuthFieldRole, CloudflareAccountId, CloudflareGatewayId, DecisionProtocol, ModelDecisionSource,
     OpenAiCompatibleCredentials, ProviderAuthField, ProviderDecisionSourceRegistry,
     ProviderDescriptor, ProviderEndpoint, ProviderSourceConfig, ProviderSourceCredentials,
 };
