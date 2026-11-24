@@ -683,11 +683,13 @@ model = "qwen3"       # required when the file sets anything
 - **Visibility:** when the file applies, Krypper prints
   `krypper: using model '...' (provider: ...) from <path>` to standard error
   before the task starts.
-- **Format:** a small TOML subset: `key = "value"` lines, blank lines, and `#`
-  comments. `provider`, `model`, `routing_mode`,
-  `allow_cross_provider_data_transfer`, and `fallback_budget_micro_usd` are
-  accepted; tables, escapes, duplicate or unknown keys, files over 16 KiB, and
-  non-UTF-8 files are rejected. Routing settings require a model default. A
+- **Format:** a small TOML subset: single-line, quoted `key = "value"`
+  assignments, blank lines, and `#` comments. Basic and literal TOML strings are
+  supported; decoded control characters are rejected. `provider`, `model`,
+  `routing_mode`, `allow_cross_provider_data_transfer`, and
+  `fallback_budget_micro_usd` are accepted; tables, multiline strings, duplicate
+  or unknown keys, files over 16 KiB, and non-UTF-8 files are rejected. Routing
+  settings require a model default. A
   present but invalid file fails the command with status 2 instead of being
   skipped.
 - **Credentials:** never stored in this TOML file. Hosted providers read each

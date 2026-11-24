@@ -91,7 +91,6 @@ fn load(path: &Path) -> Result<ProviderEvidenceStore, String> {
             path.display()
         ));
     }
-    ensure_private_permissions(path, &metadata)?;
     let file = open_private_file(path).map_err(|cause| {
         format!(
             "cannot read provider evidence '{}': {}",
@@ -99,6 +98,20 @@ fn load(path: &Path) -> Result<ProviderEvidenceStore, String> {
             cause.kind()
         )
     })?;
+    let opened_metadata = file.metadata().map_err(|cause| {
+        format!(
+            "cannot inspect provider evidence '{}': {}",
+            path.display(),
+            cause.kind()
+        )
+    })?;
+    if !opened_metadata.is_file() {
+        return Err(format!(
+            "provider evidence '{}' is not a regular file",
+            path.display()
+        ));
+    }
+    ensure_private_permissions(path, &opened_metadata, "provider evidence")?;
     let mut bytes = Vec::new();
     file.take(MAX_EVIDENCE_BYTES + 1)
         .read_to_end(&mut bytes)
@@ -152,10 +165,16 @@ fn read_revision_key(path: &Path) -> Result<[u8; 32], RevisionKeyError> {
         }
         Err(_) => return Err(RevisionKeyError::Io),
     };
-    if !metadata.file_type().is_file() || ensure_private_permissions(path, &metadata).is_err() {
+    if !metadata.file_type().is_file() {
         return Err(RevisionKeyError::Invalid);
     }
     let file = open_private_file(path).map_err(|_| RevisionKeyError::Io)?;
+    let opened_metadata = file.metadata().map_err(|_| RevisionKeyError::Io)?;
+    if !opened_metadata.is_file()
+        || ensure_private_permissions(path, &opened_metadata, "provider evidence key").is_err()
+    {
+        return Err(RevisionKeyError::Invalid);
+    }
     let mut bytes = Vec::new();
     file.take((REVISION_KEY_BYTES + 1) as u64)
         .read_to_end(&mut bytes)

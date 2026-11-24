@@ -97,6 +97,13 @@ pub(super) fn user_settings_paths() -> Result<Option<UserSettingsPaths>, String>
 }
 
 pub(super) fn load_credentials(path: &Path) -> Result<Option<CredentialStore>, String> {
+    load_credentials_with_open_file(path, open_private_file)
+}
+
+fn load_credentials_with_open_file(
+    path: &Path,
+    open_file: impl FnOnce(&Path) -> io::Result<File>,
+) -> Result<Option<CredentialStore>, String> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(cause) if cause.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -108,10 +115,18 @@ pub(super) fn load_credentials(path: &Path) -> Result<Option<CredentialStore>, S
             path.display()
         ));
     }
-    ensure_private_permissions(path, &metadata)?;
-
-    let file = open_private_file(path)
-        .map_err(|cause| file_error("cannot read credential store", path, cause))?;
+    let file =
+        open_file(path).map_err(|cause| file_error("cannot read credential store", path, cause))?;
+    let opened_metadata = file
+        .metadata()
+        .map_err(|cause| file_error("cannot inspect credential store", path, cause))?;
+    if !opened_metadata.is_file() {
+        return Err(format!(
+            "credential store '{}' is not a regular file",
+            path.display()
+        ));
+    }
+    ensure_private_permissions(path, &opened_metadata, "credential store")?;
     let mut bytes = Vec::new();
     file.take(MAX_CREDENTIAL_BYTES + 1)
         .read_to_end(&mut bytes)
@@ -171,17 +186,28 @@ pub(super) fn save_model_configuration(
             "fallback budget must be between 1 and {MAX_FALLBACK_BUDGET_MICRO_USD} micro-USD"
         ));
     }
-    let mut contents = format!("provider = \"{provider}\"\nmodel = \"{model}\"\n");
-    if routing_mode == RoutingMode::Automatic {
-        contents.push_str("routing_mode = \"automatic\"\n");
-    }
-    if allow_cross_provider_data_transfer {
-        contents.push_str("allow_cross_provider_data_transfer = \"true\"\n");
-    }
-    if let Some(budget) = fallback_budget_micro_usd {
-        contents.push_str(&format!("fallback_budget_micro_usd = \"{budget}\"\n"));
-    }
+    let configuration = ModelConfiguration {
+        provider,
+        model,
+        routing_mode: (routing_mode == RoutingMode::Automatic).then_some("automatic"),
+        allow_cross_provider_data_transfer: allow_cross_provider_data_transfer.then_some("true"),
+        fallback_budget_micro_usd: fallback_budget_micro_usd.map(|budget| budget.to_string()),
+    };
+    let contents = toml::to_string(&configuration)
+        .map_err(|_| "cannot serialize model configuration".to_owned())?;
     write_private_file(path, contents.as_bytes(), "model configuration")
+}
+
+#[derive(serde::Serialize)]
+struct ModelConfiguration<'a> {
+    provider: &'a str,
+    model: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    routing_mode: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    allow_cross_provider_data_transfer: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fallback_budget_micro_usd: Option<String>,
 }
 
 pub(super) fn save_credentials(path: &Path, credentials: &CredentialStore) -> Result<(), String> {
@@ -217,6 +243,15 @@ pub(super) fn write_private_file(
     path: &Path,
     bytes: &[u8],
     description: &str,
+) -> Result<(), String> {
+    write_private_file_with_directory_sync(path, bytes, description, sync_parent_directory)
+}
+
+fn write_private_file_with_directory_sync(
+    path: &Path,
+    bytes: &[u8],
+    description: &str,
+    sync_directory: impl FnOnce(&Path) -> io::Result<()>,
 ) -> Result<(), String> {
     let parent = path.parent().ok_or_else(|| {
         format!("cannot locate the user configuration directory for {description}")
@@ -266,7 +301,24 @@ pub(super) fn write_private_file(
     fs::rename(&temp_path, path).map_err(|cause| {
         let _ = fs::remove_file(&temp_path);
         file_error("cannot save settings file", path, cause)
+    })?;
+    sync_directory(parent).map_err(|cause| {
+        format!(
+            "saved {description} to '{}', but could not sync its parent directory: {}",
+            path.display(),
+            cause.kind()
+        )
     })
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(path: &Path) -> io::Result<()> {
+    File::open(path)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_path: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 fn create_private_directory(path: &Path) -> io::Result<()> {
@@ -310,42 +362,99 @@ fn file_error(action: &str, path: &Path, cause: io::Error) -> String {
 pub(super) fn ensure_private_permissions(
     path: &Path,
     metadata: &fs::Metadata,
+    description: &str,
 ) -> Result<(), String> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o077 != 0 {
-            return Err(format!(
-                "credential store '{}' is accessible by other users; restrict its permissions or run `krypper setup --reset`",
-                path.display()
-            ));
-        }
+        let current_uid = current_user_id();
+        ensure_private_metadata_for_user(path, metadata, current_uid, description)?;
         if let Some(parent) = path.parent() {
-            let parent_metadata = fs::symlink_metadata(parent).map_err(|cause| {
-                file_error("cannot inspect credential directory", parent, cause)
+            let parent_directory = open_private_directory(parent).map_err(|cause| {
+                file_error("cannot inspect user configuration directory", parent, cause)
             })?;
-            if !parent_metadata.file_type().is_dir()
-                || parent_metadata.permissions().mode() & 0o077 != 0
-            {
+            let parent_metadata = parent_directory.metadata().map_err(|cause| {
+                file_error("cannot inspect user configuration directory", parent, cause)
+            })?;
+            if !parent_metadata.is_dir() {
                 return Err(format!(
-                    "credential directory '{}' must be private to the current user",
+                    "user configuration directory '{}' must be private to the current user",
                     parent.display()
                 ));
             }
+            ensure_private_metadata_for_user(
+                parent,
+                &parent_metadata,
+                current_uid,
+                "user configuration directory",
+            )?;
         }
     }
-    let _ = (path, metadata);
+    #[cfg(not(unix))]
+    let _ = (path, metadata, description);
     Ok(())
+}
+
+#[cfg(unix)]
+fn ensure_private_metadata_for_user(
+    path: &Path,
+    metadata: &fs::Metadata,
+    expected_uid: u32,
+    description: &str,
+) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::PermissionsExt;
+
+    if metadata.uid() != expected_uid {
+        return Err(format!(
+            "{description} '{}' is not owned by the current user",
+            path.display()
+        ));
+    }
+    if metadata.permissions().mode() & 0o077 != 0 {
+        return Err(format!(
+            "{description} '{}' is accessible by other users; restrict its permissions or run `krypper setup --reset`",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn current_user_id() -> u32 {
+    // SAFETY: geteuid has no preconditions and returns the effective uid of this process.
+    unsafe { libc::geteuid() }
 }
 
 fn set_private_directory_permissions(path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
+        use std::os::unix::fs::MetadataExt;
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|cause| {
-            file_error("cannot restrict user configuration directory", path, cause)
+
+        let directory = open_private_directory(path)
+            .map_err(|cause| file_error("cannot open user configuration directory", path, cause))?;
+        let metadata = directory.metadata().map_err(|cause| {
+            file_error("cannot inspect user configuration directory", path, cause)
         })?;
+        if !metadata.is_dir() {
+            return Err(format!(
+                "user configuration path '{}' is not a directory",
+                path.display()
+            ));
+        }
+        if metadata.uid() != current_user_id() {
+            return Err(format!(
+                "user configuration directory '{}' is not owned by the current user",
+                path.display()
+            ));
+        }
+        directory
+            .set_permissions(fs::Permissions::from_mode(0o700))
+            .map_err(|cause| {
+                file_error("cannot restrict user configuration directory", path, cause)
+            })?;
     }
+    #[cfg(not(unix))]
     let _ = path;
     Ok(())
 }
@@ -367,7 +476,16 @@ pub(super) fn open_private_file(path: &Path) -> io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
     OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+}
+
+#[cfg(unix)]
+fn open_private_directory(path: &Path) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
         .open(path)
 }
 
@@ -452,5 +570,131 @@ mod tests {
         let contents = fs::read_to_string(path).unwrap();
         assert_eq!(contents, "provider = \"openai\"\nmodel = \"gpt-4.1\"\n");
         assert!(!contents.contains("API_KEY"));
+    }
+
+    #[test]
+    fn routing_model_configuration_round_trips_optional_settings() {
+        let directory = TempDir::new();
+        let path = directory.0.join("krypper").join("config.toml");
+
+        save_model_configuration(
+            &path,
+            "openai",
+            "gpt-4.1",
+            RoutingMode::Automatic,
+            true,
+            Some(25_000),
+        )
+        .unwrap();
+
+        let defaults = super::super::config::load_model_defaults(&path)
+            .unwrap()
+            .expect("saved routing defaults");
+        assert_eq!(defaults.provider.as_deref(), Some("openai"));
+        assert_eq!(defaults.model, "gpt-4.1");
+        assert_eq!(defaults.routing_mode, RoutingMode::Automatic);
+        assert!(defaults.allow_cross_provider_data_transfer);
+        assert_eq!(defaults.fallback_budget_micro_usd, Some(25_000));
+    }
+
+    #[test]
+    fn model_defaults_round_trip_quotes_and_backslashes() {
+        let directory = TempDir::new();
+        let path = directory.0.join("krypper").join("config.toml");
+        let model = r#"model "quoted" \\ path"#;
+
+        save_model_defaults(&path, "openai", model).unwrap();
+
+        let defaults = super::super::config::load_model_defaults(&path)
+            .unwrap()
+            .expect("saved model defaults");
+        assert_eq!(defaults.model, model);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_private_file_metadata_owned_by_another_user() {
+        use std::os::unix::fs::MetadataExt;
+
+        let directory = TempDir::new();
+        let path = directory.0.join("krypper").join(CREDENTIALS_FILE);
+        let mut credentials = CredentialStore::empty();
+        credentials.insert("OPENAI_API_KEY", "test-token".to_owned());
+        save_credentials(&path, &credentials).unwrap();
+        let opened = open_private_file(&path).unwrap();
+        let metadata = opened.metadata().unwrap();
+        let another_uid = metadata.uid().wrapping_add(1);
+
+        let error =
+            ensure_private_metadata_for_user(&path, &metadata, another_uid, "credential store")
+                .unwrap_err();
+
+        assert!(error.contains("not owned by the current user"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opening_a_fifo_does_not_block_before_descriptor_validation() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let directory = TempDir::new();
+        let path = directory.0.join("credential-store");
+        let encoded_path = CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `encoded_path` is NUL-terminated and `mkfifo` does not retain it.
+        let result = unsafe { libc::mkfifo(encoded_path.as_ptr(), 0o600) };
+        assert_eq!(result, 0, "create FIFO fixture");
+
+        let opened = open_private_file(&path).expect("nonblocking FIFO open");
+
+        assert!(!opened.metadata().unwrap().is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn credential_permissions_are_checked_on_the_opened_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = TempDir::new();
+        let path = directory.0.join("krypper").join(CREDENTIALS_FILE);
+        let mut credentials = CredentialStore::empty();
+        credentials.insert("OPENAI_API_KEY", "test-token".to_owned());
+        save_credentials(&path, &credentials).unwrap();
+
+        let result = super::load_credentials_with_open_file(&path, |path| {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
+            open_private_file(path)
+        });
+
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("opened credential file with unsafe permissions must be rejected"),
+        };
+        assert!(error.contains("accessible by other users"));
+    }
+
+    #[test]
+    fn reports_a_directory_sync_failure_after_the_file_was_saved() {
+        let directory = TempDir::new();
+        let path = directory.0.join("krypper").join("config.toml");
+        let mut sync_calls = 0;
+
+        let error = write_private_file_with_directory_sync(
+            &path,
+            b"saved contents",
+            "model configuration",
+            |parent| {
+                sync_calls += 1;
+                assert_eq!(parent, path.parent().unwrap());
+                assert_eq!(fs::read(&path).unwrap(), b"saved contents");
+                Err(io::Error::from(io::ErrorKind::PermissionDenied))
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(sync_calls, 1);
+        assert!(error.contains("saved"));
+        assert!(error.contains("sync"));
+        assert_eq!(fs::read(path).unwrap(), b"saved contents");
     }
 }

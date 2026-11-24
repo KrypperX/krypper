@@ -244,7 +244,6 @@ fn read_document(path: &Path) -> Result<Option<TaskRoutingDocument>, String> {
             path.display()
         ));
     }
-    ensure_private_permissions(path, &metadata)?;
     let file = open_private_file(path).map_err(|error| {
         format!(
             "cannot read task routing state '{}': {}",
@@ -252,6 +251,20 @@ fn read_document(path: &Path) -> Result<Option<TaskRoutingDocument>, String> {
             error.kind()
         )
     })?;
+    let opened_metadata = file.metadata().map_err(|error| {
+        format!(
+            "cannot inspect task routing state '{}': {}",
+            path.display(),
+            error.kind()
+        )
+    })?;
+    if !opened_metadata.is_file() {
+        return Err(format!(
+            "task routing state '{}' is not a regular file",
+            path.display()
+        ));
+    }
+    ensure_private_permissions(path, &opened_metadata, "task routing state")?;
     let mut bytes = Vec::new();
     file.take(MAX_STATE_BYTES + 1)
         .read_to_end(&mut bytes)
