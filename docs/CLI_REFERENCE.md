@@ -349,7 +349,7 @@ flag, provider credentials in the environment, and a fresh accepted provider
 probe. The report distinguishes token-usage price estimates and router-reserved
 estimates from actual billed cost, which model usage telemetry does not provide.
 
-Krypper uses fixed HTTPS endpoints and does not accept custom API URLs:
+Built-in providers use fixed HTTPS endpoints and do not accept custom API URLs:
 
 | Provider | Required environment variables | Fixed endpoint |
 | --- | --- | --- |
@@ -364,6 +364,17 @@ Krypper uses fixed HTTPS endpoints and does not accept custom API URLs:
 | DeepSeek | `DEEPSEEK_API_KEY` | `https://api.deepseek.com/chat/completions` |
 | Z.AI Standard API | `ZAI_API_KEY` | `https://api.z.ai/api/paas/v4/chat/completions` |
 | Mistral | `MISTRAL_API_KEY` | `https://api.mistral.ai/v1/chat/completions` |
+
+Built-in hosted model requests connect directly to the fixed endpoints above;
+provider profiles connect directly to their configured endpoints. Krypper
+disables environment-configured proxies, so `HTTP_PROXY`, `HTTPS_PROXY`,
+`ALL_PROXY`, and `NO_PROXY` do not change model traffic. Networks that require
+an HTTP proxy cannot use hosted providers with this version. Connection setup is
+limited to 10 seconds for hosted endpoints and 2 seconds for local Ollama; each
+request has a 120-second total limit. Requests are not replayed after
+transmission begins, since a provider may already have processed or billed an
+ambiguous request. Automatic route fallback is a separate, explicitly
+configured routing policy.
 
 Anthropic requires the `anthropic-workspace-id` request header for API keys that
 are not scoped to a workspace; it is optional for workspace-scoped keys. When
