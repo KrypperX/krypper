@@ -12,6 +12,7 @@ pub mod cli;
 pub mod core;
 pub mod harness;
 pub mod memory;
+pub mod routing;
 pub mod streaming;
 pub mod task_lifecycle;
 pub(crate) mod tools;

@@ -1,6 +1,6 @@
 # Provider and model architecture contract
 
-**Status:** current implementation and staged design contract. Built-in provider metadata is centralized in an internal typed catalog and resolves through the existing protocol adapter registry. Configurable provider profiles, automatic routing, and fallback are not implemented.
+**Status:** current implementation and staged design contract. Built-in provider metadata is centralized in an internal typed catalog and resolves through the existing protocol adapter registry. The opt-in deterministic routing API is implemented; configurable provider profiles, CLI/TUI routing controls, and fallback are not implemented.
 
 ## Scope and baseline
 
@@ -115,6 +115,16 @@ Evidence is stored in the per-user `model-evidence.json` file, with a private lo
 
 For compatible providers, the existing explicit usage event supplies decision latency and available token counts. For other providers, the setup probe records its bounded elapsed time and leaves token counts unknown. Rate-limit evidence stores only the HTTP 429 indicator; retry delay remains unknown in this phase, and response text is not retained. Normal provider selection does not trigger a probe or fetch evidence over the network.
 
+## P7 implementation: replaceable deterministic routing
+
+The public `krypper::routing` module defines one `ModelRouter` contract, a manual passthrough policy, and an opt-in deterministic automatic policy. Both policies share the interface; `route_model` always preserves an explicit manual choice and accepts a replaceable automatic policy. Tests and future callers can substitute automatic selection without changing provider adapters. The current CLI stays on its existing manual selection path; P9 owns user-facing CLI/TUI routing configuration.
+
+Manual selection preserves the exact provider/model override, including model IDs absent from the offline catalog, and never evaluates automatic candidates. Automatic selection consumes only caller-supplied candidates and performs no catalog lookup, network request, credential resolution, adapter construction, or tool authorization. A selected route is a recommendation for the ordinary provider registry and request validation path to execute.
+
+Automatic candidates must be discoverable, executable by a registered adapter, configured for the current account, and backed by a fresh successful provider/model/configuration probe. Required capabilities must be explicitly supported. Capability-data freshness is separate from provider probe freshness: stale or unchecked model facts, unknown support, and observed-only signals cannot satisfy a requirement. Context and output limits are enforced when requested; unknown limits then fail closed. An active cost budget rejects unknown or over-budget estimates, and unknown cost is never treated as zero.
+
+Callers provide ordered cost, latency, and quality preferences. Missing ranking data sorts after known values; equal scores use provider and model IDs as stable tie-breakers. Duplicate provider/model identities are rejected. Automatic results include a stable reason code, and no-candidate results include sorted per-candidate rejection reasons. Ranking metadata is caller-supplied and the router does not claim that a preference score proves model quality.
+
 ## Scope of this baseline document
 
-This document records the current structure and staged testable contracts. The implementation includes the trusted built-in descriptor catalog, a crate-private typed factory registry around the five existing protocol families, and the P6 capability-evidence path above. It does not add automatic routing, fallback, dynamic code loading, or model feature probes beyond the explicit connection test. Those behaviors remain later, focused implementation phases.
+This document records the current structure and staged testable contracts. The implementation includes the trusted built-in descriptor catalog, a crate-private typed factory registry around the five existing protocol families, the P6 capability-evidence path, and the P7 routing API above. User-facing automatic routing configuration remains a later phase. Fallback, dynamic code loading, and model feature probes beyond the explicit connection test are not added here.

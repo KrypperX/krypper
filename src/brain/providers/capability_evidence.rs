@@ -6,6 +6,10 @@
 
 use crate::agent_loop::DecisionFailureCode;
 use crate::brain::providers::ModelTokenUsage;
+use crate::routing::{
+    CapabilityAssertion, CapabilityName, CapabilityProvenance, CapabilitySupport,
+    CapabilityVerification, ProviderReadiness,
+};
 use ring::hmac;
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -17,22 +21,6 @@ pub(crate) const EVIDENCE_FRESHNESS_SECS: u64 = 60 * 60;
 const MAX_IDENTIFIER_BYTES: usize = 256;
 const MAX_LATENCY_MS: u64 = 24 * 60 * 60 * 1_000;
 const MAX_TOKEN_COUNT: u64 = 1_000_000_000_000;
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum CapabilityProvenance {
-    Declared,
-    Verified,
-    Observed,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum CapabilitySupport {
-    Supported,
-    Unsupported,
-    Unknown,
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct CapabilityFact {
@@ -51,32 +39,6 @@ impl CapabilityFact {
             },
         )
     }
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum CapabilityName {
-    DecisionRequest,
-    NativeStreaming,
-    ToolCalling,
-    Reasoning,
-    ImageInput,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum CapabilityVerification {
-    Unknown,
-    Verified,
-    Failed,
-    Stale,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ProviderReadiness {
-    pub(crate) discoverable: bool,
-    pub(crate) executable: bool,
-    pub(crate) configured: bool,
-    pub(crate) verification: CapabilityVerification,
 }
 
 pub(crate) fn resolve_provider_readiness(
@@ -102,14 +64,6 @@ pub(crate) fn resolve_provider_readiness(
         configured,
         verification,
     }
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct CapabilityAssertion {
-    pub(crate) name: CapabilityName,
-    pub(crate) support: CapabilitySupport,
-    pub(crate) provenance: CapabilityProvenance,
 }
 
 impl From<(CapabilityName, CapabilityFact)> for CapabilityAssertion {
