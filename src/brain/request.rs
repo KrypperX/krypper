@@ -22,6 +22,20 @@ pub(crate) fn validate_model_name_for_provider(
     name: &str,
     provider: ModelProvider,
 ) -> Result<(), &'static str> {
+    validate_model_name(name)?;
+    if provider == ModelProvider::Gemini {
+        GeminiModelName::try_from(name)?;
+    }
+    let lower_name = name.to_ascii_lowercase();
+    if provider == ModelProvider::Ollama
+        && (lower_name.ends_with(":cloud") || lower_name.ends_with("-cloud"))
+    {
+        return Err("cloud models are not supported; choose a locally installed model");
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_model_name(name: &str) -> Result<(), &'static str> {
     if name.trim().is_empty() {
         return Err("model name must not be empty");
     }
@@ -33,15 +47,6 @@ pub(crate) fn validate_model_name_for_provider(
     }
     if name.chars().any(char::is_control) {
         return Err("model name must not contain control characters");
-    }
-    if provider == ModelProvider::Gemini {
-        GeminiModelName::try_from(name)?;
-    }
-    let lower_name = name.to_ascii_lowercase();
-    if provider == ModelProvider::Ollama
-        && (lower_name.ends_with(":cloud") || lower_name.ends_with("-cloud"))
-    {
-        return Err("cloud models are not supported; choose a locally installed model");
     }
     Ok(())
 }

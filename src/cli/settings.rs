@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 const CREDENTIALS_FILE: &str = "credentials.json";
+const PROVIDER_PROFILES_FILE: &str = "provider-profiles.json";
 const MAX_CREDENTIAL_BYTES: u64 = 64 * 1024;
 static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 
@@ -27,7 +28,7 @@ impl CredentialStore {
         self.values.get(name).map(String::as_str)
     }
 
-    pub(super) fn insert(&mut self, name: &'static str, value: String) {
+    pub(super) fn insert(&mut self, name: &str, value: String) {
         self.values.insert(name.to_owned(), value);
     }
 
@@ -47,6 +48,7 @@ impl CredentialStore {
 pub(super) struct UserSettingsPaths {
     pub(super) model: PathBuf,
     pub(super) credentials: PathBuf,
+    pub(super) provider_profiles: PathBuf,
 }
 
 /// Returns the ordinary per-user paths. This deliberately ignores
@@ -59,6 +61,7 @@ pub(super) fn user_settings_paths() -> Result<Option<UserSettingsPaths>, String>
     };
     Ok(Some(UserSettingsPaths {
         credentials: model.with_file_name(CREDENTIALS_FILE),
+        provider_profiles: model.with_file_name(PROVIDER_PROFILES_FILE),
         model,
     }))
 }
@@ -119,7 +122,7 @@ pub(super) fn save_model_defaults(path: &Path, provider: &str, model: &str) -> R
 
 pub(super) fn save_credentials(path: &Path, credentials: &CredentialStore) -> Result<(), String> {
     if credentials.is_empty() {
-        return Ok(());
+        return remove_file_if_present(path, "credential store");
     }
     let bytes = serde_json::to_vec_pretty(&credentials.values)
         .map_err(|_| "cannot serialize credential store".to_owned())?;
@@ -128,6 +131,7 @@ pub(super) fn save_credentials(path: &Path, credentials: &CredentialStore) -> Re
 
 pub(super) fn remove_settings(paths: &UserSettingsPaths) -> Result<(), String> {
     remove_file_if_present(&paths.credentials, "credential store")?;
+    remove_file_if_present(&paths.provider_profiles, "provider profiles")?;
     remove_file_if_present(&paths.model, "model configuration")
 }
 
@@ -138,7 +142,11 @@ pub(super) fn valid_credential(value: &str) -> bool {
         && !value.chars().any(char::is_control)
 }
 
-fn write_private_file(path: &Path, bytes: &[u8], description: &str) -> Result<(), String> {
+pub(super) fn write_private_file(
+    path: &Path,
+    bytes: &[u8],
+    description: &str,
+) -> Result<(), String> {
     let parent = path.parent().ok_or_else(|| {
         format!("cannot locate the user configuration directory for {description}")
     })?;
@@ -212,7 +220,7 @@ fn temporary_path(path: &Path) -> PathBuf {
     path.with_file_name(format!(".{name}.{}.{}.tmp", std::process::id(), id))
 }
 
-fn remove_file_if_present(path: &Path, description: &str) -> Result<(), String> {
+pub(super) fn remove_file_if_present(path: &Path, description: &str) -> Result<(), String> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(cause) if cause.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -228,7 +236,10 @@ fn file_error(action: &str, path: &Path, cause: io::Error) -> String {
     format!("{action} '{}': {}", path.display(), cause.kind())
 }
 
-fn ensure_private_permissions(path: &Path, metadata: &fs::Metadata) -> Result<(), String> {
+pub(super) fn ensure_private_permissions(
+    path: &Path,
+    metadata: &fs::Metadata,
+) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -281,7 +292,7 @@ fn set_private_file_permissions(path: &Path) -> Result<(), String> {
 }
 
 #[cfg(unix)]
-fn open_credentials(path: &Path) -> io::Result<File> {
+pub(super) fn open_credentials(path: &Path) -> io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
     OpenOptions::new()
         .read(true)
@@ -290,7 +301,7 @@ fn open_credentials(path: &Path) -> io::Result<File> {
 }
 
 #[cfg(not(unix))]
-fn open_credentials(path: &Path) -> io::Result<File> {
+pub(super) fn open_credentials(path: &Path) -> io::Result<File> {
     File::open(path)
 }
 

@@ -484,6 +484,36 @@ pub(crate) fn is_credential_name(name: &str) -> bool {
         .iter()
         .flat_map(|descriptor| descriptor.auth_fields)
         .any(|field| field.name == name)
+        || profile_credential_name_is_valid(name)
+}
+
+fn profile_credential_name_is_valid(name: &str) -> bool {
+    let Some(profile_id) = name
+        .strip_prefix("KRYPPER_PROVIDER_")
+        .and_then(|name| name.strip_suffix("_API_KEY"))
+    else {
+        return false;
+    };
+    if profile_id.len() > 32 || profile_id.is_empty() {
+        return false;
+    }
+    if !profile_id.as_bytes()[0].is_ascii_uppercase() {
+        return false;
+    }
+    let mut expect_alphanumeric = true;
+    for byte in profile_id.bytes() {
+        if byte == b'_' {
+            if expect_alphanumeric {
+                return false;
+            }
+            expect_alphanumeric = true;
+        } else if byte.is_ascii_uppercase() || byte.is_ascii_digit() {
+            expect_alphanumeric = false;
+        } else {
+            return false;
+        }
+    }
+    !expect_alphanumeric
 }
 
 #[cfg(test)]
@@ -562,5 +592,9 @@ mod tests {
             }
         }
         assert!(!is_credential_name("UNKNOWN_PROVIDER_API_KEY"));
+        assert!(is_credential_name("KRYPPER_PROVIDER_MY_WORKER_API_KEY"));
+        assert!(!is_credential_name("KRYPPER_PROVIDER_1WORKER_API_KEY"));
+        assert!(!is_credential_name("KRYPPER_PROVIDER_MY__WORKER_API_KEY"));
+        assert!(!is_credential_name("KRYPPER_PROVIDER_MY_WORKER_SECRET"));
     }
 }

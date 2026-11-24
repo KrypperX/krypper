@@ -30,6 +30,7 @@ use super::request::*;
 pub struct OllamaDecisionSource {
     pub(super) model: String,
     pub(super) address: SocketAddr,
+    profile_endpoint: Option<String>,
     pub(super) agent: Agent,
     pub(super) remaining_decisions: usize,
     pub(super) extension_declarations: Vec<serde_json::Value>,
@@ -58,9 +59,26 @@ impl OllamaDecisionSource {
         Self {
             model: model.into(),
             address,
+            profile_endpoint: None,
             agent: model_agent(),
             remaining_decisions: action_budget,
             extension_declarations: extension_declarations.to_vec(),
+            repository_context: None,
+        }
+    }
+
+    pub(crate) fn with_profile_endpoint(
+        model: impl Into<String>,
+        action_budget: usize,
+        endpoint: String,
+    ) -> Self {
+        Self {
+            model: model.into(),
+            address: OLLAMA_ADDRESS,
+            profile_endpoint: Some(endpoint),
+            agent: model_agent(),
+            remaining_decisions: action_budget,
+            extension_declarations: Vec::new(),
             repository_context: None,
         }
     }
@@ -71,6 +89,10 @@ impl OllamaDecisionSource {
 
     pub(crate) fn clear_repository_context(&mut self) {
         self.repository_context = None;
+    }
+
+    pub(crate) fn has_builtin_endpoint(&self) -> bool {
+        self.profile_endpoint.is_none()
     }
 
     /// Requests one bounded, ordered set of workspace operations from the local model.
@@ -376,7 +398,10 @@ impl OllamaDecisionSource {
             project_guidance,
             &self.extension_declarations,
         )?;
-        let response = post_chat(&self.agent, self.address, &request)?;
+        let response = match self.profile_endpoint.as_deref() {
+            Some(endpoint) => post_chat_at_endpoint(&self.agent, endpoint, &request)?,
+            None => post_chat(&self.agent, self.address, &request)?,
+        };
         parse_model_response(&response)
     }
 }

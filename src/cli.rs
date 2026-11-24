@@ -9,6 +9,7 @@ mod help;
 mod model_selection;
 mod models;
 mod outcome;
+mod provider_profiles;
 mod settings;
 mod setup;
 mod task;

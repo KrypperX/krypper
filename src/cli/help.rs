@@ -99,8 +99,9 @@ pub(super) fn write_task_help(output: &mut dyn Write) -> io::Result<()> {
             "unless the user configuration file (see README) sets a default model; --no-config ignores saved defaults and credentials.\n",
             "Without --model, task remains caller-directed if --provider is also omitted.\n",
             "--model NAME without --provider uses local Ollama at 127.0.0.1:11434. Ollama needs no API key.\n",
-            "Each hosted provider requires explicit --provider selection and sends HTTPS requests only\n",
-            "to its fixed API endpoint; no custom API URL is accepted. Required credentials:\n",
+            "Hosted providers require explicit --provider selection or a saved user default.\n",
+            "Built-ins use fixed endpoints; trusted per-user profiles use their configured endpoint.\n",
+            "Provider profiles are documented in the CLI reference. Required built-in credentials:\n",
         )
         .as_bytes(),
     )?;
@@ -171,7 +172,7 @@ fn write_provider_selector_help(output: &mut dyn Write) -> io::Result<()> {
     let selectors = format!("{}, or {last}", selectors.join(", "));
     writeln!(
         output,
-        "  --provider NAME      choose {selectors}; requires --model"
+        "  --provider NAME      choose {selectors} or an enabled per-user profile; requires --model"
     )
 }
 
