@@ -413,11 +413,11 @@ pub fn build_gemini_request_with_extensions(
 
 pub(crate) fn gemini_generate_content_endpoint(model: &str) -> Result<String, &'static str> {
     let model = GeminiModelName::try_from(model)?;
-    Ok(format!(
-        "{}/{}:generateContent",
-        providers::GEMINI_GENERATE_CONTENT_URL,
-        model.as_str()
-    ))
+    let endpoint = providers::provider_descriptor(ModelProvider::Gemini).endpoint;
+    let ProviderEndpoint::GeminiModelPath { base, suffix, .. } = endpoint else {
+        unreachable!("Gemini provider descriptor uses a model path endpoint")
+    };
+    Ok(format!("{base}/{}:{suffix}", model.as_str()))
 }
 
 pub(crate) fn encode_model_request(request: &Value) -> Result<Vec<u8>, ModelError> {

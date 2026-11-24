@@ -4,6 +4,33 @@ use super::{
 };
 
 #[test]
+fn built_in_provider_selectors_remain_complete_and_case_sensitive() {
+    let selectors = [
+        "ollama",
+        "gemini",
+        "openai",
+        "xai",
+        "anthropic",
+        "cloudflare",
+        "cloudflare-ai-gateway",
+        "groq",
+        "openrouter",
+        "deepseek",
+        "zai",
+        "mistral",
+    ];
+
+    for selector in selectors {
+        assert!(
+            super::ModelProvider::parse(selector).is_some(),
+            "missing existing provider selector {selector}"
+        );
+    }
+    assert!(super::ModelProvider::parse("OpenAI").is_none());
+    assert!(super::ModelProvider::parse("unknown-provider").is_none());
+}
+
+#[test]
 fn decision_source_registry_rejects_duplicate_adapter_ids() {
     use super::{
         AdapterId, ProviderDecisionSource, ProviderDecisionSourceRegistry, ProviderSourceConfig,
@@ -551,43 +578,36 @@ fn xai_responses_stream_rejects_truncated_tool_call() {
 
 #[test]
 fn provider_capability_registry_covers_every_cli_provider() {
-    use super::{DecisionProtocol, ModelProvider, ProviderDecisionSourceRegistry};
+    use super::{DecisionProtocol, ProviderDecisionSourceRegistry};
     let source_registry = ProviderDecisionSourceRegistry::with_builtins();
-    for name in [
-        "ollama",
-        "gemini",
-        "openai",
-        "xai",
-        "anthropic",
-        "cloudflare",
-        "cloudflare-ai-gateway",
-        "groq",
-        "openrouter",
-        "deepseek",
-        "zai",
-        "mistral",
-    ] {
-        let provider = ModelProvider::parse(name).expect("registered provider");
-        let capabilities = provider.capabilities();
+    for descriptor in super::provider_descriptors() {
+        let capabilities = descriptor.provider.capabilities();
         assert!(
-            source_registry.contains(capabilities.protocol.adapter_id()),
-            "{name} has a source factory"
+            source_registry.contains(descriptor.adapter_id),
+            "{} has a source factory",
+            descriptor.selector
         );
         assert_eq!(
-            capabilities.native_sse_decisions,
+            capabilities.protocol, descriptor.protocol,
+            "{} protocol",
+            descriptor.selector
+        );
+        assert_eq!(
+            capabilities.native_sse_decisions, descriptor.native_sse_decisions,
+            "{} native SSE metadata",
+            descriptor.selector
+        );
+        assert_eq!(
+            descriptor.native_sse_decisions,
             matches!(
-                capabilities.protocol,
+                descriptor.protocol,
                 DecisionProtocol::Responses | DecisionProtocol::AnthropicMessages
             ),
-            "{name}"
-        );
-        assert_eq!(
-            capabilities.native_sse_decisions,
-            matches!(name, "openai" | "xai" | "anthropic"),
-            "{name}"
+            "{} protocol feature",
+            descriptor.selector
         );
     }
-    assert!(ModelProvider::parse("unknown-provider").is_none());
+    assert!(super::ModelProvider::parse("unknown-provider").is_none());
 }
 
 #[test]

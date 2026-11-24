@@ -39,35 +39,19 @@ impl OpenAiCompatibleProvider {
         self,
         cloudflare_account_id: Option<&CloudflareAccountId>,
     ) -> Result<String, &'static str> {
-        match (self, cloudflare_account_id) {
-            (Self::Cloudflare | Self::CloudflareAiGateway, Some(account_id)) => Ok(format!(
-                "https://api.cloudflare.com/client/v4/accounts/{}/ai/v1/chat/completions",
-                account_id.as_str()
-            )),
-            (Self::Cloudflare | Self::CloudflareAiGateway, None) => {
+        let descriptor = provider_descriptor(ModelProvider::OpenAiCompatible(self));
+        match (descriptor.endpoint, cloudflare_account_id) {
+            (ProviderEndpoint::CloudflareAccountPath { prefix, suffix, .. }, Some(account_id)) => {
+                Ok(format!("{prefix}{}{suffix}", account_id.as_str()))
+            }
+            (ProviderEndpoint::CloudflareAccountPath { .. }, None) => {
                 Err("CLOUDFLARE_ACCOUNT_ID is required for Cloudflare")
             }
-            (Self::Groq, None) => Ok(GROQ_CHAT_COMPLETIONS_URL.to_owned()),
-            (Self::OpenRouter, None) => Ok(OPENROUTER_CHAT_COMPLETIONS_URL.to_owned()),
-            (Self::DeepSeek, None) => Ok(DEEPSEEK_CHAT_COMPLETIONS_URL.to_owned()),
-            (Self::Zai, None) => Ok(ZAI_CHAT_COMPLETIONS_URL.to_owned()),
-            (Self::Mistral, None) => Ok(MISTRAL_CHAT_COMPLETIONS_URL.to_owned()),
-            (
-                Self::Groq | Self::OpenRouter | Self::DeepSeek | Self::Zai | Self::Mistral,
-                Some(_),
-            ) => Err("Cloudflare account ID is only valid for Cloudflare"),
-        }
-    }
-
-    pub(super) fn label(self) -> &'static str {
-        match self {
-            Self::Cloudflare => "Cloudflare Workers AI",
-            Self::CloudflareAiGateway => "Cloudflare AI Gateway",
-            Self::Groq => "Groq",
-            Self::OpenRouter => "OpenRouter",
-            Self::DeepSeek => "DeepSeek",
-            Self::Zai => "Z.AI",
-            Self::Mistral => "Mistral",
+            (ProviderEndpoint::Fixed(url), None) => Ok(url.to_owned()),
+            (ProviderEndpoint::Fixed(_), Some(_)) => {
+                Err("Cloudflare account ID is only valid for Cloudflare")
+            }
+            _ => Err("provider endpoint metadata is invalid"),
         }
     }
 }
@@ -192,7 +176,10 @@ impl OpenAiCompatibleCredentials {
                     .endpoint(Some(&account_id))?,
                 api_key: api_token,
                 extra_headers: vec![(
-                    "cf-aig-gateway-id".to_owned(),
+                    AuthFieldRole::CloudflareGatewayId
+                        .request_header()
+                        .expect("Cloudflare gateway ID has a request header")
+                        .to_owned(),
                     gateway_id.as_str().to_owned(),
                 )],
             }),

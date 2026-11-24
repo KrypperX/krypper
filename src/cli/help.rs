@@ -76,7 +76,12 @@ pub(super) fn write_task_help(output: &mut dyn Write) -> io::Result<()> {
             "  --max-actions N      required positive action limit for this invocation\n",
             "  --workspace PATH     use an existing directory as the captured task workspace\n",
             "  --model NAME         opt in to model-selected actions or plans (defaults to local Ollama)\n",
-            "  --provider NAME      choose ollama, gemini, openai, xai, anthropic, cloudflare, cloudflare-ai-gateway, groq, openrouter, deepseek, zai, or mistral; requires --model\n",
+        )
+        .as_bytes(),
+    )?;
+    write_provider_selector_help(output)?;
+    output.write_all(
+        concat!(
             "  --verified           use a planned local Ollama task with independent file checks and one correction\n",
             "  --verify-file PATH   workspace-relative file required for success; repeat with --verified (up to 32)\n",
             "  --no-config          ignore saved model defaults and credentials for this run\n",
@@ -85,7 +90,7 @@ pub(super) fn write_task_help(output: &mut dyn Write) -> io::Result<()> {
             "  --activity-jsonl    write read-only task activity positions as JSONL to stderr after each turn\n",
             "  --stream-events-jsonl  write versioned metadata-only stream events as JSONL to stderr after each turn\n",
             "  --model-usage-jsonl emit provider token counts and decision latency as prefixed JSON records to stderr\n",
-            "  --repository-context-json PATH add bounded JSON from `krypper context` as untrusted advisory data (OpenAI-compatible providers only)\n",
+            "  --repository-context-json PATH add bounded JSON from \x60krypper context\x60 as untrusted advisory data (OpenAI-compatible providers only)\n",
             "  -h, --help           show this help message and exit\n\n",
             "Without --workspace, task captures the current directory as its workspace.\n",
             "With --workspace, the selected directory is validated before task history starts;\n",
@@ -96,22 +101,12 @@ pub(super) fn write_task_help(output: &mut dyn Write) -> io::Result<()> {
             "--model NAME without --provider uses local Ollama at 127.0.0.1:11434. Ollama needs no API key.\n",
             "Each hosted provider requires explicit --provider selection and sends HTTPS requests only\n",
             "to its fixed API endpoint; no custom API URL is accepted. Required credentials:\n",
-            "  gemini: GEMINI_API_KEY -> https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent\n",
-            "  Gemini model name must be one safe path component; no custom URL is accepted.\n",
-            "  openai: OPENAI_API_KEY -> https://api.openai.com/v1/responses\n",
-            "  xai: XAI_API_KEY -> https://api.x.ai/v1/responses\n",
-            "  anthropic: ANTHROPIC_API_KEY -> https://api.anthropic.com/v1/messages\n",
-            "    optional ANTHROPIC_WORKSPACE_ID is sent as anthropic-workspace-id (required by Anthropic for keys not scoped to a workspace)\n",
-            "  cloudflare: CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN ->\n",
-            "    https://api.cloudflare.com/client/v4/accounts/<account-id>/ai/v1/chat/completions\n",
-            "  cloudflare-ai-gateway: CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN + optional CLOUDFLARE_AI_GATEWAY_ID -> same endpoint with cf-aig-gateway-id (default: default)\n",
-            "  groq: GROQ_API_KEY -> https://api.groq.com/openai/v1/chat/completions\n",
-            "  openrouter: OPENROUTER_API_KEY -> https://openrouter.ai/api/v1/chat/completions\n",
-            "  deepseek: DEEPSEEK_API_KEY -> https://api.deepseek.com/chat/completions\n",
-            "  zai: ZAI_API_KEY -> https://api.z.ai/api/paas/v4/chat/completions\n",
-            "  mistral: MISTRAL_API_KEY -> https://api.mistral.ai/v1/chat/completions\n",
-            "OpenRouter may select an upstream provider for the requested model even when fallback\n",
-            "providers are disabled in the request.\n",
+        )
+        .as_bytes(),
+    )?;
+    write_provider_credential_help(output)?;
+    output.write_all(
+        concat!(
             "Hosted requests send the task goal and observations, which can include workspace file text,\n",
             "to that provider and may incur provider charges.\n",
             "--workspace PATH works with --model NAME or --provider NAME and uses the same captured workspace.\n",
@@ -165,6 +160,92 @@ pub(super) fn write_task_help(output: &mut dyn Write) -> io::Result<()> {
         )
         .as_bytes(),
     )
+}
+
+fn write_provider_selector_help(output: &mut dyn Write) -> io::Result<()> {
+    let mut selectors = crate::brain::provider_descriptors()
+        .iter()
+        .map(|descriptor| descriptor.selector)
+        .collect::<Vec<_>>();
+    let last = selectors.pop().expect("built-in providers are not empty");
+    let selectors = format!("{}, or {last}", selectors.join(", "));
+    writeln!(
+        output,
+        "  --provider NAME      choose {selectors}; requires --model"
+    )
+}
+
+fn write_provider_credential_help(output: &mut dyn Write) -> io::Result<()> {
+    use crate::brain::{provider_descriptors, AuthFieldRole, ProviderEndpoint};
+
+    for descriptor in provider_descriptors()
+        .iter()
+        .filter(|descriptor| !descriptor.auth_fields.is_empty())
+    {
+        if descriptor
+            .auth_field(AuthFieldRole::CloudflareAccountId)
+            .is_some()
+        {
+            let mut fields = descriptor
+                .auth_fields
+                .iter()
+                .filter(|field| field.required)
+                .map(|field| field.name.to_owned())
+                .collect::<Vec<_>>();
+            let gateway = descriptor.auth_field(AuthFieldRole::CloudflareGatewayId);
+            if let Some(gateway) = gateway {
+                fields.push(format!("optional {}", gateway.name));
+            }
+            write!(output, "  {}: {}", descriptor.selector, fields.join(" + "))?;
+            if let Some(gateway) = gateway {
+                writeln!(
+                    output,
+                    " -> {}",
+                    gateway
+                        .help_note
+                        .expect("gateway help includes routing behavior")
+                )?;
+            } else if let Some(url) = descriptor.endpoint.help_url() {
+                writeln!(output, " ->\n    {url}")?;
+            }
+            continue;
+        }
+
+        let api_key = descriptor
+            .auth_field(AuthFieldRole::ApiKey)
+            .expect("hosted providers declare an API key");
+        let url = match descriptor.endpoint {
+            ProviderEndpoint::Fixed(_) | ProviderEndpoint::GeminiModelPath { .. } => descriptor
+                .endpoint
+                .help_url()
+                .expect("hosted provider has a URL"),
+            _ => unreachable!("non-Cloudflare providers use fixed or model-path endpoints"),
+        };
+        writeln!(
+            output,
+            "  {}: {} -> {url}",
+            descriptor.selector, api_key.name
+        )?;
+        for field in descriptor
+            .auth_fields
+            .iter()
+            .filter(|field| !field.required)
+        {
+            if let Some(note) = field.help_note {
+                writeln!(output, "    optional {} {note}", field.name)?;
+            }
+        }
+        if let Some(note) = descriptor.help_note {
+            writeln!(output, "  {note}")?;
+        }
+    }
+    for note in crate::brain::provider_descriptors()
+        .iter()
+        .flat_map(|descriptor| descriptor.postscript)
+    {
+        writeln!(output, "{note}")?;
+    }
+    Ok(())
 }
 
 pub(super) fn write_show_help(output: &mut dyn Write) -> io::Result<()> {

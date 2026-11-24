@@ -17,7 +17,15 @@ use ureq::Agent;
 mod anthropic;
 mod compatible;
 mod gemini;
+mod provider_catalog;
 mod responses;
+
+pub(crate) use provider_catalog::{
+    all as provider_descriptors, by_provider as provider_descriptor,
+    by_selector as provider_descriptor_by_selector, catalog_matches as provider_catalog_matches,
+    is_credential_name as is_provider_credential_name, AuthFieldRole, ProviderAuthField,
+    ProviderDescriptor, ProviderEndpoint,
+};
 
 pub use anthropic::AnthropicDecisionSource;
 #[cfg(test)]
@@ -68,18 +76,7 @@ mod stream_flag_tests {
     }
 }
 
-const OPENAI_RESPONSES_URL: &str = "https://api.openai.com/v1/responses";
-const XAI_RESPONSES_URL: &str = "https://api.x.ai/v1/responses";
-const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
-pub(super) const GEMINI_GENERATE_CONTENT_URL: &str =
-    "https://generativelanguage.googleapis.com/v1beta/models";
 pub(super) const ANTHROPIC_API_VERSION: &str = "2026-10-21";
-const ANTHROPIC_WORKSPACE_HEADER: &str = "anthropic-workspace-id";
-const GROQ_CHAT_COMPLETIONS_URL: &str = "https://api.groq.com/openai/v1/chat/completions";
-const OPENROUTER_CHAT_COMPLETIONS_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
-const DEEPSEEK_CHAT_COMPLETIONS_URL: &str = "https://api.deepseek.com/chat/completions";
-const ZAI_CHAT_COMPLETIONS_URL: &str = "https://api.z.ai/api/paas/v4/chat/completions";
-const MISTRAL_CHAT_COMPLETIONS_URL: &str = "https://api.mistral.ai/v1/chat/completions";
 
 /// The provider protocol selected for a model request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -110,18 +107,6 @@ pub(crate) enum DecisionProtocol {
     CompatibleChat,
 }
 
-impl DecisionProtocol {
-    pub(crate) const fn adapter_id(self) -> AdapterId {
-        match self {
-            Self::OllamaChat => AdapterId::OLLAMA,
-            Self::GeminiGenerateContent => AdapterId::GEMINI,
-            Self::Responses => AdapterId::RESPONSES,
-            Self::AnthropicMessages => AdapterId::ANTHROPIC,
-            Self::CompatibleChat => AdapterId::OPENAI_COMPATIBLE,
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ProviderCapabilities {
     pub(crate) protocol: DecisionProtocol,
@@ -130,51 +115,15 @@ pub(crate) struct ProviderCapabilities {
 
 impl ModelProvider {
     pub(crate) fn parse(name: &str) -> Option<Self> {
-        match name {
-            "ollama" => Some(Self::Ollama),
-            "gemini" => Some(Self::Gemini),
-            "openai" => Some(Self::OpenAi),
-            "xai" => Some(Self::Xai),
-            "anthropic" => Some(Self::Anthropic),
-            "cloudflare" => Some(Self::OpenAiCompatible(OpenAiCompatibleProvider::Cloudflare)),
-            "cloudflare-ai-gateway" => Some(Self::OpenAiCompatible(
-                OpenAiCompatibleProvider::CloudflareAiGateway,
-            )),
-            "groq" => Some(Self::OpenAiCompatible(OpenAiCompatibleProvider::Groq)),
-            "openrouter" => Some(Self::OpenAiCompatible(OpenAiCompatibleProvider::OpenRouter)),
-            "deepseek" => Some(Self::OpenAiCompatible(OpenAiCompatibleProvider::DeepSeek)),
-            "zai" => Some(Self::OpenAiCompatible(OpenAiCompatibleProvider::Zai)),
-            "mistral" => Some(Self::OpenAiCompatible(OpenAiCompatibleProvider::Mistral)),
-            _ => None,
-        }
+        provider_descriptor_by_selector(name).map(|descriptor| descriptor.provider)
     }
 
     pub(crate) fn capabilities(self) -> ProviderCapabilities {
-        let protocol = match self {
-            Self::Ollama => DecisionProtocol::OllamaChat,
-            Self::Gemini => DecisionProtocol::GeminiGenerateContent,
-            Self::OpenAi | Self::Xai => DecisionProtocol::Responses,
-            Self::Anthropic => DecisionProtocol::AnthropicMessages,
-            Self::OpenAiCompatible(_) => DecisionProtocol::CompatibleChat,
-        };
-        ProviderCapabilities {
-            protocol,
-            native_sse_decisions: matches!(
-                protocol,
-                DecisionProtocol::Responses | DecisionProtocol::AnthropicMessages
-            ),
-        }
+        provider_catalog::capabilities(self)
     }
 
     pub(super) fn label(self) -> &'static str {
-        match self {
-            Self::Ollama => "Ollama",
-            Self::Gemini => "Gemini",
-            Self::OpenAi => "OpenAI",
-            Self::Xai => "xAI",
-            Self::Anthropic => "Anthropic",
-            Self::OpenAiCompatible(provider) => provider.label(),
-        }
+        provider_descriptor(self).label
     }
 }
 
@@ -357,7 +306,7 @@ impl ProviderDecisionSourceRegistry {
         &self,
         config: ProviderSourceConfig,
     ) -> Result<ModelDecisionSource, ProviderDecisionSourceRegistryError> {
-        let adapter_id = config.provider.capabilities().protocol.adapter_id();
+        let adapter_id = provider_descriptor(config.provider).adapter_id;
         self.create_with_adapter(adapter_id, config)
     }
 

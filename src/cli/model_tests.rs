@@ -1,3 +1,5 @@
+use super::model_selection::prepare_model_source_with_credentials;
+use super::settings::{save_credentials, CredentialStore};
 use super::{prepare_model_source, run_task_with_endpoint, snapshot_task_and_turn_state};
 use crate::brain::{AdapterId, ModelProvider};
 use crate::harness::execution::GoalTurnError;
@@ -996,6 +998,46 @@ fn mistral_credentials_are_loaded_only_for_explicit_selection() {
 }
 
 #[test]
+fn saved_credentials_are_used_by_explicit_model_selection_when_enabled() {
+    let _lock = PROVIDER_ENV_TEST_LOCK
+        .lock()
+        .expect("lock provider environment tests");
+    let temporary = TempDir::new();
+    let config_home = temporary.path().to_string_lossy().into_owned();
+    let _restore_api_key = RestoreEnvironmentVariable::remove("OPENAI_API_KEY");
+    let _restore_config_home = RestoreEnvironmentVariable::set("XDG_CONFIG_HOME", &config_home);
+
+    let mut credentials = CredentialStore::empty();
+    credentials.insert("OPENAI_API_KEY", "saved-openai-test-key".to_owned());
+    let credentials_path = temporary.path().join("krypper/credentials.json");
+    save_credentials(&credentials_path, &credentials).expect("save test credentials");
+
+    let provider = ModelProvider::parse("openai").expect("parse OpenAI provider");
+    let endpoint = SocketAddr::from(([127, 0, 0, 1], 0));
+    let source = prepare_model_source_with_credentials(
+        Some("gpt-4.1".to_owned()),
+        Some(provider),
+        1,
+        endpoint,
+        true,
+    )
+    .expect("load saved credentials for explicit model selection")
+    .expect("explicit model selection creates a provider source");
+    assert_eq!(source.adapter_id(), AdapterId::RESPONSES);
+
+    assert!(matches!(
+        prepare_model_source_with_credentials(
+            Some("gpt-4.1".to_owned()),
+            Some(provider),
+            1,
+            endpoint,
+            false,
+        ),
+        Err("OPENAI_API_KEY must be set and nonempty for --provider openai")
+    ));
+}
+
+#[test]
 fn hosted_keys_do_not_change_caller_directed_or_default_ollama_tasks() {
     let _lock = PROVIDER_ENV_TEST_LOCK
         .lock()
@@ -1496,6 +1538,19 @@ fn task_help_documents_provider_selection_and_network_disclosure() {
     assert!(help.contains("https://api.deepseek.com/chat/completions"));
     assert!(help.contains("https://api.z.ai/api/paas/v4/chat/completions"));
     assert!(help.contains("https://api.mistral.ai/v1/chat/completions"));
+    for descriptor in crate::brain::provider_descriptors() {
+        for field in descriptor.auth_fields {
+            assert!(help.contains(descriptor.selector));
+            assert!(help.contains(field.name));
+        }
+        if let Some(endpoint) = descriptor.endpoint.help_url() {
+            assert!(
+                help.contains(&endpoint),
+                "missing endpoint for {}",
+                descriptor.selector
+            );
+        }
+    }
 }
 
 #[test]

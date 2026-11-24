@@ -1,7 +1,7 @@
 //! Per-user model defaults and provider credentials used by `krypper setup`.
 
 use super::config::config_path;
-use crate::brain::{validate_model_name_for_provider, ModelProvider};
+use crate::brain::{is_provider_credential_name, validate_model_name_for_provider, ModelProvider};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -11,22 +11,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 const CREDENTIALS_FILE: &str = "credentials.json";
 const MAX_CREDENTIAL_BYTES: u64 = 64 * 1024;
 static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
-
-const CREDENTIAL_NAMES: &[&str] = &[
-    "GEMINI_API_KEY",
-    "OPENAI_API_KEY",
-    "XAI_API_KEY",
-    "ANTHROPIC_API_KEY",
-    "ANTHROPIC_WORKSPACE_ID",
-    "CLOUDFLARE_ACCOUNT_ID",
-    "CLOUDFLARE_API_TOKEN",
-    "CLOUDFLARE_AI_GATEWAY_ID",
-    "GROQ_API_KEY",
-    "OPENROUTER_API_KEY",
-    "DEEPSEEK_API_KEY",
-    "ZAI_API_KEY",
-    "MISTRAL_API_KEY",
-];
 
 pub(super) struct CredentialStore {
     values: BTreeMap<String, String>,
@@ -113,7 +97,7 @@ pub(super) fn load_credentials(path: &Path) -> Result<Option<CredentialStore>, S
     })?;
     if values
         .iter()
-        .any(|(name, value)| !CREDENTIAL_NAMES.contains(&name.as_str()) || !valid_credential(value))
+        .any(|(name, value)| !is_provider_credential_name(name) || !valid_credential(value))
     {
         return Err(format!(
             "credential store '{}' contains an unsupported or invalid value",

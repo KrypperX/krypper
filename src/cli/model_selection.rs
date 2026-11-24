@@ -3,9 +3,10 @@
 use super::config::{config_path, load_model_defaults};
 use super::settings::{load_credentials, user_settings_paths, CredentialStore};
 use crate::brain::{
-    validate_model_name_for_provider, AdapterId, CloudflareAccountId, CloudflareGatewayId,
-    ModelDecisionSource, ModelProvider, OpenAiCompatibleCredentials, OpenAiCompatibleProvider,
-    ProviderDecisionSourceRegistry, ProviderSourceConfig, ProviderSourceCredentials,
+    provider_descriptor, validate_model_name_for_provider, AdapterId, AuthFieldRole,
+    CloudflareAccountId, CloudflareGatewayId, ModelDecisionSource, ModelProvider,
+    OpenAiCompatibleCredentials, OpenAiCompatibleProvider, ProviderDecisionSourceRegistry,
+    ProviderSourceConfig, ProviderSourceCredentials,
 };
 use std::io::Write;
 use std::net::SocketAddr;
@@ -76,56 +77,38 @@ pub(super) fn prepare_model_source_with_credentials(
     let mut credential_resolver = CredentialResolver::new(use_saved_credentials);
     let source_credentials = match provider {
         ModelProvider::Ollama => ProviderSourceCredentials::None,
-        ModelProvider::Gemini => ProviderSourceCredentials::HostedApiKey(hosted_api_key(
-            "GEMINI_API_KEY",
-            "GEMINI_API_KEY must be set and nonempty for --provider gemini",
-            &mut credential_resolver,
-        )?),
-        ModelProvider::OpenAi => ProviderSourceCredentials::HostedApiKey(hosted_api_key(
-            "OPENAI_API_KEY",
-            "OPENAI_API_KEY must be set and nonempty for --provider openai",
-            &mut credential_resolver,
-        )?),
-        ModelProvider::Xai => ProviderSourceCredentials::HostedApiKey(hosted_api_key(
-            "XAI_API_KEY",
-            "XAI_API_KEY must be set and nonempty for --provider xai",
-            &mut credential_resolver,
-        )?),
-        ModelProvider::Anthropic => ProviderSourceCredentials::HostedApiKey(hosted_api_key(
-            "ANTHROPIC_API_KEY",
-            "ANTHROPIC_API_KEY must be set and nonempty for --provider anthropic",
+        ModelProvider::Gemini
+        | ModelProvider::OpenAi
+        | ModelProvider::Xai
+        | ModelProvider::Anthropic => ProviderSourceCredentials::HostedApiKey(hosted_api_key_for(
+            provider,
             &mut credential_resolver,
         )?),
         ModelProvider::OpenAiCompatible(compatible_provider) => {
             let credentials = match compatible_provider {
                 OpenAiCompatibleProvider::Cloudflare => {
-                    let account_id = credential_resolver.required(
-                        "CLOUDFLARE_ACCOUNT_ID",
-                        "CLOUDFLARE_ACCOUNT_ID must be set for --provider cloudflare",
-                    )?;
-                    let account_id = CloudflareAccountId::try_from(account_id.as_str())?;
-                    let api_token = hosted_api_key(
-                        "CLOUDFLARE_API_TOKEN",
-                        "CLOUDFLARE_API_TOKEN must be set and nonempty for --provider cloudflare",
+                    let account_id = required_auth_field(
+                        provider,
+                        AuthFieldRole::CloudflareAccountId,
                         &mut credential_resolver,
                     )?;
+                    let account_id = CloudflareAccountId::try_from(account_id.as_str())?;
+                    let api_token = hosted_api_key_for(provider, &mut credential_resolver)?;
                     OpenAiCompatibleCredentials::Cloudflare {
                         account_id,
                         api_token,
                     }
                 }
                 OpenAiCompatibleProvider::CloudflareAiGateway => {
-                    let account_id = credential_resolver.required(
-                        "CLOUDFLARE_ACCOUNT_ID",
-                        "CLOUDFLARE_ACCOUNT_ID must be set for --provider cloudflare-ai-gateway",
-                    )?;
-                    let account_id = CloudflareAccountId::try_from(account_id.as_str())?;
-                    let api_token = hosted_api_key(
-                        "CLOUDFLARE_API_TOKEN",
-                        "CLOUDFLARE_API_TOKEN must be set and nonempty for --provider cloudflare-ai-gateway",
+                    let account_id = required_auth_field(
+                        provider,
+                        AuthFieldRole::CloudflareAccountId,
                         &mut credential_resolver,
                     )?;
-                    let gateway_id = cloudflare_gateway_id_from_env(&mut credential_resolver)?;
+                    let account_id = CloudflareAccountId::try_from(account_id.as_str())?;
+                    let api_token = hosted_api_key_for(provider, &mut credential_resolver)?;
+                    let gateway_id =
+                        cloudflare_gateway_id_from_env(&mut credential_resolver, provider)?;
                     OpenAiCompatibleCredentials::CloudflareAiGateway {
                         account_id,
                         api_token,
@@ -133,39 +116,19 @@ pub(super) fn prepare_model_source_with_credentials(
                     }
                 }
                 OpenAiCompatibleProvider::Groq => OpenAiCompatibleCredentials::Groq {
-                    api_key: hosted_api_key(
-                        "GROQ_API_KEY",
-                        "GROQ_API_KEY must be set and nonempty for --provider groq",
-                        &mut credential_resolver,
-                    )?,
+                    api_key: hosted_api_key_for(provider, &mut credential_resolver)?,
                 },
                 OpenAiCompatibleProvider::OpenRouter => OpenAiCompatibleCredentials::OpenRouter {
-                    api_key: hosted_api_key(
-                        "OPENROUTER_API_KEY",
-                        "OPENROUTER_API_KEY must be set and nonempty for --provider openrouter",
-                        &mut credential_resolver,
-                    )?,
+                    api_key: hosted_api_key_for(provider, &mut credential_resolver)?,
                 },
                 OpenAiCompatibleProvider::DeepSeek => OpenAiCompatibleCredentials::DeepSeek {
-                    api_key: hosted_api_key(
-                        "DEEPSEEK_API_KEY",
-                        "DEEPSEEK_API_KEY must be set and nonempty for --provider deepseek",
-                        &mut credential_resolver,
-                    )?,
+                    api_key: hosted_api_key_for(provider, &mut credential_resolver)?,
                 },
                 OpenAiCompatibleProvider::Zai => OpenAiCompatibleCredentials::Zai {
-                    api_key: hosted_api_key(
-                        "ZAI_API_KEY",
-                        "ZAI_API_KEY must be set and nonempty for --provider zai",
-                        &mut credential_resolver,
-                    )?,
+                    api_key: hosted_api_key_for(provider, &mut credential_resolver)?,
                 },
                 OpenAiCompatibleProvider::Mistral => OpenAiCompatibleCredentials::Mistral {
-                    api_key: hosted_api_key(
-                        "MISTRAL_API_KEY",
-                        "MISTRAL_API_KEY must be set and nonempty for --provider mistral",
-                        &mut credential_resolver,
-                    )?,
+                    api_key: hosted_api_key_for(provider, &mut credential_resolver)?,
                 },
             };
             ProviderSourceCredentials::OpenAiCompatible(credentials)
@@ -199,9 +162,15 @@ fn apply_anthropic_workspace_id(
     if source.adapter_id() != AdapterId::ANTHROPIC {
         return Ok(source);
     }
+    let workspace_field = auth_field(
+        ModelProvider::Anthropic,
+        AuthFieldRole::AnthropicWorkspaceId,
+    );
     let workspace_id = credentials.optional(
-        "ANTHROPIC_WORKSPACE_ID",
-        "ANTHROPIC_WORKSPACE_ID must be valid UTF-8",
+        workspace_field.name,
+        workspace_field
+            .invalid_utf8_message
+            .expect("optional workspace IDs have a UTF-8 validation message"),
     )?;
     if let Some(workspace_id) = workspace_id {
         source.set_anthropic_workspace_id(&workspace_id)?;
@@ -218,7 +187,12 @@ fn optional_workspace_id(
     match value {
         Ok(value) => Ok(Some(value)),
         Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(std::env::VarError::NotUnicode(_)) => Err("ANTHROPIC_WORKSPACE_ID must be valid UTF-8"),
+        Err(std::env::VarError::NotUnicode(_)) => Err(auth_field(
+            ModelProvider::Anthropic,
+            AuthFieldRole::AnthropicWorkspaceId,
+        )
+        .invalid_utf8_message
+        .expect("optional workspace IDs have a UTF-8 validation message")),
     }
 }
 
@@ -248,13 +222,54 @@ fn hosted_api_key(
     Ok(key)
 }
 
+fn auth_field(
+    provider: ModelProvider,
+    role: AuthFieldRole,
+) -> &'static crate::brain::ProviderAuthField {
+    provider_descriptor(provider)
+        .auth_field(role)
+        .expect("provider descriptor includes the requested auth field")
+}
+
+fn required_auth_field(
+    provider: ModelProvider,
+    role: AuthFieldRole,
+    credentials: &mut CredentialResolver,
+) -> Result<String, &'static str> {
+    let field = auth_field(provider, role);
+    credentials.required(
+        field.name,
+        field
+            .missing_message
+            .expect("required auth fields have a missing-value message"),
+    )
+}
+
+fn hosted_api_key_for(
+    provider: ModelProvider,
+    credentials: &mut CredentialResolver,
+) -> Result<String, &'static str> {
+    let field = auth_field(provider, AuthFieldRole::ApiKey);
+    hosted_api_key(
+        field.name,
+        field
+            .missing_message
+            .expect("required API keys have a missing-value message"),
+        credentials,
+    )
+}
+
 fn cloudflare_gateway_id_from_env(
     credentials: &mut CredentialResolver,
+    provider: ModelProvider,
 ) -> Result<CloudflareGatewayId, &'static str> {
+    let field = auth_field(provider, AuthFieldRole::CloudflareGatewayId);
     let value = credentials
         .optional(
-            "CLOUDFLARE_AI_GATEWAY_ID",
-            "CLOUDFLARE_AI_GATEWAY_ID must be valid UTF-8",
+            field.name,
+            field
+                .invalid_utf8_message
+                .expect("optional gateway IDs have a UTF-8 validation message"),
         )?
         .unwrap_or_else(|| "default".to_owned());
     CloudflareGatewayId::try_from(value.as_str())

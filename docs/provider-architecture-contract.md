@@ -1,10 +1,10 @@
 # Provider and model architecture contract
 
-**Status:** current implementation and staged design contract. The code has an internal typed factory registry around the existing protocol adapters. Configurable provider profiles, automatic routing, and fallback are not implemented.
+**Status:** current implementation and staged design contract. Built-in provider metadata is centralized in an internal typed catalog and resolves through the existing protocol adapter registry. Configurable provider profiles, automatic routing, and fallback are not implemented.
 
 ## Scope and baseline
 
-This contract was checked against Product revision `8d22792928ac2d5878868ad93b4462873791a961` on 2026-11-24. It covers provider selection, adapter dispatch, model metadata, credentials, and safe migration. It does not change runtime behavior.
+The implementation baseline for P3 is Product revision `e290e74e553f5b108b458009a1cf25a340cebeb3` on 2026-11-24. This contract covers provider selection, adapter dispatch, model metadata, credentials, and safe migration. P3 centralizes built-in provider metadata while preserving the existing selection and adapter behavior.
 
 ## Evidence and public API inventory
 
@@ -16,7 +16,7 @@ At the crate root, `src/lib.rs` re-exports `ModelProvider`, `OllamaDecisionSourc
 
 The public catalog API is `krypper::catalog_data::{lookup, models, provider_matches, ModelSpec}`. It reads the bundled snapshot and exposes descriptive model metadata; it does not perform network access or select a provider.
 
-Relevant tests cover several boundaries: `src/brain/providers/tests.rs` checks the capability and factory registries against all twelve selectors, duplicate/missing registration errors, and fake-adapter forwarding; `src/brain/tests/providers/` has protocol request, response, action, streaming, and extension-dispatch fixtures; and `src/brain/tests/endpoint.rs` checks endpoint rejection before request or credential use. `src/cli/model_tests.rs` and `src/cli/task_tests.rs` cover explicit provider selection, credentials, and preflight; `src/cli/setup.rs` has the setup-list test described below. Catalog behavior is covered in `src/catalog_data.rs` and generator validation in `examples/generate_model_catalog.rs`; provider event handling also has fixtures in `src/streaming/tests/provider.rs`.
+Relevant tests cover several boundaries: `src/brain/providers/provider_catalog.rs` checks the exact selector order, alias conflicts, unknown providers, catalog mappings, auth fields, and adapter metadata; `src/brain/providers/tests.rs` checks descriptor/factory parity, duplicate/missing registration errors, and fake-adapter forwarding. `src/brain/tests/providers/` has protocol request, response, action, streaming, and extension-dispatch fixtures; `src/brain/tests/endpoint.rs` checks endpoint rejection before request or credential use. `src/cli/model_tests.rs` and `src/cli/task_tests.rs` cover explicit provider selection, help output, credentials, and preflight; `src/cli/setup.rs` checks that setup choices and labels come from the descriptor catalog. Catalog behavior is covered in `src/catalog_data.rs` and generator validation in `examples/generate_model_catalog.rs`; provider event handling also has fixtures in `src/streaming/tests/provider.rs`.
 
 ## Current implementation
 
@@ -30,14 +30,15 @@ The CLI selects one model source. An explicit `--provider` selects a provider; s
 | Anthropic Messages | `anthropic` | Native Messages adapter. |
 | OpenAI-compatible chat completions | `cloudflare`, `cloudflare-ai-gateway`, `groq`, `openrouter`, `deepseek`, `zai`, `mistral` | Shared chat adapter with fixed provider endpoints. Cloudflare direct and Gateway use separate selectors; Gateway also accepts a gateway ID. |
 
-The main code locations are:
+The trusted built-in metadata and main code locations are:
 
-- `src/brain/providers.rs` defines the public `ModelProvider` enum, maps providers to protocol-level capabilities and stable adapter IDs, registers factories for the five protocol families, and wraps each constructed source behind the internal `ModelDecisionSource` facade.
+- `src/brain/providers/provider_catalog.rs` defines each built-in selector, aliases, display labels, protocol features, stable adapter ID, trusted endpoint metadata, auth fields, and descriptive catalog provider IDs. The trusted table is code-owned and remains separate from `models.dev` model records.
+- `src/brain/providers.rs` defines the public `ModelProvider` enum, derives parsing and capabilities from descriptors, registers factories for the five protocol families, and wraps each constructed source behind the internal `ModelDecisionSource` facade.
 - `src/brain/providers/{anthropic,compatible,gemini,responses}.rs` implement the hosted protocol adapters; `OpenAiCompatibleProvider` is defined in `compatible.rs`. The local Ollama source remains in Brain's decision module.
-- `src/cli/model_selection.rs` resolves provider defaults and credentials, validates model IDs, and builds the selected source through the typed registry. Provider-specific endpoints and credential requirements remain fixed in code.
-- Provider selector names are repeated in `ModelProvider::parse`, the interactive choices in `src/cli/setup.rs`, the provider list in `src/cli/help.rs`, and the unsupported-provider error in `src/cli/task.rs`. The setup test checks that every setup entry parses and verifies both Cloudflare labels, but it does not prove setup includes every supported selector. `src/brain/providers/tests.rs` separately enumerates all twelve selectors for capability parity; CLI tests exercise explicit selection, help text, and unknown-provider rejection.
+- `src/cli/model_selection.rs` resolves provider defaults and descriptor-declared credential fields, validates model IDs, and builds the selected source through the typed registry. Protocol-specific credential values remain typed before adapter construction.
+- `src/cli/setup.rs`, `src/cli/help.rs`, and `src/cli/settings.rs` derive provider choices, labels, credential prompts/whitelisting, and provider endpoint/auth summaries from the same descriptors. `src/cli/model_tests.rs` checks the exact selector list and metadata-backed help output.
 - `src/cli/settings.rs` stores model defaults and credentials in separate per-user files. Environment values override saved credential values. `KRYPPER_CONFIG` only selects model defaults; credential lookup stays in the per-user settings directory.
-- `src/catalog_data.rs`, `snapshots/models-dev/`, and `docs/models-dev-catalog.md` provide the offline model metadata catalog. It is descriptive: it does not grant credentials, select a provider, or reject an unknown model ID. The catalog snapshot is not refreshed during normal execution.
+- `src/catalog_data.rs`, `snapshots/models-dev/`, and `docs/models-dev-catalog.md` provide the offline model metadata catalog. `provider_matches` uses trusted descriptor mappings, including Gemini's `google` catalog ID and the separate Cloudflare direct/Gateway mappings. The catalog is descriptive: it does not grant credentials or authorize endpoints, and unknown model IDs remain selectable. The snapshot is not refreshed during normal execution.
 
 `ModelSpec` currently holds provider and model IDs, display name, context/output limits, optional tool-calling and reasoning flags, status, and modalities. `ProviderCapabilities` is a separate internal type and currently describes protocol family and native SSE decision support. Neither type proves that a model is available to a particular account or works with a particular task.
 
@@ -62,9 +63,9 @@ flowchart LR
     Harness --> Tools[Tools authorization and execution]
 ```
 
-The target contract is:
+The target contract for future configurable profiles and routing is:
 
-1. A trusted provider profile describes a stable provider ID, aliases, protocol/adapter ID, fixed or validated endpoint policy, authentication scheme, credential references, declared features, discovery method, and profile provenance/version. It is executable configuration, so it is kept separate from upstream descriptive model metadata.
+1. Built-in provider descriptors are code-owned and trusted. Any future configurable provider profile must describe a stable provider ID, aliases, protocol/adapter ID, fixed or validated endpoint policy, authentication scheme, credential references, declared features, discovery method, and profile provenance/version. Executable configuration stays separate from upstream descriptive model metadata.
 2. A typed registry resolves trusted adapter IDs to implementations. Duplicate or missing IDs fail deterministically. A task uses a stable selection snapshot; a configuration reload cannot silently switch its provider midway through an action.
 3. Existing-protocol providers reuse the relevant protocol adapter. A genuinely new protocol adds a focused adapter that returns the existing validated decision contract; it does not add a second Harness loop or execution authority.
 4. Model metadata remains optional and advisory. Unknown model IDs remain valid when the selected provider accepts them. Unknown capability or price data stays unknown; it is never interpreted as unsupported, available, or free.
@@ -82,7 +83,7 @@ The target contract is:
 
 ## Migration and rollback
 
-The current public provider enums and constructors are compatibility surfaces. The internal adapter seam now wraps the existing source implementations and keeps their request/response behavior intact. Adding or changing a source must preserve the explicit-selection path and protocol fixtures. Provider descriptors can later drive setup/help enumeration from one source; only after that parity is established should user-defined trusted profiles or opt-in routing be added.
+The current public provider enums and constructors are compatibility surfaces. The internal adapter seam wraps the existing source implementations and keeps their request/response behavior intact. Adding or changing a source must preserve the explicit-selection path and protocol fixtures. The built-in descriptor catalog now drives provider parsing, setup/help enumeration, credential whitelisting, catalog mapping, and adapter selection. User-defined trusted profiles and opt-in routing remain later, separately reviewed work.
 
 Configuration changes must be versioned and backward compatible. Use bounded parsing and atomic writes; keep credentials in the existing per-user credential store, referenced by name from profiles rather than copied into profile/catalog files. A rollback must allow the prior defaults and credential files to be read without a destructive reset. If a schema cannot be read or a profile fails validation, fail before any provider request and leave the previous valid configuration intact.
 
@@ -93,7 +94,7 @@ Each phase is a separate reviewable change. Reverting an adapter-registry phase 
 | Slice | Required observable checks before merge |
 | --- | --- |
 | Adapter interface and registry | Register a fake adapter; reject duplicate and missing IDs; run local fixtures for every migrated protocol; preserve one-action validation, streaming/non-streaming parity where supported, typed errors, cancellation propagation, optional usage propagation, and the existing action budget. Adding an adapter must not add a new Core dispatch path or execution loop. |
-| Built-in provider profiles | Enumerate every existing selector and alias from one trusted description source; derive setup/help/catalog filtering and factory resolution from the shared metadata; prove parity, including distinct Cloudflare direct and Gateway selectors. Conflicts and unknown providers fail deterministically. |
+| Built-in provider descriptors | Enumerate every existing selector and alias from one trusted description source; derive parsing, setup/help/catalog filtering and factory resolution from the shared metadata; prove parity, including distinct Cloudflare direct and Gateway selectors and Gemini's Google catalog mapping. Conflicts and unknown providers fail deterministically. |
 | Per-user profile lifecycle | Add, disable, replace, and remove a mock OpenAI-compatible profile without source edits or a rebuild; preserve environment-over-saved precedence; reject malformed profiles, untrusted endpoints, workspace/model/catalog-controlled credential destinations, and credential-bearing cross-origin redirects before sending credentials; prove network use is explicit and task snapshots do not change during a running task. |
 | Model catalog | Keep ordinary execution offline and refresh/import explicit, with bounded size and time. Verify generator/snapshot hashes, schema version, license notice, deterministic merge, last-known-good behavior, and Cloudflare ID mapping. With fixtures, reject stale, corrupt, duplicate, malformed, oversized, or slow imports; preserve unknown fields; handle an unavailable source; and exercise an alternate catalog source without rewriting adapters. Unknown model IDs stay selectable; unknown cost is not zero. |
 | Capability evidence | Distinguish discoverable, executable, and configured providers; label declared, verified, and observed facts separately. Fixtures record bounded, redacted health, latency, rate-limit, and usage evidence per provider/model/configuration revision; prove prompts and secrets are not retained; and verify typed-error and token-usage propagation. Test missing credentials, unsupported protocol/features, stale evidence, account-specific availability, and unknown capability outcomes. Live probes require explicit opt-in. |
@@ -104,4 +105,4 @@ Each phase is a separate reviewable change. Reverting an adapter-registry phase 
 
 ## Scope of this baseline document
 
-This document records the current structure and staged testable contracts. The current implementation includes a crate-private typed factory registry around the five existing protocol families. It does not add provider profiles, automatic routing, fallback, dynamic code loading, or live provider probes. Those behaviors require the focused implementation and evidence described above.
+This document records the current structure and staged testable contracts. The current implementation includes the trusted built-in descriptor catalog and a crate-private typed factory registry around the five existing protocol families. It does not add user-defined provider profiles, automatic routing, fallback, dynamic code loading, or live provider probes. Those behaviors require the focused implementation and evidence described above.
