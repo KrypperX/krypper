@@ -36,8 +36,6 @@ pub(super) fn initialize(
         let response = stdio::read_line(
             &mut stdio.child,
             &mut stdio.stdout,
-            &mut stdio.stderr,
-            &mut stdio.stderr_used,
             &mut stdio.pending,
             deadline,
             cancel,

@@ -51,14 +51,16 @@ pub(super) fn call_tool(
 }
 
 fn sanitize_result(result: &Value) -> Result<String, McpToolError> {
-    if result.get("isError") == Some(&Value::Bool(true)) {
-        return Err(McpLifecycleError::ServerError.into());
-    }
+    let is_error = match result.get("isError") {
+        Some(Value::Bool(value)) => *value,
+        Some(_) => return Err(McpToolError::InvalidResult),
+        None => false,
+    };
     let blocks = result
         .get("content")
         .and_then(Value::as_array)
         .ok_or(McpToolError::InvalidResult)?;
-    if blocks.is_empty() || blocks.len() > MAX_CONTENT_BLOCKS {
+    if (blocks.is_empty() && !is_error) || blocks.len() > MAX_CONTENT_BLOCKS {
         return Err(McpToolError::InvalidResult);
     }
     let mut text = String::new();
@@ -75,12 +77,17 @@ fn sanitize_result(result: &Value) -> Result<String, McpToolError> {
                 continue;
             }
             if text.len() + character.len_utf8() > MAX_RESULT_BYTES {
-                return Err(McpLifecycleError::OutputLimitExceeded.into());
+                return Err(McpToolError::InvalidResult);
             }
             text.push(character);
         }
     }
-    Ok(format!("{RESULT_PREFIX}{text}"))
+    let error_prefix = if is_error {
+        "MCP tool execution error: "
+    } else {
+        ""
+    };
+    Ok(format!("{RESULT_PREFIX}{error_prefix}{text}"))
 }
 
 #[cfg(test)]
@@ -105,20 +112,21 @@ mod tests {
     fn rejects_error_non_text_and_oversized_results() {
         assert_eq!(
             sanitize_result(&json!({"isError": true, "content": []})),
-            Err(McpLifecycleError::ServerError.into())
+            Ok(format!("{RESULT_PREFIX}MCP tool execution error: "))
         );
         for invalid in [
             result(json!([])),
             result(json!([{"type": "image", "data": "eA=="}])),
             result(json!([{"type": "text"}])),
             json!({"structuredContent": {}}),
+            json!({"isError": "true", "content": []}),
         ] {
             assert_eq!(sanitize_result(&invalid), Err(McpToolError::InvalidResult));
         }
         let oversized = result(json!([{"type": "text", "text": "x".repeat(MAX_RESULT_BYTES + 1)}]));
         assert_eq!(
             sanitize_result(&oversized),
-            Err(McpLifecycleError::OutputLimitExceeded.into())
+            Err(McpToolError::InvalidResult)
         );
     }
 

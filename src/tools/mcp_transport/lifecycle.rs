@@ -86,11 +86,10 @@ impl McpSession {
         if !self.usable {
             return Err(McpLifecycleError::ProtocolViolation.into());
         }
-        let id = self.next_request_id();
         let deadline = Instant::now() + self.timeout;
         let result = super::discovery::list_tools(
             &mut self.io,
-            id,
+            &mut self.next_id,
             deadline,
             cancel,
             scope,
@@ -142,9 +141,7 @@ impl McpSession {
     }
 
     fn next_request_id(&mut self) -> u64 {
-        let id = self.next_id;
-        self.next_id = self.next_id.wrapping_add(1);
-        id
+        super::rpc::take_request_id(&mut self.next_id)
     }
 
     /// Terminate the server process and confirm cleanup.

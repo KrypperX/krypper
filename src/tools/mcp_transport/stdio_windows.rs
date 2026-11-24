@@ -54,8 +54,6 @@ pub(super) fn write_all(
 pub(super) fn read_line(
     _child: &mut ManagedChild,
     _stdout: &mut ChildStdout,
-    _stderr: &mut ChildStderr,
-    _stderr_used: &mut usize,
     _pending: &mut Vec<u8>,
     _deadline: Instant,
     _cancel: &McpCancellation,
