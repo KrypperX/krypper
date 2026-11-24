@@ -231,6 +231,10 @@ where
             crate::streaming::SseReadError::Decode(
                 crate::streaming::SseDecodeError::FrameTooLarge,
             ) => ModelError::ProviderResponseTooLarge(provider),
+            crate::streaming::SseReadError::StreamTooLarge
+            | crate::streaming::SseReadError::TooManyFrames => {
+                ModelError::ProviderResponseTooLarge(provider)
+            }
             crate::streaming::SseReadError::Decode(_) => ModelError::ProviderInvalidJson(provider),
             crate::streaming::SseReadError::Consumer(error) => error,
         },

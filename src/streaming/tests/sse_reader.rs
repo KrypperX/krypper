@@ -57,6 +57,43 @@ fn sse_reader_accepts_complete_frame_at_eof() {
 }
 
 #[test]
+fn sse_reader_rejects_cumulative_bytes_over_limit_across_small_events() {
+    let input = b"data: x\n\n".repeat(32);
+    let mut reader = std::io::Cursor::new(input);
+    let mut delivered = 0;
+    let result = consume_sse(&mut reader, 64, |_| {
+        delivered += 1;
+        Ok::<(), ()>(())
+    });
+
+    assert!(matches!(result, Err(SseReadError::StreamTooLarge)));
+    assert_eq!(delivered, 0);
+}
+
+#[test]
+fn sse_reader_rejects_excessive_empty_and_heartbeat_frames() {
+    let input = b":\n\n".repeat(super::super::sse::MAX_SSE_FRAME_COUNT + 1);
+    let mut reader = std::io::Cursor::new(input);
+    let result = consume_sse(&mut reader, 2 * 1024 * 1024, |_| Ok::<(), ()>(()));
+
+    assert!(matches!(result, Err(SseReadError::TooManyFrames)));
+}
+
+#[test]
+fn sse_reader_accepts_a_long_stream_within_both_limits() {
+    let input = b"data: x\n\n".repeat(20_000);
+    let mut reader = std::io::Cursor::new(input);
+    let mut delivered = 0;
+    consume_sse(&mut reader, 2 * 1024 * 1024, |_| {
+        delivered += 1;
+        Ok::<(), ()>(())
+    })
+    .expect("long stream remains within byte and frame limits");
+
+    assert_eq!(delivered, 20_000);
+}
+
+#[test]
 fn sse_decoder_limits_each_frame_not_the_entire_read_chunk() {
     let mut decoder = SseDecoder::new(9);
     let frames = decoder.push(b"data: a\n\ndata: b\n\n").unwrap();
