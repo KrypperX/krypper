@@ -1,0 +1,41 @@
+name: Feature request
+description: Propose a user outcome that current Krypper behavior does not support.
+title: "[feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: outcome
+    attributes:
+      label: User outcome
+      description: What should a user be able to accomplish?
+    validations:
+      required: true
+  - type: textarea
+    id: baseline
+    attributes:
+      label: Current behavior and existing functionality
+      description: Describe what Krypper does today and why it does not meet this need. Link related issues or pull requests.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: List observable conditions that would show the outcome is complete.
+    validations:
+      required: true
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: Safety, compatibility, and limits
+      description: Note permissions, data handling, platforms, defaults, or other constraints that matter.
+    validations:
+      required: false
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Mention existing workflows or smaller changes that could meet the same need.
+    validations:
+      required: false

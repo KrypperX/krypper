@@ -34,6 +34,12 @@ supervision require a separate reviewed port.
 The CI matrix runs the full suite on Linux and macOS and checks all targets on
 Windows without running tests.
 
+## Rust toolchain
+
+The minimum supported Rust version is `1.89.0`, declared by `rust-version` in
+`Cargo.toml`. The MSRV workflow builds all targets with that version; stable
+toolchains are used for the platform verification matrix.
+
 ## Current implementation
 
 - [`src/core/task.rs`](src/core/task.rs) defines the `Task` and `Turn` domain
