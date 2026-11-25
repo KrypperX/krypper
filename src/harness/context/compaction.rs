@@ -88,14 +88,14 @@ pub(crate) fn compact_observations_for_model(
     let mut current_bytes = original_bytes;
     let mut compacted_fields = 0_usize;
     let mut omitted_bytes = 0_usize;
-    for observation_index in 0..compacted.len() {
-        for text_index in 0..compactable_text_count(&compacted[observation_index]) {
+    for observation in &mut compacted {
+        let mut observation_bytes = serialized_observation_size(observation)?;
+        let mut observation_estimated_bytes = super::observation_size(observation);
+        for text_index in 0..compactable_text_count(observation) {
             if fits(current_bytes, current_estimated_bytes, budget_bytes) {
                 break;
             }
-            let Some(original) =
-                compactable_text_at(&mut compacted[observation_index], text_index).cloned()
-            else {
+            let Some(original) = compactable_text_at(observation, text_index).cloned() else {
                 continue;
             };
             if original.is_empty() {
@@ -109,16 +109,24 @@ pub(crate) fn compact_observations_for_model(
             if minimum.len() >= original.len() {
                 continue;
             }
-            set_compactable_text(&mut compacted[observation_index], text_index, minimum);
-            let minimum_size = serialized_observation_bytes(&compacted)?;
-            let minimum_estimated_bytes = estimated_observation_bytes(&compacted);
+            set_compactable_text(observation, text_index, minimum);
+            let minimum_observation_bytes = serialized_observation_size(observation)?;
+            let minimum_observation_estimated_bytes = super::observation_size(observation);
+            let minimum_size = current_bytes
+                .saturating_sub(observation_bytes)
+                .saturating_add(minimum_observation_bytes);
+            let minimum_estimated_bytes = current_estimated_bytes
+                .saturating_sub(observation_estimated_bytes)
+                .saturating_add(minimum_observation_estimated_bytes);
             if minimum_size >= current_bytes && minimum_estimated_bytes >= current_estimated_bytes {
-                set_compactable_text(&mut compacted[observation_index], text_index, original);
+                set_compactable_text(observation, text_index, original);
                 continue;
             }
             if !fits(minimum_size, minimum_estimated_bytes, budget_bytes) {
                 current_bytes = minimum_size;
                 current_estimated_bytes = minimum_estimated_bytes;
+                observation_bytes = minimum_observation_bytes;
+                observation_estimated_bytes = minimum_observation_estimated_bytes;
                 compacted_fields += 1;
                 omitted_bytes = omitted_bytes.saturating_add(original.len());
                 continue;
@@ -130,12 +138,18 @@ pub(crate) fn compact_observations_for_model(
             while lower <= upper {
                 let middle = lower + (upper - lower) / 2;
                 set_compactable_text(
-                    &mut compacted[observation_index],
+                    observation,
                     text_index,
                     compacted_text(&original, &character_boundaries, middle, &digest),
                 );
-                let candidate_size = serialized_observation_bytes(&compacted)?;
-                let candidate_estimated_bytes = estimated_observation_bytes(&compacted);
+                let candidate_observation_bytes = serialized_observation_size(observation)?;
+                let candidate_observation_estimated_bytes = super::observation_size(observation);
+                let candidate_size = current_bytes
+                    .saturating_sub(observation_bytes)
+                    .saturating_add(candidate_observation_bytes);
+                let candidate_estimated_bytes = current_estimated_bytes
+                    .saturating_sub(observation_estimated_bytes)
+                    .saturating_add(candidate_observation_estimated_bytes);
                 if fits(candidate_size, candidate_estimated_bytes, budget_bytes) {
                     best = middle;
                     lower = middle.saturating_add(1);
@@ -147,12 +161,20 @@ pub(crate) fn compact_observations_for_model(
             }
 
             set_compactable_text(
-                &mut compacted[observation_index],
+                observation,
                 text_index,
                 compacted_text(&original, &character_boundaries, best, &digest),
             );
-            current_bytes = serialized_observation_bytes(&compacted)?;
-            current_estimated_bytes = estimated_observation_bytes(&compacted);
+            let compacted_observation_bytes = serialized_observation_size(observation)?;
+            let compacted_observation_estimated_bytes = super::observation_size(observation);
+            current_bytes = current_bytes
+                .saturating_sub(observation_bytes)
+                .saturating_add(compacted_observation_bytes);
+            current_estimated_bytes = current_estimated_bytes
+                .saturating_sub(observation_estimated_bytes)
+                .saturating_add(compacted_observation_estimated_bytes);
+            observation_bytes = compacted_observation_bytes;
+            observation_estimated_bytes = compacted_observation_estimated_bytes;
             let retained_bytes = retained_text_bytes(&original, &character_boundaries, best);
             compacted_fields += 1;
             omitted_bytes =
@@ -185,17 +207,18 @@ fn fits(serialized_bytes: usize, estimated_bytes: usize, budget_bytes: usize) ->
 fn serialized_observation_bytes(
     observations: &[WorkspaceObservation],
 ) -> Result<usize, ContextError> {
-    let mut total_bytes = 2_usize;
-    for (index, observation) in observations.iter().enumerate() {
-        if index > 0 {
-            total_bytes = total_bytes.saturating_add(1);
-        }
-        let mut counter = ByteCounter::default();
-        serde_json::to_writer(&mut counter, &super::observation_value(observation))
-            .map_err(|_| ContextError::RequestEncoding)?;
-        total_bytes = total_bytes.saturating_add(counter.0);
+    let mut total_bytes = 2_usize.saturating_add(observations.len().saturating_sub(1));
+    for observation in observations {
+        total_bytes = total_bytes.saturating_add(serialized_observation_size(observation)?);
     }
     Ok(total_bytes)
+}
+
+fn serialized_observation_size(observation: &WorkspaceObservation) -> Result<usize, ContextError> {
+    let mut counter = ByteCounter::default();
+    serde_json::to_writer(&mut counter, &super::observation_value(observation))
+        .map_err(|_| ContextError::RequestEncoding)?;
+    Ok(counter.0)
 }
 
 #[derive(Default)]
