@@ -1,32 +1,15 @@
 use super::lifecycle::{cleanup_on_error, connect_stdio};
 use super::stdio::spawn;
 use super::*;
+use crate::test_support::TempDir;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
-
-struct TempDir(PathBuf);
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
 fn temp_dir(tag: &str) -> TempDir {
-    let path = std::env::temp_dir().join(format!(
-        "krypper-mcp-transport-{}-{}-{}",
-        tag,
-        std::process::id(),
-        NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir(&path).expect("create temp dir");
-    TempDir(path)
+    TempDir::with_prefix(&format!("krypper-mcp-transport-{tag}-"))
 }
 
 fn initialize_response(version: &str) -> String {
@@ -90,7 +73,7 @@ fn wait_for_log(log: &Path, needle: &str) -> String {
 #[test]
 fn handshake_succeeds_without_discovering_or_invoking_tools() {
     let dir = temp_dir("success");
-    let log = dir.0.join("requests.log");
+    let log = dir.path().join("requests.log");
     let config = config(
         &responding_server(&initialize_response("2024-11-05")),
         &log,
@@ -116,7 +99,7 @@ fn server_notifications_before_response_are_ignored() {
     let script = format!(
         "IFS= read -r request\nprintf '%s\\n' \"$request\" > \"$1\"\nprintf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\"}}'\nprintf '%s\\n' '{response}'\nIFS= read -r notification\nprintf '%s\\n' \"$notification\" >> \"$1\"\nwhile IFS= read -r line; do :; done\n"
     );
-    let config = config(&script, &dir.0.join("log"), Duration::from_secs(2));
+    let config = config(&script, &dir.path().join("log"), Duration::from_secs(2));
 
     let session = connect_stdio(&config, &McpCancellation::new()).expect("connect");
     assert_eq!(session.protocol_version(), "2025-06-18");
@@ -126,7 +109,7 @@ fn server_notifications_before_response_are_ignored() {
 #[test]
 fn invalid_configuration_is_rejected_before_spawn() {
     let dir = temp_dir("invalid");
-    let mut config = config("exit 0\n", &dir.0.join("log"), Duration::from_secs(1));
+    let mut config = config("exit 0\n", &dir.path().join("log"), Duration::from_secs(1));
     config.executable = PathBuf::from("mcp-server");
 
     let error = error_of(connect_stdio(&config, &McpCancellation::new()));
@@ -153,7 +136,7 @@ fn unsupported_protocol_version_fails_closed() {
     let dir = temp_dir("version");
     let config = config(
         &responding_server(&initialize_response("9999-01-01")),
-        &dir.0.join("log"),
+        &dir.path().join("log"),
         Duration::from_secs(2),
     );
 
@@ -178,7 +161,7 @@ fn malformed_or_mismatched_responses_are_protocol_violations() {
     ] {
         let config = config(
             &responding_server(response),
-            &dir.0.join("log"),
+            &dir.path().join("log"),
             Duration::from_secs(2),
         );
         let error = error_of(connect_stdio(&config, &McpCancellation::new()));
@@ -193,7 +176,7 @@ fn server_error_response_is_mapped() {
         &responding_server(
             r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"denied"}}"#,
         ),
-        &dir.0.join("log"),
+        &dir.path().join("log"),
         Duration::from_secs(2),
     );
 
@@ -204,7 +187,7 @@ fn server_error_response_is_mapped() {
 #[test]
 fn disconnect_before_response_is_mapped() {
     let dir = temp_dir("disconnect");
-    let config = config("exit 0\n", &dir.0.join("log"), Duration::from_secs(2));
+    let config = config("exit 0\n", &dir.path().join("log"), Duration::from_secs(2));
 
     let error = error_of(connect_stdio(&config, &McpCancellation::new()));
     assert_eq!(error, McpLifecycleError::Disconnected);
@@ -217,7 +200,7 @@ fn handshake_timeout_is_bounded() {
         "sleep 2\nprintf '%s\\n' '{}'\n",
         initialize_response("2024-11-05")
     );
-    let config = config(&script, &dir.0.join("log"), Duration::from_millis(100));
+    let config = config(&script, &dir.path().join("log"), Duration::from_millis(100));
 
     let error = error_of(connect_stdio(&config, &McpCancellation::new()));
     assert_eq!(error, McpLifecycleError::Timeout);
@@ -230,7 +213,7 @@ fn cancellation_stops_handshake_and_cleans_up() {
         "sleep 2\nprintf '%s\\n' '{}'\n",
         initialize_response("2024-11-05")
     );
-    let config = config(&script, &dir.0.join("log"), Duration::from_secs(5));
+    let config = config(&script, &dir.path().join("log"), Duration::from_secs(5));
     let cancel = McpCancellation::new();
     let thread_cancel = cancel.clone();
     let handle = thread::spawn(move || {
@@ -248,7 +231,7 @@ fn oversized_response_is_rejected_without_buffering_without_bound() {
     let dir = temp_dir("oversized");
     let config = config(
         "printf '%070000d\\n' 0\n",
-        &dir.0.join("log"),
+        &dir.path().join("log"),
         Duration::from_secs(2),
     );
 
@@ -259,8 +242,8 @@ fn oversized_response_is_rejected_without_buffering_without_bound() {
 #[test]
 fn stderr_is_drained_while_the_mcp_session_is_idle() {
     let dir = temp_dir("stderr-drain");
-    let log = dir.0.join("log");
-    let drained = dir.0.join("stderr-drained");
+    let log = dir.path().join("log");
+    let drained = dir.path().join("stderr-drained");
     let script = format!(
         "IFS= read -r request\nprintf '%s\\n' \"$request\" > \"$1\"\nprintf '%s\\n' '{response}'\nIFS= read -r notification\nprintf '%s\\n' \"$notification\" >> \"$1\"\nhead -c 1048576 /dev/zero >&2\nprintf drained > \"$2\"\nwhile IFS= read -r line; do :; done\n",
         response = initialize_response("2024-11-05")
@@ -295,7 +278,7 @@ fn stderr_is_drained_while_the_mcp_session_is_idle() {
 #[test]
 fn shutdown_kills_the_child_process_tree() {
     let dir = temp_dir("process-tree");
-    let marker = dir.0.join("grandchild");
+    let marker = dir.path().join("grandchild");
     let script = format!(
         "printf '%s\\n' $$ > \"$1\"\n(sleep 1; printf alive > \"$2\") &\nIFS= read -r request\nprintf '%s\\n' '{response}'\nIFS= read -r notification\nwhile IFS= read -r line; do :; done\n",
         response = initialize_response("2024-11-05")
@@ -306,14 +289,14 @@ fn shutdown_kills_the_child_process_tree() {
             "-c".into(),
             script,
             "fake-mcp-server".into(),
-            dir.0.join("log").display().to_string(),
+            dir.path().join("log").display().to_string(),
             marker.display().to_string(),
         ],
         timeout: Duration::from_secs(2),
     };
 
     let session = connect_stdio(&config, &McpCancellation::new()).expect("connect");
-    let pid_log = fs::read_to_string(dir.0.join("log")).expect("pid log");
+    let pid_log = fs::read_to_string(dir.path().join("log")).expect("pid log");
     let pgid: i32 = pid_log
         .lines()
         .next()
@@ -329,7 +312,7 @@ fn shutdown_kills_the_child_process_tree() {
 #[test]
 fn eperm_with_exited_leader_and_live_descendant_fails_closed() {
     let dir = temp_dir("eperm-live-descendant");
-    let descendant_pid_file = dir.0.join("descendant.pid");
+    let descendant_pid_file = dir.path().join("descendant.pid");
     let config = config(
         "sleep 10 &\nprintf '%s\\n' \"$!\" > \"$1\"\nexit 0\n",
         &descendant_pid_file,
@@ -389,7 +372,7 @@ fn eperm_with_exited_leader_and_live_descendant_fails_closed() {
 #[test]
 fn spawn_time_is_included_in_the_handshake_timeout() {
     let dir = temp_dir("spawn-timeout");
-    let config = config("exit 0\n", &dir.0.join("log"), Duration::from_nanos(1));
+    let config = config("exit 0\n", &dir.path().join("log"), Duration::from_nanos(1));
 
     let error = error_of(connect_stdio(&config, &McpCancellation::new()));
     assert_eq!(error, McpLifecycleError::Timeout);
@@ -398,7 +381,7 @@ fn spawn_time_is_included_in_the_handshake_timeout() {
 #[test]
 fn spawn_timeout_waits_for_worker_cleanup() {
     let dir = temp_dir("spawn-timeout-cleanup");
-    let marker = dir.0.join("marker");
+    let marker = dir.path().join("marker");
     let config = config(
         "sleep 0.5\n# krypper-spawn-delay\nprintf alive > \"$1\"\n",
         &marker,
@@ -427,7 +410,7 @@ fn spawn_timeout_waits_for_worker_cleanup() {
 #[test]
 fn cancellation_during_spawn_stops_the_worker() {
     let dir = temp_dir("spawn-cancel");
-    let marker = dir.0.join("marker");
+    let marker = dir.path().join("marker");
     let config = config(
         "sleep 0.5\n# krypper-spawn-delay\nprintf alive > \"$1\"\n",
         &marker,
@@ -457,7 +440,7 @@ fn excessive_notifications_before_response_are_rejected() {
         "i=0\nwhile [ $i -lt 17 ]; do printf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\"}}'\ni=$((i + 1))\ndone\nprintf '%s\\n' '{response}'\nIFS= read -r notification\nwhile IFS= read -r line; do :; done\n",
         response = initialize_response("2025-06-18")
     );
-    let config = config(&script, &dir.0.join("log"), Duration::from_secs(2));
+    let config = config(&script, &dir.path().join("log"), Duration::from_secs(2));
 
     let error = error_of(connect_stdio(&config, &McpCancellation::new()));
     assert_eq!(error, McpLifecycleError::ProtocolViolation);
@@ -466,7 +449,7 @@ fn excessive_notifications_before_response_are_rejected() {
 #[test]
 fn handshake_error_terminates_server_before_returning() {
     let dir = temp_dir("cleanup-error-path");
-    let pid_log = dir.0.join("pid.log");
+    let pid_log = dir.path().join("pid.log");
     let script = format!(
         "printf '%s\\n' $$ > \"$1\"\nprintf '%s\\n' '{response}'\nwhile IFS= read -r line; do :; done\n",
         response = initialize_response("9999-01-01")
@@ -519,7 +502,7 @@ fn response_limit_includes_already_buffered_notification_bytes() {
         "printf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\"}}'\nhead -c 70000 /dev/zero | tr '\\000' 'A'\nprintf '%s\\n' '{response}'\nIFS= read -r notification\nwhile IFS= read -r line; do :; done\n",
         response = initialize_response("2024-11-05")
     );
-    let config = config(&script, &dir.0.join("log"), Duration::from_secs(2));
+    let config = config(&script, &dir.path().join("log"), Duration::from_secs(2));
 
     let error = error_of(connect_stdio(&config, &McpCancellation::new()));
     assert_eq!(error, McpLifecycleError::OutputLimitExceeded);
@@ -528,7 +511,7 @@ fn response_limit_includes_already_buffered_notification_bytes() {
 #[test]
 fn shutdown_kills_descendants_after_parent_exits() {
     let dir = temp_dir("orphan-tree");
-    let marker = dir.0.join("grandchild");
+    let marker = dir.path().join("grandchild");
     let script = format!(
         "(sleep 1; printf alive > \"$2\") &\nIFS= read -r request\nprintf '%s\\n' '{response}'\nIFS= read -r notification\nsleep 0.2\nexit 0\n",
         response = initialize_response("2024-11-05")
@@ -539,7 +522,7 @@ fn shutdown_kills_descendants_after_parent_exits() {
             "-c".into(),
             script,
             "fake-mcp-server".into(),
-            dir.0.join("log").display().to_string(),
+            dir.path().join("log").display().to_string(),
             marker.display().to_string(),
         ],
         timeout: Duration::from_secs(2),

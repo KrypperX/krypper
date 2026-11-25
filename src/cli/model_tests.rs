@@ -6,6 +6,7 @@ use crate::harness::execution::GoalTurnError;
 use crate::task_lifecycle::{
     TaskSession, TaskState, TurnOutcome, TurnState, WorkspaceGuidanceReadError,
 };
+use crate::test_support::TempDir;
 use serde_json::{json, Value};
 use std::ffi::OsString;
 use std::fs;
@@ -14,7 +15,6 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::thread::{self, JoinHandle};
-use uuid::Uuid;
 
 static PROVIDER_ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -90,26 +90,6 @@ impl Drop for RestoreEnvironmentVariable {
         } else {
             std::env::remove_var(self.name);
         }
-    }
-}
-
-struct TempDir(PathBuf);
-
-impl TempDir {
-    fn new() -> Self {
-        let path = std::env::temp_dir().join(format!("krypper-model-cli-{}", Uuid::new_v4()));
-        fs::create_dir(&path).expect("create temporary workspace");
-        Self(path)
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        fs::remove_dir_all(&self.0).expect("remove temporary workspace");
     }
 }
 

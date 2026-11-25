@@ -5,6 +5,9 @@
 #[cfg(test)]
 pub(crate) static CURRENT_DIR_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 pub mod agent_loop;
 mod brain;
 pub mod catalog_data;

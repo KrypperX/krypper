@@ -6,33 +6,16 @@ use krypper::task_lifecycle::{
     TaskHistoryTransition, TaskSession, TaskState, TurnActivityAction, TurnActivitySummary,
     TurnOutcome, TurnState, WorkspaceReadError, WorkspaceSearchLocation, WorkspaceWriteError,
 };
+#[path = "../src/test_support.rs"]
+mod test_support;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use test_support::TempDir;
 use uuid::Uuid;
 
 static CURRENT_DIR_LOCK: Mutex<()> = Mutex::new(());
 const MAX_FILE_SIZE: usize = 1024 * 1024;
-
-struct TempDir(PathBuf);
-
-impl TempDir {
-    fn new() -> Self {
-        let path = std::env::temp_dir().join(format!("krypper-agent-loop-{}", Uuid::new_v4()));
-        fs::create_dir(&path).unwrap();
-        Self(path)
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        fs::remove_dir_all(&self.0).unwrap();
-    }
-}
 
 struct RestoreCurrentDir(PathBuf);
 
