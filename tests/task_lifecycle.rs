@@ -243,6 +243,7 @@ fn explicit_workspace_session_keeps_its_root_for_bounded_turns_after_directory_c
         "written to the selected workspace"
     );
     assert!(!other_directory.join("result.txt").exists());
+    let _lock = test_support::lock_current_dir();
     assert_eq!(std::env::current_dir().unwrap(), original_directory);
 }
 
