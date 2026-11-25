@@ -278,6 +278,7 @@ dependencies = [
  "ignore",
  "krypper-sandbox",
  "libc",
+ "proc-macro2",
  "proptest",
  "ring",
  "rpassword",

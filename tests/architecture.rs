@@ -1,8 +1,10 @@
-use std::collections::HashSet;
 use std::fs;
-use std::path::{Path, PathBuf};
-use syn::visit::Visit;
-use syn::{Attribute, Item, Meta, Path as RustPath, UseTree};
+use std::path::Path;
+
+#[path = "architecture/guard.rs"]
+mod guard;
+
+use guard::{scan_crate_root_aliases, scan_module_file, scan_source, scan_source_at_depth};
 
 #[test]
 fn production_tools_modules_do_not_import_brain() {
@@ -41,243 +43,167 @@ fn direction_guard_detects_qualified_paths() {
     assert_eq!(violations.len(), 1, "{violations:?}");
 }
 
-fn scan_module_file(root: &Path) -> Vec<String> {
-    let mut visited = HashSet::new();
-    let mut violations = Vec::new();
-    scan_file(root, module_directory(root), &mut visited, &mut violations);
-    violations
-}
+#[test]
+fn direction_guard_detects_relative_paths_crate_aliases_and_root_globs() {
+    let root_path = "use super::brain::Decision;";
+    let root_violations = scan_source(root_path, "relative_root.rs");
+    assert_eq!(root_violations.len(), 1, "{root_violations:?}");
 
-fn scan_file(
-    file_path: &Path,
-    module_dir: PathBuf,
-    visited: &mut HashSet<PathBuf>,
-    violations: &mut Vec<String>,
-) {
-    let normalized = file_path
-        .canonicalize()
-        .unwrap_or_else(|_| file_path.to_path_buf());
-    if !visited.insert(normalized) {
-        return;
-    }
-    let Ok(source) = fs::read_to_string(file_path) else {
-        return;
-    };
-    let Ok(file) = syn::parse_file(&source) else {
-        violations.push(format!(
-            "{}: unable to parse Rust source",
-            file_path.display()
-        ));
-        return;
-    };
-    scan_items(&file.items, file_path, &module_dir, visited, violations);
-}
-
-fn scan_items(
-    items: &[Item],
-    file_path: &Path,
-    module_dir: &Path,
-    visited: &mut HashSet<PathBuf>,
-    violations: &mut Vec<String>,
-) {
-    for item in items {
-        if item_is_test_only(item_attrs(item)) {
-            continue;
+    let nested_path = r#"
+        mod nested {
+            fn access() { let _: self::super::super::brain::Decision; }
         }
-        if let Item::Mod(module) = item {
-            if let Some((_, nested)) = &module.content {
-                let nested_dir = module_dir.join(module.ident.to_string());
-                scan_items(nested, file_path, &nested_dir, visited, violations);
-            } else if let Some(module_path) = resolve_module(file_path, module_dir, module) {
-                scan_file(
-                    &module_path,
-                    module_directory(&module_path),
-                    visited,
-                    violations,
-                );
-            } else {
-                violations.push(format!(
-                    "{}: unable to resolve production module `{}`",
-                    file_path.display(),
-                    module.ident
-                ));
-            }
-            continue;
-        }
-        let mut visitor = DirectionVisitor {
-            origin: file_path.display().to_string(),
-            violations,
-        };
-        visitor.visit_item(item);
-    }
-}
+    "#;
+    let nested_violations = scan_source(nested_path, "relative_nested.rs");
+    assert_eq!(nested_violations.len(), 1, "{nested_violations:?}");
 
-fn resolve_module(file_path: &Path, module_dir: &Path, module: &syn::ItemMod) -> Option<PathBuf> {
-    if let Some(path) = module.attrs.iter().find_map(|attribute| {
-        let Meta::NameValue(name_value) = &attribute.meta else {
-            return None;
-        };
-        if !name_value.path.is_ident("path") {
-            return None;
-        }
-        let syn::Expr::Lit(expression) = &name_value.value else {
-            return None;
-        };
-        let syn::Lit::Str(value) = &expression.lit else {
-            return None;
-        };
-        Some(value.value())
-    }) {
-        return file_path.parent().map(|parent| parent.join(path));
-    }
-    let name = module.ident.to_string();
-    let flat = module_dir.join(format!("{name}.rs"));
-    if flat.is_file() {
-        return Some(flat);
-    }
-    let nested = module_dir.join(name).join("mod.rs");
-    nested.is_file().then_some(nested)
-}
-
-fn module_directory(file_path: &Path) -> PathBuf {
-    let parent = file_path.parent().unwrap_or_else(|| Path::new("."));
-    if file_path.file_name().is_some_and(|name| name == "mod.rs") {
-        parent.to_path_buf()
-    } else {
-        parent.join(file_path.file_stem().unwrap_or_default())
-    }
-}
-
-fn scan_source(source: &str, origin: &str) -> Vec<String> {
-    let Ok(file) = syn::parse_file(source) else {
-        return vec![format!("{origin}: unable to parse Rust source")];
-    };
-    let mut violations = Vec::new();
-    scan_items(
-        &file.items,
-        Path::new(origin),
-        Path::new("."),
-        &mut HashSet::new(),
-        &mut violations,
+    let direct_nested = "use super::super::brain::Decision;";
+    let direct_nested_violations = scan_source_at_depth(direct_nested, "nested.rs", 2);
+    assert_eq!(
+        direct_nested_violations.len(),
+        1,
+        "{direct_nested_violations:?}"
     );
-    violations
+
+    let alias = "use crate as root; use root::brain::Decision;";
+    let alias_violations = scan_source(alias, "crate_alias.rs");
+    assert!(
+        alias_violations
+            .iter()
+            .any(|violation| violation.contains("alias")),
+        "{alias_violations:?}"
+    );
+
+    let grouped_alias = "use crate::{self as root}; use root::brain::Decision;";
+    let grouped_alias_violations = scan_source(grouped_alias, "grouped_crate_alias.rs");
+    assert!(
+        grouped_alias_violations
+            .iter()
+            .any(|violation| violation.contains("alias")),
+        "{grouped_alias_violations:?}"
+    );
+
+    let glob = "use super::*;";
+    let glob_violations = scan_source(glob, "crate_root_glob.rs");
+    assert!(
+        glob_violations
+            .iter()
+            .any(|violation| violation.contains("glob")),
+        "{glob_violations:?}"
+    );
 }
 
-fn item_attrs(item: &Item) -> &[Attribute] {
-    match item {
-        Item::Const(item) => &item.attrs,
-        Item::Enum(item) => &item.attrs,
-        Item::ExternCrate(item) => &item.attrs,
-        Item::Fn(item) => &item.attrs,
-        Item::ForeignMod(item) => &item.attrs,
-        Item::Impl(item) => &item.attrs,
-        Item::Macro(item) => &item.attrs,
-        Item::Mod(item) => &item.attrs,
-        Item::Static(item) => &item.attrs,
-        Item::Struct(item) => &item.attrs,
-        Item::Trait(item) => &item.attrs,
-        Item::TraitAlias(item) => &item.attrs,
-        Item::Type(item) => &item.attrs,
-        Item::Union(item) => &item.attrs,
-        Item::Use(item) => &item.attrs,
-        Item::Verbatim(_) => &[],
-        _ => &[],
-    }
+#[test]
+fn direction_guard_inspects_macro_tokens_and_fails_closed_on_unknown_macros_and_includes() {
+    let hidden_path = "macro_rules! hidden { () => { use crate::brain::Decision; } }";
+    let macro_violations = scan_source(hidden_path, "macro_tokens.rs");
+    assert!(
+        macro_violations
+            .iter()
+            .any(|violation| violation.contains("macro tokens")),
+        "{macro_violations:?}"
+    );
+
+    let hidden_alias = "external_macro!(use crate as root; root::brain::Decision);";
+    let alias_violations = scan_source(hidden_alias, "macro_alias.rs");
+    assert!(
+        alias_violations
+            .iter()
+            .any(|violation| violation.contains("macro tokens")),
+        "{alias_violations:?}"
+    );
+
+    let unknown_macro = scan_source("external_macro!();", "unknown_macro.rs");
+    assert!(
+        unknown_macro
+            .iter()
+            .any(|violation| violation.contains("uninspected production macro")),
+        "{unknown_macro:?}"
+    );
+
+    let shadowed_macro = scan_source(
+        "use untrusted::format; fn build() { format!(); }",
+        "shadowed_macro.rs",
+    );
+    assert!(
+        shadowed_macro
+            .iter()
+            .any(|violation| violation.contains("macro import")),
+        "{shadowed_macro:?}"
+    );
+
+    let inspected_json_macro = scan_source(
+        "use serde_json::json; fn build() { let _ = json!({\"ok\": true}); }",
+        "inspected_json_macro.rs",
+    );
+    assert!(inspected_json_macro.is_empty(), "{inspected_json_macro:?}");
+
+    let custom_attribute = scan_source("#[custom_codegen] struct Item;", "custom_attribute.rs");
+    assert!(
+        custom_attribute
+            .iter()
+            .any(|violation| violation.contains("uninspected production attribute")),
+        "{custom_attribute:?}"
+    );
+
+    let shadowed_derive = scan_source(
+        "use untrusted::Serialize; #[derive(Serialize)] struct Item;",
+        "shadowed_derive.rs",
+    );
+    assert!(
+        shadowed_derive
+            .iter()
+            .any(|violation| violation.contains("macro import")),
+        "{shadowed_derive:?}"
+    );
+
+    let inspected_derive = scan_source(
+        "use serde::Serialize; #[derive(Serialize)] struct Item;",
+        "inspected_derive.rs",
+    );
+    assert!(inspected_derive.is_empty(), "{inspected_derive:?}");
+
+    let include = scan_source("include!(\"generated.rs\");", "included_source.rs");
+    assert!(
+        include
+            .iter()
+            .any(|violation| violation.contains("include! source is not inspected")),
+        "{include:?}"
+    );
 }
 
-fn item_is_test_only(attributes: &[Attribute]) -> bool {
-    attributes.iter().any(|attribute| {
-        attribute.path().is_ident("cfg")
-            && attribute
-                .parse_args::<Meta>()
-                .is_ok_and(|predicate| cfg_is_test_only(&predicate))
-    })
+#[test]
+fn direction_guard_ignores_test_only_associated_items() {
+    let source = r#"
+        struct Widget;
+        impl Widget {
+            #[cfg(test)]
+            fn test_only() { let _: crate::brain::TestOnly; }
+        }
+        trait Fixture {
+            #[cfg(all(test, unix))]
+            fn test_only() { let _: super::brain::TestOnly; }
+        }
+    "#;
+
+    let violations = scan_source(source, "associated_test_items.rs");
+
+    assert!(violations.is_empty(), "{violations:?}");
 }
 
-fn cfg_is_test_only(predicate: &Meta) -> bool {
-    match predicate {
-        Meta::Path(path) => path.is_ident("test"),
-        Meta::List(list) if list.path.is_ident("all") => {
-            let parser = syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated;
-            syn::parse::Parser::parse2(parser, list.tokens.clone())
-                .is_ok_and(|items| items.iter().any(cfg_is_test_only))
-        }
-        Meta::List(list) if list.path.is_ident("any") => {
-            let parser = syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated;
-            syn::parse::Parser::parse2(parser, list.tokens.clone())
-                .is_ok_and(|items| !items.is_empty() && items.iter().all(cfg_is_test_only))
-        }
-        _ => false,
-    }
-}
+#[test]
+fn crate_root_aliases_are_rejected() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("lib.rs");
+    fs::write(&root, "use crate as root;").unwrap();
+    let mut violations = Vec::new();
 
-struct DirectionVisitor<'a> {
-    origin: String,
-    violations: &'a mut Vec<String>,
-}
+    scan_crate_root_aliases(&root, &mut violations);
 
-impl Visit<'_> for DirectionVisitor<'_> {
-    fn visit_item(&mut self, item: &Item) {
-        if item_is_test_only(item_attrs(item)) {
-            return;
-        }
-        syn::visit::visit_item(self, item);
-    }
-
-    fn visit_item_use(&mut self, item: &syn::ItemUse) {
-        inspect_use_tree(&item.tree, &mut Vec::new(), &self.origin, self.violations);
-        syn::visit::visit_item_use(self, item);
-    }
-
-    fn visit_path(&mut self, path: &RustPath) {
-        if path_starts_with_brain(path) {
-            self.violations
-                .push(format!("{}: qualified crate::brain path", self.origin));
-        }
-        syn::visit::visit_path(self, path);
-    }
-}
-
-fn inspect_use_tree(
-    tree: &UseTree,
-    prefix: &mut Vec<String>,
-    origin: &str,
-    violations: &mut Vec<String>,
-) {
-    match tree {
-        UseTree::Path(path) => {
-            prefix.push(path.ident.to_string());
-            record_brain_prefix(prefix, origin, violations);
-            inspect_use_tree(&path.tree, prefix, origin, violations);
-            prefix.pop();
-        }
-        UseTree::Name(name) => {
-            prefix.push(name.ident.to_string());
-            record_brain_prefix(prefix, origin, violations);
-            prefix.pop();
-        }
-        UseTree::Rename(rename) => {
-            prefix.push(rename.ident.to_string());
-            record_brain_prefix(prefix, origin, violations);
-            prefix.pop();
-        }
-        UseTree::Glob(_) => record_brain_prefix(prefix, origin, violations),
-        UseTree::Group(group) => {
-            for item in &group.items {
-                inspect_use_tree(item, prefix, origin, violations);
-            }
-        }
-    }
-}
-
-fn record_brain_prefix(prefix: &[String], origin: &str, violations: &mut Vec<String>) {
-    if prefix.len() == 2 && prefix[0] == "crate" && prefix[1] == "brain" {
-        violations.push(format!("{origin}: crate::brain use tree"));
-    }
-}
-
-fn path_starts_with_brain(path: &RustPath) -> bool {
-    path.segments.len() >= 2
-        && path.segments[0].ident == "crate"
-        && path.segments[1].ident == "brain"
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("alias")),
+        "{violations:?}"
+    );
 }
