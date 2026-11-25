@@ -2082,6 +2082,8 @@ fn task_help_lists_checkpoint_options_and_describes_the_invocation_budget() {
     assert!(stdout(&output).contains("--workspace PATH"));
     assert!(stdout(&output).contains("--checkpoint-out PATH"));
     assert!(stdout(&output).contains("--resume PATH"));
+    assert!(stdout(&output).contains("--observation-context-budget-bytes N"));
+    assert!(stdout(&output).contains("raw TaskSession observations are unchanged"));
     assert!(stdout(&output).contains(
         "choose ollama, gemini, openai, xai, anthropic, cloudflare, cloudflare-ai-gateway, groq, openrouter, deepseek, zai, or mistral"
     ));

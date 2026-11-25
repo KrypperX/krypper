@@ -153,6 +153,103 @@ fn decision_source_registry_builds_and_forwards_a_fake_adapter() {
 }
 
 #[test]
+fn observation_context_compaction_changes_only_the_model_facing_observation_view() {
+    use super::{AdapterId, ModelDecisionSource, ProviderDecisionSource};
+    use crate::agent_loop::{BoundedDecisionSource, WorkspaceAction, WorkspaceObservation};
+    use std::cell::RefCell;
+    use std::path::PathBuf;
+    use std::rc::Rc;
+
+    struct CapturedModelInput {
+        goal: String,
+        guidance: Option<String>,
+        contents: String,
+    }
+    type CapturedDecision = Rc<RefCell<Option<CapturedModelInput>>>;
+
+    let captured = Rc::new(RefCell::new(None));
+    struct FakeDecisionSource {
+        captured: CapturedDecision,
+    }
+    impl BoundedDecisionSource for FakeDecisionSource {
+        fn choose_action(
+            &mut self,
+            _goal: &str,
+            _observations: &[WorkspaceObservation],
+        ) -> WorkspaceAction {
+            WorkspaceAction::Cancel
+        }
+
+        fn needs_root_project_guidance(&self) -> bool {
+            true
+        }
+
+        fn choose_action_with_root_project_guidance(
+            &mut self,
+            goal: &str,
+            observations: &[WorkspaceObservation],
+            guidance: Option<&str>,
+        ) -> WorkspaceAction {
+            let WorkspaceObservation::FileRead { contents, .. } = &observations[0] else {
+                panic!("model receives the same structured observation type");
+            };
+            *self.captured.borrow_mut() = Some(CapturedModelInput {
+                goal: goal.to_owned(),
+                guidance: guidance.map(str::to_owned),
+                contents: contents.clone(),
+            });
+            WorkspaceAction::Cancel
+        }
+    }
+    impl ProviderDecisionSource for FakeDecisionSource {}
+
+    let adapter = AdapterId::new("context-compaction-test");
+    let mut source: ModelDecisionSource = ModelDecisionSource::from_source_for_test(
+        adapter,
+        FakeDecisionSource {
+            captured: Rc::clone(&captured),
+        },
+    );
+    source
+        .set_observation_context_budget(1_024)
+        .expect("configure a bounded observation view");
+
+    let observations = [WorkspaceObservation::FileRead {
+        path: PathBuf::from("src/evidence.rs"),
+        contents: format!("beginning\n{}\nending", "older detail\n".repeat(3_000)),
+    }];
+    let original = observations.clone();
+    assert_eq!(
+        source.choose_action_with_root_project_guidance(
+            "keep the task goal",
+            &observations,
+            Some("retain this project guidance"),
+        ),
+        WorkspaceAction::Cancel
+    );
+
+    let captured = captured.borrow();
+    let captured = captured.as_ref().expect("fake source receives request");
+    assert_eq!(captured.goal, "keep the task goal");
+    assert_eq!(
+        captured.guidance.as_deref(),
+        Some("retain this project guidance")
+    );
+    assert!(captured
+        .contents
+        .contains("Krypper context note: text compacted"));
+    assert_eq!(
+        observations, original,
+        "Harness-owned source evidence stays unchanged"
+    );
+    let report = source
+        .take_observation_compaction()
+        .expect("compaction is reported for the request");
+    assert!(report.original_bytes > report.sent_bytes);
+    assert_eq!(report.compacted_fields, 1);
+}
+
+#[test]
 fn decision_source_registry_builds_each_builtin_protocol_adapter() {
     use super::{
         AdapterId, ModelDecisionSource, ModelProvider, OpenAiCompatibleCredentials,

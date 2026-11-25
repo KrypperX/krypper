@@ -11,6 +11,9 @@ use super::{
     OllamaDecisionSource, SYSTEM_INSTRUCTIONS,
 };
 use crate::agent_loop::{BoundedDecisionSource, WorkspaceAction, WorkspaceObservation};
+use crate::harness::context::{
+    compact_observations_for_model, ObservationCompactionReport, MAX_OBSERVATION_BYTES,
+};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -585,11 +588,18 @@ fn compatible_source_factory(
 pub(crate) struct ModelDecisionSource {
     adapter_id: AdapterId,
     source: Box<dyn ProviderDecisionSource>,
+    observation_context_budget_bytes: Option<usize>,
+    last_observation_compaction: Option<ObservationCompactionReport>,
 }
 
 impl ModelDecisionSource {
     fn from_adapter(adapter_id: AdapterId, source: Box<dyn ProviderDecisionSource>) -> Self {
-        Self { adapter_id, source }
+        Self {
+            adapter_id,
+            source,
+            observation_context_budget_bytes: None,
+            last_observation_compaction: None,
+        }
     }
 
     #[cfg(test)]
@@ -602,6 +612,36 @@ impl ModelDecisionSource {
 
     pub(crate) fn adapter_id(&self) -> AdapterId {
         self.adapter_id
+    }
+
+    pub(crate) fn set_observation_context_budget(
+        &mut self,
+        budget_bytes: usize,
+    ) -> Result<(), &'static str> {
+        if budget_bytes == 0 || budget_bytes > MAX_OBSERVATION_BYTES {
+            return Err("observation context budget must be between 1 byte and 2 MiB");
+        }
+        self.observation_context_budget_bytes = Some(budget_bytes);
+        Ok(())
+    }
+
+    pub(crate) fn take_observation_compaction(&mut self) -> Option<ObservationCompactionReport> {
+        self.last_observation_compaction.take()
+    }
+
+    fn model_observations(
+        &mut self,
+        observations: &[WorkspaceObservation],
+    ) -> Result<Option<Vec<WorkspaceObservation>>, ModelError> {
+        self.last_observation_compaction = None;
+        let Some(budget_bytes) = self.observation_context_budget_bytes else {
+            return Ok(None);
+        };
+        let Some(compacted) = compact_observations_for_model(observations, budget_bytes)? else {
+            return Ok(None);
+        };
+        self.last_observation_compaction = Some(compacted.report);
+        Ok(Some(compacted.observations))
     }
 
     pub(crate) fn set_repository_context(&mut self, context: Value) -> Result<(), &'static str> {
@@ -634,7 +674,11 @@ impl BoundedDecisionSource for ModelDecisionSource {
         goal: &str,
         observations: &[WorkspaceObservation],
     ) -> WorkspaceAction {
-        self.source.choose_action(goal, observations)
+        match self.model_observations(observations) {
+            Ok(Some(compacted)) => self.source.choose_action(goal, &compacted),
+            Ok(None) => self.source.choose_action(goal, observations),
+            Err(error) => action_from_error(error),
+        }
     }
 
     fn needs_root_project_guidance(&self) -> bool {
@@ -647,8 +691,16 @@ impl BoundedDecisionSource for ModelDecisionSource {
         observations: &[WorkspaceObservation],
         guidance: Option<&str>,
     ) -> WorkspaceAction {
-        self.source
-            .choose_action_with_root_project_guidance(goal, observations, guidance)
+        match self.model_observations(observations) {
+            Ok(Some(compacted)) => self
+                .source
+                .choose_action_with_root_project_guidance(goal, &compacted, guidance),
+            Ok(None) => {
+                self.source
+                    .choose_action_with_root_project_guidance(goal, observations, guidance)
+            }
+            Err(error) => action_from_error(error),
+        }
     }
 }
 

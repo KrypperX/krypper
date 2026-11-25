@@ -9,7 +9,7 @@ use std::fmt;
 use std::path::{Component, Path, PathBuf};
 use uuid::Uuid;
 
-const MAX_OBSERVATION_BYTES: usize = 2 * 1024 * 1024;
+pub(crate) const MAX_OBSERVATION_BYTES: usize = 2 * 1024 * 1024;
 
 pub const MAX_REPOSITORY_CONTEXT_BYTES: usize = 4 * 1024;
 pub const MAX_REPOSITORY_CONTEXT_JSON_BYTES: usize = 8 * 1024;
@@ -72,6 +72,9 @@ pub enum ContextError {
     ObservationsTooLarge,
     RepositoryContextTooLarge,
 }
+
+mod compaction;
+pub(crate) use compaction::{compact_observations_for_model, ObservationCompactionReport};
 
 pub fn collect_repository_context(
     session: &TaskSession,
