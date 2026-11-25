@@ -24,3 +24,4 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 proptest = { version = "1.12", default-features = false, features = ["std"] }
+tempfile = "3.27"
