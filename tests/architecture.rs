@@ -46,6 +46,61 @@ fn crate_root_tools_scanner_follows_external_path_attributes() {
 }
 
 #[test]
+fn crate_root_tools_scanner_resolves_children_of_path_loaded_tools_siblings() {
+    let directory = tempfile::tempdir().unwrap();
+    let source_directory = directory.path().join("src");
+    let alternate_directory = source_directory.join("tools_alt");
+    fs::create_dir_all(&alternate_directory).unwrap();
+    let crate_root = source_directory.join("lib.rs");
+    fs::write(&crate_root, "#[path = \"tools_alt.rs\"] mod tools;").unwrap();
+    fs::write(source_directory.join("tools_alt.rs"), "mod nested;").unwrap();
+    fs::write(
+        source_directory.join("nested.rs"),
+        "use crate::brain::HiddenDependency;",
+    )
+    .unwrap();
+    fs::write(alternate_directory.join("nested.rs"), "pub fn safe() {}").unwrap();
+
+    let violations = scan_tools_module_from_crate_root(&crate_root);
+
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("crate::brain")),
+        "path-loaded Tools module children were resolved under the filename instead of the parent directory: {violations:?}"
+    );
+}
+
+#[test]
+fn module_scanner_uses_mod_rs_semantics_for_path_loaded_child_modules() {
+    let directory = tempfile::tempdir().unwrap();
+    let source_directory = directory.path().join("src");
+    let tools_directory = source_directory.join("tools");
+    let path_module_directory = source_directory.join("path_module");
+    fs::create_dir_all(&tools_directory).unwrap();
+    fs::create_dir_all(&path_module_directory).unwrap();
+    fs::write(source_directory.join("lib.rs"), "mod tools;").unwrap();
+    let tools_root = source_directory.join("tools.rs");
+    fs::write(&tools_root, "#[path = \"path_module.rs\"] mod child;").unwrap();
+    fs::write(source_directory.join("path_module.rs"), "mod nested;").unwrap();
+    fs::write(
+        source_directory.join("nested.rs"),
+        "use crate::brain::HiddenDependency;",
+    )
+    .unwrap();
+    fs::write(path_module_directory.join("nested.rs"), "pub fn safe() {}").unwrap();
+
+    let violations = scan_module_file(&tools_root);
+
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("crate::brain")),
+        "#[path]-loaded modules must resolve their children beside the selected file: {violations:?}"
+    );
+}
+
+#[test]
 fn crate_root_tools_scanner_inspects_inline_tools_modules() {
     let directory = tempfile::tempdir().unwrap();
     let source_directory = directory.path().join("src");

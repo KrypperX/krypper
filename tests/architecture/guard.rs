@@ -16,6 +16,11 @@ struct ModuleVisitKey {
     inside_inline_module: bool,
 }
 
+struct ResolvedModule {
+    file_path: PathBuf,
+    module_dir: PathBuf,
+}
+
 #[derive(Default)]
 struct ModuleVisits {
     visited: HashSet<ModuleVisitKey>,
@@ -133,8 +138,8 @@ pub(super) fn scan_tools_module_from_crate_root(root: &Path) -> Vec<String> {
             resolve_module(root, &crate_root_module_dir, module, false)
         {
             scan_file(
-                &module_path,
-                module_directory(&module_path),
+                &module_path.file_path,
+                module_path.module_dir,
                 TOOLS_MODULE_DEPTH,
                 false,
                 &mut visits,
@@ -286,8 +291,8 @@ fn scan_items(
                 context.inside_inline_module,
             ) {
                 scan_file(
-                    &module_path,
-                    module_directory(&module_path),
+                    &module_path.file_path,
+                    module_path.module_dir,
                     context.module_depth + 1,
                     false,
                     visits,
@@ -342,7 +347,7 @@ fn resolve_module(
     module_dir: &Path,
     module: &syn::ItemMod,
     inside_inline_module: bool,
-) -> Option<PathBuf> {
+) -> Option<ResolvedModule> {
     let path_attributes = module
         .attrs
         .iter()
@@ -366,15 +371,26 @@ fn resolve_module(
         } else {
             file_path.parent()?
         };
-        return Some(base.join(value.value()));
+        return Some(ResolvedModule {
+            file_path: base.join(value.value()),
+            // Rust treats a file selected by `#[path]` like a `mod.rs` file.
+            // Its child modules therefore resolve beside that selected file.
+            module_dir: base.to_path_buf(),
+        });
     }
     let name = ident_name(&module.ident);
     let flat = module_dir.join(format!("{name}.rs"));
     if flat.is_file() {
-        return Some(flat);
+        return Some(ResolvedModule {
+            file_path: flat,
+            module_dir: module_dir.join(&name),
+        });
     }
     let nested = module_dir.join(name).join("mod.rs");
-    nested.is_file().then_some(nested)
+    nested.is_file().then(|| ResolvedModule {
+        module_dir: nested.parent().unwrap_or(module_dir).to_path_buf(),
+        file_path: nested,
+    })
 }
 
 fn module_directory(file_path: &Path) -> PathBuf {
@@ -1030,6 +1046,9 @@ fn module_contains_brain_import(
         return true;
     }
     if let Some((_, items)) = &module.content {
+        if module_has_path_attribute(&module.attrs) {
+            return true;
+        }
         return items_contain_brain_import(
             items,
             source_file,
@@ -1041,25 +1060,27 @@ fn module_contains_brain_import(
         );
     }
 
-    let Some(module_file) = resolve_module(source_file, module_dir, module, inside_inline_module)
+    let Some(resolved_module) =
+        resolve_module(source_file, module_dir, module, inside_inline_module)
     else {
         return true;
     };
-    let normalized = module_file
+    let normalized = resolved_module
+        .file_path
         .canonicalize()
-        .unwrap_or_else(|_| module_file.clone());
+        .unwrap_or_else(|_| resolved_module.file_path.clone());
     if !visited.insert(normalized.clone()) {
         return true;
     }
-    let source = fs::read_to_string(&module_file);
+    let source = fs::read_to_string(&resolved_module.file_path);
     let result = match source.and_then(|source| {
         syn::parse_file(&source)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
     }) {
         Ok(file) => items_contain_brain_import(
             &file.items,
-            &module_file,
-            &module_directory(&module_file),
+            &resolved_module.file_path,
+            &resolved_module.module_dir,
             false,
             module_depth,
             crate_root_brain_exports,
