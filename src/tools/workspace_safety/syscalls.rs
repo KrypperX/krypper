@@ -45,7 +45,7 @@ mod backend;
 pub(super) use backend::{
     close_file, duplicate_directory, fstat_file, is_symlink_loop, mkdir_at, open_at,
     open_current_directory, open_directory_path, read_link_at, rename_file_at, set_mode, stat_at,
-    sync_file, unlink_at, unlink_created_file, DirectoryStream,
+    sync_file, try_lock_file_exclusive, unlink_at, unlink_created_file, DirectoryStream,
 };
 
 pub(crate) fn encode_workspace_path(path: &OsStr) -> Vec<u8> {

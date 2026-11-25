@@ -209,6 +209,36 @@ Create and replace also preserve their existing limits and behavior. Replace
 requires one non-empty exact match in an existing UTF-8 file. It rejects
 missing or ambiguous matches, symlink paths, non-regular files, and
 replacements that would exceed 1 MiB.
+
+Replace and patch stage new contents in a hidden file in the target directory,
+then atomically rename it over the target. The staged file is created with
+requested mode `0600` and is never more permissive than that before the rename;
+Krypper then applies the original file's ordinary `rwx` permission bits and
+syncs that metadata. If this post-rename step fails, the
+operation is reported as committed but unverified; the target may remain mode
+`0600` if permission restoration was not reached. The new file gets owner and
+group according to process and directory rules. The original file's timestamps,
+special permission bits, ACLs, and extended attributes are not copied; directory
+creation policies may still add metadata to the new file. Other names that were
+hard links to the original continue to refer to its old contents.
+
+Krypper serializes replacements of the same inode within one process and takes
+a nonblocking advisory lock on the existing file before staging across
+processes. This prevents two cooperating Krypper replacements from silently
+overwriting each other's changes on filesystems that honor the lock. A held lock
+rejects the operation without changing the target; a filesystem that cannot
+provide the lock also rejects replacement before staging. Other programs can
+ignore advisory locks, so Krypper also rechecks the original file identity and
+contents immediately before rename; an external writer can still race that
+final check.
+
+Before commit, Krypper rechecks a staged file's inode before removing it and
+reports when cleanup fails. An external process with write access to the target
+directory may still race the check and unlink. Abrupt termination may leave a
+hidden `.krypper-replace-<UUID>` file in the target directory. Krypper does not
+sweep matching names automatically because a name alone cannot prove that a file
+is stale or owned by Krypper; inspect such files before removing them.
+
 Replacement output and retained activity history contain only path and byte
 count metadata. Read and list actions use the same workspace policy as the
 existing commands, while create is create-only and follows the same path and
