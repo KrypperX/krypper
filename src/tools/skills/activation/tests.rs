@@ -10,26 +10,24 @@ use crate::tools::{capture_workspace_root_at, registry, WorkspaceRoot};
 use serde_json::json;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
-
-static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
-
 struct Fixture {
     path: PathBuf,
     root: WorkspaceRoot,
+    _directory: crate::test_support::TempDir,
 }
 
 impl Fixture {
     fn new(label: &str) -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "krypper-skill-activation-{}-{}-{}",
-            label,
-            std::process::id(),
-            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        let directory = crate::test_support::TempDir::with_prefix(&format!(
+            "krypper-skill-activation-{label}-"
         ));
-        fs::create_dir(&path).unwrap();
+        let path = directory.path().to_path_buf();
         let root = capture_workspace_root_at(&path).unwrap();
-        Self { path, root }
+        Self {
+            path,
+            root,
+            _directory: directory,
+        }
     }
 
     fn manifest(&self, name: &str, instructions: &str) {
@@ -43,12 +41,6 @@ impl Fixture {
         let target = self.path.join(format!(".krypper/skills/{name}.json"));
         fs::create_dir_all(target.parent().unwrap()).unwrap();
         fs::write(target, contents).unwrap();
-    }
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
     }
 }
 

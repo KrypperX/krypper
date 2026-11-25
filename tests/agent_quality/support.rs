@@ -1,30 +1,30 @@
 // Shared by several test and example targets; each target uses a subset.
 #![allow(dead_code)]
 
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use uuid::Uuid;
+use tempfile::Builder;
 
 pub struct TempRoot {
     path: PathBuf,
+    _directory: tempfile::TempDir,
 }
 
 impl TempRoot {
     pub fn new(label: &str) -> Result<Self, String> {
-        let path = std::env::temp_dir().join(format!("krypper-aqb-{label}-{}", Uuid::new_v4()));
-        fs::create_dir_all(&path).map_err(|error| format!("create fixture root: {error}"))?;
-        Ok(Self { path })
+        let directory = Builder::new()
+            .prefix(&format!("krypper-aqb-{label}-"))
+            .tempdir()
+            .map_err(|error| format!("create fixture root: {error}"))?;
+        let path = directory.path().to_path_buf();
+        Ok(Self {
+            path,
+            _directory: directory,
+        })
     }
 
     pub fn path(&self) -> &Path {
         &self.path
-    }
-}
-
-impl Drop for TempRoot {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
     }
 }
 

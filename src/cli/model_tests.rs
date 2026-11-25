@@ -6,17 +6,14 @@ use crate::harness::execution::GoalTurnError;
 use crate::task_lifecycle::{
     TaskSession, TaskState, TurnOutcome, TurnState, WorkspaceGuidanceReadError,
 };
-use crate::test_support::TempDir;
+use crate::test_support::{with_current_dir, RestoreEnvironmentVariable, TempDir};
 use serde_json::{json, Value};
 use std::ffi::OsString;
 use std::fs;
 use std::io::{Cursor, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::path::Path;
 use std::thread::{self, JoinHandle};
-
-static PROVIDER_ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[path = "model_tests/provider_profile_tests.rs"]
 mod provider_profile_tests;
@@ -61,60 +58,8 @@ fn task_result_states_use_snapshot_entries_for_matching_ids() {
     );
 }
 
-struct RestoreEnvironmentVariable {
-    name: &'static str,
-    value: Option<OsString>,
-}
-
-impl RestoreEnvironmentVariable {
-    fn remove(name: &'static str) -> Self {
-        let value = std::env::var_os(name);
-        std::env::remove_var(name);
-        Self { name, value }
-    }
-
-    fn set(name: &'static str, value: &str) -> Self {
-        let previous = std::env::var_os(name);
-        std::env::set_var(name, value);
-        Self {
-            name,
-            value: previous,
-        }
-    }
-}
-
-impl Drop for RestoreEnvironmentVariable {
-    fn drop(&mut self) {
-        if let Some(value) = self.value.take() {
-            std::env::set_var(self.name, value);
-        } else {
-            std::env::remove_var(self.name);
-        }
-    }
-}
-
-struct RestoreCurrentDir(PathBuf);
-
-impl RestoreCurrentDir {
-    fn enter(path: &Path) -> Self {
-        let previous = std::env::current_dir().expect("read current directory");
-        std::env::set_current_dir(path).expect("set temporary workspace");
-        Self(previous)
-    }
-}
-
-impl Drop for RestoreCurrentDir {
-    fn drop(&mut self) {
-        std::env::set_current_dir(&self.0).expect("restore current directory");
-    }
-}
-
 fn in_workspace<T>(path: &Path, operation: impl FnOnce() -> T) -> T {
-    let _lock = crate::CURRENT_DIR_TEST_LOCK
-        .lock()
-        .expect("lock current directory");
-    let _restore = RestoreCurrentDir::enter(path);
-    operation()
+    with_current_dir(path, operation)
 }
 
 struct MockResponse {
@@ -793,9 +738,7 @@ fn resume_cli_preserves_workspace_binding_error_message_and_exit_code() {
 
 #[test]
 fn model_cli_uses_explicit_workspace_without_changing_current_directory() {
-    let _lock = PROVIDER_ENV_TEST_LOCK
-        .lock()
-        .expect("lock provider environment tests");
+    let _lock = crate::test_support::lock_current_dir();
     let _unused_gemini_key = RestoreEnvironmentVariable::set("GEMINI_API_KEY", "");
     let (endpoint, server) = mock_server(vec![
         MockResponse {
@@ -819,25 +762,27 @@ fn model_cli_uses_explicit_workspace_without_changing_current_directory() {
     fs::create_dir(&process_directory).expect("create caller directory");
     fs::create_dir(&workspace).expect("create selected workspace");
 
-    let (code, output, error, current_directory) = in_workspace(&process_directory, || {
-        let original_directory = std::env::current_dir().expect("read current directory");
-        let mut args = task_args("2");
-        args.push(OsString::from("--workspace"));
-        args.push(workspace.as_os_str().to_owned());
-        let mut input = Cursor::new(Vec::<u8>::new());
-        let mut output = Vec::new();
-        let mut error = Vec::new();
-        let code = run_task_with_endpoint(&args, &mut input, &mut output, &mut error, endpoint)
-            .expect("run mocked model task");
-        let current_directory = std::env::current_dir().expect("read current directory after task");
-        assert_eq!(current_directory, original_directory);
-        (
-            code,
-            String::from_utf8(output).expect("UTF-8 output"),
-            String::from_utf8(error).expect("UTF-8 error output"),
-            current_directory,
-        )
-    });
+    let (code, output, error, current_directory) =
+        crate::test_support::with_current_dir_under_lock(&process_directory, || {
+            let original_directory = std::env::current_dir().expect("read current directory");
+            let mut args = task_args("2");
+            args.push(OsString::from("--workspace"));
+            args.push(workspace.as_os_str().to_owned());
+            let mut input = Cursor::new(Vec::<u8>::new());
+            let mut output = Vec::new();
+            let mut error = Vec::new();
+            let code = run_task_with_endpoint(&args, &mut input, &mut output, &mut error, endpoint)
+                .expect("run mocked model task");
+            let current_directory =
+                std::env::current_dir().expect("read current directory after task");
+            assert_eq!(current_directory, original_directory);
+            (
+                code,
+                String::from_utf8(output).expect("UTF-8 output"),
+                String::from_utf8(error).expect("UTF-8 error output"),
+                current_directory,
+            )
+        });
 
     assert_eq!(code, 0, "{error}");
     assert!(output.contains("Model selected action: create_file"));
@@ -997,9 +942,7 @@ fn explicit_ollama_provider_keeps_the_local_model_path() {
 
 #[test]
 fn mistral_credentials_are_loaded_only_for_explicit_selection() {
-    let _lock = PROVIDER_ENV_TEST_LOCK
-        .lock()
-        .expect("lock provider environment tests");
+    let _lock = crate::test_support::lock_environment();
     let key = "local-mistral-test-key";
     let _restore_key = RestoreEnvironmentVariable::set("MISTRAL_API_KEY", key);
     let provider = ModelProvider::parse("mistral").expect("parse Mistral provider");
@@ -1018,9 +961,7 @@ fn mistral_credentials_are_loaded_only_for_explicit_selection() {
 
 #[test]
 fn saved_credentials_are_used_by_explicit_model_selection_when_enabled() {
-    let _lock = PROVIDER_ENV_TEST_LOCK
-        .lock()
-        .expect("lock provider environment tests");
+    let _lock = crate::test_support::lock_environment();
     let temporary = TempDir::new();
     let config_home = temporary.path().to_string_lossy().into_owned();
     let _restore_api_key = RestoreEnvironmentVariable::remove("OPENAI_API_KEY");
@@ -1058,9 +999,7 @@ fn saved_credentials_are_used_by_explicit_model_selection_when_enabled() {
 
 #[test]
 fn hosted_keys_do_not_change_caller_directed_or_default_ollama_tasks() {
-    let _lock = PROVIDER_ENV_TEST_LOCK
-        .lock()
-        .expect("lock provider environment tests");
+    let _lock = crate::test_support::lock_current_dir();
     let key = "local-mistral-test-key";
     let _restore_key = RestoreEnvironmentVariable::set("MISTRAL_API_KEY", key);
     let xai_key = "local-xai-test-key";
@@ -1073,20 +1012,21 @@ fn hosted_keys_do_not_change_caller_directed_or_default_ollama_tasks() {
         OsString::from("--max-actions"),
         OsString::from("1"),
     ];
-    let (caller_code, caller_output, caller_error) = in_workspace(caller_workspace.path(), || {
-        let mut input = Cursor::new(b"complete caller-directed\n".to_vec());
-        let mut output = Vec::new();
-        let mut error = Vec::new();
-        let code = run_task_with_endpoint(
-            &caller_args,
-            &mut input,
-            &mut output,
-            &mut error,
-            SocketAddr::from(([127, 0, 0, 1], 0)),
-        )
-        .expect("run caller-directed task without Mistral selection");
-        (code, output, error)
-    });
+    let (caller_code, caller_output, caller_error) =
+        crate::test_support::with_current_dir_under_lock(caller_workspace.path(), || {
+            let mut input = Cursor::new(b"complete caller-directed\n".to_vec());
+            let mut output = Vec::new();
+            let mut error = Vec::new();
+            let code = run_task_with_endpoint(
+                &caller_args,
+                &mut input,
+                &mut output,
+                &mut error,
+                SocketAddr::from(([127, 0, 0, 1], 0)),
+            )
+            .expect("run caller-directed task without Mistral selection");
+            (code, output, error)
+        });
     assert_eq!(caller_code, 0, "{}", String::from_utf8_lossy(&caller_error));
     assert!(String::from_utf8_lossy(&caller_output).contains("Task outcome: succeeded"));
     assert!(!String::from_utf8_lossy(&caller_output).contains(key));
@@ -1099,20 +1039,21 @@ fn hosted_keys_do_not_change_caller_directed_or_default_ollama_tasks() {
         body: tool_response("complete_task", json!({"result":"local Ollama"})),
     }]);
     let ollama_workspace = TempDir::new();
-    let (ollama_code, ollama_output, ollama_error) = in_workspace(ollama_workspace.path(), || {
-        let mut input = Cursor::new(Vec::<u8>::new());
-        let mut output = Vec::new();
-        let mut error = Vec::new();
-        let code = run_task_with_endpoint(
-            &task_args("1"),
-            &mut input,
-            &mut output,
-            &mut error,
-            endpoint,
-        )
-        .expect("run default local Ollama task without Mistral selection");
-        (code, output, error)
-    });
+    let (ollama_code, ollama_output, ollama_error) =
+        crate::test_support::with_current_dir_under_lock(ollama_workspace.path(), || {
+            let mut input = Cursor::new(Vec::<u8>::new());
+            let mut output = Vec::new();
+            let mut error = Vec::new();
+            let code = run_task_with_endpoint(
+                &task_args("1"),
+                &mut input,
+                &mut output,
+                &mut error,
+                endpoint,
+            )
+            .expect("run default local Ollama task without Mistral selection");
+            (code, output, error)
+        });
     assert_eq!(ollama_code, 0, "{}", String::from_utf8_lossy(&ollama_error));
     assert!(String::from_utf8_lossy(&ollama_output).contains("Task outcome: succeeded"));
     assert!(!String::from_utf8_lossy(&ollama_output).contains(key));
@@ -1130,9 +1071,7 @@ fn hosted_keys_do_not_change_caller_directed_or_default_ollama_tasks() {
 
 #[test]
 fn xai_credentials_are_loaded_only_for_explicit_selection() {
-    let _lock = PROVIDER_ENV_TEST_LOCK
-        .lock()
-        .expect("lock provider environment tests");
+    let _lock = crate::test_support::lock_environment();
     let _restore_key = RestoreEnvironmentVariable::set("XAI_API_KEY", "local-xai-test-key");
     let provider = ModelProvider::parse("xai").expect("parse xAI provider");
 
@@ -1170,9 +1109,7 @@ fn xai_credentials_are_loaded_only_for_explicit_selection() {
 
 #[test]
 fn anthropic_workspace_id_environment_is_optional_and_validated() {
-    let _lock = PROVIDER_ENV_TEST_LOCK
-        .lock()
-        .expect("lock provider environment tests");
+    let _lock = crate::test_support::lock_environment();
     let _restore_key =
         RestoreEnvironmentVariable::set("ANTHROPIC_API_KEY", "local-anthropic-test-key");
     let provider = ModelProvider::parse("anthropic").expect("parse Anthropic provider");
@@ -1220,9 +1157,7 @@ fn anthropic_workspace_id_environment_is_optional_and_validated() {
 
 #[test]
 fn hosted_provider_credentials_are_required_before_task_lifecycle_creation() {
-    let _lock = PROVIDER_ENV_TEST_LOCK
-        .lock()
-        .expect("lock provider environment tests");
+    let _lock = crate::test_support::lock_environment();
     let provider_variables = [
         "GEMINI_API_KEY",
         "OPENAI_API_KEY",
@@ -1272,9 +1207,8 @@ fn hosted_provider_credentials_are_required_before_task_lifecycle_creation() {
             .iter()
             .map(|name| RestoreEnvironmentVariable::remove(name))
             .collect::<Vec<_>>();
-        if let Some((name, value)) = supplemental {
-            std::env::set_var(name, value);
-        }
+        let _supplemental_override =
+            supplemental.map(|(name, value)| RestoreEnvironmentVariable::set(name, value));
         let workspace = TempDir::new();
         let checkpoint = workspace.path().join("new checkpoint.json");
         let mut args = [
@@ -1320,9 +1254,7 @@ fn hosted_provider_credentials_are_required_before_task_lifecycle_creation() {
 
 #[test]
 fn cloudflare_ai_gateway_defaults_and_validates_gateway_id_before_task_lifecycle_creation() {
-    let _lock = PROVIDER_ENV_TEST_LOCK
-        .lock()
-        .expect("lock provider environment tests");
+    let _lock = crate::test_support::lock_environment();
     let _restore_account = RestoreEnvironmentVariable::set("CLOUDFLARE_ACCOUNT_ID", "account-123");
     let _restore_token =
         RestoreEnvironmentVariable::set("CLOUDFLARE_API_TOKEN", "local-test-token");
@@ -1360,9 +1292,7 @@ fn cloudflare_ai_gateway_defaults_and_validates_gateway_id_before_task_lifecycle
 
 #[test]
 fn cloudflare_account_id_is_validated_before_task_lifecycle_creation() {
-    let _lock = PROVIDER_ENV_TEST_LOCK
-        .lock()
-        .expect("lock provider environment tests");
+    let _lock = crate::test_support::lock_environment();
     let _restore_account = RestoreEnvironmentVariable::set("CLOUDFLARE_ACCOUNT_ID", "bad/path");
     let _restore_token =
         RestoreEnvironmentVariable::set("CLOUDFLARE_API_TOKEN", "local-test-token");
@@ -1407,9 +1337,7 @@ fn cloudflare_account_id_is_validated_before_task_lifecycle_creation() {
 
 #[test]
 fn gemini_model_path_injection_is_rejected_before_task_lifecycle_creation() {
-    let _lock = PROVIDER_ENV_TEST_LOCK
-        .lock()
-        .expect("lock provider environment tests");
+    let _lock = crate::test_support::lock_environment();
     let _restore_key = RestoreEnvironmentVariable::set("GEMINI_API_KEY", "local-test-key");
     let workspace = TempDir::new();
     let checkpoint = workspace.path().join("new checkpoint.json");

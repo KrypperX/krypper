@@ -1,50 +1,22 @@
 use super::*;
-use crate::CURRENT_DIR_TEST_LOCK;
+use crate::test_support::CurrentDirGuard;
 use proptest::prelude::*;
 use std::fs;
 
-struct TempWorkspace(PathBuf);
+struct TempWorkspace(crate::test_support::TempDir);
 
 impl TempWorkspace {
     fn new() -> Self {
-        let path =
-            std::env::temp_dir().join(format!("krypper-checkpoint-workspace-{}", Uuid::new_v4()));
-        fs::create_dir(&path).unwrap();
-        Self(path)
-    }
-}
-
-impl Drop for TempWorkspace {
-    fn drop(&mut self) {
-        fs::remove_dir_all(&self.0).unwrap();
-    }
-}
-
-struct RestoreCurrentDir(PathBuf);
-
-impl RestoreCurrentDir {
-    fn enter(path: &std::path::Path) -> Self {
-        let previous = std::env::current_dir().unwrap();
-        std::env::set_current_dir(path).unwrap();
-        Self(previous)
-    }
-}
-
-impl Drop for RestoreCurrentDir {
-    fn drop(&mut self) {
-        if let Err(error) = std::env::set_current_dir(&self.0) {
-            eprintln!("failed to restore test working directory: {error}");
-        }
+        Self(crate::test_support::TempDir::with_prefix(
+            "krypper-checkpoint-workspace-",
+        ))
     }
 }
 
 #[test]
 fn checkpoint_preserves_only_metadata_for_workspace_activity() {
-    let _lock = CURRENT_DIR_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let workspace = TempWorkspace::new();
-    let _restore = RestoreCurrentDir::enter(&workspace.0);
+    let _restore = CurrentDirGuard::enter(workspace.0.path());
 
     let read_secret = "read_excerpt_sentinel";
     let query_secret = "search_query_sentinel";
@@ -178,7 +150,7 @@ proptest! {
         descriptions in prop::collection::vec(checkpoint_description(), 0..8),
     ) {
         let workspace = TempWorkspace::new();
-        let mut session = TaskSession::new_in_workspace(&workspace.0).unwrap();
+        let mut session = TaskSession::new_in_workspace(workspace.0.path()).unwrap();
         for description in descriptions {
             session.create_task(description);
         }
@@ -186,7 +158,7 @@ proptest! {
         let bytes = session.export_checkpoint().unwrap();
         prop_assert!(bytes.len() <= MAX_TASK_SESSION_CHECKPOINT_BYTES);
 
-        let restored = TaskSession::restore_checkpoint_in_workspace(&bytes, &workspace.0).unwrap();
+        let restored = TaskSession::restore_checkpoint_in_workspace(&bytes, workspace.0.path()).unwrap();
         prop_assert_eq!(restored.snapshot(), expected.clone());
         for task in expected.tasks() {
             let before = session.get_task(task.id()).unwrap();
@@ -203,7 +175,7 @@ proptest! {
         terminal_state in 0u8..4,
     ) {
         let workspace = TempWorkspace::new();
-        let mut session = TaskSession::new_in_workspace(&workspace.0).unwrap();
+        let mut session = TaskSession::new_in_workspace(workspace.0.path()).unwrap();
         let task_id = session.create_task(description).id();
         session
             .get_task_mut(task_id)
@@ -264,7 +236,7 @@ proptest! {
         let expected_snapshot = session.snapshot();
         let expected_task = session.get_task(task_id).unwrap();
         let bytes = session.export_checkpoint().unwrap();
-        let restored = TaskSession::restore_checkpoint_in_workspace(&bytes, &workspace.0).unwrap();
+        let restored = TaskSession::restore_checkpoint_in_workspace(&bytes, workspace.0.path()).unwrap();
         let restored_task = restored.get_task(task_id).unwrap();
 
         prop_assert_eq!(restored.snapshot(), expected_snapshot);
@@ -284,7 +256,7 @@ proptest! {
         document["tasks"][0]["history"][0]["sequence"] = serde_json::json!(0);
         let corrupted = serde_json::to_vec(&document).unwrap();
         prop_assert_eq!(
-            TaskSession::restore_checkpoint_in_workspace(&corrupted, &workspace.0).unwrap_err(),
+            TaskSession::restore_checkpoint_in_workspace(&corrupted, workspace.0.path()).unwrap_err(),
             TaskSessionCheckpointError::InvalidCheckpoint,
         );
     }
@@ -294,11 +266,11 @@ proptest! {
         bytes in prop::collection::vec(any::<u8>(), 0..4096),
     ) {
         let workspace = TempWorkspace::new();
-        if let Ok(restored) = TaskSession::restore_checkpoint_in_workspace(&bytes, &workspace.0) {
+        if let Ok(restored) = TaskSession::restore_checkpoint_in_workspace(&bytes, workspace.0.path()) {
             let expected = restored.snapshot();
             let canonical = restored.export_checkpoint().unwrap();
             let round_trip =
-                TaskSession::restore_checkpoint_in_workspace(&canonical, &workspace.0).unwrap();
+                TaskSession::restore_checkpoint_in_workspace(&canonical, workspace.0.path()).unwrap();
             prop_assert_eq!(round_trip.snapshot(), expected);
         }
     }
@@ -306,7 +278,7 @@ proptest! {
     #[test]
     fn restore_rejects_generated_duplicate_task_identifiers(task_count in 2usize..8) {
         let workspace = TempWorkspace::new();
-        let mut session = TaskSession::new_in_workspace(&workspace.0).unwrap();
+        let mut session = TaskSession::new_in_workspace(workspace.0.path()).unwrap();
         for index in 0..task_count {
             session.create_task(format!("generated task {index}"));
         }
@@ -317,7 +289,7 @@ proptest! {
         tasks[1]["id"] = first_id;
         let corrupted = serde_json::to_vec(&document).unwrap();
 
-        let result = TaskSession::restore_checkpoint_in_workspace(&corrupted, &workspace.0);
+        let result = TaskSession::restore_checkpoint_in_workspace(&corrupted, workspace.0.path());
         prop_assert_eq!(result.unwrap_err(), TaskSessionCheckpointError::InvalidCheckpoint);
     }
 }
@@ -335,7 +307,7 @@ fn checkpoint_restores_version_one_sessions() {
 #[test]
 fn version_one_process_evidence_requires_fresh_full_suite_verification() {
     let workspace = TempWorkspace::new();
-    let mut session = TaskSession::new_in_workspace(&workspace.0).unwrap();
+    let mut session = TaskSession::new_in_workspace(workspace.0.path()).unwrap();
     let (task_id, turn_id) = {
         let task = session.create_task("resume legacy test evidence");
         task.transition(TaskState::Running).unwrap();
@@ -364,7 +336,8 @@ fn version_one_process_evidence_requires_fresh_full_suite_verification() {
         serde_json::from_slice(&session.export_checkpoint().unwrap()).unwrap();
     checkpoint["version"] = serde_json::json!(1);
     let bytes = serde_json::to_vec(&checkpoint).unwrap();
-    let restored = TaskSession::restore_checkpoint_in_workspace(&bytes, &workspace.0).unwrap();
+    let restored =
+        TaskSession::restore_checkpoint_in_workspace(&bytes, workspace.0.path()).unwrap();
 
     assert_eq!(
         crate::harness::execution::task_test_verification(&restored, task_id, None),

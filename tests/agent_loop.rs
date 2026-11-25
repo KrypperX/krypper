@@ -10,34 +10,10 @@ use krypper::task_lifecycle::{
 mod test_support;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-use test_support::TempDir;
+use test_support::{with_current_dir, TempDir};
 use uuid::Uuid;
 
-static CURRENT_DIR_LOCK: Mutex<()> = Mutex::new(());
 const MAX_FILE_SIZE: usize = 1024 * 1024;
-
-struct RestoreCurrentDir(PathBuf);
-
-impl RestoreCurrentDir {
-    fn enter(path: &Path) -> Self {
-        let previous = std::env::current_dir().unwrap();
-        std::env::set_current_dir(path).unwrap();
-        Self(previous)
-    }
-}
-
-impl Drop for RestoreCurrentDir {
-    fn drop(&mut self) {
-        std::env::set_current_dir(&self.0).unwrap();
-    }
-}
-
-fn with_current_dir<T>(path: &Path, operation: impl FnOnce() -> T) -> T {
-    let _lock = CURRENT_DIR_LOCK.lock().unwrap();
-    let _restore = RestoreCurrentDir::enter(path);
-    operation()
-}
 
 fn running_turn(session: &mut TaskSession, goal: &str) -> (Uuid, Uuid) {
     let task = session.create_task(goal);

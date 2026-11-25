@@ -6,22 +6,17 @@ use krypper::harness::verification::{
 };
 use krypper::task_lifecycle::{TaskHistoryTransition, TaskSession, TaskState};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use uuid::Uuid;
 
-struct TempWorkspace(PathBuf);
+#[path = "../src/test_support.rs"]
+mod test_support;
+
+struct TempWorkspace(test_support::TempDir);
 
 impl TempWorkspace {
     fn new() -> Self {
-        let path = std::env::temp_dir().join(format!("krypper-outcome-check-{}", Uuid::new_v4()));
-        fs::create_dir(&path).expect("create fixture workspace");
-        Self(path)
-    }
-}
-
-impl Drop for TempWorkspace {
-    fn drop(&mut self) {
-        fs::remove_dir_all(&self.0).expect("remove fixture workspace");
+        Self(test_support::TempDir::with_prefix("krypper-outcome-check-"))
     }
 }
 
@@ -55,9 +50,9 @@ fn evidence(status: CompletionCheckEvidenceStatus, summary: &str) -> CompletionC
 #[test]
 fn passing_independent_check_records_success_in_task_session() {
     let workspace = TempWorkspace::new();
-    let artifact = workspace.0.join("artifact.txt");
+    let artifact = workspace.0.path().join("artifact.txt");
     fs::write(&artifact, "fixture result").expect("write local fixture");
-    let (mut session, task_id) = running_task(&workspace.0);
+    let (mut session, task_id) = running_task(workspace.0.path());
     let check_evidence = if artifact.is_file() {
         vec![evidence(
             CompletionCheckEvidenceStatus::Passed,
@@ -102,7 +97,7 @@ fn passing_independent_check_records_success_in_task_session() {
 #[test]
 fn failed_evidence_overrides_a_completed_model_turn() {
     let workspace = TempWorkspace::new();
-    let (mut session, task_id) = running_task(&workspace.0);
+    let (mut session, task_id) = running_task(workspace.0.path());
 
     let verification = reconcile_task_state_with_checks(
         &mut session,
@@ -126,7 +121,7 @@ fn failed_evidence_overrides_a_completed_model_turn() {
 #[test]
 fn missing_or_unknown_evidence_cannot_succeed() {
     let workspace = TempWorkspace::new();
-    let (mut session, task_id) = running_task(&workspace.0);
+    let (mut session, task_id) = running_task(workspace.0.path());
 
     let verification = reconcile_task_state_with_checks(
         &mut session,
@@ -151,7 +146,7 @@ fn missing_or_unknown_evidence_cannot_succeed() {
 #[test]
 fn explicitly_unknown_evidence_cannot_succeed() {
     let workspace = TempWorkspace::new();
-    let (mut session, task_id) = running_task(&workspace.0);
+    let (mut session, task_id) = running_task(workspace.0.path());
 
     let verification = reconcile_task_state_with_checks(
         &mut session,
@@ -175,13 +170,13 @@ fn explicitly_unknown_evidence_cannot_succeed() {
 #[test]
 fn verification_does_not_change_workspace_contents() {
     let workspace = TempWorkspace::new();
-    let sentinel = workspace.0.join("sentinel.txt");
+    let sentinel = workspace.0.path().join("sentinel.txt");
     fs::write(&sentinel, "unchanged").expect("write local fixture");
-    let before = fs::read_dir(&workspace.0)
+    let before = fs::read_dir(workspace.0.path())
         .expect("read fixture workspace")
         .map(|entry| entry.expect("fixture entry").file_name())
         .collect::<Vec<_>>();
-    let (mut session, task_id) = running_task(&workspace.0);
+    let (mut session, task_id) = running_task(workspace.0.path());
 
     reconcile_task_state_with_checks(
         &mut session,
@@ -192,7 +187,7 @@ fn verification_does_not_change_workspace_contents() {
     )
     .expect("verify completed task");
 
-    let after = fs::read_dir(&workspace.0)
+    let after = fs::read_dir(workspace.0.path())
         .expect("read fixture workspace")
         .map(|entry| entry.expect("fixture entry").file_name())
         .collect::<Vec<_>>();
@@ -206,7 +201,7 @@ fn verification_does_not_change_workspace_contents() {
 #[test]
 fn too_many_required_checks_fail_closed_with_bounded_results() {
     let workspace = TempWorkspace::new();
-    let (mut session, task_id) = running_task(&workspace.0);
+    let (mut session, task_id) = running_task(workspace.0.path());
     let checks = (0..=MAX_COMPLETION_CHECKS)
         .map(|index| RequiredCompletionCheck {
             id: format!("check_{index}"),

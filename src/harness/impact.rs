@@ -633,24 +633,17 @@ mod tests {
     use crate::task_lifecycle::{TaskState, TurnState};
     use std::fs;
 
-    struct TempWorkspace(PathBuf);
+    struct TempWorkspace(crate::test_support::TempDir);
 
     impl TempWorkspace {
         fn new() -> Self {
-            let root =
-                std::env::temp_dir().join(format!("krypper-impact-analysis-{}", Uuid::new_v4()));
-            fs::create_dir_all(&root).expect("create fixture workspace");
-            Self(root)
+            Self(crate::test_support::TempDir::with_prefix(
+                "krypper-impact-analysis-",
+            ))
         }
 
         fn path(&self) -> &Path {
-            &self.0
-        }
-    }
-
-    impl Drop for TempWorkspace {
-        fn drop(&mut self) {
-            fs::remove_dir_all(&self.0).expect("remove fixture workspace");
+            self.0.path()
         }
     }
 

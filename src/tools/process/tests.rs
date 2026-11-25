@@ -2,6 +2,7 @@ use super::outcome::{record_event, resolve_outcome, StopReason};
 use super::*;
 use crate::brain::OllamaDecisionSource;
 use crate::task_lifecycle::{TaskSession, TaskState, TurnOutcome, TurnState};
+use crate::test_support::TempDir;
 use crate::tools::process_profile::ProcessProfile;
 use serde_json::{json, Value};
 use std::ffi::OsString;
@@ -83,16 +84,17 @@ fn model_request_json(request: &[u8]) -> Value {
     serde_json::from_slice(&request[body_start..]).unwrap()
 }
 
-fn prepare_task_fixture(path: &Path) -> PathBuf {
+fn prepare_task_fixture(path: &Path) -> (TempDir, PathBuf) {
     fs::write(
         path.join("src/lib.rs"),
         "pub fn fixture_value() -> usize { 1 }\n",
     )
     .unwrap();
-    let outside = Path::new("/var/tmp").join(format!("krypper-process-canary-{}", Uuid::new_v4()));
+    let outside_directory = TempDir::with_prefix("krypper-process-canary-");
+    let outside = outside_directory.path().join(Uuid::new_v4().to_string());
     fs::write(&outside, "host private canary").unwrap();
     symlink(&outside, path.join("escape")).unwrap();
-    outside
+    (outside_directory, outside)
 }
 
 fn task_with_process_grant(
@@ -110,8 +112,8 @@ fn task_with_process_grant(
     (session, task, turn)
 }
 
-fn fixture() -> PathBuf {
-    let path = std::env::temp_dir().join(format!("krypper-process-{}", Uuid::new_v4()));
+fn fixture() -> TempDir {
+    let path = TempDir::with_prefix("krypper-process-");
     fs::create_dir_all(path.join("src")).unwrap();
     fs::write(
         path.join("Cargo.toml"),
@@ -163,7 +165,6 @@ fn profile_is_denied_without_explicit_task_authority() {
     assert!(session
         .run_offline_cargo_tests(Uuid::new_v4(), turn, None)
         .is_err());
-    fs::remove_dir_all(path).unwrap();
 }
 
 #[test]
@@ -216,7 +217,6 @@ fn registered_plan_reaches_process_authorization_through_harness() {
             .state(),
         TurnState::Failed
     );
-    fs::remove_dir_all(path).unwrap();
 }
 
 #[test]
@@ -225,7 +225,7 @@ fn approved_profile_reaches_process_dispatch_through_task_session_and_harness() 
         run_goal_turn_with_plan, GoalTurnStopReason, WorkspaceAction, WorkspaceObservation,
     };
     let path = fixture();
-    let runtime = path.with_extension("runtime");
+    let runtime = TempDir::with_prefix("krypper-process-runtime-");
     fs::create_dir_all(runtime.join("bin")).unwrap();
     for binary in ["cargo", "rustc"] {
         fs::copy("/usr/bin/true", runtime.join("bin").join(binary)).unwrap();
@@ -283,14 +283,12 @@ fn approved_profile_reaches_process_dispatch_through_task_session_and_harness() 
         session.offline_cargo_filters_for_test(task),
         vec![Some("works".to_owned())]
     );
-    fs::remove_dir_all(path).unwrap();
-    fs::remove_dir_all(runtime).unwrap();
 }
 
 #[test]
 fn missing_containment_never_launches_workspace_code() {
     let path = fixture();
-    let marker = path.with_extension("launched");
+    let marker = path.join("launched");
     fs::write(
         path.join("build.rs"),
         format!(
@@ -299,7 +297,7 @@ fn missing_containment_never_launches_workspace_code() {
         ),
     )
     .unwrap();
-    let runtime = path.with_extension("runtime");
+    let runtime = TempDir::with_prefix("krypper-process-runtime-");
     fs::create_dir_all(runtime.join("bin")).unwrap();
     for binary in ["cargo", "rustc"] {
         fs::copy("/usr/bin/true", runtime.join("bin").join(binary)).unwrap();
@@ -319,8 +317,6 @@ fn missing_containment_never_launches_workspace_code() {
     assert_eq!(result.outcome, ProcessOutcome::SandboxUnavailable);
     assert!(result.cleanup_confirmed);
     assert!(!marker.exists(), "no workspace code may launch");
-    fs::remove_dir_all(path).unwrap();
-    fs::remove_dir_all(runtime).unwrap();
 }
 
 #[test]
@@ -350,7 +346,7 @@ fn test_filter_validation_rejects_unbounded_or_option_like_values() {
 #[test]
 fn invalid_filter_returns_before_workspace_process_launch() {
     let path = fixture();
-    let marker = path.with_extension("launched");
+    let marker = path.join("launched");
     fs::write(
         path.join("build.rs"),
         format!(
@@ -359,7 +355,7 @@ fn invalid_filter_returns_before_workspace_process_launch() {
         ),
     )
     .unwrap();
-    let runtime = path.with_extension("runtime");
+    let runtime = TempDir::with_prefix("krypper-process-runtime-");
     fs::create_dir_all(runtime.join("bin")).unwrap();
     for binary in ["cargo", "rustc"] {
         fs::copy("/usr/bin/true", runtime.join("bin").join(binary)).unwrap();
@@ -374,8 +370,6 @@ fn invalid_filter_returns_before_workspace_process_launch() {
         !marker.exists(),
         "invalid filters must not launch workspace code"
     );
-    fs::remove_dir_all(path).unwrap();
-    fs::remove_dir_all(runtime).unwrap();
 }
 
 #[test]
@@ -520,8 +514,6 @@ fn cargo_build_script_warning_cannot_fake_a_filtered_test_result() {
     assert!(!absent_result.tests_ran);
     assert_eq!(absent_result.outcome, ProcessOutcome::NoTestsMatched);
     assert!(!absent_result.succeeded());
-
-    fs::remove_dir_all(path).unwrap();
 }
 
 #[test]
@@ -530,7 +522,7 @@ fn resource_readback_rejects_missing_and_unlimited_controls() {
     let limits = ProcessProfile::offline_cargo_test().unwrap().limits();
     let supervisor = std::mem::ManuallyDrop::new(Supervisor {
         unit: "unused".into(),
-        group: path.clone(),
+        group: path.to_path_buf(),
         cleaned: true,
         limits,
     });
@@ -552,7 +544,6 @@ fn resource_readback_rejects_missing_and_unlimited_controls() {
         assert!(supervisor.verify().is_err(), "{name} must fail closed");
         fs::write(path.join(name), original).unwrap();
     }
-    fs::remove_dir_all(path).unwrap();
 }
 
 #[test]
@@ -683,7 +674,7 @@ fn cancellation_after_probe_resolves_to_cancelled() {
     let limits = ProcessProfile::offline_cargo_test().unwrap().limits();
     let mut supervisor = Supervisor {
         unit: "unused".into(),
-        group: path.clone(),
+        group: path.to_path_buf(),
         cleaned: true,
         limits,
     };
@@ -693,7 +684,6 @@ fn cancellation_after_probe_resolves_to_cancelled() {
     assert!(result.cleanup_confirmed);
     assert_eq!(result.output_bytes, 0);
     assert!(result.resource_events.is_empty());
-    fs::remove_dir_all(path).unwrap();
 }
 
 #[test]
@@ -752,8 +742,6 @@ fn process_grants_do_not_survive_a_checkpoint_restore() {
             .outcome,
         ProcessOutcome::Denied
     );
-    fs::remove_dir_all(path).unwrap();
-    fs::remove_dir_all(runtime).unwrap();
 }
 
 #[test]
@@ -764,7 +752,7 @@ fn local_model_task_patches_then_runs_a_filtered_offline_cargo_test() {
     let toolchain = std::env::var_os("KRYPPER_TEST_TOOLCHAIN").expect("toolchain required");
     let registry = std::env::var_os("KRYPPER_TEST_REGISTRY").expect("registry required");
     let path = fixture();
-    let outside = prepare_task_fixture(&path);
+    let (_outside_directory, outside) = prepare_task_fixture(&path);
     let goal = "Patch the fixture and verify its selected test";
     let policy = OfflineCargoPolicy::new(Path::new(&toolchain), Path::new(&registry)).unwrap();
     let (mut session, task, turn) = task_with_process_grant(&path, policy, goal);
@@ -840,8 +828,6 @@ fn local_model_task_patches_then_runs_a_filtered_offline_cargo_test() {
             }
         )));
     assert_eq!(fs::read_to_string(&outside).unwrap(), "host private canary");
-    fs::remove_dir_all(path).unwrap();
-    fs::remove_file(outside).unwrap();
 }
 
 #[test]
@@ -852,7 +838,7 @@ fn local_model_task_cannot_complete_after_a_zero_match_offline_cargo_test() {
     let toolchain = std::env::var_os("KRYPPER_TEST_TOOLCHAIN").expect("toolchain required");
     let registry = std::env::var_os("KRYPPER_TEST_REGISTRY").expect("registry required");
     let path = fixture();
-    let outside = prepare_task_fixture(&path);
+    let (_outside_directory, outside) = prepare_task_fixture(&path);
     let goal = "Patch the fixture and verify a selected test";
     let policy = OfflineCargoPolicy::new(Path::new(&toolchain), Path::new(&registry)).unwrap();
     let (mut session, task, turn) = task_with_process_grant(&path, policy, goal);
@@ -916,8 +902,6 @@ fn local_model_task_cannot_complete_after_a_zero_match_offline_cargo_test() {
             }
         )));
     assert_eq!(fs::read_to_string(&outside).unwrap(), "host private canary");
-    fs::remove_dir_all(path).unwrap();
-    fs::remove_file(outside).unwrap();
 }
 
 #[test]
@@ -926,7 +910,7 @@ fn unavailable_host_controls_never_launch_workspace_code() {
     let toolchain = std::env::var_os("KRYPPER_TEST_TOOLCHAIN").expect("toolchain required");
     let registry = std::env::var_os("KRYPPER_TEST_REGISTRY").expect("registry required");
     let path = fixture();
-    let marker = path.with_extension("launched");
+    let marker = path.join("launched");
     fs::write(
         path.join("build.rs"),
         format!(
@@ -950,7 +934,6 @@ fn unavailable_host_controls_never_launch_workspace_code() {
         "workspace code must never launch on failed preflight"
     );
     assert!(result.cleanup_confirmed);
-    fs::remove_dir_all(path).unwrap();
 }
 
 /// Explicit host fixture; ordinary CI never claims this passed when prerequisites are absent.
@@ -1137,8 +1120,6 @@ assert_eq!(std::env::current_dir().unwrap().to_str().unwrap(), "/workspace");
     trigger.join().unwrap();
     assert_eq!(result.outcome, ProcessOutcome::Cancelled, "{result:?}");
     assert!(result.cleanup_confirmed);
-    fs::remove_dir_all(path).unwrap();
-    fs::remove_file(outside).unwrap();
 }
 
 #[test]

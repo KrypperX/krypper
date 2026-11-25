@@ -2,7 +2,6 @@ use super::*;
 use serde_json::Value;
 use std::cell::Cell;
 use std::fs;
-use std::path::PathBuf;
 
 const MODELS_DEV_FIXTURE: &[u8] = br#"{
       "cloudflare-workers-ai": {
@@ -42,23 +41,13 @@ const CLOUDFLARE_FIXTURE: &[u8] = br#"{
       }]
     }"#;
 
-struct TestDirectory(PathBuf);
+struct TestDirectory(crate::test_support::TempDir);
 
 impl TestDirectory {
     fn new() -> Self {
-        let id = NEXT_TEMP_FILE.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "krypper-catalog-source-test-{}-{id}",
-            std::process::id()
-        ));
-        fs::create_dir(&path).unwrap();
-        Self(path)
-    }
-}
-
-impl Drop for TestDirectory {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+        Self(crate::test_support::TempDir::with_prefix(
+            "krypper-catalog-source-test-",
+        ))
     }
 }
 
@@ -384,7 +373,7 @@ fn invalid_prices_fail_closed() {
 #[test]
 fn explicit_refresh_writes_a_verified_cache() {
     let directory = TestDirectory::new();
-    let path = directory.0.join("catalog.json");
+    let path = directory.0.path().join("catalog.json");
     let source = ModelsDevSource;
     let transport = FixtureTransport::response(MODELS_DEV_FIXTURE);
     let result = refresh_catalog(&path, &[&source], &transport, 1_800_000_000).unwrap();
@@ -406,7 +395,7 @@ fn explicit_refresh_writes_a_verified_cache() {
 #[test]
 fn source_trait_accepts_a_new_typed_source_id_without_changing_the_registry() {
     let directory = TestDirectory::new();
-    let path = directory.0.join("catalog.json");
+    let path = directory.0.path().join("catalog.json");
     let result =
         import_catalog_payload(&path, &TestSource, br#"{"id":"custom-model"}"#, 55).unwrap();
     assert_eq!(
@@ -422,7 +411,7 @@ fn source_trait_accepts_a_new_typed_source_id_without_changing_the_registry() {
 #[test]
 fn core_enforces_source_size_limits_even_if_transport_or_adapter_does_not() {
     let directory = TestDirectory::new();
-    let path = directory.0.join("catalog.json");
+    let path = directory.0.path().join("catalog.json");
     let source = TestSource;
     let oversized = vec![b' '; source.descriptor().max_bytes + 1];
     assert_eq!(
@@ -439,7 +428,7 @@ fn core_enforces_source_size_limits_even_if_transport_or_adapter_does_not() {
 #[test]
 fn unavailable_source_returns_stale_last_known_good_without_replacing_it() {
     let directory = TestDirectory::new();
-    let path = directory.0.join("catalog.json");
+    let path = directory.0.path().join("catalog.json");
     import_catalog_payload(&path, &ModelsDevSource, MODELS_DEV_FIXTURE, 90).unwrap();
     let source = CloudflareWorkersAiSource;
     import_catalog_payload(&path, &source, CLOUDFLARE_FIXTURE, 100).unwrap();
@@ -466,7 +455,7 @@ fn unavailable_source_returns_stale_last_known_good_without_replacing_it() {
 #[test]
 fn corrupt_cache_and_invalid_import_do_not_replace_last_known_good() {
     let directory = TestDirectory::new();
-    let path = directory.0.join("catalog.json");
+    let path = directory.0.path().join("catalog.json");
     fs::write(&path, b"{invalid\n").unwrap();
     assert_eq!(
         read_catalog_cache(&path).unwrap_err(),
@@ -483,7 +472,7 @@ fn corrupt_cache_and_invalid_import_do_not_replace_last_known_good() {
 #[test]
 fn cache_rejects_changed_payload_hashes_and_unknown_schema_versions() {
     let directory = TestDirectory::new();
-    let path = directory.0.join("catalog.json");
+    let path = directory.0.path().join("catalog.json");
     import_catalog_payload(&path, &ModelsDevSource, MODELS_DEV_FIXTURE, 1_800_000_000).unwrap();
 
     let mut cache: super::cache::CatalogCacheFile =
@@ -507,7 +496,7 @@ fn cache_rejects_changed_payload_hashes_and_unknown_schema_versions() {
 #[test]
 fn cache_rejects_unknown_fields() {
     let directory = TestDirectory::new();
-    let path = directory.0.join("catalog.json");
+    let path = directory.0.path().join("catalog.json");
     import_catalog_payload(&path, &ModelsDevSource, MODELS_DEV_FIXTURE, 10).unwrap();
     let mut cache: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     cache

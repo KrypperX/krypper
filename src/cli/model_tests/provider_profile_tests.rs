@@ -7,10 +7,11 @@ use super::super::provider_profiles::{
 use super::super::settings::{save_credentials, CredentialStore};
 use super::super::task::run_task_with_options;
 use super::{
-    in_workspace, mock_server, read_request, redirecting_mock_server, request_header, request_json,
-    task_args, MockResponse, RestoreEnvironmentVariable, TempDir, PROVIDER_ENV_TEST_LOCK,
+    mock_server, read_request, redirecting_mock_server, request_header, request_json, task_args,
+    MockResponse, RestoreEnvironmentVariable, TempDir,
 };
 use crate::agent_loop::WorkspaceAction;
+use crate::test_support::lock_environment;
 use serde_json::{json, Value};
 use std::ffi::OsString;
 use std::fs;
@@ -36,9 +37,7 @@ fn profile_tool_response(name: &str, arguments: Value) -> String {
 
 #[test]
 fn task_cli_uses_per_user_profiles_env_precedence_and_no_config_selection() {
-    let _lock = PROVIDER_ENV_TEST_LOCK
-        .lock()
-        .expect("lock provider environment tests");
+    let _lock = crate::test_support::lock_current_dir();
     let config_home = TempDir::new();
     let config_home_value = config_home.path().to_string_lossy().into_owned();
     let _restore_config_home =
@@ -83,22 +82,24 @@ fn task_cli_uses_per_user_profiles_env_precedence_and_no_config_selection() {
     let workspace = TempDir::new();
     let mut args = task_args("1");
     args.extend([OsString::from("--provider"), OsString::from("mock")]);
-    std::env::set_var("KRYPPER_PROVIDER_MOCK_API_KEY", "environment-profile-key");
-    let (code, output, error) = in_workspace(workspace.path(), || {
-        let mut input = Cursor::new(Vec::<u8>::new());
-        let mut output = Vec::new();
-        let mut error = Vec::new();
-        let code = run_task_with_options(
-            &args,
-            &mut input,
-            &mut output,
-            &mut error,
-            SocketAddr::from(([127, 0, 0, 1], 0)),
-            true,
-        )
-        .expect("run task through per-user provider profile");
-        (code, output, error)
-    });
+    let _restore_environment_api_key =
+        RestoreEnvironmentVariable::set("KRYPPER_PROVIDER_MOCK_API_KEY", "environment-profile-key");
+    let (code, output, error) =
+        crate::test_support::with_current_dir_under_lock(workspace.path(), || {
+            let mut input = Cursor::new(Vec::<u8>::new());
+            let mut output = Vec::new();
+            let mut error = Vec::new();
+            let code = run_task_with_options(
+                &args,
+                &mut input,
+                &mut output,
+                &mut error,
+                SocketAddr::from(([127, 0, 0, 1], 0)),
+                true,
+            )
+            .expect("run task through per-user provider profile");
+            (code, output, error)
+        });
     assert_eq!(code, 0, "{}", String::from_utf8_lossy(&error));
     assert!(String::from_utf8_lossy(&output).contains("Task outcome: succeeded"));
     assert!(!String::from_utf8_lossy(&output).contains("environment-profile-key"));
@@ -107,7 +108,7 @@ fn task_cli_uses_per_user_profiles_env_precedence_and_no_config_selection() {
     let mut no_config_args = first_request_args;
     no_config_args.push(OsString::from("--no-config"));
     let (no_config_code, no_config_output, no_config_error) =
-        in_workspace(workspace.path(), || {
+        crate::test_support::with_current_dir_under_lock(workspace.path(), || {
             let mut input = Cursor::new(Vec::<u8>::new());
             let mut output = Vec::new();
             let mut error = Vec::new();
@@ -141,7 +142,8 @@ fn task_cli_uses_per_user_profiles_env_precedence_and_no_config_selection() {
         assert_eq!(request_json(request)["tool_choice"], "required");
     }
 
-    std::env::remove_var("KRYPPER_PROVIDER_MOCK_API_KEY");
+    let _remove_environment_api_key =
+        RestoreEnvironmentVariable::remove("KRYPPER_PROVIDER_MOCK_API_KEY");
     assert!(prepare_model_source_for_selection(
         Some("mock-model".to_owned()),
         Some(ProviderSelection::Profile("mock".to_owned())),
@@ -164,9 +166,7 @@ fn task_cli_uses_per_user_profiles_env_precedence_and_no_config_selection() {
 
 #[test]
 fn custom_profile_defaults_are_rejected_from_krypper_config_overrides() {
-    let _lock = PROVIDER_ENV_TEST_LOCK
-        .lock()
-        .expect("lock provider environment tests");
+    let _lock = lock_environment();
     let config_home = TempDir::new();
     let _restore_config_home =
         RestoreEnvironmentVariable::set("XDG_CONFIG_HOME", config_home.path().to_str().unwrap());
@@ -217,9 +217,7 @@ fn custom_profile_defaults_are_rejected_from_krypper_config_overrides() {
 fn replacing_a_profile_does_not_change_an_in_flight_source_snapshot() {
     use crate::agent_loop::BoundedDecisionSource;
 
-    let _lock = PROVIDER_ENV_TEST_LOCK
-        .lock()
-        .expect("lock provider environment tests");
+    let _lock = lock_environment();
     let config_home = TempDir::new();
     let config_home_value = config_home.path().to_string_lossy().into_owned();
     let _restore_config_home =
@@ -257,7 +255,7 @@ fn replacing_a_profile_does_not_change_an_in_flight_source_snapshot() {
         ..profile
     };
     replace_profile(&profile_path, replacement).expect("replace stored profile");
-    std::env::set_var(
+    let _restore_reloaded_api_key = RestoreEnvironmentVariable::set(
         "KRYPPER_PROVIDER_SNAPSHOT_API_KEY",
         "snapshot-key-after-reload",
     );
@@ -284,9 +282,7 @@ fn replacing_a_profile_does_not_change_an_in_flight_source_snapshot() {
 fn profile_credentials_are_not_forwarded_across_a_redirect() {
     use crate::agent_loop::BoundedDecisionSource;
 
-    let _lock = PROVIDER_ENV_TEST_LOCK
-        .lock()
-        .expect("lock provider environment tests");
+    let _lock = lock_environment();
     let config_home = TempDir::new();
     let config_home_value = config_home.path().to_string_lossy().into_owned();
     let _restore_config_home =

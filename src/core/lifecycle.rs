@@ -8,8 +8,6 @@
 use crate::tools::{capture_workspace_root, capture_workspace_root_at, WorkspaceRoot};
 use std::fmt;
 use std::path::Path;
-#[cfg(test)]
-use std::path::PathBuf;
 use uuid::Uuid;
 
 mod checkpoint;

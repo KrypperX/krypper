@@ -1215,26 +1215,20 @@ fn disabled_fallback_rejects_an_action_attached_to_an_http_error() {
     );
 }
 
-struct TempWorkspace(PathBuf);
+struct TempWorkspace(crate::test_support::TempDir);
 
 impl TempWorkspace {
     fn new() -> Self {
-        let path = std::env::temp_dir().join(format!("krypper-fallback-{}", uuid::Uuid::new_v4()));
-        fs::create_dir(&path).expect("create temporary workspace");
-        Self(path)
-    }
-}
-
-impl Drop for TempWorkspace {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+        Self(crate::test_support::TempDir::with_prefix(
+            "krypper-fallback-",
+        ))
     }
 }
 
 #[test]
 fn one_complete_action_reaches_harness_after_retry() {
     let workspace = TempWorkspace::new();
-    let mut session = TaskSession::new_in_workspace(&workspace.0).expect("workspace session");
+    let mut session = TaskSession::new_in_workspace(workspace.0.path()).expect("workspace session");
     let task_id = session.create_task("create one file").id();
     let turn_id = {
         let task = session.get_task_mut(task_id).expect("task");
@@ -1272,7 +1266,7 @@ fn one_complete_action_reaches_harness_after_retry() {
     assert_eq!(result.stop_reason(), GoalTurnStopReason::Completed);
     assert_eq!(result.actions_taken(), 2);
     assert_eq!(
-        fs::read_to_string(workspace.0.join("created.txt")).expect("created file"),
+        fs::read_to_string(workspace.0.path().join("created.txt")).expect("created file"),
         "created once"
     );
     assert_eq!(

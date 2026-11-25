@@ -2,36 +2,16 @@
 use crate::agent_loop::GoalTurnResult;
 use crate::brain::*;
 use crate::task_lifecycle::{TaskSession, TaskState, TurnOutcome, TurnState};
-use crate::test_support::TempDir;
+use crate::test_support::{with_current_dir, TempDir};
 use serde_json::{json, Value};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::thread::{self, JoinHandle};
 use uuid::Uuid;
-struct RestoreCurrentDir(PathBuf);
-
-impl RestoreCurrentDir {
-    fn enter(path: &Path) -> Self {
-        let previous = std::env::current_dir().expect("read current directory");
-        std::env::set_current_dir(path).expect("set temporary workspace");
-        Self(previous)
-    }
-}
-
-impl Drop for RestoreCurrentDir {
-    fn drop(&mut self) {
-        std::env::set_current_dir(&self.0).expect("restore current directory");
-    }
-}
-
 fn in_workspace<T>(path: &Path, operation: impl FnOnce() -> T) -> T {
-    let _lock = crate::CURRENT_DIR_TEST_LOCK
-        .lock()
-        .expect("lock current directory");
-    let _restore = RestoreCurrentDir::enter(path);
-    operation()
+    with_current_dir(path, operation)
 }
 
 fn assert_failed_turn(

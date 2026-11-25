@@ -3,12 +3,11 @@ use super::super::{
     replace_text_file_at,
     types::{CliError, DirHandle, WorkspaceRoot},
 };
-use super::NEXT_TEMP;
+use super::temp_dir;
 use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
 
 fn workspace_root(path: &Path) -> WorkspaceRoot {
     WorkspaceRoot {
@@ -19,11 +18,8 @@ fn workspace_root(path: &Path) -> WorkspaceRoot {
 
 #[test]
 fn mutations_reject_git_and_krypper_metadata_but_preserve_reads_and_normal_paths() {
-    let path = std::env::temp_dir().join(format!(
-        "krypper-mutation-policy-{}-{}",
-        std::process::id(),
-        NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
-    ));
+    let directory = temp_dir("krypper-mutation-policy-");
+    let path = directory.path();
     fs::create_dir_all(path.join(".git/hooks")).unwrap();
     fs::create_dir_all(path.join(".krypper/skills")).unwrap();
     fs::create_dir_all(path.join(".gitignore")).unwrap();
@@ -32,7 +28,7 @@ fn mutations_reject_git_and_krypper_metadata_but_preserve_reads_and_normal_paths
     fs::write(path.join(".krypper/skills/example.json"), "protected\n").unwrap();
     symlink(".git", path.join("git-alias")).unwrap();
     symlink(".krypper", path.join("krypper-alias")).unwrap();
-    let root = workspace_root(&path);
+    let root = workspace_root(path);
 
     let protected_files = [
         ".git/config",
@@ -96,6 +92,4 @@ fn mutations_reject_git_and_krypper_metadata_but_preserve_reads_and_normal_paths
         "allowed"
     );
     create_text_file_at(&root, OsStr::new("normal.txt"), "allowed").unwrap();
-
-    fs::remove_dir_all(path).unwrap();
 }

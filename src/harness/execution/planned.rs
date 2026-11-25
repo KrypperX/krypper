@@ -1685,22 +1685,20 @@ mod tests {
 
     struct TempWorkspace {
         root: PathBuf,
+        _directory: crate::test_support::TempDir,
         workspace: PathBuf,
     }
 
     impl TempWorkspace {
         fn new() -> Self {
-            let root =
-                std::env::temp_dir().join(format!("krypper-process-correction-{}", Uuid::new_v4()));
-            let workspace = root.join("workspace");
+            let root = crate::test_support::TempDir::with_prefix("krypper-process-correction-");
+            let workspace = root.path().join("workspace");
             fs::create_dir_all(&workspace).expect("create fixture workspace");
-            Self { root, workspace }
-        }
-    }
-
-    impl Drop for TempWorkspace {
-        fn drop(&mut self) {
-            fs::remove_dir_all(&self.root).expect("remove fixture workspace");
+            Self {
+                root: root.path().to_path_buf(),
+                _directory: root,
+                workspace: workspace.to_path_buf(),
+            }
         }
     }
 

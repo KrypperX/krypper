@@ -2,16 +2,15 @@ use super::contract::{MemoryKind, MemoryProvenance, MemorySensitivity, MemorySou
 use super::record::MemoryRecord;
 use super::scope::{DeletionRequest, DeletionScope, MemoryQuery, WorkspaceKey};
 use super::store::{MemoryStore, MemoryStoreError, MEMORY_STORE_VERSION};
+use crate::test_support::TempDir;
 use std::fs;
 use std::path::PathBuf;
-use uuid::Uuid;
 
-fn store_path() -> PathBuf {
-    std::env::temp_dir()
-        .join(format!("krypper-memory-store-{}", Uuid::new_v4()))
-        .join("memory.jsonl")
+fn store_path() -> (TempDir, PathBuf) {
+    let directory = TempDir::with_prefix("krypper-memory-store-");
+    let path = directory.path().join("memory.jsonl");
+    (directory, path)
 }
-
 fn workspace(key: &str) -> WorkspaceKey {
     WorkspaceKey::new(key).expect("workspace key")
 }
@@ -36,7 +35,7 @@ fn enabled_store(path: &std::path::Path) -> MemoryStore {
 
 #[test]
 fn a_disabled_store_touches_nothing_and_a_missing_store_is_empty() {
-    let path = store_path();
+    let (_directory, path) = store_path();
     assert!(MemoryStore::open_opt_in(path.clone(), false).is_none());
     assert!(!path.exists());
 
@@ -48,7 +47,7 @@ fn a_disabled_store_touches_nothing_and_a_missing_store_is_empty() {
 
 #[test]
 fn restart_preserves_records_but_never_crosses_workspaces() {
-    let path = store_path();
+    let (_directory, path) = store_path();
     let alpha = record("ws-a", "alpha fact", 10);
     let beta = record("ws-b", "beta fact", 11);
     {
@@ -70,7 +69,7 @@ fn restart_preserves_records_but_never_crosses_workspaces() {
 
 #[test]
 fn corrupt_and_duplicate_lines_are_skipped_and_rewritten_clean() {
-    let path = store_path();
+    let (_directory, path) = store_path();
     let valid = record("ws-a", "kept fact", 10).to_json().expect("json");
     let text =
         format!("{{\"version\":{MEMORY_STORE_VERSION}}}\nnot json at all\n{valid}\n{valid}\n");
@@ -94,7 +93,7 @@ fn corrupt_and_duplicate_lines_are_skipped_and_rewritten_clean() {
 
 #[test]
 fn unsupported_store_and_record_versions_fail_closed() {
-    let path = store_path();
+    let (_directory, path) = store_path();
     fs::create_dir_all(path.parent().expect("parent")).expect("create dir");
     fs::write(&path, "{\"version\":99}\n").expect("write store");
     assert_eq!(
@@ -115,7 +114,7 @@ fn unsupported_store_and_record_versions_fail_closed() {
 
 #[test]
 fn append_replaces_the_same_id_and_prunes_expired_records() {
-    let path = store_path();
+    let (_directory, path) = store_path();
     let store = enabled_store(&path);
     let kept = record("ws-a", "kept fact", 10);
     let expiring = MemoryRecord::new(
@@ -151,7 +150,7 @@ fn append_replaces_the_same_id_and_prunes_expired_records() {
 
 #[test]
 fn deletion_removes_only_the_requested_scope() {
-    let path = store_path();
+    let (_directory, path) = store_path();
     let store = enabled_store(&path);
     let alpha = record("ws-a", "alpha fact", 10);
     let beta = record("ws-b", "beta fact", 11);

@@ -14,43 +14,12 @@ use krypper::task_lifecycle::{
 mod test_support;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-use test_support::TempDir;
+use test_support::{with_current_dir, CurrentDirGuard, TempDir};
 use uuid::Uuid;
-
-static CURRENT_DIR_LOCK: Mutex<()> = Mutex::new(());
-
-struct RestoreCurrentDir(PathBuf);
-
-impl RestoreCurrentDir {
-    fn enter(path: &Path) -> Self {
-        let previous = std::env::current_dir().unwrap();
-        std::env::set_current_dir(path).unwrap();
-        Self(previous)
-    }
-}
-
-impl Drop for RestoreCurrentDir {
-    fn drop(&mut self) {
-        if let Err(error) = std::env::set_current_dir(&self.0) {
-            eprintln!("failed to restore test working directory: {error}");
-        }
-    }
-}
-
-fn with_current_dir<T>(path: &Path, operation: impl FnOnce() -> T) -> T {
-    let _lock = CURRENT_DIR_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let _restore = RestoreCurrentDir::enter(path);
-    operation()
-}
 
 #[test]
 fn explicit_workspace_session_uses_the_selected_root_without_changing_current_directory() {
-    let _lock = CURRENT_DIR_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lock = test_support::lock_current_dir();
     let temporary = TempDir::new();
     let workspace = temporary.path().join("selected workspace");
     fs::create_dir(&workspace).unwrap();
@@ -234,9 +203,7 @@ fn task_session_snapshot_omits_task_outcome_and_workspace_sentinels() {
 
 #[test]
 fn explicit_workspace_session_keeps_its_root_for_bounded_turns_after_directory_changes() {
-    let _lock = CURRENT_DIR_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let current_directory = CurrentDirGuard::hold();
     let temporary = TempDir::new();
     let workspace = temporary.path().join("selected workspace");
     let other_directory = temporary.path().join("other directory");
@@ -258,7 +225,7 @@ fn explicit_workspace_session_keeps_its_root_for_bounded_turns_after_directory_c
     let mut decisions =
         |_: &str, _: &[WorkspaceObservation]| actions.next().expect("two decisions are available");
 
-    let restore_directory = RestoreCurrentDir::enter(&other_directory);
+    current_directory.set(&other_directory);
     let result = run_goal_turn_with_budget(
         &mut session,
         task_id,
@@ -268,7 +235,7 @@ fn explicit_workspace_session_keeps_its_root_for_bounded_turns_after_directory_c
         &mut decisions,
     )
     .unwrap();
-    drop(restore_directory);
+    drop(current_directory);
 
     assert_eq!(result.stop_reason(), GoalTurnStopReason::Completed);
     assert_eq!(
@@ -306,6 +273,7 @@ fn explicit_workspace_session_rejects_missing_and_non_directory_paths() {
 #[cfg(windows)]
 #[test]
 fn unsupported_workspace_capture_has_a_typed_platform_error() {
+    let _lock = test_support::lock_current_dir();
     let error = TaskSession::new_in_workspace(std::env::current_dir().unwrap()).unwrap_err();
     assert_eq!(
         error.kind(),
