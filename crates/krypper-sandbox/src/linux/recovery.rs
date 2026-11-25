@@ -163,33 +163,39 @@ impl HostLease {
             }
         }
         drop(receipt);
-        self.record("").map_err(HostLeaseError::CleanupUnconfirmed)
+        self.clear_receipt()
+            .map_err(HostLeaseError::CleanupUnconfirmed)
     }
     pub(super) fn record(&mut self, text: &str) -> io::Result<()> {
-        let directory = receipt_parent(&self.receipt)?;
         if text.is_empty() {
-            match fs::remove_file(&self.receipt) {
-                Ok(()) => {}
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e),
-            }
-        } else {
-            let temporary = directory.join(format!(".krypper-cargo-{}", Uuid::new_v4()));
-            let update = (|| -> io::Result<()> {
-                let mut file = OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .mode(0o600)
-                    .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-                    .open(&temporary)?;
-                file.write_all(text.as_bytes())?;
-                file.sync_all()?;
-                fs::rename(&temporary, &self.receipt)
-            })();
-            if update.is_err() {
-                let _ = fs::remove_file(temporary);
-            }
-            update?;
+            return Err(io::Error::other("cleanup receipt cannot be empty"));
+        }
+        let directory = receipt_parent(&self.receipt)?;
+        let temporary = directory.join(format!(".krypper-cargo-{}", Uuid::new_v4()));
+        let update = (|| -> io::Result<()> {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(&temporary)?;
+            file.write_all(text.as_bytes())?;
+            file.sync_all()?;
+            fs::rename(&temporary, &self.receipt)
+        })();
+        if update.is_err() {
+            let _ = fs::remove_file(temporary);
+        }
+        update?;
+        File::open(directory)?.sync_all()
+    }
+
+    pub(super) fn clear_receipt(&mut self) -> io::Result<()> {
+        let directory = receipt_parent(&self.receipt)?;
+        match fs::remove_file(&self.receipt) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
         }
         File::open(directory)?.sync_all()
     }
@@ -267,7 +273,17 @@ mod path_invariant_tests {
     }
 
     #[test]
-    fn recording_rejects_a_receipt_without_a_parent_instead_of_panicking() {
+    fn clearing_rejects_a_receipt_without_a_parent_instead_of_panicking() {
+        let mut lease = HostLease {
+            _lock: std::fs::File::open("/dev/null").expect("open inert lock fixture"),
+            receipt: PathBuf::new(),
+        };
+
+        assert!(lease.clear_receipt().is_err());
+    }
+
+    #[test]
+    fn recording_rejects_empty_receipt_content() {
         let mut lease = HostLease {
             _lock: std::fs::File::open("/dev/null").expect("open inert lock fixture"),
             receipt: PathBuf::new(),

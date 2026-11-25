@@ -360,7 +360,7 @@ fn run_with_containment(request: SandboxRunRequest, contained: bool) -> SandboxR
             result.diagnostic = Some(e.to_string());
             result.cleanup_confirmed = !is_cleanup_uncertain();
             if result.cleanup_confirmed {
-                let _ = lease.record("");
+                let _ = lease.clear_receipt();
             } else {
                 result.outcome = SandboxOutcome::OutcomeUnknown;
                 result.recovery_hold = true;
@@ -520,7 +520,7 @@ fn run_with_containment(request: SandboxRunRequest, contained: bool) -> SandboxR
         result.recovery_hold = true;
     }
     if result.cleanup_confirmed {
-        let _ = lease.record("");
+        let _ = lease.clear_receipt();
     }
     result
 }
