@@ -1,4 +1,5 @@
 use super::*;
+use proptest::prelude::*;
 
 #[test]
 fn sse_consumer_cancellation_stops_before_next_read() {
@@ -215,4 +216,115 @@ fn sse_decoder_preserves_multiline_data_across_chunk_boundaries() {
     );
     assert_eq!(frames[0].data, "first\nsecond");
     assert_eq!(decoder.finish(), Ok(()));
+}
+
+fn sse_line() -> impl Strategy<Value = String> {
+    prop::collection::vec(any::<char>(), 0..20).prop_map(|characters| {
+        characters
+            .into_iter()
+            .filter(|character| !matches!(character, '\r' | '\n'))
+            .collect()
+    })
+}
+
+struct ChunkedReader<'a> {
+    input: &'a [u8],
+    sizes: &'a [usize],
+    offset: usize,
+    next_size: usize,
+}
+
+impl std::io::Read for ChunkedReader<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if self.offset == self.input.len() {
+            return Ok(0);
+        }
+        let size = self.sizes[self.next_size % self.sizes.len()].max(1);
+        self.next_size += 1;
+        let count = size.min(buffer.len()).min(self.input.len() - self.offset);
+        buffer[..count].copy_from_slice(&self.input[self.offset..self.offset + count]);
+        self.offset += count;
+        Ok(count)
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(96))]
+
+    #[test]
+    fn sse_decoding_is_independent_of_byte_chunk_boundaries(
+        frames in prop::collection::vec(
+            (prop::option::of(sse_line()), prop::collection::vec(sse_line(), 1..4)),
+            0..8,
+        ),
+        crlf in any::<bool>(),
+        chunk_sizes in prop::collection::vec(1usize..16, 1..12),
+    ) {
+        let ending = if crlf { "\r\n" } else { "\n" };
+        let mut wire = String::new();
+        let mut expected = Vec::with_capacity(frames.len());
+        for (event, data_lines) in frames {
+            if let Some(event_value) = &event {
+                wire.push_str("event:");
+                wire.push_str(event_value);
+                wire.push_str(ending);
+            }
+            for line in &data_lines {
+                wire.push_str("data:");
+                wire.push_str(line);
+                wire.push_str(ending);
+            }
+            wire.push_str(ending);
+            expected.push(SseFrame {
+                event: event.map(|value| {
+                    value
+                        .strip_prefix(' ')
+                        .unwrap_or(&value)
+                        .to_owned()
+                }),
+                data: data_lines
+                    .iter()
+                    .map(|line| line.strip_prefix(' ').unwrap_or(line))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            });
+        }
+        let bytes = wire.as_bytes();
+
+        let mut bytewise_reader = ChunkedReader {
+            input: bytes,
+            sizes: &[1],
+            offset: 0,
+            next_size: 0,
+        };
+        let mut bytewise_frames = Vec::new();
+        let bytewise_result = consume_sse(
+            &mut bytewise_reader,
+            bytes.len().saturating_add(1),
+            |frame| {
+                bytewise_frames.push(frame);
+                Ok::<(), ()>(())
+            },
+        );
+        prop_assert!(bytewise_result.is_ok());
+        prop_assert_eq!(bytewise_frames, expected.clone());
+
+        let mut chunked_reader = ChunkedReader {
+            input: bytes,
+            sizes: &chunk_sizes,
+            offset: 0,
+            next_size: 0,
+        };
+        let mut chunked_frames = Vec::new();
+        let chunked_result = consume_sse(
+            &mut chunked_reader,
+            bytes.len().saturating_add(1),
+            |frame| {
+                chunked_frames.push(frame);
+                Ok::<(), ()>(())
+            },
+        );
+        prop_assert!(chunked_result.is_ok());
+        prop_assert_eq!(chunked_frames, expected);
+    }
 }

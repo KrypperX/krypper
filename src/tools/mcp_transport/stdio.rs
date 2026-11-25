@@ -441,10 +441,8 @@ pub(super) fn read_line(
         let before = response.len();
         let (stdout_eof, _, _) = drain(stdout, &mut response, MAX_RESPONSE_BYTES)?;
         let progressed = response.len() > before;
-        if let Some(position) = response.iter().position(|byte| *byte == b'\n') {
-            let line: Vec<u8> = response.drain(..=position).collect();
+        if let Some(line) = take_line(&mut response) {
             *pending = response;
-            let line = line.strip_suffix(b"\r").unwrap_or(&line).to_vec();
             return Ok(line);
         }
         if response.len() >= MAX_RESPONSE_BYTES {
@@ -455,6 +453,12 @@ pub(super) fn read_line(
         }
         thread::sleep(POLL_INTERVAL);
     }
+}
+
+fn take_line(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
+    let position = buffer.iter().position(|byte| *byte == b'\n')?;
+    let line: Vec<u8> = buffer.drain(..=position).collect();
+    Some(line.strip_suffix(b"\r").unwrap_or(&line).to_vec())
 }
 
 fn check(deadline: Instant, cancel: &McpCancellation) -> Result<(), McpLifecycleError> {
@@ -510,6 +514,7 @@ fn drain(
 #[cfg(test)]
 mod stderr_capture_tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn stderr_capture_retains_only_its_byte_budget() {
@@ -547,5 +552,37 @@ mod stderr_capture_tests {
         };
         assert_eq!(retained.len(), MAX_STDERR_BYTES);
         capture.stop();
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(96))]
+
+        #[test]
+        fn mcp_line_framing_preserves_bytes_across_read_boundaries(
+            prefix_bytes in prop::collection::vec(any::<u8>(), 0..256),
+            suffix in prop::collection::vec(any::<u8>(), 0..256),
+            split_seed in any::<usize>(),
+        ) {
+            let prefix: Vec<u8> = prefix_bytes.into_iter().filter(|byte| *byte != b'\n').collect();
+            let mut wire = prefix.clone();
+            wire.push(b'\n');
+            wire.extend_from_slice(&suffix);
+            let split = split_seed % (wire.len() + 1);
+            let mut pending = wire[..split].to_vec();
+            let extracted = if split <= prefix.len() {
+                prop_assert_eq!(take_line(&mut pending), None);
+                pending.extend_from_slice(&wire[split..]);
+                take_line(&mut pending)
+            } else {
+                let line = take_line(&mut pending);
+                pending.extend_from_slice(&wire[split..]);
+                line
+            };
+
+            let mut expected_line = prefix;
+            expected_line.push(b'\n');
+            prop_assert_eq!(extracted, Some(expected_line));
+            prop_assert_eq!(pending, suffix);
+        }
     }
 }

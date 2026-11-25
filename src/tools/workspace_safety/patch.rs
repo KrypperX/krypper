@@ -691,3 +691,76 @@ mod tests {
         (directory, root)
     }
 }
+
+#[cfg(test)]
+mod parser_property_tests {
+    use super::apply_unified_diff;
+    use proptest::prelude::*;
+
+    fn patch_line() -> impl Strategy<Value = String> {
+        prop::collection::vec(any::<char>(), 0..24).prop_map(|characters| {
+            characters
+                .into_iter()
+                .filter(|character| !matches!(character, '\0' | '\r' | '\n'))
+                .collect()
+        })
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(96))]
+
+        #[test]
+        fn valid_single_line_replacements_preserve_unmodified_content_and_file_shape(
+            mut lines in prop::collection::vec(patch_line(), 1..8),
+            index in any::<usize>(),
+            replacement in patch_line(),
+            crlf in any::<bool>(),
+            final_newline in any::<bool>(),
+        ) {
+            // Keep a representable final line when the original omits its final newline.
+            lines.last_mut().unwrap().push('\u{e000}');
+            let index = index % lines.len();
+            let old_line = lines[index].clone();
+            let mut new_line = replacement;
+            if new_line == old_line {
+                new_line.push('!');
+            }
+            let ending = if crlf { "\r\n" } else { "\n" };
+            let mut original = lines.join(ending);
+            if final_newline {
+                original.push_str(ending);
+            }
+
+            let patch = format!(
+                "--- a/note.txt\n+++ b/note.txt\n@@ -{line} +{line} @@\n-{old}\n+{new}\n",
+                line = index + 1,
+                old = old_line,
+                new = new_line,
+            );
+            lines[index] = new_line.clone();
+            let mut expected = lines.join(ending);
+            if final_newline {
+                expected.push_str(ending);
+            }
+
+            let result = apply_unified_diff("note.txt", &original, &patch).unwrap();
+            prop_assert_eq!(result.contents, expected);
+            prop_assert_eq!(result.before_diff, old_line);
+            prop_assert_eq!(result.after_diff, new_line);
+        }
+
+        #[test]
+        fn arbitrary_bounded_patch_and_file_text_never_panics(
+            patch_bytes in prop::collection::vec(any::<u8>(), 0..1024),
+            original_bytes in prop::collection::vec(any::<u8>(), 0..256),
+        ) {
+            let patch = String::from_utf8_lossy(&patch_bytes);
+            let original = String::from_utf8_lossy(&original_bytes);
+            if let Ok(result) = apply_unified_diff("note.txt", &original, &patch) {
+                prop_assert!(result.before_diff.len() <= patch.len());
+                prop_assert!(result.after_diff.len() <= patch.len());
+                prop_assert_ne!(result.contents, original);
+            }
+        }
+    }
+}
