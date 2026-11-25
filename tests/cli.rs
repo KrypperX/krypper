@@ -1,38 +1,17 @@
 use krypper::task_lifecycle::{TaskSession, TaskState};
+#[path = "../src/test_support.rs"]
+mod test_support;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
-
-static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
+use test_support::TempDir;
 
 const MAX_FILE_SIZE: usize = 1024 * 1024;
 const MAX_TASK_ACTION_LINE_BYTES: usize = MAX_FILE_SIZE + 4096;
-
-struct TempDir(PathBuf);
-
-impl TempDir {
-    fn new() -> Self {
-        let id = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("krypper-test-{}-{id}", std::process::id()));
-        fs::create_dir(&path).expect("create test directory");
-        Self(path)
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
 
 fn command(cwd: Option<&Path>, args: &[&str]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_krypper"));

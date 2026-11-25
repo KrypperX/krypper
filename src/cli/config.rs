@@ -320,34 +320,7 @@ pub(super) const MAX_FALLBACK_BUDGET_MICRO_USD: u64 = 1_000_000_000;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
-
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new() -> Self {
-            let id = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir()
-                .join(format!("krypper-config-test-{}-{id}", std::process::id()));
-            fs::create_dir(&path).unwrap();
-            Self(path)
-        }
-
-        fn write(&self, text: &[u8]) -> PathBuf {
-            let path = self.0.join("config.toml");
-            fs::write(&path, text).unwrap();
-            path
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
+    use crate::test_support::TempDir;
 
     fn os(value: &str) -> Option<OsString> {
         Some(OsString::from(value))
@@ -437,23 +410,23 @@ mod tests {
     fn missing_file_and_empty_file_yield_no_defaults() {
         let directory = TempDir::new();
         assert_eq!(
-            load_model_defaults(&directory.0.join("absent.toml")).unwrap(),
+            load_model_defaults(&directory.path().join("absent.toml")).unwrap(),
             None
         );
-        let path = directory.write(b"# nothing here\n");
+        let path = directory.write_file("config.toml", b"# nothing here\n");
         assert_eq!(load_model_defaults(&path).unwrap(), None);
     }
 
     #[test]
     fn loads_model_with_optional_provider() {
         let directory = TempDir::new();
-        let path = directory.write(b"model = \"qwen3\"\n");
+        let path = directory.write_file("config.toml", b"model = \"qwen3\"\n");
         let defaults = load_model_defaults(&path).unwrap().unwrap();
         assert_eq!(defaults.model, "qwen3");
         assert_eq!(defaults.provider, None);
         assert_eq!(defaults.path, path);
 
-        let path = directory.write(b"provider = \"openai\"\nmodel = \"m\"\n");
+        let path = directory.write_file("config.toml", b"provider = \"openai\"\nmodel = \"m\"\n");
         let defaults = load_model_defaults(&path).unwrap().unwrap();
         assert_eq!(defaults.provider.as_deref(), Some("openai"));
     }
@@ -461,7 +434,8 @@ mod tests {
     #[test]
     fn loads_automatic_routing_preferences_without_changing_manual_defaults() {
         let directory = TempDir::new();
-        let path = directory.write(
+        let path = directory.write_file(
+            "config.toml",
             b"provider = \"openai\"\nmodel = \"gpt-4.1\"\nrouting_mode = \"automatic\"\nallow_cross_provider_data_transfer = \"true\"\nfallback_budget_micro_usd = \"2500000\"\n",
         );
         let defaults = load_model_defaults(&path).unwrap().unwrap();
@@ -469,7 +443,10 @@ mod tests {
         assert!(defaults.allow_cross_provider_data_transfer);
         assert_eq!(defaults.fallback_budget_micro_usd, Some(2_500_000));
 
-        let path = directory.write(b"provider = \"openai\"\nmodel = \"gpt-4.1\"\n");
+        let path = directory.write_file(
+            "config.toml",
+            b"provider = \"openai\"\nmodel = \"gpt-4.1\"\n",
+        );
         let defaults = load_model_defaults(&path).unwrap().unwrap();
         assert_eq!(defaults.routing_mode, RoutingMode::Manual);
         assert!(!defaults.allow_cross_provider_data_transfer);
@@ -479,7 +456,8 @@ mod tests {
     #[test]
     fn rejects_fallback_settings_without_automatic_routing() {
         let directory = TempDir::new();
-        let path = directory.write(
+        let path = directory.write_file(
+            "config.toml",
             b"provider = \"openai\"\nmodel = \"gpt-4.1\"\nfallback_budget_micro_usd = \"1000000\"\n",
         );
         assert!(load_model_defaults(&path)
@@ -490,7 +468,7 @@ mod tests {
     #[test]
     fn provider_without_model_is_rejected() {
         let directory = TempDir::new();
-        let path = directory.write(b"provider = \"openai\"\n");
+        let path = directory.write_file("config.toml", b"provider = \"openai\"\n");
         let error = load_model_defaults(&path).unwrap_err();
         assert!(error.contains("provider requires model"), "{error}");
     }
@@ -498,15 +476,16 @@ mod tests {
     #[test]
     fn rejects_oversized_non_utf8_and_non_regular_files() {
         let directory = TempDir::new();
-        let oversized = directory.write(&vec![b'#'; MAX_CONFIG_BYTES as usize + 1]);
+        let oversized =
+            directory.write_file("config.toml", &vec![b'#'; MAX_CONFIG_BYTES as usize + 1]);
         assert!(load_model_defaults(&oversized)
             .unwrap_err()
             .contains("larger than"));
 
-        let invalid = directory.write(&[0xff, 0xfe, b'\n']);
+        let invalid = directory.write_file("config.toml", &[0xff, 0xfe, b'\n']);
         assert!(load_model_defaults(&invalid).unwrap_err().contains("UTF-8"));
 
-        assert!(load_model_defaults(&directory.0)
+        assert!(load_model_defaults(directory.path())
             .unwrap_err()
             .contains("not a regular file"));
     }
@@ -514,7 +493,7 @@ mod tests {
     #[test]
     fn accepts_a_file_exactly_at_the_size_limit() {
         let directory = TempDir::new();
-        let path = directory.write(&vec![b'#'; MAX_CONFIG_BYTES as usize]);
+        let path = directory.write_file("config.toml", &vec![b'#'; MAX_CONFIG_BYTES as usize]);
         assert_eq!(load_model_defaults(&path).unwrap(), None);
     }
 }

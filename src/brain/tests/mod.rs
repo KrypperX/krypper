@@ -2,6 +2,7 @@
 use crate::agent_loop::GoalTurnResult;
 use crate::brain::*;
 use crate::task_lifecycle::{TaskSession, TaskState, TurnOutcome, TurnState};
+use crate::test_support::TempDir;
 use serde_json::{json, Value};
 use std::fs;
 use std::io::{Read, Write};
@@ -9,26 +10,6 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::thread::{self, JoinHandle};
 use uuid::Uuid;
-struct TempDir(PathBuf);
-
-impl TempDir {
-    fn new() -> Self {
-        let path = std::env::temp_dir().join(format!("krypper-model-{}", Uuid::new_v4()));
-        fs::create_dir(&path).expect("create temporary directory");
-        Self(path)
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        fs::remove_dir_all(&self.0).expect("remove temporary directory");
-    }
-}
-
 struct RestoreCurrentDir(PathBuf);
 
 impl RestoreCurrentDir {

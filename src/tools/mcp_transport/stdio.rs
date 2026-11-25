@@ -117,20 +117,11 @@ impl Drop for StdioChild {
 
 pub(super) struct ManagedChild(Option<Child>);
 
-impl std::ops::Deref for ManagedChild {
-    type Target = Child;
-    fn deref(&self) -> &Self::Target {
-        self.0.as_ref().unwrap()
-    }
-}
-
-impl std::ops::DerefMut for ManagedChild {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.0.as_mut().unwrap()
-    }
-}
-
 impl ManagedChild {
+    fn child_mut(&mut self) -> Option<&mut Child> {
+        self.0.as_mut()
+    }
+
     pub(super) fn has_exited(&mut self) -> io::Result<bool> {
         let Some(child) = self.0.as_ref() else {
             return Ok(false);
@@ -383,9 +374,14 @@ fn spawn_inner(
             .spawn()
             .map_err(|_| McpLifecycleError::SpawnFailed)?,
     ));
-    let stdin = child.stdin.take().ok_or(McpLifecycleError::SpawnFailed)?;
-    let stdout = child.stdout.take().ok_or(McpLifecycleError::SpawnFailed)?;
-    let stderr = child.stderr.take().ok_or(McpLifecycleError::SpawnFailed)?;
+    let (stdin, stdout, stderr) = {
+        let child = child.child_mut().ok_or(McpLifecycleError::SpawnFailed)?;
+        (
+            child.stdin.take().ok_or(McpLifecycleError::SpawnFailed)?,
+            child.stdout.take().ok_or(McpLifecycleError::SpawnFailed)?,
+            child.stderr.take().ok_or(McpLifecycleError::SpawnFailed)?,
+        )
+    };
     set_nonblocking(stdin.as_raw_fd())?;
     set_nonblocking(stdout.as_raw_fd())?;
     set_nonblocking(stderr.as_raw_fd())?;

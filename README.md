@@ -68,12 +68,14 @@ It prompts for the account ID, a hidden API token, and an optional AI Gateway ID
 - [Model routing evaluation](docs/model-routing-evaluation.md) — offline preflight and opt-in manual/automatic route comparison
 - [Provider routing migration](docs/provider-routing-migration.md) — compatibility, automatic routing setup, and rollback
 - [Safe impact analysis](docs/safe-impact-analysis.md) — bounded multi-file plan review and revision checks
+- [Changelog](CHANGELOG.md) — notable user-visible changes
 - [Development guide](DEVELOPMENT.md) — code layout, architectural boundaries, and migration notes
 - [Documentation directory](docs/) — focused technical guides
 
 ## Contributing
 
-See the repository's existing development guidance and pull requests before proposing changes. Run `cargo test` locally when changing Rust code.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the Rust toolchain, validation commands,
+and pull request guidance.
 
 ## License
 
