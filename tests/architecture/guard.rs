@@ -1,4 +1,4 @@
-use proc_macro2::{TokenStream, TokenTree};
+use proc_macro2::{Ident, TokenStream, TokenTree};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -6,6 +6,17 @@ use syn::visit::Visit;
 use syn::{Attribute, Item, Meta, Path as RustPath, UseTree};
 
 const TOOLS_MODULE_DEPTH: usize = 1;
+
+fn ident_name(ident: &Ident) -> String {
+    let name = ident.to_string();
+    name.strip_prefix("r#").unwrap_or(&name).to_owned()
+}
+
+fn path_is_ident(path: &RustPath, expected: &str) -> bool {
+    path.leading_colon.is_none()
+        && path.segments.len() == 1
+        && ident_name(&path.segments[0].ident) == expected
+}
 
 struct ModuleScanContext<'a> {
     file_path: &'a Path,
@@ -94,7 +105,7 @@ fn scan_items(
         }
         if item_attrs(item)
             .iter()
-            .any(|attribute| attribute.path().is_ident("macro_use"))
+            .any(|attribute| path_is_ident(attribute.path(), "macro_use"))
         {
             violations.push(format!(
                 "{}: macro_use imports are not inspected",
@@ -111,7 +122,7 @@ fn scan_items(
                 violations,
             );
             if let Some((_, nested)) = &module.content {
-                let nested_dir = context.module_dir.join(module.ident.to_string());
+                let nested_dir = context.module_dir.join(ident_name(&module.ident));
                 scan_items(
                     nested,
                     &ModuleScanContext {
@@ -192,7 +203,7 @@ fn resolve_module(
         let Meta::NameValue(name_value) = &attribute.meta else {
             return None;
         };
-        if !name_value.path.is_ident("path") {
+        if !path_is_ident(&name_value.path, "path") {
             return None;
         }
         let syn::Expr::Lit(expression) = &name_value.value else {
@@ -210,7 +221,7 @@ fn resolve_module(
         };
         return Some(base.join(path));
     }
-    let name = module.ident.to_string();
+    let name = ident_name(&module.ident);
     let flat = module_dir.join(format!("{name}.rs"));
     if flat.is_file() {
         return Some(flat);
@@ -288,7 +299,7 @@ fn item_attrs(item: &Item) -> &[Attribute] {
 
 fn item_is_test_only(attributes: &[Attribute]) -> bool {
     attributes.iter().any(|attribute| {
-        attribute.path().is_ident("cfg")
+        path_is_ident(attribute.path(), "cfg")
             && attribute
                 .parse_args::<Meta>()
                 .is_ok_and(|predicate| cfg_is_test_only(&predicate))
@@ -297,13 +308,13 @@ fn item_is_test_only(attributes: &[Attribute]) -> bool {
 
 fn cfg_is_test_only(predicate: &Meta) -> bool {
     match predicate {
-        Meta::Path(path) => path.is_ident("test"),
-        Meta::List(list) if list.path.is_ident("all") => {
+        Meta::Path(path) => path_is_ident(path, "test"),
+        Meta::List(list) if path_is_ident(&list.path, "all") => {
             let parser = syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated;
             syn::parse::Parser::parse2(parser, list.tokens.clone())
                 .is_ok_and(|items| items.iter().any(cfg_is_test_only))
         }
-        Meta::List(list) if list.path.is_ident("any") => {
+        Meta::List(list) if path_is_ident(&list.path, "any") => {
             let parser = syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated;
             syn::parse::Parser::parse2(parser, list.tokens.clone())
                 .is_ok_and(|items| !items.is_empty() && items.iter().all(cfg_is_test_only))
@@ -359,7 +370,7 @@ impl Visit<'_> for DirectionVisitor<'_> {
     }
 
     fn visit_item_extern_crate(&mut self, item: &syn::ItemExternCrate) {
-        if item.ident == "self" && item.rename.is_some() {
+        if ident_name(&item.ident) == "self" && item.rename.is_some() {
             self.violations
                 .push(format!("{}: self crate alias is not checked", self.origin));
         }
@@ -370,7 +381,7 @@ impl Visit<'_> for DirectionVisitor<'_> {
         let segments = path
             .segments
             .iter()
-            .map(|segment| segment.ident.to_string())
+            .map(|segment| ident_name(&segment.ident))
             .collect::<Vec<_>>();
         if path_starts_with_brain(&segments, self.module_depth)
             || path_starts_with_brain_export(
@@ -386,7 +397,7 @@ impl Visit<'_> for DirectionVisitor<'_> {
     }
 
     fn visit_macro(&mut self, mac: &syn::Macro) {
-        if mac.path.is_ident("include") {
+        if path_is_ident(&mac.path, "include") {
             self.violations.push(format!(
                 "{}: production include! source is not inspected",
                 self.origin
@@ -459,7 +470,7 @@ fn inspect_use_tree(
 ) {
     match tree {
         UseTree::Path(path) => {
-            prefix.push(path.ident.to_string());
+            prefix.push(ident_name(&path.ident));
             inspect_use_tree(
                 &path.tree,
                 prefix,
@@ -471,7 +482,7 @@ fn inspect_use_tree(
             prefix.pop();
         }
         UseTree::Name(name) => {
-            prefix.push(name.ident.to_string());
+            prefix.push(ident_name(&name.ident));
             record_brain_prefix(
                 prefix,
                 module_depth,
@@ -482,7 +493,7 @@ fn inspect_use_tree(
             prefix.pop();
         }
         UseTree::Rename(rename) => {
-            prefix.push(rename.ident.to_string());
+            prefix.push(ident_name(&rename.ident));
             record_brain_prefix(
                 prefix,
                 module_depth,
@@ -493,7 +504,7 @@ fn inspect_use_tree(
             if path_resolves_to_crate_root(prefix, module_depth) {
                 violations.push(format!(
                     "{origin}: crate-root import alias `{}` is not checked",
-                    rename.rename
+                    ident_name(&rename.rename)
                 ));
             }
             prefix.pop();
@@ -629,7 +640,7 @@ pub(super) fn scan_crate_root_aliases(
         }
         if item_attrs(item)
             .iter()
-            .any(|attribute| attribute.path().is_ident("macro_use"))
+            .any(|attribute| path_is_ident(attribute.path(), "macro_use"))
         {
             violations.push(format!(
                 "{}: crate-root macro imports are not inspected",
@@ -646,7 +657,7 @@ pub(super) fn scan_crate_root_aliases(
                     &mut crate_root_brain_exports,
                 );
             }
-            Item::Mod(module) if module.ident == "tools" => {
+            Item::Mod(module) if ident_name(&module.ident) == "tools" => {
                 for attribute in &module.attrs {
                     if !attribute_is_inspected(
                         attribute,
@@ -662,13 +673,15 @@ pub(super) fn scan_crate_root_aliases(
                     }
                 }
             }
-            Item::ExternCrate(item) if item.ident == "self" && item.rename.is_some() => {
+            Item::ExternCrate(item)
+                if ident_name(&item.ident) == "self" && item.rename.is_some() =>
+            {
                 violations.push(format!(
                     "{}: crate-root extern alias `{}` is not checked",
                     root.display(),
                     item.rename
                         .as_ref()
-                        .map(|(_, ident)| ident.to_string())
+                        .map(|(_, ident)| ident_name(ident))
                         .unwrap_or_default()
                 ));
             }
@@ -676,7 +689,7 @@ pub(super) fn scan_crate_root_aliases(
                 if item
                     .attrs
                     .iter()
-                    .any(|attribute| attribute.path().is_ident("macro_use")) =>
+                    .any(|attribute| path_is_ident(attribute.path(), "macro_use")) =>
             {
                 violations.push(format!(
                     "{}: crate-root macro import is not inspected",
@@ -703,7 +716,7 @@ pub(super) fn scan_crate_root_aliases(
             let Item::Mod(module) = item else {
                 continue;
             };
-            if module.ident == "tools" || item_is_test_only(&module.attrs) {
+            if ident_name(&module.ident) == "tools" || item_is_test_only(&module.attrs) {
                 continue;
             }
             if module_contains_brain_import(
@@ -714,7 +727,7 @@ pub(super) fn scan_crate_root_aliases(
                 1,
                 &crate_root_brain_exports,
                 &mut HashSet::new(),
-            ) && crate_root_brain_exports.insert(module.ident.to_string())
+            ) && crate_root_brain_exports.insert(ident_name(&module.ident))
             {
                 added_export = true;
             }
@@ -737,6 +750,18 @@ pub(super) fn scan_crate_root_aliases(
                 &mut crate_root_brain_exports,
             );
             added_export |= crate_root_brain_exports.len() != previous_count;
+        }
+
+        for item in &file.items {
+            let Item::Type(type_alias) = item else {
+                continue;
+            };
+            if item_is_test_only(&type_alias.attrs)
+                || !type_alias_contains_brain_import(&type_alias.ty, 0, &crate_root_brain_exports)
+            {
+                continue;
+            }
+            added_export |= crate_root_brain_exports.insert(ident_name(&type_alias.ident));
         }
 
         if !added_export {
@@ -772,7 +797,7 @@ fn module_contains_brain_import(
         return items_contain_brain_import(
             items,
             source_file,
-            &module_dir.join(module.ident.to_string()),
+            &module_dir.join(ident_name(&module.ident)),
             true,
             module_depth,
             crate_root_brain_exports,
@@ -842,9 +867,28 @@ fn items_contain_brain_import(
             // A macro can emit an import or public facade that is absent from
             // this AST. Mark the containing root module as uninspectable.
             Item::Macro(_) => true,
+            Item::Type(type_alias) => type_alias_contains_brain_import(
+                &type_alias.ty,
+                module_depth,
+                crate_root_brain_exports,
+            ),
             _ => false,
         }
     })
+}
+
+fn type_alias_contains_brain_import(
+    ty: &syn::Type,
+    module_depth: usize,
+    crate_root_brain_exports: &HashSet<String>,
+) -> bool {
+    let mut visitor = BrainPathProbe {
+        module_depth,
+        crate_root_brain_exports,
+        found: false,
+    };
+    visitor.visit_type(ty);
+    visitor.found
 }
 
 fn use_tree_contains_brain_import(
@@ -855,7 +899,7 @@ fn use_tree_contains_brain_import(
 ) -> bool {
     match tree {
         UseTree::Path(path) => {
-            prefix.push(path.ident.to_string());
+            prefix.push(ident_name(&path.ident));
             let found = use_tree_contains_brain_import(
                 &path.tree,
                 prefix,
@@ -866,14 +910,14 @@ fn use_tree_contains_brain_import(
             found
         }
         UseTree::Name(name) => {
-            prefix.push(name.ident.to_string());
+            prefix.push(ident_name(&name.ident));
             let found = path_starts_with_brain(prefix, module_depth)
                 || path_starts_with_brain_export(prefix, module_depth, crate_root_brain_exports);
             prefix.pop();
             found
         }
         UseTree::Rename(rename) => {
-            prefix.push(rename.ident.to_string());
+            prefix.push(ident_name(&rename.ident));
             let found = path_starts_with_brain(prefix, module_depth)
                 || path_starts_with_brain_export(prefix, module_depth, crate_root_brain_exports);
             prefix.pop();
@@ -898,7 +942,7 @@ fn inspect_crate_root_alias(
 ) {
     match tree {
         UseTree::Path(path) => {
-            prefix.push(path.ident.to_string());
+            prefix.push(ident_name(&path.ident));
             inspect_crate_root_alias(
                 &path.tree,
                 prefix,
@@ -909,14 +953,14 @@ fn inspect_crate_root_alias(
             prefix.pop();
         }
         UseTree::Rename(rename) => {
-            prefix.push(rename.ident.to_string());
+            prefix.push(ident_name(&rename.ident));
             if root_path_starts_with_brain_or_export(prefix, crate_root_brain_exports) {
-                crate_root_brain_exports.insert(rename.rename.to_string());
+                crate_root_brain_exports.insert(ident_name(&rename.rename));
             }
             if path_resolves_to_crate_root(prefix, 0) {
                 violations.push(format!(
                     "{origin}: crate-root import alias `{}` is not checked",
-                    rename.rename
+                    ident_name(&rename.rename)
                 ));
             }
             prefix.pop();
@@ -933,9 +977,9 @@ fn inspect_crate_root_alias(
             }
         }
         UseTree::Name(name) => {
-            prefix.push(name.ident.to_string());
+            prefix.push(ident_name(&name.ident));
             if root_path_starts_with_brain_or_export(prefix, crate_root_brain_exports) {
-                crate_root_brain_exports.insert(name.ident.to_string());
+                crate_root_brain_exports.insert(ident_name(&name.ident));
             }
             prefix.pop();
         }
@@ -1151,7 +1195,7 @@ fn serde_string_contains_brain_path(
             &path
                 .segments
                 .iter()
-                .map(|segment| segment.ident.to_string())
+                .map(|segment| ident_name(&segment.ident))
                 .collect::<Vec<_>>(),
             module_depth,
         )
@@ -1159,7 +1203,7 @@ fn serde_string_contains_brain_path(
         let segments = path
             .segments
             .iter()
-            .map(|segment| segment.ident.to_string())
+            .map(|segment| ident_name(&segment.ident))
             .collect::<Vec<_>>();
         path_starts_with_brain_export(&segments, module_depth, crate_root_brain_exports)
     }) {
@@ -1193,7 +1237,7 @@ impl Visit<'_> for BrainPathProbe<'_> {
         let segments = path
             .segments
             .iter()
-            .map(|segment| segment.ident.to_string())
+            .map(|segment| ident_name(&segment.ident))
             .collect::<Vec<_>>();
         self.found |= path_starts_with_brain(&segments, self.module_depth)
             || path_starts_with_brain_export(
@@ -1209,7 +1253,7 @@ fn derive_is_inspected(derive: &RustPath, imported: &HashSet<String>) -> bool {
     let segments: Vec<_> = derive
         .segments
         .iter()
-        .map(|segment| segment.ident.to_string())
+        .map(|segment| ident_name(&segment.ident))
         .collect();
     if segments.len() == 1 {
         return BUILTIN_DERIVES.contains(&segments[0].as_str()) || imported.contains(&segments[0]);
@@ -1221,14 +1265,14 @@ fn derive_is_inspected(derive: &RustPath, imported: &HashSet<String>) -> bool {
 
 fn macro_is_inspected(path: &RustPath, imported: &HashSet<String>) -> bool {
     if path.segments.len() == 2
-        && path.segments[0].ident == "serde_json"
-        && path.segments[1].ident == "json"
+        && ident_name(&path.segments[0].ident) == "serde_json"
+        && ident_name(&path.segments[1].ident) == "json"
     {
         return true;
     }
     path.segments.len() == 1
-        && (PRELUDE_MACROS.contains(&path.segments[0].ident.to_string().as_str())
-            || imported.contains(&path.segments[0].ident.to_string()))
+        && (PRELUDE_MACROS.contains(&ident_name(&path.segments[0].ident).as_str())
+            || imported.contains(&ident_name(&path.segments[0].ident)))
 }
 
 fn inspected_macro_imports(
@@ -1253,7 +1297,7 @@ fn inspected_macro_imports(
                 if item
                     .attrs
                     .iter()
-                    .any(|attribute| attribute.path().is_ident("macro_use")) =>
+                    .any(|attribute| path_is_ident(attribute.path(), "macro_use")) =>
             {
                 violations.push(format!(
                     "{}: extern crate macro imports are not inspected",
@@ -1275,20 +1319,26 @@ fn inspect_macro_import_tree(
 ) {
     match tree {
         UseTree::Path(path) => {
-            prefix.push(path.ident.to_string());
+            prefix.push(ident_name(&path.ident));
             inspect_macro_import_tree(&path.tree, prefix, origin, imported, violations);
             prefix.pop();
         }
         UseTree::Name(name) => {
-            prefix.push(name.ident.to_string());
-            inspect_macro_import(prefix, name.ident.to_string(), origin, imported, violations);
+            prefix.push(ident_name(&name.ident));
+            inspect_macro_import(
+                prefix,
+                ident_name(&name.ident),
+                origin,
+                imported,
+                violations,
+            );
             prefix.pop();
         }
         UseTree::Rename(rename) => {
-            prefix.push(rename.ident.to_string());
+            prefix.push(ident_name(&rename.ident));
             inspect_macro_import(
                 prefix,
-                rename.rename.to_string(),
+                ident_name(&rename.rename),
                 origin,
                 imported,
                 violations,
@@ -1360,7 +1410,7 @@ fn standard_builtin_derive_trait_import(source: &[String], local_name: &str) -> 
 fn path_label(path: &RustPath) -> String {
     path.segments
         .iter()
-        .map(|segment| segment.ident.to_string())
+        .map(|segment| ident_name(&segment.ident))
         .collect::<Vec<_>>()
         .join("::")
 }
@@ -1387,9 +1437,9 @@ fn macro_tokens_contain_forbidden_path(
         if path_starts_with_brain(&segments, module_depth)
             || path_starts_with_brain_export(&segments, module_depth, crate_root_brain_exports)
             || path_resolves_to_crate_root(&segments, module_depth)
-                && tokens
-                    .get(end)
-                    .is_some_and(|token| matches!(token, TokenTree::Ident(ident) if ident == "as"))
+                && tokens.get(end).is_some_and(
+                    |token| matches!(token, TokenTree::Ident(ident) if ident_name(ident) == "as"),
+                )
             || path_resolves_to_crate_root(&segments, module_depth)
                 && tokens.get(end).is_some_and(
                     |token| matches!(token, TokenTree::Punct(punct) if punct.as_char() == '*'),
@@ -1412,13 +1462,13 @@ fn token_path_at(tokens: &[TokenTree], start: usize) -> Option<(Vec<String>, usi
         let TokenTree::Ident(ident) = tokens.get(index + 1)? else {
             return None;
         };
-        if ident != "crate" {
+        if ident_name(ident) != "crate" {
             return None;
         }
         segments.push("$crate".to_owned());
         index += 2;
     } else if let Some(TokenTree::Ident(ident)) = tokens.get(index) {
-        segments.push(ident.to_string());
+        segments.push(ident_name(ident));
         index += 1;
     } else {
         return None;
@@ -1430,7 +1480,7 @@ fn token_path_at(tokens: &[TokenTree], start: usize) -> Option<(Vec<String>, usi
         let TokenTree::Ident(ident) = tokens.get(index + 2)? else {
             break;
         };
-        segments.push(ident.to_string());
+        segments.push(ident_name(ident));
         index += 3;
     }
     Some((segments, index))

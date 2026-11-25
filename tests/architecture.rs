@@ -44,6 +44,14 @@ fn direction_guard_detects_qualified_paths() {
     let violations = scan_source(source, "qualified.rs");
 
     assert_eq!(violations.len(), 1, "{violations:?}");
+
+    let raw_identifier_violations =
+        scan_source("use crate::r#brain::Decision;", "raw_brain_identifier.rs");
+    assert_eq!(
+        raw_identifier_violations.len(),
+        1,
+        "{raw_identifier_violations:?}"
+    );
 }
 
 #[test]
@@ -116,6 +124,15 @@ fn direction_guard_inspects_macro_tokens_and_fails_closed_on_unknown_macros_and_
             .iter()
             .any(|violation| violation.contains("macro tokens")),
         "{macro_violations:?}"
+    );
+
+    let hidden_raw_path = "macro_rules! hidden { () => { use crate::r#brain::Decision; } }";
+    let hidden_raw_path_violations = scan_source(hidden_raw_path, "macro_raw_path.rs");
+    assert!(
+        hidden_raw_path_violations
+            .iter()
+            .any(|violation| violation.contains("macro tokens")),
+        "{hidden_raw_path_violations:?}"
     );
 
     let hidden_alias = "external_macro!(use crate as root; root::brain::Decision);";
@@ -347,8 +364,12 @@ fn crate_root_brain_reexports_and_globs_are_rejected() {
     for (root_source, exported_name) in [
         ("pub(crate) use brain as brain_api;", "brain_api"),
         (
-            "pub(crate) use crate::brain::Decision as PublicDecision;",
+            "pub(crate) use crate::r#brain::Decision as PublicDecision;",
             "PublicDecision",
+        ),
+        (
+            "pub(crate) type BrainDecision = crate::brain::Decision;",
+            "BrainDecision",
         ),
     ] {
         fs::write(&root, root_source).unwrap();
@@ -397,6 +418,9 @@ fn crate_root_inline_facades_and_transitive_reexports_are_rejected() {
                     pub use crate::brain::ModelError as PublicModelError;
                 }
             }
+            pub mod type_aliases {
+                pub(crate) type DecisionAlias = crate::brain::Decision;
+            }
         "#,
     )
     .unwrap();
@@ -407,6 +431,7 @@ fn crate_root_inline_facades_and_transitive_reexports_are_rejected() {
     for (facade, item) in [
         ("compatibility", "ModelError"),
         ("extensions", "provider::PublicModelError"),
+        ("type_aliases", "DecisionAlias"),
     ] {
         assert!(
             brain_exports.contains(facade),
