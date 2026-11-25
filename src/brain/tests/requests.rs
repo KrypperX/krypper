@@ -305,4 +305,55 @@ fn extension_request_builders_advertise_authorized_declarations() {
     for names in names {
         assert!(names.contains(&"external_read"));
     }
+
+    let chat_tool = parsed[0]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["function"]["name"] == "external_read")
+        .unwrap();
+    let responses_tool = parsed[1]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "external_read")
+        .unwrap();
+    let anthropic_tool = parsed[2]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "external_read")
+        .unwrap();
+    let gemini_tool = parsed[3]["tools"][0]["functionDeclarations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "external_read")
+        .unwrap();
+    let compatible_tool = parsed[4]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["function"]["name"] == "external_read")
+        .unwrap();
+    assert_eq!(
+        chat_tool["function"]["parameters"],
+        serde_json::json!({"type":"object","properties":{}})
+    );
+    assert_eq!(
+        responses_tool["parameters"],
+        serde_json::json!({"type":"object","properties":{}})
+    );
+    assert_eq!(
+        anthropic_tool["input_schema"],
+        serde_json::json!({"type":"object","properties":{},"additionalProperties":false})
+    );
+    assert_eq!(
+        gemini_tool["parameters"],
+        serde_json::json!({"type":"OBJECT","properties":{}})
+    );
+    assert_eq!(
+        compatible_tool["function"]["parameters"],
+        serde_json::json!({"type":"object","properties":{}})
+    );
 }

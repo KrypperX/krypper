@@ -1,298 +1,69 @@
-//! Provider-neutral, fail-closed extension declaration bridge.
+//! Provider-specific conversion of host-authorized extension declarations.
 //!
-//! Only host-authorized descriptors may enter provider schemas. This module
-//! does not register executors or bypass the existing Harness dispatch.
+//! Descriptor, grant, schema and argument authorization is owned by Tools. This
+//! module adapts already-validated declarations to each model provider format.
 
-use crate::tools::capability_policy::{
-    evaluate, CapabilityContext, CapabilityDenial, CapabilityGrant,
-};
-use crate::tools::extension_contract::{
-    validate_descriptors, ExtensionContractError, ExtensionDescriptor, ExtensionEffect,
+use crate::contracts::extensions::CapabilityContext;
+use crate::tools::extension_authorization::{
+    authorize_extension_dispatch, authorize_extension_dispatch_with_arguments,
+    validate_authorized_tools, validate_extension_declarations,
 };
 use serde_json::{json, Value};
 
-/// A validated declaration and the host-issued grant for one task.
+pub use crate::contracts::extensions::{BridgeError, ExtensionTool};
+
+#[cfg(test)]
+use crate::contracts::extensions::{CapabilityDenial, CapabilityGrant, ExtensionDescriptor};
+
+/// Build declarations in the common function shape consumed by provider adapters.
 ///
-/// Hosts own the registry and the grant. Constructing this value does not make
-/// the operation executable by a provider.
-pub struct ExtensionTool<'a> {
-    /// Host-validated descriptor for the operation.
-    pub descriptor: ExtensionDescriptor<'a>,
-    /// Provider-facing description of the operation.
-    pub description: &'a str,
-    /// Supported JSON Schema object for model arguments.
-    pub parameters: Value,
-    /// Host-issued grant for the active task.
-    pub grant: &'a CapabilityGrant,
-}
-
-/// Errors that prevent an extension from being advertised or dispatched.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum BridgeError {
-    /// The descriptor collection is malformed.
-    InvalidContract(ExtensionContractError),
-    /// The host capability check denied the operation.
-    Denied(CapabilityDenial),
-    /// The declared argument schema is unsupported.
-    InvalidSchema,
-    /// Model arguments do not match the declared schema.
-    InvalidArguments,
-    /// The requested name is not registered.
-    UnknownTool,
-    /// The requested name collides with a built-in or another extension.
-    NameCollision,
-    /// The declared effect cannot use this in-process bridge.
-    UnsupportedEffect,
-}
-
-/// Reject unsupported JSON Schema constructs before advertising a tool.
-/// The dispatch validator must enforce every accepted constraint.
-fn valid_parameters(parameters: &Value) -> bool {
-    valid_schema(parameters) && parameters.get("type").and_then(Value::as_str) == Some("object")
-}
-
-fn valid_schema(schema: &Value) -> bool {
-    let Some(fields) = schema.as_object() else {
-        return false;
-    };
-    if fields.keys().any(|key| {
-        !matches!(
-            key.as_str(),
-            "type" | "properties" | "required" | "additionalProperties" | "items"
-        )
-    }) {
-        return false;
-    }
-    let Some(kind) = fields.get("type").and_then(Value::as_str) else {
-        return false;
-    };
-    if !matches!(
-        kind,
-        "object" | "array" | "string" | "boolean" | "integer" | "number" | "null"
-    ) {
-        return false;
-    }
-    match kind {
-        "object" => {
-            if fields.contains_key("items") {
-                return false;
-            }
-            if fields
-                .get("additionalProperties")
-                .is_some_and(|v| v != &Value::Bool(false))
-            {
-                return false;
-            }
-            let Some(properties) = fields.get("properties").and_then(Value::as_object) else {
-                return false;
-            };
-            if !properties.values().all(valid_schema) {
-                return false;
-            }
-            match fields.get("required") {
-                None => true,
-                Some(Value::Array(required)) => required
-                    .iter()
-                    .all(|v| v.as_str().is_some_and(|k| properties.contains_key(k))),
-                _ => false,
-            }
-        }
-        "array" => {
-            !fields.contains_key("properties")
-                && !fields.contains_key("required")
-                && !fields.contains_key("additionalProperties")
-                && fields.get("items").is_some_and(valid_schema)
-        }
-        _ => fields.len() == 1,
-    }
-}
-
-fn validate_value(schema: &Value, value: &Value) -> bool {
-    match schema["type"].as_str() {
-        Some("object") => {
-            let (Some(values), Some(properties)) =
-                (value.as_object(), schema["properties"].as_object())
-            else {
-                return false;
-            };
-            let required = schema.get("required").and_then(Value::as_array);
-            if required.is_some_and(|items| {
-                items
-                    .iter()
-                    .any(|k| !values.contains_key(k.as_str().unwrap_or("")))
-            }) {
-                return false;
-            }
-            values.iter().all(|(key, value)| {
-                properties
-                    .get(key)
-                    .is_some_and(|sub| validate_value(sub, value))
-            })
-        }
-        Some("array") => value
-            .as_array()
-            .is_some_and(|items| items.iter().all(|v| validate_value(&schema["items"], v))),
-        Some("string") => value.is_string(),
-        Some("boolean") => value.is_boolean(),
-        Some("integer") => value.as_i64().is_some() || value.as_u64().is_some(),
-        Some("number") => value.is_number(),
-        Some("null") => value.is_null(),
-        _ => false,
-    }
-}
-
-// This in-process bridge is for workspace effects only; elevated effects need
-// the separate verified-supervisor/sandbox path.
-fn supported_effect(tool: &ExtensionTool<'_>) -> bool {
-    matches!(
-        tool.descriptor.effect,
-        ExtensionEffect::ReadWorkspace | ExtensionEffect::MutateWorkspace
-    )
-}
-
-/// Reject an extension name that could shadow a built-in tool or another extension.
-fn validate_extension_names(tools: &[ExtensionTool<'_>]) -> Result<(), BridgeError> {
-    let mut seen = std::collections::HashSet::new();
-    for tool in tools {
-        let name = tool.descriptor.qualified_name();
-        if name == "complete_task"
-            || crate::tools::registry::workspace_operations()
-                .iter()
-                .any(|operation| operation.name() == name)
-            || !seen.insert(name)
-        {
-            return Err(BridgeError::NameCollision);
-        }
-    }
-    Ok(())
-}
-
-/// Build declarations in the existing OpenAI-function shape used by Brain.
-///
-/// An advertised tool is not executable until Harness separately validates
-/// its grant and routes it through the existing authorized dispatch boundary.
+/// An advertised tool is not executable until Harness separately validates its
+/// grant and routes it through the existing authorized dispatch boundary.
 pub fn authorized_declarations(
     tools: &[ExtensionTool<'_>],
     context: CapabilityContext,
 ) -> Result<Vec<Value>, BridgeError> {
-    let descriptors = tools
+    validate_authorized_tools(tools, context)?;
+    Ok(tools
         .iter()
-        .map(|tool| tool.descriptor.clone())
-        .collect::<Vec<_>>();
-    validate_descriptors(&descriptors).map_err(BridgeError::InvalidContract)?;
-    validate_extension_names(tools)?;
-    if !tools.iter().all(supported_effect) {
-        return Err(BridgeError::UnsupportedEffect);
-    }
-    let mut declarations = Vec::with_capacity(tools.len());
-    for tool in tools {
-        evaluate(&tool.descriptor, context, Some(tool.grant)).map_err(BridgeError::Denied)?;
-        if !valid_parameters(&tool.parameters) {
-            return Err(BridgeError::InvalidSchema);
-        }
-        declarations.push(json!({
-            "type": "function",
-            "function": {
-                "name": tool.descriptor.qualified_name(),
-                "description": tool.description,
-                "parameters": tool.parameters
-            }
-        }));
-    }
-    Ok(declarations)
-}
-
-fn authorize_tool<'a, 'b>(
-    tools: &'a [ExtensionTool<'b>],
-    context: CapabilityContext,
-    name: &str,
-) -> Result<&'a ExtensionTool<'b>, BridgeError> {
-    let descriptors = tools
-        .iter()
-        .map(|tool| tool.descriptor.clone())
-        .collect::<Vec<_>>();
-    validate_descriptors(&descriptors).map_err(BridgeError::InvalidContract)?;
-    validate_extension_names(tools)?;
-    if !tools.iter().all(supported_effect) {
-        return Err(BridgeError::UnsupportedEffect);
-    }
-    let tool = tools
-        .iter()
-        .find(|tool| tool.descriptor.qualified_name() == name)
-        .ok_or(BridgeError::UnknownTool)?;
-    evaluate(&tool.descriptor, context, Some(tool.grant)).map_err(BridgeError::Denied)?;
-    if !valid_parameters(&tool.parameters) {
-        return Err(BridgeError::InvalidSchema);
-    }
-    Ok(tool)
+        .map(|tool| {
+            json!({
+                "type": "function",
+                "function": {
+                    "name": tool.descriptor.qualified_name(),
+                    "description": tool.description,
+                    "parameters": tool.parameters
+                }
+            })
+        })
+        .collect())
 }
 
 /// Revalidate an extension call at dispatch time, not just at advertisement.
 ///
 /// This gate must be called by the existing Harness dispatch path before any
-/// extension executor runs. Model-supplied names never create grants.
-/// Argument validation happens in the argument-aware dispatch path.
+/// extension executor runs.
 pub fn authorize_dispatch(
     tools: &[ExtensionTool<'_>],
     context: CapabilityContext,
     name: &str,
 ) -> Result<(), BridgeError> {
-    authorize_tool(tools, context, name).map(|_| ())
+    authorize_extension_dispatch(tools, context, name)
 }
 
-/// Validate model-supplied arguments against the registered object's declared
-/// properties before any host executor can receive them. This deliberately
-/// supports only a narrow JSON Schema subset and rejects unsupported keywords
-/// rather than silently weakening the host's declared contract.
+/// Validate model-supplied arguments before any host executor can receive them.
 pub(crate) fn authorize_dispatch_with_arguments(
     tools: &[ExtensionTool<'_>],
     context: CapabilityContext,
     name: &str,
     arguments: &Value,
 ) -> Result<(), BridgeError> {
-    let tool = authorize_tool(tools, context, name)?;
-    if !validate_value(&tool.parameters, arguments) {
-        return Err(BridgeError::InvalidArguments);
-    }
-    Ok(())
+    authorize_extension_dispatch_with_arguments(tools, context, name, arguments)
 }
 
-/// Validate declaration envelopes at a public request-builder boundary.
-///
-/// Callers still need `authorized_declarations` for capability checks; this gate
-/// only prevents malformed or name-colliding declarations from being advertised.
+/// Validate declaration envelopes at a provider request-builder boundary.
 pub(crate) fn validate_declarations(declarations: &[Value]) -> Result<(), BridgeError> {
-    let mut seen = std::collections::HashSet::new();
-    for declaration in declarations {
-        let Some(function) = declaration.get("function") else {
-            return Err(BridgeError::InvalidSchema);
-        };
-        let Some(name) = function.get("name").and_then(Value::as_str) else {
-            return Err(BridgeError::InvalidSchema);
-        };
-        if function
-            .get("description")
-            .and_then(Value::as_str)
-            .is_none()
-        {
-            return Err(BridgeError::InvalidSchema);
-        }
-        let Some(parameters) = function.get("parameters") else {
-            return Err(BridgeError::InvalidSchema);
-        };
-        if !valid_parameters(parameters) {
-            return Err(BridgeError::InvalidSchema);
-        }
-        if name == "complete_task"
-            || crate::tools::registry::workspace_operations()
-                .iter()
-                .any(|operation| operation.name() == name)
-            || !seen.insert(name)
-        {
-            return Err(BridgeError::NameCollision);
-        }
-    }
-    Ok(())
+    validate_extension_declarations(declarations)
 }
 
 /// Convert already-authorized declarations to the provider's existing schema.
