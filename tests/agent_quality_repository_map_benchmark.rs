@@ -17,8 +17,8 @@ use std::time::Instant;
 
 const BASELINE_SHA: &str = "5c4ce1cd8f05d2dec93c545f67608c28d8ddb7e8";
 const FIXTURE_SHA256: &str = "68c9d7aa4dc3f722777fe55e1a6ff37013a12428c42b53fb142f4c5a1a7e1842";
-const PRODUCT_FIXTURE_SHA256: &str =
-    "65589fe3a7fd64c8c4d8306c73f704b0e087147cc1d48558bada027d9b5adc71";
+const SYNTHETIC_PRODUCT_FIXTURE_SHA256: &str =
+    "337700a138e8d43499f5cc4e0897797f96e8e63780b44792bf2b7c2bcadb32d6";
 const REPEAT_RUNS: usize = 3;
 
 struct TaskCase {
@@ -146,10 +146,10 @@ fn matched_payload_budget_compares_bounded_search_with_the_module_map() {
 }
 
 #[test]
-fn matched_payload_budget_covers_a_pinned_krypper_source_slice() {
-    let root = TempRoot::new("repository-map-product-source").expect("create source fixture root");
+fn matched_payload_budget_covers_a_synthetic_product_layout() {
+    let root = TempRoot::new("repository-map-product-layout").expect("create layout fixture root");
     let workspace = root.path().join("workspace");
-    copy_pinned_krypper_source_fixture(&workspace);
+    write_synthetic_product_layout(&workspace);
     let fixture_digest = fixture_digest(&workspace);
     let mut session = TaskSession::new_in_workspace(&workspace).expect("bind source fixture");
 
@@ -200,9 +200,9 @@ fn matched_payload_budget_covers_a_pinned_krypper_source_slice() {
     }
     assert_eq!(map_hits, expected_hits);
     assert_eq!(expected_hits, 9);
-    assert_eq!(fixture_digest, PRODUCT_FIXTURE_SHA256);
+    assert_eq!(fixture_digest, SYNTHETIC_PRODUCT_FIXTURE_SHA256);
     eprintln!(
-        "baseline_sha={BASELINE_SHA} product_source_fixture_sha256={fixture_digest} tasks={} repeats={} payload_budget_bytes={} model=none provider_calls=0 baseline_target_hits={baseline_hits}/{expected_hits} module_map_target_hits={map_hits}/{expected_hits} baseline_avg_payload_bytes={} module_map_avg_payload_bytes={} module_map_avg_source_bytes={} baseline_p50_us={} module_map_p50_us={}",
+        "baseline_sha={BASELINE_SHA} synthetic_product_fixture_sha256={fixture_digest} tasks={} repeats={} payload_budget_bytes={} model=none provider_calls=0 baseline_target_hits={baseline_hits}/{expected_hits} module_map_target_hits={map_hits}/{expected_hits} baseline_avg_payload_bytes={} module_map_avg_payload_bytes={} module_map_avg_source_bytes={} baseline_p50_us={} module_map_p50_us={}",
         PRODUCT_TASKS.len(),
         REPEAT_RUNS,
         MAX_REPOSITORY_CONTEXT_BYTES,
@@ -291,48 +291,57 @@ fn setup_workspace(workspace: &Path) {
         .expect("write Git metadata source");
 }
 
-fn copy_pinned_krypper_source_fixture(workspace: &Path) {
-    let source = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/repository_map/krypper_source/src");
-    for relative in [
-        "lib.rs",
-        "core/mod.rs",
-        "core/lifecycle.rs",
-        "tools.rs",
-        "tools/workspace_safety.rs",
-    ] {
-        let from = source.join(relative);
-        let to = workspace.join("src").join(relative);
-        fs::create_dir_all(to.parent().expect("source fixture parent"))
-            .expect("create source fixture directory");
-        fs::copy(from, to).expect("copy pinned Krypper source file");
-    }
-    for relative in ["core/lifecycle", "harness", "tools/workspace_safety"] {
-        copy_rust_tree(
-            &source.join(relative),
-            &workspace.join("src").join(relative),
-        );
-    }
-}
-
-fn copy_rust_tree(source: &Path, destination: &Path) {
-    fs::create_dir_all(destination).expect("create Rust source fixture directory");
-    let mut entries = fs::read_dir(source)
-        .expect("read Krypper source directory")
-        .map(|entry| entry.expect("read Krypper source entry"))
-        .collect::<Vec<_>>();
-    entries.sort_by_key(|entry| entry.file_name());
-    for entry in entries {
-        let from = entry.path();
-        let to = destination.join(entry.file_name());
-        let entry_type = entry.file_type().expect("read Krypper source entry type");
-        if entry_type.is_dir() {
-            copy_rust_tree(&from, &to);
-        } else if entry_type.is_file()
-            && from.extension().and_then(|extension| extension.to_str()) == Some("rs")
-        {
-            fs::copy(from, to).expect("copy Rust source fixture file");
-        }
+fn write_synthetic_product_layout(workspace: &Path) {
+    let files = [
+        (
+            "src/lib.rs",
+            "pub mod core;\npub mod harness;\npub mod tools;\n",
+        ),
+        ("src/core/mod.rs", "pub mod lifecycle;\n"),
+        (
+            "src/core/lifecycle.rs",
+            "pub mod checkpoint;\npub mod errors;\npub mod session;\n",
+        ),
+        (
+            "src/core/lifecycle/checkpoint.rs",
+            "pub struct Checkpoint;\n",
+        ),
+        (
+            "src/core/lifecycle/errors.rs",
+            "pub enum LifecycleError { InvalidState }\n",
+        ),
+        (
+            "src/core/lifecycle/session.rs",
+            "pub struct TaskSession;\nimpl TaskSession { pub fn active_turn(&self) -> bool { true } }\n",
+        ),
+        (
+            "src/harness/mod.rs",
+            "pub mod context;\npub mod recovery;\n",
+        ),
+        (
+            "src/harness/context.rs",
+            "pub fn collect_repository_context() -> Vec<String> { Vec::new() }\n",
+        ),
+        ("src/harness/recovery.rs", "pub struct RecoveryPoint;\n"),
+        ("src/tools.rs", "pub mod workspace_safety;\n"),
+        (
+            "src/tools/workspace_safety.rs",
+            "pub mod paths;\npub mod search;\n",
+        ),
+        (
+            "src/tools/workspace_safety/paths.rs",
+            "pub fn resolve_workspace_path() -> bool { true }\n",
+        ),
+        (
+            "src/tools/workspace_safety/search.rs",
+            "pub fn search_workspace() -> Vec<String> { Vec::new() }\n",
+        ),
+    ];
+    for (relative, contents) in files {
+        let path = workspace.join(relative);
+        fs::create_dir_all(path.parent().expect("synthetic fixture parent"))
+            .expect("create synthetic fixture directory");
+        fs::write(path, contents).expect("write synthetic fixture file");
     }
 }
 
