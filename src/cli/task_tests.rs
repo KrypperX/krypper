@@ -236,6 +236,101 @@ fn repository_context_json_rejects_local_provider_before_network_access() {
 }
 
 #[test]
+fn task_observation_context_compaction_is_opt_in_and_emits_safe_accounting() {
+    let fixture = TempWorkspace::new();
+    let large_text = format!(
+        "beginning evidence\n{}\nending evidence",
+        "older detail\n".repeat(4_000)
+    );
+    fs::write(fixture.path().join("large.txt"), &large_text).expect("write large fixture");
+    let (address, server) = mock_server(vec![
+        model_tool("read_file", json!({"path":"large.txt"})),
+        model_tool("complete_task", json!({"result":"read complete"})),
+    ]);
+    let args = vec![
+        OsString::from("--goal"),
+        OsString::from("Read the large fixture and finish"),
+        OsString::from("--max-actions"),
+        OsString::from("2"),
+        OsString::from("--workspace"),
+        fixture.path().as_os_str().to_owned(),
+        OsString::from("--model"),
+        OsString::from("fixture-model"),
+        OsString::from("--no-config"),
+        OsString::from("--observation-context-budget-bytes"),
+        OsString::from("1024"),
+    ];
+
+    let (code, output, error) = run(&args, "", address);
+
+    assert_eq!(code, 0, "{error}\n{output}");
+    let requests = server.join().expect("mock model requests complete");
+    assert_eq!(requests.len(), 2);
+    let second_request = String::from_utf8_lossy(&requests[1]);
+    assert!(second_request.contains("large.txt"));
+    assert!(second_request.contains("Krypper context note: text compacted"));
+    assert!(second_request.contains("sha256="));
+    assert!(error.contains("KRYPPER_CONTEXT_COMPACTION"));
+    assert!(error.contains("\"original_bytes\":"));
+    assert!(error.contains("\"sent_bytes\":"));
+    assert!(output.contains("beginning evidence"));
+    assert!(output.contains("ending evidence"));
+}
+
+#[test]
+fn observation_context_budget_argument_rejects_invalid_and_inapplicable_values() {
+    let fixture = TempWorkspace::new();
+    for value in ["0", "2097153", "not-a-number"] {
+        let args = [
+            OsString::from("--goal"),
+            OsString::from("Read the fixture"),
+            OsString::from("--max-actions"),
+            OsString::from("1"),
+            OsString::from("--observation-context-budget-bytes"),
+            OsString::from(value),
+        ];
+        let mut input = Cursor::new(Vec::<u8>::new());
+        let mut output = Vec::new();
+        let mut error = Vec::new();
+        let code = super::run_task_with_endpoint(
+            &args,
+            &mut input,
+            &mut output,
+            &mut error,
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+        )
+        .expect("reject an invalid budget before running a task");
+        assert_eq!(code, 2);
+        assert!(String::from_utf8_lossy(&error).contains("observation context budget"));
+        assert!(output.is_empty());
+    }
+
+    let args = [
+        OsString::from("--goal"),
+        OsString::from("Read the fixture"),
+        OsString::from("--max-actions"),
+        OsString::from("1"),
+        OsString::from("--observation-context-budget-bytes"),
+        OsString::from("1024"),
+    ];
+    let mut input = Cursor::new(Vec::<u8>::new());
+    let mut output = Vec::new();
+    let mut error = Vec::new();
+    let code = super::run_task_with_endpoint(
+        &args,
+        &mut input,
+        &mut output,
+        &mut error,
+        SocketAddr::from(([127, 0, 0, 1], 0)),
+    )
+    .expect("reject the option without contacting a model");
+    assert_eq!(code, 2);
+    assert!(String::from_utf8_lossy(&error).contains("requires a model-backed task"));
+    assert!(output.is_empty());
+    assert!(fixture.path().is_dir());
+}
+
+#[test]
 fn verified_cli_passes_task_session_file_evidence_without_correction() {
     let fixture = TempWorkspace::new();
     let (address, server) = mock_server(vec![model_tool(

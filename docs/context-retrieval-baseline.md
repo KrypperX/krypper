@@ -75,30 +75,35 @@ memory, so a prompt can carry the sum of all four ceilings.
   Host-only diagnostics
   are excluded from serialized context.
 
-## What exists versus missing
+## Follow-on implementation status
 
-Exists and is reused: bounded goal-token search, range reads, snippet neutralisation, provenance
-revisions, skill activation with a shared byte budget, opt-in memory recall with isolation and
-evaluation fixtures, metadata-only checkpoints.
+The baseline above is a frozen record at `ef75809`. Later implementation slices changed this
+status:
 
-Missing, in the order the issue proposes:
+- The bounded Rust module map is opt-in and lives in `src/harness/repository_map.rs` (#282).
+  Same-model context evaluation support was added in #284 and its reliability work in #304. The
+  harness exists; a completed held-out quality report is still outstanding.
+- This change adds `--observation-context-budget-bytes` as an opt-in, deterministic view of the
+  current turn's observation JSON. It preserves structured outcome metadata, marks shortened text
+  with its original byte count and digest, and leaves authoritative TaskSession observations intact.
+  Its limit covers observation JSON only; the shared total budget across goal, guidance, skills,
+  retrieved context, and observations remains missing.
+- The current compaction view is rebuilt per model decision. It is not a persistent rolling summary
+  across turns or checkpoint resumes; resumed turns build context from their own observations.
 
-1. A shared total context budget across the four layers (today each caps itself).
-2. A repository map, and any measured comparison of it against bounded search. No such measurement
-   exists yet, so no symbol-navigation work starts before it.
-3. Opt-in long-session compaction that preserves goal, authorization, constraints, tool outcomes and
-   provenance while keeping raw lifecycle evidence authoritative.
-4. Held-out bug-location and multi-file comparison fixtures at matched budget.
+## Remaining slices
 
-## Next slices
+1. Define and enforce a shared total prompt budget across the context layers, with explicit allocation
+   and deterministic reporting.
+2. If matched-budget evaluation shows a benefit, design restart-safe cross-turn compaction with
+   source attribution, stale-summary rejection, and raw lifecycle evidence kept authoritative.
+3. Complete held-out bug-location and multi-file evaluation, including success, recall, input size,
+   latency, stale retrieval, and safety regressions. Record limitations and avoid quality claims
+   until the run is reproducible.
 
-- Slice 2: a bounded, deterministic repository map behind an opt-in flag, plus the measurement
-  harness that compares it with bounded search on representative Rust repositories.
-- Slice 3: opt-in compaction with explicit provenance and stale-summary rejection.
-- Slice 4: matched-budget evaluation report covering success, recall, tokens, latency, stale
-  retrieval and safety regressions.
-
-Each slice is a separate PR and must keep default CLI and provider behaviour unchanged.
+Repository navigation and compaction should be extended only after those measurements establish a
+remaining user-visible gap. Default CLI and provider behaviour remain unchanged unless an option is
+explicitly selected.
 
 ## Limits of this note
 

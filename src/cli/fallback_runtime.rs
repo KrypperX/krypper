@@ -11,6 +11,7 @@ use crate::fallback::{
     FallbackCheckpoint, FallbackDecisionSource, FallbackProviderResponse, FallbackRuntime,
     FallbackTaskState, ProviderCompletion,
 };
+use crate::harness::context::ObservationCompactionReport;
 use crate::routing::{AutomaticRoutingRequest, RoutingCandidate, RoutingSelection};
 use serde_json::Value;
 use std::net::SocketAddr;
@@ -32,6 +33,8 @@ pub(super) struct CliFallbackRuntime {
     action_budget: usize,
     ollama_endpoint: SocketAddr,
     repository_context: Option<Value>,
+    observation_context_budget_bytes: Option<usize>,
+    last_observation_compaction: Option<ObservationCompactionReport>,
     last_token_usage: Option<crate::brain::ModelTokenUsage>,
     turn_boundary_confirmed: bool,
     cancellation: Arc<AtomicBool>,
@@ -46,6 +49,7 @@ pub(super) struct CliFallbackRuntimeConfig<'a> {
     pub(super) action_budget: usize,
     pub(super) ollama_endpoint: SocketAddr,
     pub(super) repository_context: Option<Value>,
+    pub(super) observation_context_budget_bytes: Option<usize>,
 }
 
 impl CliFallbackRuntime {
@@ -63,6 +67,8 @@ impl CliFallbackRuntime {
             action_budget: config.action_budget,
             ollama_endpoint: config.ollama_endpoint,
             repository_context: config.repository_context,
+            observation_context_budget_bytes: config.observation_context_budget_bytes,
+            last_observation_compaction: None,
             last_token_usage: None,
             turn_boundary_confirmed: false,
             cancellation,
@@ -71,6 +77,10 @@ impl CliFallbackRuntime {
 
     pub(super) fn take_token_usage(&mut self) -> Option<crate::brain::ModelTokenUsage> {
         self.last_token_usage.take()
+    }
+
+    pub(super) fn take_observation_compaction(&mut self) -> Option<ObservationCompactionReport> {
+        self.last_observation_compaction.take()
     }
 
     fn source_for(
@@ -91,6 +101,9 @@ impl CliFallbackRuntime {
                 return Err("automatic route does not support repository context");
             }
             source.set_repository_context(context.clone())?;
+        }
+        if let Some(budget_bytes) = self.observation_context_budget_bytes {
+            source.set_observation_context_budget(budget_bytes)?;
         }
         Ok(source)
     }
@@ -201,6 +214,7 @@ impl FallbackRuntime for CliFallbackRuntime {
             root_project_guidance,
         );
         self.last_token_usage = source.take_token_usage();
+        self.last_observation_compaction = source.take_observation_compaction();
         let completion = match &action {
             WorkspaceAction::Unsupported { action: label }
                 if matches!(
@@ -272,6 +286,13 @@ impl TaskDecisionSource {
         match self {
             Self::Single { source, .. } => source.take_token_usage(),
             Self::Fallback(source) => source.runtime_mut().take_token_usage(),
+        }
+    }
+
+    pub(super) fn take_observation_compaction(&mut self) -> Option<ObservationCompactionReport> {
+        match self {
+            Self::Single { source, .. } => source.take_observation_compaction(),
+            Self::Fallback(source) => source.runtime_mut().take_observation_compaction(),
         }
     }
 

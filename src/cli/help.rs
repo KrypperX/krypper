@@ -70,7 +70,7 @@ pub(super) fn write_context_help(output: &mut dyn Write) -> io::Result<()> {
 pub(super) fn write_task_help(output: &mut dyn Write) -> io::Result<()> {
     output.write_all(
         concat!(
-            "usage: krypper task [-h] [--goal GOAL] --max-actions N [--workspace PATH] [--model NAME] [--provider NAME] [--verified --verify-file PATH ...] [--no-config] [--checkpoint-out PATH] [--resume PATH] [--activity-jsonl] [--stream-events-jsonl] [--model-usage-jsonl] [--repository-context-json PATH]\n\n",
+            "usage: krypper task [-h] [--goal GOAL] --max-actions N [--workspace PATH] [--model NAME] [--provider NAME] [--verified --verify-file PATH ...] [--no-config] [--checkpoint-out PATH] [--resume PATH] [--activity-jsonl] [--stream-events-jsonl] [--model-usage-jsonl] [--repository-context-json PATH] [--observation-context-budget-bytes N]\n\n",
             "run a bounded task in the selected workspace or current directory\n\n",
             "options:\n  --goal GOAL          task goal (required unless --resume is used)\n",
             "  --max-actions N      required positive action limit for this invocation\n",
@@ -91,6 +91,7 @@ pub(super) fn write_task_help(output: &mut dyn Write) -> io::Result<()> {
             "  --stream-events-jsonl  write versioned metadata-only stream events as JSONL to stderr after each turn\n",
             "  --model-usage-jsonl emit provider token counts and decision latency as prefixed JSON records to stderr\n",
             "  --repository-context-json PATH add bounded JSON from \x60krypper context\x60 as untrusted advisory data (OpenAI-compatible providers only)\n",
+            "  --observation-context-budget-bytes N cap model-facing observation JSON and report any text compaction (1..2097152; model-backed tasks only)\n",
             "  -h, --help           show this help message and exit\n\n",
             "Without --workspace, task captures the current directory as its workspace.\n",
             "With --workspace, the selected directory is validated before task history starts;\n",
@@ -98,6 +99,7 @@ pub(super) fn write_task_help(output: &mut dyn Write) -> io::Result<()> {
             "Without --model or --provider, task remains caller-directed and makes no model requests,\n",
             "unless the user configuration file (see README) sets a default model; --no-config ignores saved defaults and credentials.\n",
             "Without --model, task remains caller-directed if --provider is also omitted.\n",
+            "Observation compaction is opt-in. It preserves structured outcome metadata and marks omitted text with its original byte count and SHA-256 digest; raw TaskSession observations are unchanged. The byte budget covers observation JSON only, not the full provider request.\n",
             "--model NAME without --provider uses local Ollama at 127.0.0.1:11434. Ollama needs no API key.\n",
             "Hosted providers require explicit --provider selection or a saved user default.\n",
             "Built-ins use fixed endpoints; trusted per-user profiles use their configured endpoint.\n",

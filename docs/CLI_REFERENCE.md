@@ -145,6 +145,39 @@ increasing sequence numbers and deduplicated activity-position updates. This
 CLI option exports task metadata; it does not stream model response text or
 tool output. Use `--model-usage-jsonl` separately for provider usage records.
 
+### Observation context compaction
+
+Model-backed tasks can opt in to a smaller serialized observation payload:
+
+```sh
+cargo run -- task \
+  --goal "Inspect the large build log" \
+  --max-actions 4 \
+  --observation-context-budget-bytes 262144
+```
+
+The value must be between 1 byte and 2 MiB. It applies to the current turn's
+observation JSON only; it does not cap the goal, system instructions, project
+guidance, retrieved context, provider request overhead, or token count. The
+default leaves current model input unchanged. It is not available with
+`--verified`, whose planning and review requests use a separate flow.
+The opt-in projection rejects source observation histories above its 16 MiB
+input ceiling before making a model-facing copy. The value is invocation-scoped
+and is not stored in checkpoints; pass it again when resuming if you want the
+same limit on the new turn.
+
+When the observation JSON exceeds the selected value, Krypper shortens older
+text fields first so newer evidence has priority. It keeps structured event
+types, paths, ranges, and process outcomes. Each shortened field includes an
+explicit note with the original byte count and SHA-256 digest; if all eligible
+text is removed and the structured observations still exceed the limit, the
+model decision fails with `context_too_large`. This creates a model-facing
+copy and does not alter the authoritative TaskSession observations or workspace output.
+For each request that was compacted, stderr receives a
+`KRYPPER_CONTEXT_COMPACTION` JSON record with original and sent byte counts,
+compacted field count, and omitted byte count. The record contains no prompt or
+workspace text.
+
 The unquoted path forms remain supported. `read`, `list`, and `mkdir` take the
 remaining line as the path; `list` defaults to `.`. `read-range` treats the
 final two whitespace-separated fields as the start line and maximum line

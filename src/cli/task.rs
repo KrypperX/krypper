@@ -29,7 +29,9 @@ use crate::agent_loop::{
 };
 use crate::brain::ModelDecisionSource;
 use crate::brain::{ModelProvider, OLLAMA_ADDRESS};
-use crate::harness::context::{MAX_REPOSITORY_CONTEXT_BYTES, MAX_REPOSITORY_CONTEXT_JSON_BYTES};
+use crate::harness::context::{
+    MAX_OBSERVATION_BYTES, MAX_REPOSITORY_CONTEXT_BYTES, MAX_REPOSITORY_CONTEXT_JSON_BYTES,
+};
 use crate::harness::execution::workspace_action_name;
 use crate::harness::recovery::{
     prepare_checkpoint_for_pause, prepare_resumed_session, ResumeError,
@@ -177,6 +179,7 @@ where
     let mut stream_events_jsonl = false;
     let mut model_usage_jsonl = false;
     let mut repository_context_json = None;
+    let mut observation_context_budget_bytes = None;
     let mut verified = false;
     let mut verify_files = Vec::new();
     let mut position = 0;
@@ -382,6 +385,35 @@ where
                 repository_context_json = Some(PathBuf::from(value));
                 position += 1;
             }
+            "--observation-context-budget-bytes" => {
+                if observation_context_budget_bytes.is_some() {
+                    return usage_error(
+                        error,
+                        Some("task"),
+                        "--observation-context-budget-bytes may be provided only once",
+                    );
+                }
+                let Some(value) = arguments.get(position) else {
+                    return usage_error(
+                        error,
+                        Some("task"),
+                        "the following argument is required: --observation-context-budget-bytes",
+                    );
+                };
+                let budget = value
+                    .to_str()
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .filter(|budget| (1..=MAX_OBSERVATION_BYTES).contains(budget));
+                let Some(budget) = budget else {
+                    return usage_error(
+                        error,
+                        Some("task"),
+                        "observation context budget must be an integer from 1 through 2097152 bytes",
+                    );
+                };
+                observation_context_budget_bytes = Some(budget);
+                position += 1;
+            }
             "--verified" => {
                 if verified {
                     return usage_error(
@@ -550,6 +582,14 @@ where
         return usage_error(error, Some("task"), "--verified requires manual routing");
     }
 
+    if verified && observation_context_budget_bytes.is_some() {
+        return usage_error(
+            error,
+            Some("task"),
+            "--observation-context-budget-bytes is not supported with --verified",
+        );
+    }
+
     let repository_context = if let Some(path) = repository_context_json.as_deref() {
         match read_repository_context_json(path) {
             Ok(context) => Some(context),
@@ -619,6 +659,18 @@ where
         Ok(source) => source,
         Err(message) => return usage_error(error, Some("task"), message),
     };
+    if let Some(budget_bytes) = observation_context_budget_bytes {
+        let Some(source) = model_source.as_mut() else {
+            return usage_error(
+                error,
+                Some("task"),
+                "--observation-context-budget-bytes requires a model-backed task",
+            );
+        };
+        if let Err(message) = source.set_observation_context_budget(budget_bytes) {
+            return usage_error(error, Some("task"), message);
+        }
+    }
     if let Some(context) = repository_context.as_ref() {
         let Some(source) = model_source.as_mut() else {
             return usage_error(
@@ -796,6 +848,7 @@ where
                     action_budget: max_actions,
                     ollama_endpoint: model_endpoint,
                     repository_context: repository_context.clone(),
+                    observation_context_budget_bytes,
                 }) {
                     Ok(runtime) => runtime,
                     Err(message) => return usage_error(error, Some("task"), &message),
@@ -937,6 +990,26 @@ where
                                 observations,
                                 project_guidance,
                             );
+                            if let Some(report) = decision_source.take_observation_compaction() {
+                                let event = serde_json::json!({
+                                    "type": "observation_context_compacted",
+                                    "decision": decisions,
+                                    "original_bytes": report.original_bytes,
+                                    "sent_bytes": report.sent_bytes,
+                                    "compacted_fields": report.compacted_fields,
+                                    "omitted_bytes": report.omitted_bytes,
+                                });
+                                if let Err(cause) =
+                                    writeln!(error, "KRYPPER_CONTEXT_COMPACTION {event}")
+                                        .and_then(|()| error.flush())
+                                {
+                                    stream_error = Some(cause);
+                                    return WorkspaceAction::Unsupported {
+                                        action: "unable to display context compaction report"
+                                            .to_owned(),
+                                    };
+                                }
+                            }
                             if let Some(selection) = decision_source.current_selection() {
                                 if last_reported_selection.as_ref() != Some(&selection) {
                                     let _ = writeln!(
