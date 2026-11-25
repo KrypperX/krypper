@@ -8,8 +8,10 @@ use crate::agent_loop::{
 };
 use crate::brain::OllamaDecisionSource;
 use crate::harness::execution::{
-    create_plan_with_workspace_context, run_goal_turn_with_completion_correction,
-    run_goal_turn_with_plan,
+    create_impact_checked_plan, process_test_verification, review_existing_impact_plan,
+    run_goal_turn_with_impact_checked_completion_correction,
+    run_goal_turn_with_impact_checked_plan, stop_reason_after_test_verification,
+    task_test_verification, ProcessTestVerificationStatus,
 };
 use crate::harness::verification::{
     reconcile_task_state_with_checks, verify_completion_checks, CompletionCheckEvidence,
@@ -27,12 +29,14 @@ pub(super) struct VerifiedTurnBatch {
     pub(super) correction_attempted: bool,
     pub(super) stop_reason: GoalTurnStopReason,
     pub(super) actions_taken: usize,
+    pub(super) test_verification: Option<ProcessTestVerificationStatus>,
 }
 
 pub(super) struct VerifiedTaskReport {
     pub(super) verification: CompletionVerification,
     pub(super) correction_status: &'static str,
     pub(super) stop_reason: GoalTurnStopReason,
+    pub(super) test_verification: Option<ProcessTestVerificationStatus>,
 }
 
 #[allow(clippy::too_many_arguments)] // Session, IDs, goal, budget, checks, policy flags, and Brain/control sources are separate workflow inputs.
@@ -62,26 +66,51 @@ pub(super) fn run_verified_turn(
         plan_goal.push_str("\n- ");
         plan_goal.push_str(&path.display().to_string());
     }
-    let initial_plan = create_plan_with_workspace_context(
+    let initial_plan = create_impact_checked_plan(
         session,
         task_id,
+        turn_id,
         source,
         &plan_goal,
         &[],
         action_budget,
     );
-    let (turns, verification, correction_status, correction_attempted, stop_reason) =
-        if allow_correction {
-            let result = run_goal_turn_with_completion_correction(
-                session,
-                task_id,
-                turn_id,
-                goal,
-                action_budget,
-                Some(initial_plan),
-                &required_checks,
-                |_, result| verification_evidence(verify_files, result),
-                |_, session, prior_result, verification, goal, remaining_actions| {
+    let (
+        turns,
+        verification,
+        correction_status,
+        correction_attempted,
+        stop_reason,
+        test_verification,
+    ) = if allow_correction {
+        let result = run_goal_turn_with_impact_checked_completion_correction(
+            session,
+            task_id,
+            turn_id,
+            goal,
+            action_budget,
+            Some(initial_plan),
+            &required_checks,
+            |_, result| verification_evidence(verify_files, result),
+            |_,
+             session,
+             correction_task_id,
+             correction_turn_id,
+             process_failure,
+             prior_result,
+             verification,
+             goal,
+             remaining_actions| {
+                let correction_budget = remaining_actions.saturating_sub(2);
+                let plan = if let Some(failure) = process_failure {
+                    source.create_process_failure_correction_plan(
+                        session,
+                        prior_result,
+                        failure,
+                        goal,
+                        correction_budget,
+                    )
+                } else {
                     source
                         .create_completion_correction_plan(
                             session,
@@ -89,95 +118,114 @@ pub(super) fn run_verified_turn(
                             goal,
                             prior_result.observations(),
                             verification,
-                            remaining_actions,
+                            correction_budget,
                         )
                         .and_then(|plan| {
                             plan.ok_or(crate::brain::BrainReflectionError::InvalidPlan(
                                 crate::brain::WorkspacePlanError::InvalidResponse,
                             ))
                         })
-                },
-                control,
-            )
-            .map_err(io::Error::other)?;
-            let initial = result.initial_result();
-            let correction_status = if result.correction_result().is_some() {
-                "attempted once"
-            } else if result.initial_verification().status == CompletionVerificationStatus::Passed {
-                "not needed; checks passed"
-            } else if pause_after_plan && initial.stop_reason() == GoalTurnStopReason::Continued {
-                "deferred until checkpoint resume"
-            } else if matches!(
+                }?;
+                review_existing_impact_plan(
+                    session,
+                    correction_task_id,
+                    correction_turn_id,
+                    source,
+                    goal,
+                    prior_result.observations(),
+                    remaining_actions,
+                    plan,
+                )
+                .map_err(crate::brain::BrainReflectionError::InvalidPlan)
+            },
+            control,
+        )
+        .map_err(io::Error::other)?;
+        let initial = result.initial_result();
+        let correction_status = if result.correction_result().is_some() {
+            "attempted once"
+        } else if result.initial_verification().status == CompletionVerificationStatus::Passed {
+            "not needed; checks passed"
+        } else if pause_after_plan && initial.stop_reason() == GoalTurnStopReason::Continued {
+            "deferred until checkpoint resume"
+        } else if matches!(
+            initial.stop_reason(),
+            GoalTurnStopReason::Completed | GoalTurnStopReason::ActionCompleted
+        ) {
+            "skipped; insufficient remaining action budget"
+        } else {
+            "skipped; initial turn did not complete normally"
+        };
+        let correction_attempted = result.correction_result().is_some();
+        let test_verification = result.test_verification();
+        let stop_reason = result.final_stop_reason();
+        let verification = if result.correction_result().is_none()
+            && !matches!(
                 initial.stop_reason(),
                 GoalTurnStopReason::Completed | GoalTurnStopReason::ActionCompleted
             ) {
-                "skipped; insufficient remaining action budget"
-            } else {
-                "skipped; initial turn did not complete normally"
-            };
-            let correction_attempted = result.correction_result().is_some();
-            let stop_reason = result
-                .correction_result()
-                .map_or(initial.stop_reason(), GoalTurnResult::stop_reason);
-            let verification = if result.correction_result().is_none()
-                && !matches!(
-                    initial.stop_reason(),
-                    GoalTurnStopReason::Completed | GoalTurnStopReason::ActionCompleted
-                ) {
-                verify_completion_checks(
-                    &required_checks,
-                    &verification_evidence(verify_files, initial),
-                )
-            } else {
-                result.final_verification().clone()
-            };
-            let mut turns = vec![initial.clone()];
-            if let Some(correction) = result.correction_result() {
-                turns.push(correction.clone());
-            }
-            (
-                turns,
-                verification,
-                correction_status,
-                correction_attempted,
-                stop_reason,
+            verify_completion_checks(
+                &required_checks,
+                &verification_evidence(verify_files, initial),
             )
         } else {
-            let initial_result = run_goal_turn_with_plan(
-                session,
-                task_id,
-                turn_id,
-                goal,
-                action_budget,
-                initial_plan,
-                control,
-            )
-            .map_err(io::Error::other)?;
-            let evidence = verification_evidence(verify_files, &initial_result);
-            let verification = reconcile_task_state_with_checks(
-                session,
-                task_id,
-                initial_result.stop_reason(),
-                &required_checks,
-                &evidence,
-            )
-            .map_err(io::Error::other)?;
-            let correction_status = if pause_after_plan
-                && initial_result.stop_reason() == GoalTurnStopReason::Continued
-            {
+            result.final_verification().clone()
+        };
+        let mut turns = vec![initial.clone()];
+        if let Some(correction) = result.correction_result() {
+            turns.push(correction.clone());
+        }
+        (
+            turns,
+            verification,
+            correction_status,
+            correction_attempted,
+            stop_reason,
+            test_verification,
+        )
+    } else {
+        let initial_result = run_goal_turn_with_impact_checked_plan(
+            session,
+            task_id,
+            turn_id,
+            goal,
+            action_budget,
+            initial_plan,
+            control,
+        )
+        .map_err(io::Error::other)?;
+        let evidence = verification_evidence(verify_files, &initial_result);
+        let current_test_verification = initial_result
+            .observations()
+            .iter()
+            .any(|observation| matches!(observation, WorkspaceObservation::ProcessFinished { .. }))
+            .then(|| process_test_verification(&initial_result, false, None));
+        let test_verification = task_test_verification(session, task_id, current_test_verification);
+        let stop_reason =
+            stop_reason_after_test_verification(initial_result.stop_reason(), test_verification);
+        let verification = reconcile_task_state_with_checks(
+            session,
+            task_id,
+            stop_reason,
+            &required_checks,
+            &evidence,
+        )
+        .map_err(io::Error::other)?;
+        let correction_status =
+            if pause_after_plan && initial_result.stop_reason() == GoalTurnStopReason::Continued {
                 "deferred until checkpoint resume; correction already used"
             } else {
                 "not attempted; correction already used in this invocation"
             };
-            let stop_reason = initial_result.stop_reason();
-            (
-                vec![initial_result],
-                verification,
-                correction_status,
-                false,
-                stop_reason,
-            )
-        };
+        (
+            vec![initial_result],
+            verification,
+            correction_status,
+            false,
+            stop_reason,
+            test_verification,
+        )
+    };
     let actions_taken = turns.iter().map(GoalTurnResult::actions_taken).sum();
     Ok(VerifiedTurnBatch {
         turns,
@@ -186,6 +234,7 @@ pub(super) fn run_verified_turn(
         correction_attempted,
         stop_reason,
         actions_taken,
+        test_verification,
     })
 }
 

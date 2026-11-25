@@ -90,6 +90,19 @@ that its contents match an expected value. A recorded failed file operation is
 `Failed`, while missing evidence is `Unknown`. Task success requires a completed
 turn and passing evidence for every required file.
 
+Before the initial or correction verified plan writes files, Harness previews
+proposed edits and searches bounded references. Multi-file plans, detected
+public Rust API changes, references outside the mutation targets, and actionable
+unknown or truncated evidence receive a review request to the same local model
+with the impact report. If the reviewed plan changes that report, the model must
+confirm the final report and keep the plan unchanged. Existing-file writes
+recheck a full content revision immediately before atomic replacement, though a
+concurrent external writer can race that check. This evidence is lexical and
+bounded; it does not resolve macros or guarantee a consistent snapshot across
+files. Files commit atomically one at a time, so a later failure can leave earlier
+successful edits in place. See the
+[impact analysis guide](safe-impact-analysis.md) for bounds and recovery details.
+
 After the planned operations, the CLI prompts for task control. Enter
 `complete [result]` to run the checks, `continue` to start another bounded turn,
 or `cancel` to stop. These control actions still run through the existing
@@ -98,11 +111,12 @@ Harness and TaskSession lifecycle.
 `--max-actions` caps Harness actions (planned workspace operations and caller
 task-control actions) across all turns in this invocation; Ollama requests are
 not included in the displayed action count. If a normally completed turn has
-failed or unknown checks and at least three action slots remain, Krypper may
-request one reflection-informed correction plan per CLI invocation. This
-three-slot threshold lets the bounded correction planner reserve two decision
-slots and still allow at least one planned operation; the model requests do not
-add to the displayed Harness action count. Krypper does not retry a denied or
+failed or unknown checks and at least five action slots remain, Krypper may
+request one reflection-informed correction plan per CLI invocation. A confirmed
+offline test failure requires at least six slots so the correction can also rerun
+tests after its edits. These thresholds reserve the reflection and plan requests,
+room for impact review, and the required workspace operations; model requests do
+not add to the displayed Harness action count. Krypper does not retry a denied or
 failed workspace action or a turn ended by cancellation,
 continuation, or insufficient budget. The correction uses the same local model
 source and only the remaining `--max-actions` slots. Output reports each check

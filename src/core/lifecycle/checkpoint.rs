@@ -7,7 +7,8 @@ use std::sync::Arc;
 /// Maximum encoded size accepted for a TaskSession checkpoint.
 pub const MAX_TASK_SESSION_CHECKPOINT_BYTES: usize = 1024 * 1024;
 
-const TASK_SESSION_CHECKPOINT_VERSION: u32 = 1;
+const TASK_SESSION_CHECKPOINT_VERSION: u32 = 2;
+const MIN_SUPPORTED_TASK_SESSION_CHECKPOINT_VERSION: u32 = 1;
 
 /// A checkpoint could not be exported or did not describe a valid restorable session.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -304,6 +305,11 @@ enum CheckpointActivitySummary {
         succeeded: bool,
         output_bytes: usize,
     },
+    OfflineCargoTestFinished {
+        filter_hash: Option<[u8; 32]>,
+        passed: bool,
+        retry_any_filter: bool,
+    },
     FileRead {
         bytes_read: usize,
     },
@@ -329,6 +335,7 @@ enum CheckpointActivitySummary {
         location_count: usize,
     },
     Completed,
+    ExtensionCompleted,
     Continued,
     BudgetExhausted {
         actions: usize,
@@ -348,6 +355,15 @@ impl From<TurnActivitySummary> for CheckpointActivitySummary {
             } => Self::ProcessFinished {
                 succeeded,
                 output_bytes,
+            },
+            TurnActivitySummary::OfflineCargoTestFinished {
+                filter_hash,
+                passed,
+                retry_any_filter,
+            } => Self::OfflineCargoTestFinished {
+                filter_hash,
+                passed,
+                retry_any_filter,
             },
             TurnActivitySummary::FileRead { bytes_read } => Self::FileRead { bytes_read },
             TurnActivitySummary::FileRangeRead {
@@ -376,6 +392,7 @@ impl From<TurnActivitySummary> for CheckpointActivitySummary {
                 Self::TreeTextSearched { location_count }
             }
             TurnActivitySummary::Completed => Self::Completed,
+            TurnActivitySummary::ExtensionCompleted => Self::ExtensionCompleted,
             TurnActivitySummary::Continued => Self::Continued,
             TurnActivitySummary::BudgetExhausted { actions } => Self::BudgetExhausted { actions },
             TurnActivitySummary::Cancelled => Self::Cancelled,
@@ -395,6 +412,15 @@ impl From<CheckpointActivitySummary> for TurnActivitySummary {
             } => Self::ProcessFinished {
                 succeeded,
                 output_bytes,
+            },
+            CheckpointActivitySummary::OfflineCargoTestFinished {
+                filter_hash,
+                passed,
+                retry_any_filter,
+            } => Self::OfflineCargoTestFinished {
+                filter_hash,
+                passed,
+                retry_any_filter,
             },
             CheckpointActivitySummary::FileRead { bytes_read } => Self::FileRead { bytes_read },
             CheckpointActivitySummary::FileRangeRead {
@@ -423,6 +449,7 @@ impl From<CheckpointActivitySummary> for TurnActivitySummary {
                 Self::TreeTextSearched { location_count }
             }
             CheckpointActivitySummary::Completed => Self::Completed,
+            CheckpointActivitySummary::ExtensionCompleted => Self::ExtensionCompleted,
             CheckpointActivitySummary::Continued => Self::Continued,
             CheckpointActivitySummary::BudgetExhausted { actions } => {
                 Self::BudgetExhausted { actions }
@@ -520,7 +547,9 @@ impl TaskSession {
         }
         let checkpoint: CheckpointSession = serde_json::from_slice(bytes)
             .map_err(|_| TaskSessionCheckpointError::InvalidCheckpoint)?;
-        if checkpoint.version != TASK_SESSION_CHECKPOINT_VERSION {
+        if checkpoint.version < MIN_SUPPORTED_TASK_SESSION_CHECKPOINT_VERSION
+            || checkpoint.version > TASK_SESSION_CHECKPOINT_VERSION
+        {
             return Err(TaskSessionCheckpointError::UnsupportedVersion {
                 version: checkpoint.version,
             });

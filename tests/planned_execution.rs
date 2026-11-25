@@ -452,3 +452,62 @@ fn an_over_budget_plan_stops_before_later_operations() {
         Some(TurnOutcome::Failure { .. })
     ));
 }
+
+#[test]
+fn partial_multi_file_failure_preserves_edit_and_failure_evidence() {
+    let root = TempDir::new();
+    let workspace = root.path().join("workspace");
+    fs::create_dir(&workspace).expect("create workspace");
+    fs::write(workspace.join("first.txt"), "old first\n").expect("write first file");
+    fs::write(workspace.join("second.txt"), "old second\n").expect("write second file");
+    let (mut session, task_id, turn_id) = session_for(&workspace, "edit two files");
+    let plan = WorkspacePlan::try_from_actions(
+        vec![
+            WorkspaceAction::ApplyPatch {
+                path: PathBuf::from("first.txt"),
+                patch: "--- a/first.txt\n+++ b/first.txt\n@@ -1 +1 @@\n-old first\n+new first\n"
+                    .to_owned(),
+            },
+            WorkspaceAction::ApplyPatch {
+                path: PathBuf::from("second.txt"),
+                patch: "--- a/second.txt\n+++ b/second.txt\n@@ -1 +1 @@\n-not the current text\n+new second\n"
+                    .to_owned(),
+            },
+        ],
+        2,
+    )
+    .expect("build bounded two-file plan");
+    let mut control = |_: &str, _: &[WorkspaceObservation]| WorkspaceAction::Complete {
+        result: "must not claim success".to_owned(),
+    };
+
+    let result = run_goal_turn_with_plan(
+        &mut session,
+        task_id,
+        turn_id,
+        "edit two files",
+        3,
+        Ok(plan),
+        &mut control,
+    )
+    .expect("preserve the failed turn result");
+
+    assert_eq!(
+        fs::read_to_string(workspace.join("first.txt")).unwrap(),
+        "new first\n"
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.join("second.txt")).unwrap(),
+        "old second\n"
+    );
+    assert_eq!(result.stop_reason(), GoalTurnStopReason::ActionFailed);
+    assert!(matches!(
+        result.observations(),
+        [WorkspaceObservation::PatchApplied { path, .. }, WorkspaceObservation::PatchFailed { path: failed_path, .. }]
+            if path == Path::new("first.txt") && failed_path == Path::new("second.txt")
+    ));
+    assert!(matches!(
+        result.outcome(),
+        Some(TurnOutcome::Failure { .. })
+    ));
+}

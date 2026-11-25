@@ -298,7 +298,7 @@ fn verified_execution_evidence<'a>(
     let expected_activity = result
         .observations()
         .iter()
-        .map(crate::harness::execution::summarize_observation)
+        .flat_map(crate::harness::execution::summarize_observation_activity)
         .collect::<Vec<_>>();
     let activity = turn.activity_history();
     if activity.get(..expected_activity.len()) != Some(expected_activity.as_slice()) {

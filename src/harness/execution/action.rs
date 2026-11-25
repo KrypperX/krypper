@@ -101,11 +101,57 @@ pub(crate) fn summarize_observation(observation: &WorkspaceObservation) -> TurnA
     }
 }
 
-pub(super) fn execute_action(
+pub(crate) fn summarize_observation_activity(
+    observation: &WorkspaceObservation,
+) -> Vec<TurnActivitySummary> {
+    let mut activity = vec![summarize_observation(observation)];
+    match observation {
+        WorkspaceObservation::ProcessFinished { result } => {
+            activity.push(TurnActivitySummary::OfflineCargoTestFinished {
+                filter_hash: result.test_filter.as_deref().map(offline_test_filter_hash),
+                passed: result.succeeded()
+                    && result.tests_ran
+                    && result.executed_tests.is_some_and(|count| count > 0),
+                retry_any_filter: matches!(result.outcome, crate::ProcessOutcome::NoTestsMatched)
+                    && result.test_filter.is_some()
+                    && !result.tests_ran
+                    && result.executed_tests == Some(0)
+                    && !result.truncated
+                    && result.cleanup_confirmed
+                    && !result.recovery_hold,
+            });
+        }
+        WorkspaceObservation::ActionFailed {
+            action: WorkspaceAction::OfflineCargoTest { test_filter },
+            ..
+        } => {
+            activity.push(TurnActivitySummary::OfflineCargoTestFinished {
+                filter_hash: test_filter.as_deref().map(offline_test_filter_hash),
+                passed: false,
+                retry_any_filter: false,
+            });
+        }
+        WorkspaceObservation::ExtensionCompleted { .. } => {
+            activity.push(TurnActivitySummary::ExtensionCompleted);
+        }
+        _ => {}
+    }
+    activity
+}
+
+fn offline_test_filter_hash(filter: &str) -> [u8; 32] {
+    let digest = ring::digest::digest(&ring::digest::SHA256, filter.as_bytes());
+    let mut hash = [0_u8; 32];
+    hash.copy_from_slice(digest.as_ref());
+    hash
+}
+
+pub(super) fn execute_action_with_revision(
     session: &TaskSession,
     task_id: Uuid,
     turn_id: Uuid,
     action: &WorkspaceAction,
+    expected_revision: Option<&str>,
 ) -> Result<ActionExecution, GoalTurnError> {
     match action {
         WorkspaceAction::OfflineCargoTest { test_filter } => {
@@ -240,12 +286,13 @@ pub(super) fn execute_action(
             path,
             match_text,
             replacement_text,
-        } => match session.replace_workspace_text(
+        } => match session.replace_workspace_text_with_revision(
             task_id,
             turn_id,
             path,
             match_text,
             replacement_text,
+            expected_revision,
         ) {
             Ok(bytes_written) => Ok(ActionExecution::Observation(
                 WorkspaceObservation::TextReplaced {
@@ -266,7 +313,13 @@ pub(super) fn execute_action(
             Err(error) => Err(GoalTurnError::WorkspaceReplace(error)),
         },
         WorkspaceAction::ApplyPatch { path, patch } => {
-            match session.apply_workspace_patch(task_id, turn_id, path, patch) {
+            match session.apply_workspace_patch_with_revision(
+                task_id,
+                turn_id,
+                path,
+                patch,
+                expected_revision,
+            ) {
                 Ok(evidence) => Ok(ActionExecution::Observation(
                     WorkspaceObservation::PatchApplied {
                         path: path.clone(),

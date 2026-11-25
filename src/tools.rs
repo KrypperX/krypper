@@ -12,19 +12,20 @@ pub(crate) mod skills;
 mod workspace_safety;
 
 pub(crate) use workspace_safety::{
-    apply_patch_file_at, capture_workspace_root, capture_workspace_root_at,
+    apply_patch_file_at_with_revision, capture_workspace_root, capture_workspace_root_at,
     capture_workspace_root_at_with_error, create_directory_at, create_text_file,
     create_text_file_at, encode_workspace_path, list_directory, list_task_directory_names_at,
-    read_project_guidance_at, read_root_agents_md_at, read_text_file, read_text_file_at,
-    replace_text_file_at, search_text_files_at, search_tree_text_files_at, CliError, PatchEvidence,
+    preview_replace_text, preview_workspace_patch, read_project_guidance_at,
+    read_root_agents_md_at, read_text_file, read_text_file_at, replace_text_file_at_with_revision,
+    search_text_files_at, search_tree_text_files_at, text_revision, CliError, PatchEvidence,
     RootGuidanceReadError, WorkspaceRoot, MAX_PATCH_BYTES,
 };
 
 #[cfg(test)]
 mod tests {
+    use super::workspace_safety::replace_text_file_at;
     use super::{
-        capture_workspace_root_at, create_text_file_at, read_text_file_at, replace_text_file_at,
-        search_text_files_at,
+        capture_workspace_root_at, create_text_file_at, read_text_file_at, search_text_files_at,
     };
     use std::ffi::OsStr;
     use std::fs;

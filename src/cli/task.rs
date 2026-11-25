@@ -870,6 +870,7 @@ where
                 verification: batch.verification,
                 correction_status: batch.correction_status,
                 stop_reason,
+                test_verification: batch.test_verification,
             };
             let iteration_actions = batch.actions_taken;
             let result = batch
@@ -1156,6 +1157,9 @@ where
     writeln!(output, "Actions: {actions_taken}/{max_actions}")?;
     if let Some(report) = verified_report.as_ref() {
         writeln!(output, "Verification: {:?}", report.verification.status)?;
+        if let Some(status) = report.test_verification {
+            writeln!(output, "Test verification: {status:?}")?;
+        }
         for check in &report.verification.checks {
             write!(output, "- {}: {:?}", check.description, check.status)?;
             if let Some(summary) = check.evidence_summary.as_deref() {

@@ -26,7 +26,12 @@ pub(crate) use read::{
     capture_workspace_root, capture_workspace_root_at, capture_workspace_root_at_with_error,
     read_project_guidance_at, read_root_agents_md_at, read_text_file, read_text_file_at,
 };
+#[cfg(test)]
 pub(crate) use replace::{apply_patch_file_at, replace_text_file_at};
+pub(crate) use replace::{
+    apply_patch_file_at_with_revision, preview_replace_text, preview_workspace_patch,
+    replace_text_file_at_with_revision, text_revision,
+};
 pub(crate) use search::{search_text_files_at, search_tree_text_files_at};
 pub(crate) use syscalls::encode_workspace_path;
 pub(crate) use types::{CliError, DirHandle, PatchEvidence, RootGuidanceReadError, WorkspaceRoot};

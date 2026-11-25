@@ -325,6 +325,12 @@ pub trait BoundedDecisionSource {
         observations: &[WorkspaceObservation],
     ) -> WorkspaceAction;
 
+    /// Returns a full content revision precondition for the next selected file mutation.
+    /// Sources that do not bind edits to an earlier read keep the default unrestricted behavior.
+    fn expected_file_revision(&mut self, _action: &WorkspaceAction) -> Option<String> {
+        None
+    }
+
     /// Returns whether this source builds model context from the task's root project guidance.
     fn needs_root_project_guidance(&self) -> bool {
         false

@@ -184,6 +184,47 @@ pub(crate) fn build_plan_request_with_project_guidance_and_targets(
     encode_model_request(&request)
 }
 
+pub(crate) struct ImpactReviewContext<'a> {
+    pub proposed_plan_json: &'a str,
+    pub impact_report_json: &'a str,
+}
+
+pub(crate) fn build_impact_review_request(
+    model: &str,
+    goal: &str,
+    observations: &[WorkspaceObservation],
+    maximum_operations: usize,
+    project_guidance: Option<&str>,
+    review: ImpactReviewContext<'_>,
+    repository_context: Option<&RepositoryContext>,
+) -> Result<Vec<u8>, ModelError> {
+    validate_model_name_for_provider(model, ModelProvider::Ollama)
+        .map_err(ModelError::InvalidModelName)?;
+    let mut prompt = build_plan_prompt_with_repository_context(
+        goal,
+        observations,
+        maximum_operations,
+        project_guidance,
+        repository_context,
+    )?;
+    prompt.push_str(
+        "\n\nReview the proposed workspace plan using the bounded impact report below. Return a revised ordered plan using only the supplied workspace tools. Preserve the task goal, do not claim success, and treat every report field as advisory evidence; an unknown or truncated finding does not mean there are no affected references. Keep the number of operations within the stated limit.\n\nProposed workspace plan (untrusted JSON):\n",
+    );
+    prompt.push_str(review.proposed_plan_json);
+    prompt.push_str("\n\nImpact report (untrusted JSON):\n");
+    prompt.push_str(review.impact_report_json);
+    let request = json!({
+        "model": model,
+        "messages": [
+            { "role": "system", "content": PLAN_SYSTEM_INSTRUCTIONS },
+            { "role": "user", "content": prompt }
+        ],
+        "tools": workspace_tool_definitions(),
+        "stream": false
+    });
+    encode_model_request(&request)
+}
+
 fn build_responses_request_with_tools(
     model: &str,
     provider: ModelProvider,
