@@ -1,20 +1,19 @@
 //! Process supervision: leases, bounded pipes, reaping and the two run entry points.
 
-use crate::host::{effective_uid, host_command};
+use crate::host::effective_uid;
 use crate::sandbox::sandbox;
 use crate::{RunLimits, SandboxOutcome, SandboxResource, SandboxRunRequest, SandboxRunResult};
-use std::fs::{self, OpenOptions};
 use std::io::{self, Read};
 use std::os::unix::process::ExitStatusExt;
-use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::{Duration, Instant};
-use uuid::Uuid;
 
+mod cgroup;
 mod process;
 mod recovery;
 
+use cgroup::{cpu_usage_usec, record_cgroup_limit_events, record_event, Supervisor};
 use process::{bounded_host, drain, nonblocking, reap, ManagedChild};
 use recovery::{
     hold_for_recovery, is_cleanup_uncertain, mark_cleanup_uncertain, try_active_lock,
@@ -60,213 +59,6 @@ fn drain_after_child_exit(
             return Ok(PostExitDrain::DeadlineExpired);
         }
         thread::sleep(Duration::from_millis(5));
-    }
-}
-
-fn record_cgroup_limit_events(group: &Path, events: &mut Vec<SandboxResource>) {
-    for (name, field, resource) in [
-        ("memory.events", "max", SandboxResource::Memory),
-        ("pids.events", "max", SandboxResource::Processes),
-    ] {
-        if fs::read_to_string(group.join(name)).is_ok_and(|contents| {
-            contents.lines().any(|line| {
-                line.split_once(' ').is_some_and(|(key, value)| {
-                    key == field && value.parse::<u64>().is_ok_and(|count| count > 0)
-                })
-            })
-        }) {
-            record_event(events, resource);
-        }
-    }
-}
-
-fn cpu_usage_usec(group: &Path) -> io::Result<u64> {
-    fs::read_to_string(group.join("cpu.stat"))?
-        .lines()
-        .find_map(|line| {
-            line.strip_prefix("usage_usec ")
-                .and_then(|value| value.parse::<u64>().ok())
-        })
-        .ok_or_else(|| io::Error::other("CPU accounting unavailable"))
-}
-
-pub(super) struct Supervisor {
-    pub(super) unit: String,
-    pub(super) group: PathBuf,
-    pub(super) cleaned: bool,
-    pub(super) limits: RunLimits,
-}
-impl Supervisor {
-    fn create(id: Uuid, limits: RunLimits) -> io::Result<Self> {
-        let unit = format!("krypper-test-{}.service", id.simple());
-        let memory = format!("MemoryMax={}", limits.memory_bytes);
-        let tasks = format!("TasksMax={}", limits.processes);
-        let runtime_secs = limits.wall_millis.div_ceil(1_000).saturating_add(15);
-        let runtime = format!("RuntimeMaxSec={runtime_secs}");
-        let keepalive = runtime_secs.to_string();
-        // Only a trusted inert keeper starts here. No workspace code runs until verification.
-        let mut command = host_command("/usr/bin/systemd-run");
-        command.args([
-            "--user",
-            "--quiet",
-            "--collect",
-            "--unit",
-            &unit,
-            "-p",
-            "Delegate=yes",
-        ]);
-        command.args(["-p", memory.as_str(), "-p", "MemorySwapMax=0"]);
-        command.args(["-p", tasks.as_str()]);
-        let creation = bounded_host(command.args([
-            "-p",
-            "CPUQuota=100%",
-            "-p",
-            runtime.as_str(),
-            "-p",
-            "KillMode=control-group",
-            "-p",
-            "TimeoutStopSec=1",
-            "-p",
-            "SendSIGKILL=yes",
-            "--",
-            "/usr/bin/sleep",
-            keepalive.as_str(),
-        ]));
-        let mut supervisor = Self {
-            unit,
-            group: PathBuf::new(),
-            cleaned: false,
-            limits,
-        };
-        creation?;
-        let group = bounded_host(host_command("/usr/bin/systemctl").args([
-            "--user",
-            "show",
-            &supervisor.unit,
-            "--property=ControlGroup",
-            "--value",
-        ]))?;
-        supervisor.group = control_group_path(Path::new(group.trim()))?;
-        supervisor.verify()?;
-        let membership = fs::read_to_string("/proc/thread-self/cgroup")?;
-        let relative = membership
-            .lines()
-            .find_map(|line| line.strip_prefix("0::"))
-            .ok_or_else(|| io::Error::other("cgroup v2 membership unavailable"))?;
-        let current = Path::new("/sys/fs/cgroup").join(relative.trim_start_matches('/'));
-        let common = supervisor
-            .group
-            .ancestors()
-            .find(|ancestor| current.starts_with(ancestor))
-            .ok_or_else(|| io::Error::other("cgroup attachment ancestry unavailable"))?;
-        OpenOptions::new()
-            .write(true)
-            .open(common.join("cgroup.procs"))
-            .map_err(|_| {
-                io::Error::other(
-                    "caller must run inside the writable delegated user-manager cgroup subtree",
-                )
-            })?;
-        Ok(supervisor)
-    }
-    pub(super) fn verify(&self) -> io::Result<()> {
-        let read = |name| fs::read_to_string(self.group.join(name));
-        let memory = read("memory.max")?.trim().parse::<u64>().ok();
-        let tasks = read("pids.max")?.trim().parse::<u64>().ok();
-        let cpu = read("cpu.max")?;
-        let fields = cpu
-            .split_whitespace()
-            .map(str::parse::<u64>)
-            .collect::<Result<Vec<_>, _>>();
-        if memory != Some(self.limits.memory_bytes)
-            || tasks != Some(self.limits.processes)
-            || read("memory.swap.max")?.trim() != "0"
-            || !matches!(fields, Ok(ref v) if v.len() == 2 && v[0] > 0 && v[1] > 0 && v[0] <= v[1])
-        {
-            return Err(io::Error::other(
-                "required hard resource controls unavailable",
-            ));
-        }
-        // Both attach and whole-tree kill must be delegated before launch.
-        OpenOptions::new()
-            .write(true)
-            .open(self.group.join("cgroup.procs"))?;
-        OpenOptions::new()
-            .write(true)
-            .open(self.group.join("cgroup.kill"))?;
-        Ok(())
-    }
-    fn clean(&mut self) -> bool {
-        if self.cleaned {
-            return true;
-        }
-        if !self.group.as_os_str().is_empty() && self.group.exists() {
-            // The manager can still terminate the unit when the caller's cgroup mount is
-            // read-only. Success still requires independent empty-tree readback below.
-            let _ = fs::write(self.group.join("cgroup.kill"), b"1");
-        }
-        let _ =
-            bounded_host(host_command("/usr/bin/systemctl").args(["--user", "stop", &self.unit]));
-        let inactive = bounded_host(host_command("/usr/bin/systemctl").args([
-            "--user",
-            "show",
-            &self.unit,
-            "--property=ActiveState",
-            "--value",
-        ]))
-        .is_ok_and(|s| matches!(s.trim(), "inactive" | "failed"));
-        let start = Instant::now();
-        while self.group.exists() && start.elapsed() < Duration::from_secs(3) {
-            if fs::read_to_string(self.group.join("cgroup.events"))
-                .is_ok_and(|s| s.lines().any(|l| l == "populated 0"))
-            {
-                self.cleaned = inactive;
-                return self.cleaned;
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-        // A removed cgroup cannot contain live processes. Also require manager acknowledgement.
-        self.cleaned = inactive && !self.group.exists();
-        self.cleaned
-    }
-}
-
-fn control_group_path(path: &Path) -> io::Result<PathBuf> {
-    if !path.is_absolute()
-        || path
-            .components()
-            .any(|component| matches!(component, std::path::Component::ParentDir))
-    {
-        return Err(io::Error::other("invalid cgroup identity"));
-    }
-    let relative = path
-        .strip_prefix("/")
-        .map_err(|_| io::Error::other("invalid cgroup identity"))?;
-    Ok(Path::new("/sys/fs/cgroup").join(relative))
-}
-
-#[cfg(test)]
-mod path_invariant_tests {
-    use super::control_group_path;
-    use std::path::Path;
-
-    #[test]
-    fn control_group_paths_must_be_absolute_and_contained() {
-        assert_eq!(
-            control_group_path(Path::new("/user.slice/krypper-test.service"))
-                .expect("validated absolute cgroup path"),
-            Path::new("/sys/fs/cgroup/user.slice/krypper-test.service")
-        );
-        assert!(control_group_path(Path::new("user.slice/krypper-test.service")).is_err());
-        assert!(control_group_path(Path::new("/user.slice/../other.service")).is_err());
-    }
-}
-
-impl Drop for Supervisor {
-    fn drop(&mut self) {
-        if !self.clean() {
-            mark_cleanup_uncertain();
-        }
     }
 }
 
@@ -375,10 +167,10 @@ fn run_with_containment(request: SandboxRunRequest, contained: bool) -> SandboxR
     let execution = (|| -> io::Result<()> {
         lease.record(&format!(
             "{}\n{}\n",
-            supervisor.unit,
-            supervisor.group.display()
+            supervisor.unit(),
+            supervisor.group().display()
         ))?;
-        let mut probe = sandbox(&directories, &supervisor.group)?;
+        let mut probe = sandbox(&directories, supervisor.group())?;
         probe.args(["--", "/usr/bin/true"]);
         if !bounded_host(&mut probe)?.is_empty() {
             return Err(io::Error::other("unexpected sandbox output"));
@@ -388,7 +180,7 @@ fn run_with_containment(request: SandboxRunRequest, contained: bool) -> SandboxR
             settle_before_launch(&mut result, &mut supervisor, StopReason::Cancelled);
             return Ok(());
         }
-        let mut command = sandbox(&directories, &supervisor.group)?;
+        let mut command = sandbox(&directories, supervisor.group())?;
         command.args(cargo_command_args(test_filter.as_deref()));
         result.outcome = SandboxOutcome::SpawnFailed;
         let mut child = ManagedChild::new(command.spawn()?);
@@ -431,8 +223,8 @@ fn run_with_containment(request: SandboxRunRequest, contained: bool) -> SandboxR
                 break;
             }
             if let Some(exit) = child.child_mut()?.try_wait()? {
-                let cpu_budget_exceeded = cpu_usage_usec(&supervisor.group)? >= cpu_budget;
-                record_cgroup_limit_events(&supervisor.group, &mut events);
+                let cpu_budget_exceeded = cpu_usage_usec(supervisor.group())? >= cpu_budget;
+                record_cgroup_limit_events(supervisor.group(), &mut events);
                 cgroup_events_recorded = true;
                 let _ = supervisor.clean();
                 let post_exit_drain = if out_eof && err_eof {
@@ -477,14 +269,14 @@ fn run_with_containment(request: SandboxRunRequest, contained: bool) -> SandboxR
                 stop = StopReason::WallTimeout;
                 break;
             }
-            if cpu_usage_usec(&supervisor.group)? >= cpu_budget {
+            if cpu_usage_usec(supervisor.group())? >= cpu_budget {
                 stop = StopReason::CpuBudget;
                 break;
             }
             thread::sleep(Duration::from_millis(5));
         }
         if !cgroup_events_recorded {
-            record_cgroup_limit_events(&supervisor.group, &mut events);
+            record_cgroup_limit_events(supervisor.group(), &mut events);
         }
         if matches!(stop, StopReason::Signaled(libc::SIGXCPU)) {
             record_event(&mut events, SandboxResource::Cpu);
@@ -579,19 +371,6 @@ enum StopReason {
     Unknown,
 }
 
-fn record_event(events: &mut Vec<SandboxResource>, resource: SandboxResource) {
-    if events.contains(&resource) {
-        return;
-    }
-    events.push(resource);
-    events.sort_by_key(|resource| match resource {
-        SandboxResource::Processes => 0,
-        SandboxResource::Memory => 1,
-        SandboxResource::Cpu => 2,
-        SandboxResource::FileSize => 3,
-    });
-}
-
 fn resolve_outcome(
     stop: StopReason,
     events: &[SandboxResource],
@@ -630,47 +409,11 @@ mod internal_outcome_tests {
     use uuid::Uuid;
 
     #[test]
-    fn cgroup_readback_rejects_missing_and_unlimited_controls() {
-        let path = std::env::temp_dir().join(format!("krypper-sandbox-cgroup-{}", Uuid::new_v4()));
-        std::fs::create_dir(&path).unwrap();
-        let limits = RunLimits::offline_cargo_test();
-        let supervisor = std::mem::ManuallyDrop::new(super::Supervisor {
-            unit: "unused".into(),
-            group: path.clone(),
-            cleaned: true,
-            limits,
-        });
-        assert!(supervisor.verify().is_err());
-        for (name, value) in [
-            ("memory.max", limits.memory_bytes.to_string()),
-            ("memory.swap.max", "0".into()),
-            ("pids.max", limits.processes.to_string()),
-            ("cpu.max", "100000 100000".into()),
-            ("cgroup.procs", "".into()),
-            ("cgroup.kill", "".into()),
-        ] {
-            std::fs::write(path.join(name), value).unwrap();
-        }
-        assert!(supervisor.verify().is_ok());
-        for name in ["memory.max", "pids.max", "cpu.max"] {
-            let original = std::fs::read(path.join(name)).unwrap();
-            std::fs::write(path.join(name), "max").unwrap();
-            assert!(supervisor.verify().is_err(), "{name} must fail closed");
-            std::fs::write(path.join(name), original).unwrap();
-        }
-        std::fs::remove_dir_all(path).unwrap();
-    }
-
-    #[test]
     fn cancellation_after_probe_resolves_before_any_child_launch() {
         let path = std::env::temp_dir().join(format!("krypper-sandbox-cancel-{}", Uuid::new_v4()));
         std::fs::create_dir(&path).unwrap();
-        let mut supervisor = super::Supervisor {
-            unit: "unused".into(),
-            group: path.clone(),
-            cleaned: true,
-            limits: RunLimits::offline_cargo_test(),
-        };
+        let mut supervisor =
+            super::cgroup::Supervisor::test_fixture(path.clone(), RunLimits::offline_cargo_test());
         let mut result = crate::SandboxRunResult::empty(
             Uuid::new_v4(),
             SandboxOutcome::SandboxUnavailable,
