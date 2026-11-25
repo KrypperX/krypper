@@ -8,24 +8,6 @@ use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-pub(super) fn host_command(executable: &str) -> Command {
-    let mut command = Command::new(executable);
-    let uid = super::linux::effective_uid();
-    command
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env("LANG", "C")
-        .env("XDG_RUNTIME_DIR", format!("/run/user/{uid}"))
-        .env(
-            "DBUS_SESSION_BUS_ADDRESS",
-            format!("unix:path=/run/user/{uid}/bus"),
-        )
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    command
-}
-
 // Reap on every error path too. A stuck kernel wait is never allowed to block the caller.
 
 pub(super) fn sandbox(directories: &DirectoryDescriptors, group: &Path) -> io::Result<Command> {
@@ -51,7 +33,7 @@ pub(super) fn sandbox(directories: &DirectoryDescriptors, group: &Path) -> io::R
     let attach = OpenOptions::new()
         .write(true)
         .open(group.join("cgroup.procs"))?;
-    let mut command = host_command("/usr/bin/bwrap");
+    let mut command = crate::host::host_command("/usr/bin/bwrap");
     command.stderr(Stdio::piped()).args([
         "--unshare-user",
         "--unshare-pid",

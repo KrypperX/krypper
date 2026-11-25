@@ -16,6 +16,8 @@ const MAX_OUTPUT_BYTES: usize = 256 * 1024;
 const MAX_PROCESSES: u64 = 128;
 
 #[cfg(target_os = "linux")]
+mod host;
+#[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
 mod sandbox;
