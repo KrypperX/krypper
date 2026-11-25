@@ -1,18 +1,12 @@
 //! Opt-in Linux offline test profile. Host policy is never deserialized from model input.
 //!
-//! `policy` owns the fixed Cargo profile and its limits, `sandbox` owns the contained child
-//! command, `supervisor` owns leases, pipes, reaping and the run entry points. This file is a
-//! facade so every existing `crate::tools::process::*` path keeps working.
+//! Product-owned authorization and result types stay here; the `supervisor` module adapts them
+//! to the fixed offline Cargo sandbox crate while preserving existing imports.
 
 mod outcome;
 mod policy;
 mod result;
-#[cfg(target_os = "linux")]
-mod sandbox;
-#[cfg(target_os = "linux")]
 mod supervisor;
-#[cfg(not(target_os = "linux"))]
-mod unsupported;
 
 #[cfg(all(test, target_os = "linux"))]
 mod host_fixtures;
@@ -24,18 +18,12 @@ pub use self::outcome::{ProcessOutcome, ProcessResource};
 pub use self::policy::OfflineCargoPolicy;
 pub(crate) use self::policy::{validate_test_filter, MAX_TEST_FILTER_BYTES};
 pub use self::result::ProcessResult;
-#[cfg(target_os = "linux")]
 pub(crate) use self::supervisor::run;
-#[cfg(not(target_os = "linux"))]
-pub(crate) use self::unsupported::run;
 
 #[cfg(all(test, target_os = "linux"))]
 use self::policy::cargo_command_args;
 #[cfg(all(test, target_os = "linux"))]
-use self::supervisor::{
-    record_raw_output, record_test_evidence, run_with_bounds, run_without_containment,
-    settle_before_launch, Supervisor,
-};
+use self::supervisor::{record_raw_output, record_test_evidence, run_with_bounds};
 #[cfg(all(test, target_os = "linux"))]
 use crate::tools::capture_workspace_root_at;
 #[cfg(all(test, target_os = "linux"))]
@@ -54,4 +42,35 @@ use uuid::Uuid;
 fn effective_uid() -> u32 {
     // SAFETY: `geteuid` takes no arguments, has no preconditions and cannot fail.
     unsafe { libc::geteuid() }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod unsupported_platform_tests {
+    use super::{run, OfflineCargoPolicy, ProcessOutcome};
+    use crate::test_support::TempDir;
+    use crate::tools::capture_workspace_root_at;
+    use std::fs;
+
+    #[test]
+    fn offline_cargo_reports_unavailable_without_a_direct_spawn_fallback() {
+        let root = TempDir::with_prefix("krypper-macos-sandbox-unavailable-");
+        let workspace = root.join("workspace");
+        let toolchain = root.join("toolchain");
+        let registry = root.join("registry");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(toolchain.join("bin")).unwrap();
+        fs::create_dir_all(&registry).unwrap();
+        fs::write(toolchain.join("bin/cargo"), "placeholder").unwrap();
+        fs::write(toolchain.join("bin/rustc"), "placeholder").unwrap();
+
+        let root_handle = capture_workspace_root_at(&workspace).unwrap();
+        let policy = OfflineCargoPolicy::new(&toolchain, &registry).unwrap();
+        let result = run(&root_handle, &policy, None);
+
+        assert_eq!(result.outcome, ProcessOutcome::SandboxUnavailable);
+        assert_eq!(
+            result.diagnostic.as_deref(),
+            Some("process sandbox is unavailable on this platform")
+        );
+    }
 }
