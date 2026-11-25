@@ -1,8 +1,12 @@
 #![warn(clippy::undocumented_unsafe_blocks)]
 #![warn(unsafe_op_in_unsafe_fn)]
+#![cfg_attr(all(clippy, not(test)), warn(clippy::unwrap_used))]
 
 #[cfg(test)]
 pub(crate) static CURRENT_DIR_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+pub(crate) mod test_support;
 
 pub mod agent_loop;
 mod brain;

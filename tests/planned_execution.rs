@@ -7,30 +7,12 @@ use krypper::task_lifecycle::{
     TaskHistoryTransition, TaskSession, TaskState, TurnActivitySummary, TurnOutcome, TurnState,
 };
 use krypper::{WorkspacePlan, WorkspacePlanError};
+#[path = "../src/test_support.rs"]
+mod test_support;
 use std::fs;
 use std::path::{Path, PathBuf};
+use test_support::TempDir;
 use uuid::Uuid;
-
-struct TempDir(PathBuf);
-
-impl TempDir {
-    fn new() -> Self {
-        let path =
-            std::env::temp_dir().join(format!("krypper-planned-execution-{}", Uuid::new_v4()));
-        fs::create_dir(&path).expect("create fixture directory");
-        Self(path)
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        fs::remove_dir_all(&self.0).expect("remove fixture directory");
-    }
-}
 
 fn running_turn(session: &mut TaskSession, goal: &str) -> (Uuid, Uuid) {
     let task = session.create_task(goal);

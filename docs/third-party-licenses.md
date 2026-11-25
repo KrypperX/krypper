@@ -9,7 +9,7 @@ Krypper's own source is offered under Apache-2.0; see the root [LICENSE](../LICE
 
 ## Rust dependencies
 
-`Cargo.toml` directly names `ignore`, `libc`, `ring`, `rpassword`, `serde`, `serde_json`, `signal-hook`, `toml`, `ureq`, and `uuid`; `proptest` is a development dependency. `Cargo.lock` pins the dependency graph. Each crate retains its own licensing; the project's Apache-2.0 declaration does not override it.
+`Cargo.toml` directly names `ignore`, `libc`, `ring`, `rpassword`, `serde`, `serde_json`, `signal-hook`, `toml`, `ureq`, and `uuid`; `proptest` and `tempfile` are development dependencies. `Cargo.lock` pins the dependency graph. Each crate retains its own licensing; the project's Apache-2.0 declaration does not override it.
 
 `deny.toml` defines the automated dependency policy. The CI check examines the locked graph with all features, development dependencies, and the Linux, macOS, and Windows targets listed there. It rejects unknown licenses, dependency sources, advisories, yanked crates, and wildcard requirements. The current policy accepts Apache-2.0, BSD-3-Clause, CDLA-Permissive-2.0, ISC, MIT, Unicode-3.0, and Unlicense terms. Duplicate dependency versions are warnings so compatibility-driven pairs remain visible for review.
 

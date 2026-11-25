@@ -27,15 +27,11 @@ const POST_EXIT_PIPE_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 // No caller-provided command, bus address, environment, or shell is accepted.
 
 struct ManagedChild(Option<std::process::Child>);
-impl std::ops::Deref for ManagedChild {
-    type Target = std::process::Child;
-    fn deref(&self) -> &Self::Target {
-        self.0.as_ref().unwrap()
-    }
-}
-impl std::ops::DerefMut for ManagedChild {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.0.as_mut().unwrap()
+impl ManagedChild {
+    fn child_mut(&mut self) -> io::Result<&mut std::process::Child> {
+        self.0
+            .as_mut()
+            .ok_or_else(|| io::Error::other("host child process was already detached"))
     }
 }
 fn reap(child: &mut std::process::Child) -> bool {
@@ -70,11 +66,12 @@ impl Drop for ManagedChild {
 fn bounded_host(command: &mut Command) -> io::Result<String> {
     let mut child = ManagedChild(Some(command.spawn()?));
     let mut stdout = child
+        .child_mut()?
         .stdout
         .take()
         .ok_or_else(|| io::Error::other("missing pipe"))?;
     nonblocking(&stdout)?;
-    let mut stderr = child.stderr.take();
+    let mut stderr = child.child_mut()?.stderr.take();
     if let Some(pipe) = &stderr {
         nonblocking(pipe)?;
     }
@@ -89,11 +86,12 @@ fn bounded_host(command: &mut Command) -> io::Result<String> {
             drain(pipe, &mut errors, remaining)?;
         }
         if output.len() + errors.len() >= 16 * 1024 || start.elapsed() > Duration::from_secs(5) {
+            let child = child.child_mut()?;
             let _ = child.kill();
-            let _ = reap(&mut child);
+            let _ = reap(child);
             return Err(io::Error::other("host command exceeded bound"));
         }
-        if let Some(status) = child.try_wait()? {
+        if let Some(status) = child.child_mut()?.try_wait()? {
             let remaining = (16 * 1024usize).saturating_sub(output.len() + errors.len());
             drain(&mut stdout, &mut output, remaining)?;
             if !status.success() {
@@ -366,7 +364,7 @@ impl HostLease {
         self.record("").map_err(HostLeaseError::CleanupUnconfirmed)
     }
     fn record(&mut self, text: &str) -> io::Result<()> {
-        let directory = self.receipt.parent().unwrap();
+        let directory = receipt_parent(&self.receipt)?;
         if text.is_empty() {
             match fs::remove_file(&self.receipt) {
                 Ok(()) => {}
@@ -393,6 +391,12 @@ impl HostLease {
         }
         File::open(directory)?.sync_all()
     }
+}
+
+fn receipt_parent(receipt: &Path) -> io::Result<&Path> {
+    receipt
+        .parent()
+        .ok_or_else(|| io::Error::other("invalid cleanup receipt path"))
 }
 
 fn parse_previous_unit_state(output: &str) -> io::Result<PreviousUnitState> {
@@ -493,15 +497,7 @@ impl Supervisor {
             "--property=ControlGroup",
             "--value",
         ]))?;
-        let path = Path::new(group.trim());
-        if !path.is_absolute()
-            || path
-                .components()
-                .any(|c| matches!(c, std::path::Component::ParentDir))
-        {
-            return Err(io::Error::other("invalid cgroup identity"));
-        }
-        supervisor.group = Path::new("/sys/fs/cgroup").join(path.strip_prefix("/").unwrap());
+        supervisor.group = control_group_path(Path::new(group.trim()))?;
         supervisor.verify()?;
         let membership = fs::read_to_string("/proc/thread-self/cgroup")?;
         let relative = membership
@@ -585,6 +581,54 @@ impl Supervisor {
         self.cleaned
     }
 }
+
+fn control_group_path(path: &Path) -> io::Result<PathBuf> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(io::Error::other("invalid cgroup identity"));
+    }
+    let relative = path
+        .strip_prefix("/")
+        .map_err(|_| io::Error::other("invalid cgroup identity"))?;
+    Ok(Path::new("/sys/fs/cgroup").join(relative))
+}
+
+#[cfg(test)]
+mod path_invariant_tests {
+    use super::{control_group_path, receipt_parent};
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn cleanup_receipt_requires_a_parent_directory() {
+        assert!(receipt_parent(Path::new("krypper.receipt")).is_ok());
+        assert!(receipt_parent(Path::new("")).is_err());
+    }
+
+    #[test]
+    fn recording_rejects_a_receipt_without_a_parent_instead_of_panicking() {
+        let mut lease = super::HostLease {
+            _lock: std::fs::File::open("/dev/null").expect("open inert lock fixture"),
+            receipt: PathBuf::new(),
+        };
+
+        assert!(lease.record("").is_err());
+    }
+
+    #[test]
+    fn control_group_paths_must_be_absolute_and_contained() {
+        assert_eq!(
+            control_group_path(Path::new("/user.slice/krypper-test.service"))
+                .expect("validated absolute cgroup path"),
+            Path::new("/sys/fs/cgroup/user.slice/krypper-test.service")
+        );
+        assert!(control_group_path(Path::new("user.slice/krypper-test.service")).is_err());
+        assert!(control_group_path(Path::new("/user.slice/../other.service")).is_err());
+    }
+}
+
 impl Drop for Supervisor {
     fn drop(&mut self) {
         if !self.clean() {
@@ -781,14 +825,18 @@ fn run_with_containment(
         result.outcome = ProcessOutcome::SpawnFailed;
         let mut child = ManagedChild(Some(command.spawn()?));
         launched = true;
-        let mut out = child
-            .stdout
-            .take()
-            .ok_or_else(|| io::Error::other("missing stdout"))?;
-        let mut err = child
-            .stderr
-            .take()
-            .ok_or_else(|| io::Error::other("missing stderr"))?;
+        let (mut out, mut err) = {
+            let child = child.child_mut()?;
+            let out = child
+                .stdout
+                .take()
+                .ok_or_else(|| io::Error::other("missing stdout"))?;
+            let err = child
+                .stderr
+                .take()
+                .ok_or_else(|| io::Error::other("missing stderr"))?;
+            (out, err)
+        };
         nonblocking(&out)?;
         nonblocking(&err)?;
         let mut stdout = Vec::new();
@@ -812,7 +860,7 @@ fn run_with_containment(
                 stop = StopReason::Cancelled;
                 break;
             }
-            if let Some(exit) = child.try_wait()? {
+            if let Some(exit) = child.child_mut()?.try_wait()? {
                 let cpu_budget_exceeded = cpu_usage_usec(&supervisor.group)? >= cpu_budget;
                 // Read kernel counters before cleanup removes the cgroup files.
                 record_cgroup_limit_events(&supervisor.group, &mut events);
@@ -881,7 +929,7 @@ fn run_with_containment(
         }
         result.cleanup_confirmed = supervisor.clean() && output_drain_confirmed;
         // cgroup.kill terminates bwrap as well as descendants; reap our direct child.
-        if !reap(&mut child) {
+        if !reap(child.child_mut()?) {
             result.cleanup_confirmed = false;
         }
         result.outcome = resolve_outcome(stop, &events, result.cleanup_confirmed);

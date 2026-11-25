@@ -354,27 +354,7 @@ fn validate_profile_id(id: &str) -> Result<(), &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    static NEXT_DIR: AtomicUsize = AtomicUsize::new(0);
-
-    struct TempDir(std::path::PathBuf);
-
-    impl TempDir {
-        fn new() -> Self {
-            let id = NEXT_DIR.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir()
-                .join(format!("krypper-profiles-test-{}-{id}", std::process::id()));
-            fs::create_dir(&path).unwrap();
-            Self(path)
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
+    use crate::test_support::TempDir;
 
     fn compatible_profile(id: &str, endpoint: &str) -> ProviderProfile {
         ProviderProfile {
@@ -390,7 +370,7 @@ mod tests {
     #[test]
     fn profiles_round_trip_in_deterministic_id_order_without_secret_fields() {
         let directory = TempDir::new();
-        let path = directory.0.join("krypper/provider-profiles.json");
+        let path = directory.path().join("krypper/provider-profiles.json");
         save_provider_profiles(
             &path,
             &[
@@ -410,7 +390,7 @@ mod tests {
     #[test]
     fn rejects_unknown_fields_duplicate_ids_and_untrusted_endpoints() {
         let directory = TempDir::new();
-        let path = directory.0.join("krypper/provider-profiles.json");
+        let path = directory.path().join("krypper/provider-profiles.json");
         save_provider_profiles(
             &path,
             &[
@@ -441,8 +421,8 @@ mod tests {
     #[test]
     fn profile_lifecycle_adds_replaces_disables_enables_and_removes_last_secret() {
         let directory = TempDir::new();
-        let profile_path = directory.0.join("krypper/provider-profiles.json");
-        let credential_path = directory.0.join("krypper/credentials.json");
+        let profile_path = directory.path().join("krypper/provider-profiles.json");
+        let credential_path = directory.path().join("krypper/credentials.json");
         let first = compatible_profile("mock", "https://first.example/v1/chat/completions");
         add_profile(&profile_path, first.clone()).unwrap();
         assert!(add_profile(&profile_path, first.clone()).is_err());
