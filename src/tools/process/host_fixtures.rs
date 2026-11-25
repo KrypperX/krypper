@@ -160,11 +160,41 @@ fn real_sandbox_isolation_blocks_host_paths_and_namespaces() {
     };
     let path = workspace();
     let outside = Path::new("/var/tmp").join(format!("krypper-real-canary-{}", Uuid::new_v4()));
+    let probe_name = format!("krypper-fd-write-{}", Uuid::new_v4());
+    let probe_paths = [
+        path.join(&probe_name),
+        host.toolchain.join(&probe_name),
+        host.registry.join(&probe_name),
+    ];
+    assert!(probe_paths.iter().all(|probe| !probe.exists()));
+    for probe in &probe_paths {
+        let canary = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(probe)
+            .unwrap_or_else(|error| {
+                panic!("host fixture root must allow a unique write probe: {error}")
+            });
+        drop(canary);
+        fs::remove_file(probe).unwrap();
+    }
     fs::write(&outside, "host private canary").unwrap();
     std::os::unix::fs::symlink(&outside, path.join("escape")).unwrap();
-    fs::write(
-        path.join("src/lib.rs"),
-        r#"
+    let source = r#"
+use std::os::unix::fs::MetadataExt;
+
+fn assert_create_denied(path: &str, expected: std::io::ErrorKind, context: &str) {
+    match std::fs::OpenOptions::new().write(true).create_new(true).open(path) {
+        Err(error) => assert_eq!(error.kind(), expected, "{context}: {error}"),
+        Ok(mut file) => {
+            let write = std::io::Write::write_all(&mut file, b"read-only mount probe");
+            drop(file);
+            let cleanup = std::fs::remove_file(path);
+            panic!("{context}: create succeeded (write={write:?}); cleanup={cleanup:?}");
+        }
+    }
+}
+
 #[test] fn isolation_selected_test() {
     assert!(std::fs::read_to_string("escape").is_err(), "workspace symlink escaped");
     assert!(std::fs::write("escape", "changed").is_err(), "workspace symlink was writable");
@@ -174,17 +204,81 @@ fn real_sandbox_isolation_blocks_host_paths_and_namespaces() {
     let status = std::fs::read_to_string("/proc/self/status").unwrap();
     let nspid = status.lines().find(|line| line.starts_with("NSpid:")).expect("NSpid");
     assert_eq!(nspid.split_whitespace().count(), 2, "pid namespace not isolated: {nspid}");
+
+    let visible_fds = std::fs::read_dir("/proc/self/fd").unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").unwrap();
+    for fd in 200..=202 {
+        let fd_name = fd.to_string();
+        let fd_path = format!("/proc/self/fd/{fd}");
+        let mountpoint = match fd {
+            200 => "/workspace",
+            201 => "/toolchain",
+            202 => "/cargo/registry",
+            _ => unreachable!(),
+        };
+        let is_read_only = mountinfo.lines().any(|line| {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            fields.get(4) == Some(&mountpoint)
+                && fields
+                    .get(5)
+                    .is_some_and(|options| options.split(',').any(|option| option == "ro"))
+        });
+        assert!(is_read_only, "{mountpoint} is not mounted read-only");
+        assert_create_denied(
+            &format!("{mountpoint}/__FD_PROBE__"),
+            std::io::ErrorKind::ReadOnlyFilesystem,
+            &format!("read-only mount {mountpoint}"),
+        );
+
+        let descriptor_is_visible = visible_fds.contains(&fd_name);
+        if descriptor_is_visible {
+            let descriptor = std::fs::metadata(&fd_path).expect("visible mount descriptor");
+            let mounted_root = std::fs::metadata(mountpoint).expect("mount source destination");
+            assert!(descriptor.is_dir(), "FD {fd} is not a directory");
+            assert_eq!((descriptor.dev(), descriptor.ino()), (mounted_root.dev(), mounted_root.ino()), "FD {fd} is not the expected mount source");
+            eprintln!("mount source FD {fd} remains visible for {mountpoint}");
+            assert_create_denied(
+                &format!("{fd_path}/__FD_PROBE__"),
+                std::io::ErrorKind::ReadOnlyFilesystem,
+                &format!("visible mount source FD {fd}"),
+            );
+        } else {
+            eprintln!("mount source FD {fd} is closed in the payload");
+            assert_create_denied(
+                &format!("{fd_path}/__FD_PROBE__"),
+                std::io::ErrorKind::NotFound,
+                &format!("closed mount source FD {fd}"),
+            );
+        }
+    }
 }
 #[test] fn unrelated_test_is_filtered() { panic!("unrelated test ran"); }
-"#,
-    )
-    .unwrap();
+"#
+        .replace("__FD_PROBE__", &probe_name);
+    fs::write(path.join("src/lib.rs"), source).unwrap();
     let root = capture_workspace_root_at(&path).unwrap();
     let result = run(&root, &policy(&host), Some("isolation_selected_test"));
+
+    let leaked_probe_files: Vec<_> = probe_paths
+        .iter()
+        .filter(|probe| probe.exists())
+        .cloned()
+        .collect();
+    let outside_contents = fs::read_to_string(&outside).ok();
+    for probe in &leaked_probe_files {
+        fs::remove_file(probe).expect("remove host-side FD probe artifact");
+    }
+    fs::remove_dir_all(&path).unwrap();
+    fs::remove_file(&outside).unwrap();
+
+    assert!(
+        leaked_probe_files.is_empty(),
+        "read-only FD probe created host files: {leaked_probe_files:?}"
+    );
     assert!(result.succeeded(), "isolation fixture failed: {result:?}");
     assert_eq!(result.executed_tests, Some(1), "{result:?}");
     assert!(result.cleanup_confirmed, "{result:?}");
-    assert_eq!(fs::read_to_string(&outside).unwrap(), "host private canary");
-    fs::remove_dir_all(path).unwrap();
-    fs::remove_file(outside).unwrap();
+    assert_eq!(outside_contents.as_deref(), Some("host private canary"));
 }

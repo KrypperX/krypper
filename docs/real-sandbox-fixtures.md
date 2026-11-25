@@ -54,7 +54,7 @@ invocations would contend for the same host resource.
 | Fixture | Boundary |
 | --- | --- |
 | `real_sandbox_host_reports_supported_prerequisites` | The host really provides all five primitives (printed per run). |
-| `real_sandbox_isolation_blocks_host_paths_and_namespaces` | A workspace symlink to an outside canary is unreadable and unwritable; `/home` and `/run/user` are absent; cwd is `/workspace`; `NSpid` has a single entry, so a PID namespace exists. |
+| `real_sandbox_isolation_blocks_host_paths_and_namespaces` | A workspace symlink to an outside canary is unreadable and unwritable; `/home` and `/run/user` are absent; cwd is `/workspace`; `NSpid` has a single entry; host-side create-new canaries confirm all three mount sources are writable before launch; `/proc/self/fd` is inspected and writes through mount source descriptors 200–202 are denied. |
 | `real_sandbox_environment_and_network_carry_no_host_secrets` | Parent-provided `GITHUB_TOKEN` and a per-run secret canary are absent inside; a live host loopback listener is unreachable inside and still reachable outside. |
 | `real_sandbox_cleanup_releases_state_for_the_next_run` | Cleanup is confirmed, no recovery hold is raised, and an immediately following run is not degraded. |
 | `real_offline_cargo_behavior_is_preserved_through_the_harness` | The registered profile still runs through `WorkspacePlan` and Harness with a literal filter: the selected test executes, the unrelated test is filtered. |
@@ -74,7 +74,10 @@ the legacy pair once the gated suite has been exercised on a provisioned host.
 ## What is still unproven
 
 Ordinary CI cannot establish: Bubblewrap flag semantics, in-payload namespace behaviour,
-`pre_exec` cgroup attachment, `close_range` descriptor hygiene, delegated-subtree checks,
-crash-time lease recovery, or cross-process cleanup holds. Those remain source-review claims
-until a gated run on a provisioned host supplies evidence. macOS and Windows behaviour is
-unknown.
+`pre_exec` cgroup attachment, ambient descriptor hygiene beyond the explicit 200–202 write probes,
+delegated-subtree checks, crash-time lease recovery, or cross-process cleanup holds. Those remain
+source-review claims until a gated run on a provisioned host supplies evidence. macOS and Windows
+behaviour is unknown.
+
+This fixture does not evaluate syscall filtering. The fixed Bubblewrap command installs no seccomp
+profile, so passing its mount-source probes provides no seccomp evidence.
