@@ -149,6 +149,17 @@ fn direction_guard_inspects_macro_tokens_and_fails_closed_on_unknown_macros_and_
         "{custom_attribute:?}"
     );
 
+    let custom_use_attribute = scan_source(
+        "#[custom_codegen] use std::fmt::Debug;",
+        "custom_use_attribute.rs",
+    );
+    assert!(
+        custom_use_attribute
+            .iter()
+            .any(|violation| violation.contains("uninspected production attribute")),
+        "{custom_use_attribute:?}"
+    );
+
     let module_attribute = scan_source("#[custom_codegen] mod nested {}", "module_attribute.rs");
     assert!(
         module_attribute
@@ -177,6 +188,26 @@ fn direction_guard_inspects_macro_tokens_and_fails_closed_on_unknown_macros_and_
             .iter()
             .any(|violation| violation.contains("macro import")),
         "{shadowed_derive:?}"
+    );
+
+    let shadowed_builtin_derive = scan_source(
+        "use untrusted::Clone; #[derive(Clone)] struct Item;",
+        "shadowed_builtin_derive.rs",
+    );
+    assert!(
+        shadowed_builtin_derive
+            .iter()
+            .any(|violation| violation.contains("macro import")),
+        "{shadowed_builtin_derive:?}"
+    );
+
+    let inspected_builtin_derive_import = scan_source(
+        "use std::clone::Clone; #[derive(Clone)] struct Item;",
+        "inspected_builtin_derive_import.rs",
+    );
+    assert!(
+        inspected_builtin_derive_import.is_empty(),
+        "{inspected_builtin_derive_import:?}"
     );
 
     let inspected_derive = scan_source(
@@ -336,5 +367,130 @@ fn crate_root_brain_reexports_and_globs_are_rejected() {
             .iter()
             .any(|violation| violation.contains("Brain glob import")),
         "Brain glob should fail closed: {violations:?}"
+    );
+}
+
+#[test]
+fn crate_root_inline_facades_and_transitive_reexports_are_rejected() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("lib.rs");
+    fs::write(
+        &root,
+        r#"
+            pub mod compatibility {
+                pub use crate::extensions::provider::PublicModelError as ModelError;
+            }
+            pub use crate::compatibility::ModelError as PublicModelError;
+            pub mod extensions {
+                pub mod provider {
+                    pub use crate::brain::ModelError as PublicModelError;
+                }
+            }
+        "#,
+    )
+    .unwrap();
+    let mut violations = Vec::new();
+
+    let brain_exports = scan_crate_root_aliases(&root, &mut violations);
+
+    for (facade, item) in [
+        ("compatibility", "ModelError"),
+        ("extensions", "provider::PublicModelError"),
+    ] {
+        assert!(
+            brain_exports.contains(facade),
+            "facade `{facade}` was not recorded: {brain_exports:?}"
+        );
+        let tool_source = format!("use crate::{facade}::{item};");
+        let tool_violations =
+            scan_source_with_root_exports(&tool_source, "tools_facade.rs", 1, &brain_exports);
+        assert!(
+            !tool_violations.is_empty(),
+            "Tools import through `{facade}::{item}` was not rejected"
+        );
+    }
+    assert!(brain_exports.contains("PublicModelError"));
+    let root_alias_violations = scan_source_with_root_exports(
+        "use crate::PublicModelError;",
+        "tools_root_facade_alias.rs",
+        1,
+        &brain_exports,
+    );
+    assert!(
+        !root_alias_violations.is_empty(),
+        "a crate-root re-export of an inline facade was not rejected"
+    );
+}
+
+#[test]
+fn crate_root_external_facades_that_reexport_brain_are_rejected() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("lib.rs");
+    fs::write(&root, "pub mod facade;").unwrap();
+    fs::write(
+        directory.path().join("facade.rs"),
+        "pub use crate::brain::ModelError;",
+    )
+    .unwrap();
+    let mut violations = Vec::new();
+
+    let brain_exports = scan_crate_root_aliases(&root, &mut violations);
+
+    assert!(
+        brain_exports.contains("facade"),
+        "external Brain facade was not recorded: {brain_exports:?}"
+    );
+    let tool_violations = scan_source_with_root_exports(
+        "use crate::facade::ModelError;",
+        "tools_external_facade.rs",
+        1,
+        &brain_exports,
+    );
+    assert!(
+        !tool_violations.is_empty(),
+        "Tools import through an external Brain facade was not rejected"
+    );
+}
+
+#[test]
+fn module_scanner_resolves_inline_path_attributes_and_reports_read_failures() {
+    let directory = tempfile::tempdir().unwrap();
+    let source_directory = directory.path().join("src");
+    let inline_directory = source_directory.join("tools/inline");
+    fs::create_dir_all(&inline_directory).unwrap();
+    fs::write(source_directory.join("lib.rs"), "mod tools;").unwrap();
+
+    let tools_root = source_directory.join("tools.rs");
+    fs::write(
+        &tools_root,
+        r#"
+            mod inline {
+                #[path = "child.rs"]
+                mod child;
+            }
+        "#,
+    )
+    .unwrap();
+    fs::write(
+        inline_directory.join("child.rs"),
+        "use crate::brain::HiddenDependency;",
+    )
+    .unwrap();
+
+    let violations = scan_module_file(&tools_root);
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("crate::brain")),
+        "inline module path target was not scanned: {violations:?}"
+    );
+
+    fs::write(&tools_root, "#[path = \"missing.rs\"] mod missing;").unwrap();
+    let violations = scan_module_file(&tools_root);
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("unable to read Rust source")),
+        "an unreadable path target did not fail closed: {violations:?}"
     );
 }
