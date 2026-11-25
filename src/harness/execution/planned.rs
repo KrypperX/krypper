@@ -297,11 +297,6 @@ fn check_and_review_impact_plan(
 }
 
 fn impact_needs_model_review(report: &ImpactReport) -> bool {
-    let mutation_paths = report
-        .mutation_targets
-        .iter()
-        .map(String::as_str)
-        .collect::<BTreeSet<_>>();
     report.mutation_targets.len() > 1
         || report.truncated
         || !report.unknowns.is_empty()
@@ -309,7 +304,7 @@ fn impact_needs_model_review(report: &ImpactReport) -> bool {
         || report
             .references
             .iter()
-            .any(|reference| !mutation_paths.contains(reference.path.as_str()))
+            .any(|reference| reference.may_remain_after_plan)
         || report.files.iter().any(|file| {
             matches!(
                 file.public_api_status,

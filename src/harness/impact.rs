@@ -14,7 +14,10 @@ const MAX_IMPACT_FILES: usize = 16;
 const MAX_SYMBOL_QUERIES: usize = 4;
 const MAX_IMPACT_REFERENCES: usize = 64;
 
-/// Whether the bounded lexical search completed within its configured limits.
+/// Whether bounded lexical search completed within its configured limits and search scope.
+///
+/// Complete means no configured limit or search error was encountered. The workspace search
+/// scope still follows `.gitignore` rules and excludes `.git` metadata directories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ImpactCoverage {
@@ -34,6 +37,8 @@ pub struct ImpactReference {
     pub kind: ImpactReferenceKind,
     /// Literal search confirms this source range; semantic linkage is not parsed.
     pub confidence: ImpactEvidenceConfidence,
+    /// The reference remains or may remain after the proposed plan is applied.
+    pub may_remain_after_plan: bool,
 }
 
 /// Classification inferred from the reference path and source line.
@@ -147,7 +152,7 @@ pub(crate) fn analyze_plan(
     {
         let normalized = normalize_workspace_relative_path(path)
             .ok_or(ImpactAnalysisError::UnsupportedMutation)?;
-        if !normalized_targets.insert(normalized) {
+        if !normalized_targets.insert(workspace_path_comparison_key(&normalized)) {
             return Err(ImpactAnalysisError::ConflictingEdits);
         }
         targets.insert(path.clone());
@@ -215,7 +220,7 @@ pub(crate) fn analyze_plan(
                 file.path.display()
             ));
         }
-        symbols.extend(identifiers(changed_text));
+        symbols.extend(changed_identifiers(&old_lines, &new_lines));
         let (public_api_status, public_api_symbols) = public_api_changes(&file.before, &file.after);
         if public_api_status == PublicApiStatus::Unknown {
             report.coverage = Some(ImpactCoverage::Partial);
@@ -257,7 +262,7 @@ pub(crate) fn analyze_plan(
             "symbol search was limited to {MAX_SYMBOL_QUERIES} identifiers; remaining references are unknown"
         ));
     }
-    for symbol in candidates.iter().take(MAX_SYMBOL_QUERIES) {
+    'symbol_search: for symbol in candidates.iter().take(MAX_SYMBOL_QUERIES) {
         let locations =
             match session.search_workspace_tree_text(task_id, turn_id, Path::new("."), symbol) {
                 Ok(locations) => locations,
@@ -296,7 +301,24 @@ pub(crate) fn analyze_plan(
                 ));
                 continue;
             };
-            if let Some((start_column, end_column)) = identifier_range(line, symbol) {
+            let changed_file = changed.iter().find(|file| {
+                workspace_path_comparison_key(&file.path)
+                    == workspace_path_comparison_key(&location.path)
+            });
+            let after_line = changed_file.and_then(|file| {
+                file.before
+                    .as_deref()
+                    .and_then(|before| corresponding_after_line(before, &file.after, location.line))
+            });
+            for (start_column, end_column) in identifier_ranges(line, symbol) {
+                if report.references.len() == MAX_IMPACT_REFERENCES {
+                    report.coverage = Some(ImpactCoverage::Partial);
+                    report.truncated = true;
+                    report.unknowns.push(format!(
+                        "references were limited to {MAX_IMPACT_REFERENCES}; additional locations are unknown"
+                    ));
+                    break 'symbol_search;
+                }
                 report.references.push(ImpactReference {
                     symbol: symbol.clone(),
                     path: location.path.to_string_lossy().into_owned(),
@@ -305,6 +327,11 @@ pub(crate) fn analyze_plan(
                     end_column,
                     kind: reference_kind(&location.path, line),
                     confidence: ImpactEvidenceConfidence::ExactSourceRange,
+                    may_remain_after_plan: match changed_file {
+                        None => true,
+                        Some(_) => after_line
+                            .is_none_or(|after| !identifier_ranges(after, symbol).is_empty()),
+                    },
                 });
             }
         }
@@ -320,6 +347,9 @@ pub(crate) fn analyze_plan(
     }
     report.limitations.push(
         "references use bounded ASCII lexical searches; semantic resolution, macros and generated code are not parsed".to_owned(),
+    );
+    report.limitations.push(
+        "workspace search respects applicable .gitignore rules and skips .git metadata directories; references in ignored paths are outside this report's scope".to_owned(),
     );
     Ok((report, expected_revisions))
 }
@@ -367,14 +397,25 @@ fn changed_lines<'a>(
     (start, end, old_changed, new_changed)
 }
 
-fn identifiers<'a>(lines: impl Iterator<Item = &'a str>) -> BTreeSet<String> {
+fn changed_identifiers(old_lines: &[&str], new_lines: &[&str]) -> BTreeSet<String> {
+    let old_counts = identifier_counts(old_lines.iter().copied());
+    let new_counts = identifier_counts(new_lines.iter().copied());
+    old_counts
+        .keys()
+        .chain(new_counts.keys())
+        .filter(|symbol| old_counts.get(*symbol) != new_counts.get(*symbol))
+        .cloned()
+        .collect()
+}
+
+fn identifier_counts<'a>(lines: impl Iterator<Item = &'a str>) -> BTreeMap<String, usize> {
     const KEYWORDS: &[&str] = &[
         "as", "async", "await", "bool", "break", "const", "continue", "crate", "else", "enum",
         "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut",
         "pub", "return", "self", "Self", "static", "struct", "super", "trait", "true", "type",
         "unsafe", "use", "where", "while", "String", "Option", "Result", "Some", "None",
     ];
-    let mut result = BTreeSet::new();
+    let mut result = BTreeMap::new();
     for line in lines {
         let bytes = line.as_bytes();
         let mut index = 0;
@@ -390,7 +431,7 @@ fn identifiers<'a>(lines: impl Iterator<Item = &'a str>) -> BTreeSet<String> {
             }
             let token = &line[start..index];
             if !KEYWORDS.contains(&token) {
-                result.insert(token.to_owned());
+                *result.entry(token.to_owned()).or_default() += 1;
             }
         }
     }
@@ -458,6 +499,20 @@ fn normalize_workspace_relative_path(path: &Path) -> Option<PathBuf> {
     (!normalized.as_os_str().is_empty()).then_some(normalized)
 }
 
+fn workspace_path_comparison_key(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        // Windows paths are case-insensitive. Lowercase only the comparison key, preserving the
+        // caller's original path for all reads and writes. Lossy conversion errs on the safe side
+        // by rejecting potentially equivalent non-Unicode paths as duplicates.
+        PathBuf::from(path.to_string_lossy().to_lowercase())
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_path_buf()
+    }
+}
+
 fn public_declarations(contents: &str) -> Option<BTreeSet<String>> {
     let mut declarations = BTreeSet::new();
     for line in contents
@@ -494,22 +549,57 @@ fn reference_kind(path: &Path, line: &str) -> ImpactReferenceKind {
     }
 }
 
-fn identifier_range(line: &str, symbol: &str) -> Option<(usize, usize)> {
+fn identifier_ranges(line: &str, symbol: &str) -> Vec<(usize, usize)> {
     let mut search_from = 0;
+    let mut ranges = Vec::new();
     while let Some(offset) = line[search_from..].find(symbol) {
         let start = search_from + offset;
         let end = start + symbol.len();
         let before_ok = start == 0 || !is_identifier_continue(line.as_bytes()[start - 1]);
         let after_ok = end == line.len() || !is_identifier_continue(line.as_bytes()[end]);
         if before_ok && after_ok {
-            return Some((start + 1, end + 1));
+            ranges.push((start + 1, end + 1));
         }
         search_from = end;
         if search_from >= line.len() {
-            return None;
+            break;
         }
     }
-    None
+    ranges
+}
+
+fn corresponding_after_line<'a>(before: &str, after: &'a str, line: usize) -> Option<&'a str> {
+    let before_lines = before.lines().collect::<Vec<_>>();
+    let after_lines = after.lines().collect::<Vec<_>>();
+    let index = line.checked_sub(1)?;
+    if index >= before_lines.len() {
+        return None;
+    }
+    let prefix = before_lines
+        .iter()
+        .zip(&after_lines)
+        .take_while(|(old, new)| old == new)
+        .count();
+    let suffix = before_lines[prefix..]
+        .iter()
+        .rev()
+        .zip(after_lines[prefix..].iter().rev())
+        .take_while(|(old, new)| old == new)
+        .count();
+    let old_changed_end = before_lines.len().saturating_sub(suffix);
+    let new_changed_end = after_lines.len().saturating_sub(suffix);
+    let after_index = if index < prefix {
+        index
+    } else if index >= old_changed_end {
+        after_lines
+            .len()
+            .checked_sub(before_lines.len().saturating_sub(index))?
+    } else if old_changed_end - prefix == new_changed_end - prefix {
+        prefix + (index - prefix)
+    } else {
+        return None;
+    };
+    after_lines.get(after_index).copied()
 }
 
 fn is_identifier_start(byte: u8) -> bool {
@@ -666,6 +756,97 @@ mod tests {
             fs::read_to_string(workspace.path().join("file.rs")).unwrap(),
             "old name\n"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn analysis_rejects_case_equivalent_path_aliases_before_mutation() {
+        let workspace = TempWorkspace::new();
+        fs::write(workspace.path().join("Foo.rs"), "old name\n").expect("write source");
+        let (session, task_id, turn_id) = running_session(workspace.path());
+        let plan = WorkspacePlan::try_from_actions(
+            vec![
+                WorkspaceAction::ReplaceText {
+                    path: PathBuf::from("Foo.rs"),
+                    match_text: "old".to_owned(),
+                    replacement_text: "new".to_owned(),
+                },
+                WorkspaceAction::ReplaceText {
+                    path: PathBuf::from("foo.rs"),
+                    match_text: "name".to_owned(),
+                    replacement_text: "symbol".to_owned(),
+                },
+            ],
+            2,
+        )
+        .expect("valid bounded plan");
+
+        assert_eq!(
+            analyze_plan(&session, task_id, turn_id, &plan),
+            Err(ImpactAnalysisError::ConflictingEdits)
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.path().join("Foo.rs")).unwrap(),
+            "old name\n"
+        );
+    }
+
+    #[test]
+    fn analysis_reports_ignored_path_search_scope() {
+        let workspace = TempWorkspace::new();
+        fs::write(workspace.path().join("source.rs"), "fn old_name() {}\n").expect("write source");
+        fs::write(workspace.path().join(".gitignore"), "ignored.rs\n").expect("write ignore rules");
+        fs::write(
+            workspace.path().join("ignored.rs"),
+            "fn caller() { old_name(); }\n",
+        )
+        .expect("write ignored reference");
+        let (session, task_id, turn_id) = running_session(workspace.path());
+        let plan = WorkspacePlan::try_from_actions(
+            vec![WorkspaceAction::ReplaceText {
+                path: PathBuf::from("source.rs"),
+                match_text: "old_name".to_owned(),
+                replacement_text: "new_name".to_owned(),
+            }],
+            1,
+        )
+        .expect("valid bounded plan");
+
+        let (report, _) = analyze_plan(&session, task_id, turn_id, &plan)
+            .expect("analyze bounded source and visible workspace paths");
+
+        assert_eq!(report.coverage, Some(ImpactCoverage::Complete));
+        assert!(!report
+            .references
+            .iter()
+            .any(|reference| reference.path == "ignored.rs"));
+        assert!(report.limitations.iter().any(|limitation| {
+            limitation.contains(".gitignore") && limitation.contains("ignored paths")
+        }));
+    }
+
+    #[test]
+    fn analysis_caps_reference_ranges_within_a_line() {
+        let workspace = TempWorkspace::new();
+        let before = format!("fn old_name() {{ {} }}\n", "old_name(); ".repeat(70));
+        fs::write(workspace.path().join("source.rs"), &before).expect("write source");
+        let (session, task_id, turn_id) = running_session(workspace.path());
+        let plan = WorkspacePlan::try_from_actions(
+            vec![WorkspaceAction::ReplaceText {
+                path: PathBuf::from("source.rs"),
+                match_text: "fn old_name".to_owned(),
+                replacement_text: "fn new_name".to_owned(),
+            }],
+            1,
+        )
+        .expect("valid bounded plan");
+
+        let (report, _) = analyze_plan(&session, task_id, turn_id, &plan)
+            .expect("analyze bounded source references");
+
+        assert_eq!(report.references.len(), MAX_IMPACT_REFERENCES);
+        assert_eq!(report.coverage, Some(ImpactCoverage::Partial));
+        assert!(report.truncated);
     }
 
     #[test]

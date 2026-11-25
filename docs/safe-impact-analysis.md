@@ -2,10 +2,11 @@
 
 Krypper exposes an opt-in Harness path that analyzes a workspace plan before applying it. The
 verified task workflow uses this path for its initial and correction plans. Plans that edit
-multiple paths, change a detected public Rust API, have references outside their mutation targets,
-or contain actionable unknown or truncated evidence receive an additional review request from the
-same local Ollama model. If review changes the impact report, the final report is sent back for one
-confirmation; the plan must remain identical and the report must still match before execution.
+multiple paths, change a detected public Rust API, have references that remain or may remain after
+the plan (including in another part of a mutation target), or contain actionable unknown or
+truncated evidence receive an additional review request from the same local Ollama model. If review
+changes the impact report, the final report is sent back for one confirmation; the plan must remain
+identical and the report must still match before execution.
 
 Library callers can use the same flow:
 
@@ -59,14 +60,17 @@ second patch executor, shell runner, process authority, or workspace grant.
   retained. Each existing workspace search uses the Tools layer's 16 MiB bound.
 - Existing-file patch and replacement previews use the same transformation rules as writes. Each
   normalized workspace-relative target may be mutated only once per plan; duplicate paths and
-  lexical aliases fail before writes.
+  lexical aliases fail before writes. Windows case-equivalent aliases are also rejected.
 - Reference ranges include a workspace-relative path, one-based line, one-based byte columns,
-  classification, and confidence. Test paths and public API references are called out separately.
+  classification, confidence, and whether the reference remains or may remain after the plan.
+  Test paths and public API references are called out separately.
 - Public Rust API changes use conservative lexical checks. Changed public item names are reported
   as changes; a changed file with stable public names is reported as unknown because signatures,
   fields, variants, and other members are not parsed. Symbol references use bounded literal search.
-  `coverage` describes whether those bounded searches hit a limit; a separate `limitations` field
-  says that they do not resolve Rust semantics, macros, generated code, or indirect dependencies.
+  `coverage` describes whether those bounded searches hit a limit within the workspace search
+  scope. Search follows applicable `.gitignore` rules and skips `.git` metadata directories, so
+  references in ignored paths remain outside the report. A separate `limitations` field says that
+  searches do not resolve Rust semantics, macros, generated code, or indirect dependencies.
 - Search failures, range changes, symbol limits, and result limits are reported as unknown or
   truncated evidence. They are never represented as proof that no references exist.
 - A final read-only analysis is repeated before execution. Existing-file writes recheck the full

@@ -97,6 +97,57 @@ fn impact_checked_planner_sends_references_to_same_model_before_accepting_plan()
 }
 
 #[test]
+fn same_file_references_are_sent_for_model_review() {
+    let workspace = TempDir::new();
+    fs::write(
+        workspace.path().join("source.rs"),
+        "fn old_name() { old_name(); }\n",
+    )
+    .expect("write source and same-file caller");
+    let (session, task_id, turn_id) =
+        running_turn_in_workspace(workspace.path(), "Rename old_name");
+    let patch = "--- a/source.rs\n+++ b/source.rs\n@@ -1 +1 @@\n-fn old_name() { old_name(); }\n+fn new_name() { old_name(); }\n";
+    let plan = json!({
+        "message": { "role": "assistant", "tool_calls": [
+            {"function":{"name":"apply_patch","arguments":{"path":"source.rs","patch":patch}}}
+        ]}
+    })
+    .to_string();
+    let (address, server) = mock_server(vec![ok(plan.clone()), ok(plan)]);
+    let mut source = OllamaDecisionSource::with_endpoint("fixture-model", 3, address);
+
+    let checked = create_impact_checked_plan(
+        &session,
+        task_id,
+        turn_id,
+        &mut source,
+        "Rename old_name",
+        &[],
+        3,
+    )
+    .expect("review plan with an unchanged same-file caller");
+    let requests = server.join().expect("join model fixture");
+
+    let same_file_references = checked
+        .report()
+        .references
+        .iter()
+        .filter(|reference| reference.path == "source.rs" && reference.symbol == "old_name")
+        .collect::<Vec<_>>();
+    assert_eq!(same_file_references.len(), 2);
+    assert!(same_file_references
+        .iter()
+        .all(|reference| reference.may_remain_after_plan));
+    assert_eq!(requests.len(), 2);
+    let review = request_json(&requests[1]);
+    let prompt = review["messages"][1]["content"]
+        .as_str()
+        .expect("impact review prompt");
+    assert!(prompt.contains("source.rs"));
+    assert!(prompt.contains("old_name"));
+}
+
+#[test]
 fn revised_impact_report_gets_confirmation_before_execution() {
     let workspace = TempDir::new();
     fs::create_dir_all(workspace.path().join("src")).expect("create source directory");
