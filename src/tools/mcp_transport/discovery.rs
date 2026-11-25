@@ -4,13 +4,13 @@ use super::lifecycle::McpCancellation;
 use super::rpc;
 use super::stdio::StdioChild;
 use super::{untrusted_text, McpToolError, DESCRIPTION_PREFIX, MAX_DESCRIPTION_BYTES};
-use crate::brain::provider_bridge::{
-    authorized_declarations, validate_declarations, ExtensionTool,
+use crate::contracts::extensions::{
+    validate_descriptors, CapabilityContext, CapabilityGrant, ExtensionAuthority,
+    ExtensionDescriptor, ExtensionEffect, ExtensionTool, EXTENSION_CONTRACT_VERSION,
 };
-use crate::tools::capability_policy::{evaluate, CapabilityContext, CapabilityGrant};
-use crate::tools::extension_contract::{
-    validate_descriptors, ExtensionAuthority, ExtensionDescriptor, ExtensionEffect,
-    EXTENSION_CONTRACT_VERSION,
+use crate::tools::capability_policy::evaluate;
+use crate::tools::extension_authorization::{
+    validate_authorized_tools, validate_extension_declarations,
 };
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -222,7 +222,7 @@ pub(super) fn list_tools(
             })
         })
         .collect::<Vec<_>>();
-    validate_declarations(&declarations)?;
+    validate_extension_declarations(&declarations)?;
 
     let granted = candidates
         .into_iter()
@@ -241,6 +241,6 @@ pub(super) fn list_tools(
         .iter()
         .map(McpTool::extension_tool)
         .collect::<Vec<_>>();
-    authorized_declarations(&tools, context)?;
+    validate_authorized_tools(&tools, context)?;
     Ok(granted)
 }

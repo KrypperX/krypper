@@ -4,8 +4,10 @@ use super::lifecycle::{McpCancellation, McpLifecycleError};
 use super::rpc;
 use super::stdio::{StdioChild, MAX_RESPONSE_BYTES};
 use super::{McpToolError, RESULT_PREFIX};
-use crate::brain::provider_bridge::{authorize_dispatch_with_arguments, BridgeError};
-use crate::tools::capability_policy::{CapabilityContext, CapabilityDenial, CapabilityGrant};
+use crate::contracts::extensions::{
+    BridgeError, CapabilityContext, CapabilityDenial, CapabilityGrant,
+};
+use crate::tools::extension_authorization::authorize_extension_dispatch_with_arguments;
 use crate::tools::mcp_transport::discovery::McpTool;
 use serde_json::{json, Value};
 use std::time::Instant;
@@ -26,7 +28,7 @@ pub(super) fn call_tool(
 ) -> Result<String, McpToolError> {
     let grant = grant.ok_or(BridgeError::Denied(CapabilityDenial::MissingGrant))?;
     let extension = tool.extension_tool_with_grant(grant);
-    authorize_dispatch_with_arguments(
+    authorize_extension_dispatch_with_arguments(
         std::slice::from_ref(&extension),
         context,
         &tool.qualified_name(),

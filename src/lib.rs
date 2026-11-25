@@ -11,6 +11,7 @@ mod brain;
 pub mod catalog_data;
 pub mod catalog_sources;
 pub mod cli;
+mod contracts;
 pub mod core;
 pub mod harness;
 pub mod memory;

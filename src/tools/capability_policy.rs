@@ -4,41 +4,11 @@
 //! output and extension metadata cannot issue grants. Existing TaskSession,
 //! registry, workspace and sandbox enforcement remain authoritative.
 
-use super::extension_contract::{ExtensionAuthority, ExtensionDescriptor, ExtensionEffect};
+pub use crate::contracts::extensions::{CapabilityContext, CapabilityDenial, CapabilityGrant};
+use crate::contracts::extensions::{ExtensionAuthority, ExtensionDescriptor, ExtensionEffect};
+
+#[cfg(test)]
 use uuid::Uuid;
-
-/// A host-issued authorization for one task and one extension operation.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CapabilityGrant {
-    pub task_id: Uuid,
-    pub namespace: String,
-    pub operation: String,
-    pub effect: ExtensionEffect,
-    /// Trusted task grant epoch; changed on revocation.
-    pub generation: u64,
-    /// Explicit host approval for elevated effects.
-    pub host_approved: bool,
-}
-
-/// Trusted runtime context for a single dispatch decision.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CapabilityContext {
-    pub task_id: Uuid,
-    pub generation: u64,
-    pub task_authorized: bool,
-}
-
-/// Why an extension operation cannot be dispatched.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CapabilityDenial {
-    TaskUnauthorized,
-    MissingGrant,
-    WrongTask,
-    StaleGrant,
-    WrongOperation,
-    WrongEffect,
-    HostApprovalRequired,
-}
 
 /// Evaluate one host-issued grant against the requested extension operation.
 ///
