@@ -1,4 +1,3 @@
-use super::outcome::{record_event, resolve_outcome, StopReason};
 use super::*;
 use crate::brain::OllamaDecisionSource;
 use crate::task_lifecycle::{TaskSession, TaskState, TurnOutcome, TurnState};
@@ -286,40 +285,6 @@ fn approved_profile_reaches_process_dispatch_through_task_session_and_harness() 
 }
 
 #[test]
-fn missing_containment_never_launches_workspace_code() {
-    let path = fixture();
-    let marker = path.join("launched");
-    fs::write(
-        path.join("build.rs"),
-        format!(
-            "fn main() {{ std::fs::write({:?}, b\"launched\").unwrap(); }}",
-            marker
-        ),
-    )
-    .unwrap();
-    let runtime = TempDir::with_prefix("krypper-process-runtime-");
-    fs::create_dir_all(runtime.join("bin")).unwrap();
-    for binary in ["cargo", "rustc"] {
-        fs::copy("/usr/bin/true", runtime.join("bin").join(binary)).unwrap();
-    }
-    let policy = OfflineCargoPolicy::new(&runtime, &runtime).unwrap();
-    let root = capture_workspace_root_at(&path).unwrap();
-
-    let result = run_without_containment(
-        &root,
-        &policy,
-        None,
-        Duration::from_secs(2),
-        8192,
-        10_000_000,
-    );
-
-    assert_eq!(result.outcome, ProcessOutcome::SandboxUnavailable);
-    assert!(result.cleanup_confirmed);
-    assert!(!marker.exists(), "no workspace code may launch");
-}
-
-#[test]
 fn zero_exit_alone_is_not_success() {
     let mut result = ProcessResult::empty(ProcessOutcome::Exited(0));
     assert!(result.succeeded());
@@ -341,6 +306,18 @@ fn test_filter_validation_rejects_unbounded_or_option_like_values() {
     assert!(validate_test_filter(Some(&oversized)).is_err());
     let multibyte_oversized = "é".repeat(MAX_TEST_FILTER_BYTES / 2 + 1);
     assert!(validate_test_filter(Some(&multibyte_oversized)).is_err());
+}
+
+#[test]
+fn sandbox_runner_limits_match_the_fixed_product_profile() {
+    let profile = ProcessProfile::offline_cargo_test().unwrap().limits();
+    let runner = krypper_sandbox::RunLimits::offline_cargo_test();
+
+    assert_eq!(runner.wall_millis, profile.wall_secs * 1_000);
+    assert_eq!(runner.cpu_budget_usec, profile.cpu_ms * 1_000);
+    assert_eq!(runner.memory_bytes, profile.memory_bytes);
+    assert_eq!(runner.output_bytes, profile.output_bytes);
+    assert_eq!(runner.processes, profile.processes);
 }
 
 #[test]
@@ -517,125 +494,6 @@ fn cargo_build_script_warning_cannot_fake_a_filtered_test_result() {
 }
 
 #[test]
-fn resource_readback_rejects_missing_and_unlimited_controls() {
-    let path = fixture();
-    let limits = ProcessProfile::offline_cargo_test().unwrap().limits();
-    let supervisor = std::mem::ManuallyDrop::new(Supervisor {
-        unit: "unused".into(),
-        group: path.to_path_buf(),
-        cleaned: true,
-        limits,
-    });
-    assert!(supervisor.verify().is_err());
-    for (name, value) in [
-        ("memory.max", limits.memory_bytes.to_string()),
-        ("memory.swap.max", "0".into()),
-        ("pids.max", limits.processes.to_string()),
-        ("cpu.max", "100000 100000".into()),
-        ("cgroup.procs", "".into()),
-        ("cgroup.kill", "".into()),
-    ] {
-        fs::write(path.join(name), value).unwrap();
-    }
-    assert!(supervisor.verify().is_ok());
-    for name in ["memory.max", "pids.max", "cpu.max"] {
-        let original = fs::read(path.join(name)).unwrap();
-        fs::write(path.join(name), "max").unwrap();
-        assert!(supervisor.verify().is_err(), "{name} must fail closed");
-        fs::write(path.join(name), original).unwrap();
-    }
-}
-
-#[test]
-fn outcome_resolution_is_deterministic_for_limits_cancellation_and_cleanup() {
-    use ProcessOutcome::*;
-    let cases = [
-        (StopReason::OutputLimit, vec![], true, OutputLimitExceeded),
-        (StopReason::Cancelled, vec![], true, Cancelled),
-        (StopReason::WallTimeout, vec![], true, TimedOut),
-        (
-            StopReason::CpuBudget,
-            vec![],
-            true,
-            ResourceLimitExceeded {
-                resource: ProcessResource::Cpu,
-            },
-        ),
-        (StopReason::Exited(0), vec![], true, Exited(0)),
-        (StopReason::Exited(101), vec![], true, Exited(101)),
-        (StopReason::Signaled(9), vec![], true, Signaled(9)),
-        (StopReason::Unknown, vec![], true, OutcomeUnknown),
-        (
-            StopReason::WallTimeout,
-            vec![ProcessResource::Memory],
-            true,
-            ResourceLimitExceeded {
-                resource: ProcessResource::Memory,
-            },
-        ),
-        (
-            StopReason::Cancelled,
-            vec![ProcessResource::Processes],
-            true,
-            ResourceLimitExceeded {
-                resource: ProcessResource::Processes,
-            },
-        ),
-        (
-            StopReason::Exited(0),
-            vec![ProcessResource::FileSize],
-            true,
-            ResourceLimitExceeded {
-                resource: ProcessResource::FileSize,
-            },
-        ),
-        (StopReason::Exited(0), vec![], false, OutcomeUnknown),
-        (
-            StopReason::Cancelled,
-            vec![ProcessResource::Cpu],
-            false,
-            OutcomeUnknown,
-        ),
-    ];
-    for (stop, events, cleanup_confirmed, expected) in cases {
-        assert_eq!(
-            resolve_outcome(stop, &events, cleanup_confirmed),
-            expected,
-            "{stop:?} {events:?} cleanup={cleanup_confirmed}"
-        );
-    }
-}
-
-#[test]
-fn kernel_limit_events_are_deduplicated_and_ordered() {
-    let mut events = Vec::new();
-    for resource in [
-        ProcessResource::FileSize,
-        ProcessResource::Processes,
-        ProcessResource::Memory,
-        ProcessResource::Cpu,
-        ProcessResource::Memory,
-    ] {
-        record_event(&mut events, resource);
-    }
-    assert_eq!(
-        events,
-        [
-            ProcessResource::Processes,
-            ProcessResource::Memory,
-            ProcessResource::Cpu,
-            ProcessResource::FileSize,
-        ]
-    );
-    assert_eq!(
-        resolve_outcome(StopReason::Exited(0), &events, true),
-        ProcessOutcome::ResourceLimitExceeded {
-            resource: ProcessResource::Processes,
-        }
-    );
-}
-
-#[test]
 fn audit_metadata_is_bounded_and_a_recovery_hold_blocks_success() {
     let mut result = ProcessResult::empty(ProcessOutcome::Exited(0));
     result.stdout = "x".repeat(64);
@@ -666,24 +524,6 @@ fn process_result_serializes_bounded_audit_metadata() {
     assert_eq!(value["output_limit"], 8_192);
     assert_eq!(value["resource_events"], json!(["memory"]));
     assert_eq!(value["recovery_hold"], true);
-}
-
-#[test]
-fn cancellation_after_probe_resolves_to_cancelled() {
-    let path = fixture();
-    let limits = ProcessProfile::offline_cargo_test().unwrap().limits();
-    let mut supervisor = Supervisor {
-        unit: "unused".into(),
-        group: path.to_path_buf(),
-        cleaned: true,
-        limits,
-    };
-    let mut result = ProcessResult::empty_with_filter(ProcessOutcome::SandboxUnavailable, None);
-    settle_before_launch(&mut result, &mut supervisor, StopReason::Cancelled);
-    assert_eq!(result.outcome, ProcessOutcome::Cancelled);
-    assert!(result.cleanup_confirmed);
-    assert_eq!(result.output_bytes, 0);
-    assert!(result.resource_events.is_empty());
 }
 
 #[test]

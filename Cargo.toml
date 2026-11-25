@@ -10,7 +10,12 @@ authors = ["Bom Thatchakorn", "KrypperX"]
 license = "Apache-2.0"
 publish = false
 
+[workspace]
+members = ["crates/krypper-sandbox"]
+resolver = "2"
+
 [dependencies]
+krypper-sandbox = { path = "crates/krypper-sandbox" }
 ignore = "0.4.34"
 libc = "0.2"
 ring = "0.17"
