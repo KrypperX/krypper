@@ -1,7 +1,6 @@
 //! The Linux sandbox command: host executable lookup and the contained child command.
 
-use super::policy::OfflineCargoPolicy;
-use crate::tools::WorkspaceRoot;
+use crate::DirectoryDescriptors;
 use std::fs::OpenOptions;
 use std::io::{self};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -11,7 +10,7 @@ use std::process::{Command, Stdio};
 
 pub(super) fn host_command(executable: &str) -> Command {
     let mut command = Command::new(executable);
-    let uid = super::effective_uid();
+    let uid = super::linux::effective_uid();
     command
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
@@ -29,15 +28,11 @@ pub(super) fn host_command(executable: &str) -> Command {
 
 // Reap on every error path too. A stuck kernel wait is never allowed to block the caller.
 
-pub(super) fn sandbox(
-    root: &WorkspaceRoot,
-    policy: &OfflineCargoPolicy,
-    group: &Path,
-) -> io::Result<Command> {
+pub(super) fn sandbox(directories: &DirectoryDescriptors, group: &Path) -> io::Result<Command> {
     let roots: [OwnedFd; 3] = [
-        root.process_descriptor()?.into(),
-        policy.toolchain.process_descriptor()?.into(),
-        policy.registry.process_descriptor()?.into(),
+        directories.workspace.try_clone()?.into(),
+        directories.toolchain.try_clone()?.into(),
+        directories.registry.try_clone()?.into(),
     ];
     // Keep sources above destinations so dup2 cannot overwrite a later source descriptor.
     let mut pinned = Vec::new();

@@ -25,10 +25,12 @@ The authoritative runtime checks are:
 - `workspace_operations` and `OperationDefinition` in `src/tools/registry.rs` define the registered `offline_cargo_test` operation, its closed request schema and descriptive effect.
 - `execute_action` in `src/harness/execution/action.rs` dispatches the action and records its typed process observation.
 - `validate_test_filter` and `cargo_command_args` in `src/tools/process/policy.rs` validate the optional filter and construct the fixed argument list.
-- `run_with_containment`, `run_with_bounds` and `settle_before_launch` in `src/tools/process/supervisor.rs` implement fail-closed readiness, cleanup, cancellation, lease and resource-readback gates.
-- `sandbox` in `src/tools/process/sandbox.rs` constructs the sandbox command, mounts, namespace flags, payload environment and descriptor hygiene.
+- `src/tools/process/supervisor.rs` adapts the Tools-owned policy and captured workspace handles to the private sandbox crate, then maps its typed result back to the existing Product outcome.
+- `run_with_containment` and `settle_before_launch` in `crates/krypper-sandbox/src/linux.rs` implement fail-closed readiness, cleanup, cancellation, leases and resource-readback gates. `crates/krypper-sandbox/src/sandbox.rs` constructs the fixed Bubblewrap command, mounts, namespaces, payload environment and descriptor hygiene.
 
 Registry effect descriptions, tool metadata and model output are descriptive inputs only; they do not authorize a process. The versioned descriptor in `src/tools/process_profile.rs` is also descriptive: its own module contract says it registers no tool, grants no authority, selects no sandbox and launches no process. The fixed policy validates the `offline_cargo_test` descriptor and uses its executable, argument prefix and limits; cwd, environment values, sandbox flags and enforcement remain owned by the policy and supervisor.
+
+The sandbox crate is a private Cargo workspace member. It accepts only captured directory handles, the optional validated test filter, fixed bounded limits and cancellation state; it has no API for choosing a command, environment, mounts or authorization grant. The extraction preserves the existing Bubblewrap and cgroup behavior and does not claim lower runtime overhead or additional platform support.
 
 ### Implemented boundaries
 

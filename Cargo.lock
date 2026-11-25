@@ -276,6 +276,7 @@ name = "krypper"
 version = "0.1.0"
 dependencies = [
  "ignore",
+ "krypper-sandbox",
  "libc",
  "proptest",
  "ring",
@@ -286,6 +287,14 @@ dependencies = [
  "tempfile",
  "toml",
  "ureq",
+ "uuid",
+]
+
+[[package]]
+name = "krypper-sandbox"
+version = "0.1.0"
+dependencies = [
+ "libc",
  "uuid",
 ]
 

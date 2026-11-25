@@ -72,6 +72,14 @@ their provenance, integrity and immutability, just as for `/usr` and the kernel;
 an ELF header alone is not an authenticity check. No installer or downloader
 runs through this API.
 
+The public Tools and `ProcessResult` imports remain in the Product crate. Its
+adapter passes captured directory handles and fixed limits to the private
+`krypper-sandbox` workspace member, which owns Bubblewrap setup, cgroup
+supervision and cleanup. The crate does not accept a command, arbitrary
+arguments, environment, mount list or authorization grant. This boundary
+extraction does not change the profile's runtime behavior or establish a
+performance improvement.
+
 Process grants are not checkpointed. A restored task requires a fresh host
 grant. `policy.cancellation()` returns a one-way cancellation handle for the
 trusted caller; a cancelled grant must be replaced explicitly to run again.
@@ -109,7 +117,6 @@ to run without containment. For an already provisioned deployment, launching
 the embedding program as a user service (for example with `systemd-run --user`)
 provides the appropriate parent context. This feature never edits systemd,
 permissions, host configuration, or CI to make a failing preflight pass.
-A Codex sandbox without these capabilities correctly reports unavailability.
 
 A trusted, inert keeper starts in a unique transient user unit first. Before
 workspace code can launch, Tools reads back finite `cpu.max`, `memory.max`,
