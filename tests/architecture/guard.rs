@@ -358,6 +358,14 @@ impl Visit<'_> for DirectionVisitor<'_> {
         );
     }
 
+    fn visit_item_extern_crate(&mut self, item: &syn::ItemExternCrate) {
+        if item.ident == "self" && item.rename.is_some() {
+            self.violations
+                .push(format!("{}: self crate alias is not checked", self.origin));
+        }
+        syn::visit::visit_item_extern_crate(self, item);
+    }
+
     fn visit_path(&mut self, path: &RustPath) {
         let segments = path
             .segments

@@ -86,6 +86,17 @@ fn direction_guard_detects_relative_paths_crate_aliases_and_root_globs() {
         "{grouped_alias_violations:?}"
     );
 
+    let self_crate_alias_violations = scan_source(
+        "extern crate self as root; use root::brain::Decision;",
+        "self_crate_alias.rs",
+    );
+    assert!(
+        self_crate_alias_violations
+            .iter()
+            .any(|violation| violation.contains("self crate alias")),
+        "{self_crate_alias_violations:?}"
+    );
+
     let glob = "use super::*;";
     let glob_violations = scan_source(glob, "crate_root_glob.rs");
     assert!(
