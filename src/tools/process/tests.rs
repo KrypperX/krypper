@@ -89,7 +89,7 @@ fn prepare_task_fixture(path: &Path) -> PathBuf {
         "pub fn fixture_value() -> usize { 1 }\n",
     )
     .unwrap();
-    let outside = path.with_extension("outside-canary");
+    let outside = Path::new("/var/tmp").join(format!("krypper-process-canary-{}", Uuid::new_v4()));
     fs::write(&outside, "host private canary").unwrap();
     symlink(&outside, path.join("escape")).unwrap();
     outside
@@ -823,8 +823,8 @@ fn local_model_task_patches_then_runs_a_filtered_offline_cargo_test() {
         .as_str()
         .unwrap();
     assert!(completion_prompt.contains(r#""test_filter":"task_fixture_selected_test""#));
-    assert!(completion_prompt.contains(r#""tests_ran":true""#));
-    assert!(completion_prompt.contains(r#""executed_tests":1""#));
+    assert!(completion_prompt.contains(r#""tests_ran":true"#));
+    assert!(completion_prompt.contains(r#""executed_tests":1"#));
     assert!(completion_prompt.contains("1 filtered out"));
 
     let recorded_turn = session.get_task(task).unwrap().get_turn(turn).unwrap();

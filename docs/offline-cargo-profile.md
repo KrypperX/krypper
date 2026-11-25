@@ -135,8 +135,12 @@ There is no optional namespace flag or direct-spawn fallback.
   live in `/tmp`. The minimal `/dev` is private. Writable tmpfs storage also
   counts against the hard memory ceiling; no host output files are promoted.
 - Start from an empty payload environment: only fixed PATH, HOME, TMPDIR,
-  CARGO_HOME, CARGO_BUILD_JOBS (one), CARGO_TARGET_DIR, RUSTC and LANG are set. No provider, GitHub,
-  SSH, proxy, user-manager environment or credential is forwarded.
+  CARGO_HOME, CARGO_BUILD_JOBS (one), CARGO_PROFILE_DEV_DEBUG (zero),
+  CARGO_PROFILE_TEST_DEBUG (zero), CARGO_INCREMENTAL (zero), CARGO_TARGET_DIR,
+  RUSTC and LANG are set. Cargo incremental metadata and
+  debug symbols are disabled to keep build artifacts within the per-file limit.
+  No provider, GitHub, SSH, proxy, user-manager environment or credential is
+  forwarded.
 - No network namespace sharing; no capabilities, no privilege elevation, no
   nested user namespaces. Build scripts and tests are untrusted sandbox code.
 - Per job: 3 GiB hard memory, zero swap, 128 processes/threads, CPU quota of
