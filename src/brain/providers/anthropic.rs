@@ -236,7 +236,9 @@ impl AnthropicDecisionSource {
             goal,
             observations,
             project_guidance,
-            ModelProvider::Anthropic.capabilities().native_sse_decisions
+            ModelProvider::Anthropic
+                .capabilities()
+                .native_decision_streaming
                 && stream_flag_enabled(std::env::var_os("KRYPPER_ANTHROPIC_STREAM").as_deref()),
         )
     }

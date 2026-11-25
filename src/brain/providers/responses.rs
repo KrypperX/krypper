@@ -255,7 +255,7 @@ impl ResponsesDecisionSource {
             self.provider
                 .model_provider()
                 .capabilities()
-                .native_sse_decisions
+                .native_decision_streaming
                 && stream_flag_enabled(std::env::var_os("KRYPPER_RESPONSES_STREAM").as_deref()),
         )
     }

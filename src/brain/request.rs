@@ -58,6 +58,7 @@ fn build_chat_request_with_tools(
     remaining_decisions: usize,
     project_guidance: Option<&str>,
     tools: Value,
+    stream: bool,
 ) -> Result<Vec<u8>, ModelError> {
     validate_model_name_for_provider(model, ModelProvider::OpenAi)
         .map_err(ModelError::InvalidModelName)?;
@@ -74,7 +75,7 @@ fn build_chat_request_with_tools(
             { "role": "user", "content": prompt }
         ],
         "tools": tools,
-        "stream": false
+        "stream": stream
     });
     encode_model_request(&request)
 }
@@ -94,6 +95,7 @@ pub(crate) fn build_chat_request(
         remaining_decisions,
         project_guidance,
         tool_definitions(),
+        false,
     )
 }
 
@@ -109,6 +111,45 @@ pub fn build_chat_request_with_extensions(
     project_guidance: Option<&str>,
     extension_declarations: &[Value],
 ) -> Result<Vec<u8>, ModelError> {
+    build_chat_request_with_extensions_streaming(
+        model,
+        goal,
+        observations,
+        remaining_decisions,
+        project_guidance,
+        extension_declarations,
+        false,
+    )
+}
+
+pub(crate) fn build_streaming_chat_request_with_extensions(
+    model: &str,
+    goal: &str,
+    observations: &[WorkspaceObservation],
+    remaining_decisions: usize,
+    project_guidance: Option<&str>,
+    extension_declarations: &[Value],
+) -> Result<Vec<u8>, ModelError> {
+    build_chat_request_with_extensions_streaming(
+        model,
+        goal,
+        observations,
+        remaining_decisions,
+        project_guidance,
+        extension_declarations,
+        true,
+    )
+}
+
+fn build_chat_request_with_extensions_streaming(
+    model: &str,
+    goal: &str,
+    observations: &[WorkspaceObservation],
+    remaining_decisions: usize,
+    project_guidance: Option<&str>,
+    extension_declarations: &[Value],
+    stream: bool,
+) -> Result<Vec<u8>, ModelError> {
     validate_declarations(extension_declarations)
         .map_err(|_| ModelError::InvalidToolCall("invalid extension declarations"))?;
     let mut tools = tool_definitions();
@@ -122,6 +163,7 @@ pub fn build_chat_request_with_extensions(
         remaining_decisions,
         project_guidance,
         tools,
+        stream,
     )
 }
 

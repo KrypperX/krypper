@@ -55,7 +55,7 @@ pub(crate) use gemini::GeminiModelName;
 pub use responses::{ResponsesDecisionSource, ResponsesProvider};
 
 /// Only explicit opt-in values enable experimental native streaming.
-fn stream_flag_enabled(value: Option<&std::ffi::OsStr>) -> bool {
+pub(super) fn stream_flag_enabled(value: Option<&std::ffi::OsStr>) -> bool {
     matches!(value.and_then(|value| value.to_str()), Some(value) if value == "1" || value.eq_ignore_ascii_case("true"))
 }
 
@@ -129,7 +129,7 @@ impl DecisionProtocol {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ProviderCapabilities {
     pub(crate) protocol: DecisionProtocol,
-    pub(crate) native_sse_decisions: bool,
+    pub(crate) native_decision_streaming: bool,
 }
 
 impl ModelProvider {
@@ -417,11 +417,14 @@ fn ollama_source_factory(
     if !matches!(credentials, ProviderSourceCredentials::None) {
         return Err("Ollama adapter does not accept hosted credentials");
     }
-    Ok(Box::new(OllamaDecisionSource::with_endpoint(
-        model,
-        action_budget,
-        ollama_endpoint,
-    )))
+    Ok(Box::new(
+        OllamaDecisionSource::with_endpoint_and_extensions(
+            model,
+            action_budget,
+            ollama_endpoint,
+            &[],
+        ),
+    ))
 }
 
 fn gemini_source_factory(

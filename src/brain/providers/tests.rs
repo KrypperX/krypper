@@ -464,7 +464,7 @@ fn decision_sources_carry_extension_declarations_into_requests() {
     let declarations = authorized_declarations(&tools, context).expect("authorized");
     let endpoint = "http://127.0.0.1:1".to_owned();
 
-    let ollama = super::OllamaDecisionSource::with_endpoint_and_extensions(
+    let ollama = super::OllamaDecisionSource::with_endpoint_and_extensions_non_streaming(
         "test-model",
         1,
         "127.0.0.1:1".parse().unwrap(),
@@ -755,15 +755,17 @@ fn provider_capability_registry_covers_every_cli_provider() {
             descriptor.selector
         );
         assert_eq!(
-            capabilities.native_sse_decisions, descriptor.native_sse_decisions,
-            "{} native SSE metadata",
+            capabilities.native_decision_streaming, descriptor.native_decision_streaming,
+            "{} native decision-streaming metadata",
             descriptor.selector
         );
         assert_eq!(
-            descriptor.native_sse_decisions,
+            descriptor.native_decision_streaming,
             matches!(
                 descriptor.protocol,
-                DecisionProtocol::Responses | DecisionProtocol::AnthropicMessages
+                DecisionProtocol::OllamaChat
+                    | DecisionProtocol::Responses
+                    | DecisionProtocol::AnthropicMessages
             ),
             "{} protocol feature",
             descriptor.selector
