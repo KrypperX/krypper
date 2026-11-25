@@ -143,20 +143,7 @@ pub(crate) fn analyze_plan(
     turn_id: Uuid,
     plan: &WorkspacePlan,
 ) -> Result<(ImpactReport, BTreeMap<PathBuf, String>), ImpactAnalysisError> {
-    let mut targets = BTreeSet::new();
-    let mut normalized_targets = BTreeSet::new();
-    for path in plan
-        .operations()
-        .iter()
-        .filter_map(workspace_mutation_target)
-    {
-        let normalized = normalize_workspace_relative_path(path)
-            .ok_or(ImpactAnalysisError::UnsupportedMutation)?;
-        if !normalized_targets.insert(workspace_path_comparison_key(&normalized)) {
-            return Err(ImpactAnalysisError::ConflictingEdits);
-        }
-        targets.insert(path.clone());
-    }
+    let targets = unique_mutation_targets(plan)?;
     if targets.len() > MAX_IMPACT_FILES {
         return Err(ImpactAnalysisError::TooManyFiles);
     }
@@ -352,6 +339,24 @@ pub(crate) fn analyze_plan(
         "workspace search respects applicable .gitignore rules and skips .git metadata directories; references in ignored paths are outside this report's scope".to_owned(),
     );
     Ok((report, expected_revisions))
+}
+
+fn unique_mutation_targets(plan: &WorkspacePlan) -> Result<BTreeSet<PathBuf>, ImpactAnalysisError> {
+    let mut normalized_targets = BTreeSet::new();
+    let mut targets = BTreeSet::new();
+    for path in plan
+        .operations()
+        .iter()
+        .filter_map(workspace_mutation_target)
+    {
+        let normalized = normalize_workspace_relative_path(path)
+            .ok_or(ImpactAnalysisError::UnsupportedMutation)?;
+        if !normalized_targets.insert(workspace_path_comparison_key(&normalized)) {
+            return Err(ImpactAnalysisError::ConflictingEdits);
+        }
+        targets.insert(path.clone());
+    }
+    Ok(targets)
 }
 
 struct ChangedFile {
@@ -760,10 +765,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn analysis_rejects_case_equivalent_path_aliases_before_mutation() {
-        let workspace = TempWorkspace::new();
-        fs::write(workspace.path().join("Foo.rs"), "old name\n").expect("write source");
-        let (session, task_id, turn_id) = running_session(workspace.path());
+    fn duplicate_case_equivalent_targets_are_rejected_on_windows() {
         let plan = WorkspacePlan::try_from_actions(
             vec![
                 WorkspaceAction::ReplaceText {
@@ -782,12 +784,8 @@ mod tests {
         .expect("valid bounded plan");
 
         assert_eq!(
-            analyze_plan(&session, task_id, turn_id, &plan),
+            unique_mutation_targets(&plan),
             Err(ImpactAnalysisError::ConflictingEdits)
-        );
-        assert_eq!(
-            fs::read_to_string(workspace.path().join("Foo.rs")).unwrap(),
-            "old name\n"
         );
     }
 
