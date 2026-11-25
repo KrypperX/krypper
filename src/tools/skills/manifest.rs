@@ -13,8 +13,15 @@ pub(crate) const SKILL_MANIFEST_SCHEMA: &str = "krypper-skill/v1";
 pub(crate) const MAX_SKILL_MANIFEST_BYTES: usize = 16 * 1024;
 
 const MAX_NAME_BYTES: usize = 64;
-const MAX_DESCRIPTION_BYTES: usize = 512;
+pub(crate) const MAX_DESCRIPTION_BYTES: usize = 512;
 const MAX_INSTRUCTIONS_BYTES: usize = 8 * 1024;
+
+/// Whether parsing failed on JSON syntax or on the manifest schema.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SkillManifestError {
+    MalformedJson,
+    InvalidManifest,
+}
 
 /// Reasons a skill manifest cannot be loaded.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -70,16 +77,17 @@ struct SkillManifest {
 pub(crate) fn parse_manifest(
     contents: &str,
     expected_name: &str,
-) -> Result<ParsedSkill, SkillLoadError> {
+) -> Result<ParsedSkill, SkillManifestError> {
+    let value = serde_json::from_str(contents).map_err(|_| SkillManifestError::MalformedJson)?;
     let manifest: SkillManifest =
-        serde_json::from_str(contents).map_err(|_| SkillLoadError::InvalidManifest)?;
+        serde_json::from_value(value).map_err(|_| SkillManifestError::InvalidManifest)?;
     if manifest.schema != SKILL_MANIFEST_SCHEMA
         || manifest.name != expected_name
         || !valid_skill_name(&manifest.name)
         || !valid_text(&manifest.description, MAX_DESCRIPTION_BYTES)
         || !valid_text(&manifest.instructions, MAX_INSTRUCTIONS_BYTES)
     {
-        return Err(SkillLoadError::InvalidManifest);
+        return Err(SkillManifestError::InvalidManifest);
     }
     Ok(ParsedSkill {
         name: manifest.name,

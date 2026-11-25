@@ -146,7 +146,9 @@ mint a grant, or choose an arbitrary executor.
   JSON fields fail closed. Results are sorted by name, then manifest path.
 - Discovery and reads use the existing workspace containment walk. Absolute
   paths, parent components, symlinks, escapes, oversize inputs, invalid UTF-8 and
-  malformed manifests are rejected before use.
+  schema-invalid manifests fail closed. A syntactically malformed JSON file is
+  skipped individually and reported to the host by relative path; file contents
+  are not included in the diagnostic.
 - Instructions are inert, untrusted text. Manifests cannot declare tools,
   commands, grants or policy; loading never activates a skill, injects context,
   downloads content or changes authority. Bounded selection and injection are a
@@ -160,14 +162,19 @@ mint a grant, or choose an arbitrary executor.
   manifests and activates only the skill names the host supplies, in the host's
   order. Task text, model output, repository excerpts and manifest content never
   select or add a skill, so activation cannot expand authority.
-- Bounds: at most 4 active skills per request and at most 2 KiB of instruction
-  text in total, split evenly across the selected skills. Unused share is not
-  redistributed. Truncation happens on a character boundary, is marked in the
-  text and is reported as `truncated`. An unknown name or an over-limit request
-  fails closed instead of activating a partial set; an empty request activates
-  nothing.
-- Instruction lines are trimmed, control characters replaced and
-  directive-like lines neutralized (`neutralized_lines`). The injected block is
+- Bounds: at most 4 active skills per request and at most 2 KiB of combined
+  description and instruction text, divided evenly across selected skills.
+  Descriptions use at most min(512 bytes, one quarter of each skill's share),
+  with the remaining three quarters reserved for instructions. Unused description
+  allowance is not redistributed. Truncation
+  happens on a character boundary, is marked in the text and is reported as
+  `truncated`. An unknown name or an over-limit request fails closed instead of
+  activating a partial set; an empty request activates nothing.
+- Trailing whitespace in description and instruction lines is trimmed, control
+  characters are replaced and directive-like lines neutralized (`neutralized_lines`). Substring checks
+  on those lines are text-sanitization defense in depth only; activation uses
+  exact host-supplied skill-name matches. Malformed-JSON diagnostics are host
+  metadata and are omitted from serialized model context. The injected block is
   labeled as untrusted advisory text, not a command, tool grant or policy.
 - Precedence is explicit and tested: the task goal and Harness bounds stay
   highest, then root/AGENTS.md project guidance, then activated skills, then

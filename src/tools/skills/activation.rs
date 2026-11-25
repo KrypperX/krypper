@@ -6,8 +6,8 @@
 //! result is inert, bounded advisory text for the existing planning context
 //! builders, not a tool, grant, command or policy decision.
 
-use super::discovery::{load_skills, LoadedSkill};
-use super::manifest::SkillLoadError;
+use super::discovery::{load_skills, LoadedSkill, SkippedSkillManifest};
+use super::manifest::{SkillLoadError, MAX_DESCRIPTION_BYTES};
 use crate::tools::WorkspaceRoot;
 use serde::Serialize;
 use std::fmt;
@@ -16,7 +16,7 @@ use std::path::PathBuf;
 /// Maximum number of skills the host may activate in one request.
 pub(crate) const MAX_ACTIVE_SKILLS: usize = 4;
 
-/// Maximum UTF-8 bytes of skill instructions rendered into one prompt.
+/// Maximum UTF-8 bytes of skill descriptions and instructions rendered together.
 pub(crate) const MAX_SKILL_CONTEXT_BYTES: usize = 2 * 1024;
 
 const TRUNCATION_MARKER: &str = "\n[truncated]";
@@ -79,6 +79,9 @@ pub struct SkillContext {
     pub(crate) bytes: usize,
     pub(crate) truncated: bool,
     pub(crate) neutralized_lines: usize,
+    /// Host diagnostics only; never serialized into model context.
+    #[serde(skip)]
+    pub(crate) skipped_manifests: Vec<SkippedSkillManifest>,
 }
 
 /// Load project skills and activate the host-named subset in host order.
@@ -89,8 +92,10 @@ pub(crate) fn activate_skills(
     root: &WorkspaceRoot,
     requested: &[&str],
 ) -> Result<SkillContext, SkillActivationError> {
-    let loaded = load_skills(root, &[])?;
-    select_skills(&loaded, requested)
+    let report = load_skills(root, &[])?;
+    let mut context = select_skills(&report.skills, requested)?;
+    context.skipped_manifests = report.skipped_manifests;
+    Ok(context)
 }
 
 /// Select and render host-named skills from an already loaded set.
@@ -113,9 +118,11 @@ pub(crate) fn select_skills(
     }
     let mut selected = Vec::with_capacity(names.len());
     for name in names {
+        // Host selection is an exact name match. A prefix or substring in
+        // task/model text cannot activate a skill.
         let skill = loaded
             .iter()
-            .find(|skill| skill.name == name)
+            .find(|skill| skill.name.as_str() == name)
             .ok_or(SkillActivationError::UnknownSkill)?;
         selected.push(skill);
     }
@@ -128,20 +135,29 @@ fn render(selected: &[&LoadedSkill]) -> SkillContext {
         return context;
     }
     // Every activated skill receives the same deterministic share of the
-    // instruction budget. Unused share is not redistributed, so one long skill
-    // can never crowd the others out of the prompt.
+    // combined description and instruction budget. Descriptions are capped at
+    // one quarter of that share; unused text space is not redistributed.
     let allowance = MAX_SKILL_CONTEXT_BYTES / selected.len();
     for skill in selected {
-        let (instructions, truncated) = render_instructions(
-            skill.instructions.as_str(),
-            allowance,
+        let description_allowance = (allowance / 4).min(MAX_DESCRIPTION_BYTES);
+        let (description, description_truncated) = render_skill_text(
+            &skill.description,
+            description_allowance,
             &mut context.neutralized_lines,
         );
-        context.truncated |= truncated;
-        context.bytes += instructions.len();
+        // Reserve the full description slice for every skill, even when a
+        // description is short, so instruction space stays symmetric.
+        let instruction_allowance = allowance.saturating_sub(description_allowance);
+        let (instructions, instructions_truncated) = render_skill_text(
+            skill.instructions.as_str(),
+            instruction_allowance,
+            &mut context.neutralized_lines,
+        );
+        context.truncated |= description_truncated || instructions_truncated;
+        context.bytes += description.len() + instructions.len();
         context.skills.push(ActiveSkill {
             name: skill.name.clone(),
-            description: skill.description.clone(),
+            description,
             manifest_path: skill.manifest_path.clone(),
             instructions,
         });
@@ -149,12 +165,12 @@ fn render(selected: &[&LoadedSkill]) -> SkillContext {
     context
 }
 
-/// Render one skill's instructions within `allowance` bytes.
+/// Render one skill text field within `allowance` bytes.
 ///
 /// Lines are trimmed, control characters are replaced and directive-like lines
 /// are neutralized. Truncation happens on a character boundary and is marked,
 /// so a host can report that the model saw a partial skill.
-fn render_instructions(text: &str, allowance: usize, neutralized: &mut usize) -> (String, bool) {
+fn render_skill_text(text: &str, allowance: usize, neutralized: &mut usize) -> (String, bool) {
     let mut rendered = String::new();
     let mut truncated = false;
     for line in text.lines() {
@@ -191,6 +207,8 @@ fn render_instructions(text: &str, allowance: usize, neutralized: &mut usize) ->
 fn neutralized_line(line: &str, neutralized: &mut usize) -> String {
     let line = line.trim_end();
     let lowered = line.to_ascii_lowercase();
+    // Substring matching here only sanitizes untrusted text; it never selects
+    // or activates a skill, which requires an exact host-supplied name above.
     if DIRECTIVE_MARKERS
         .iter()
         .any(|marker| lowered.contains(marker))
