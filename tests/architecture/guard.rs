@@ -1244,7 +1244,11 @@ impl Visit<'_> for BrainPathProbe<'_> {
                 &segments,
                 self.module_depth,
                 self.crate_root_brain_exports,
-            );
+            )
+            || self.module_depth == 0
+                && segments
+                    .first()
+                    .is_some_and(|segment| self.crate_root_brain_exports.contains(segment));
         syn::visit::visit_path(self, path);
     }
 }

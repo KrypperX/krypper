@@ -391,6 +391,25 @@ fn crate_root_brain_reexports_and_globs_are_rejected() {
         );
     }
 
+    fs::write(
+        &root,
+        "type BrainDecision = crate::brain::Decision; type Alias = BrainDecision;",
+    )
+    .unwrap();
+    let mut violations = Vec::new();
+    let brain_exports = scan_crate_root_aliases(&root, &mut violations);
+    assert!(brain_exports.contains("Alias"), "{brain_exports:?}");
+    let alias_chain_violations = scan_source_with_root_exports(
+        "use crate::Alias;",
+        "tools_alias_chain.rs",
+        1,
+        &brain_exports,
+    );
+    assert!(
+        !alias_chain_violations.is_empty(),
+        "a root type-alias chain to Brain was not rejected"
+    );
+
     fs::write(&root, "pub(crate) use brain::*;").unwrap();
     let mut violations = Vec::new();
     let _ = scan_crate_root_aliases(&root, &mut violations);
