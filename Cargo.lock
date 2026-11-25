@@ -284,6 +284,7 @@ dependencies = [
  "serde",
  "serde_json",
  "signal-hook",
+ "syn",
  "tempfile",
  "toml",
  "ureq",
