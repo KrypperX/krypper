@@ -6,18 +6,87 @@ mod guard;
 
 use guard::{
     scan_crate_root_aliases, scan_module_file, scan_source, scan_source_at_depth,
-    scan_source_with_root_exports,
+    scan_source_with_root_exports, scan_tools_module_from_crate_root,
 };
 
 #[test]
 fn production_tools_modules_do_not_import_brain() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tools.rs");
-    let violations = scan_module_file(&root);
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs");
+    let violations = scan_tools_module_from_crate_root(&root);
 
     assert!(
         violations.is_empty(),
         "production Tools modules must not depend on Brain:\n{}",
         violations.join("\n")
+    );
+}
+
+#[test]
+fn crate_root_tools_scanner_follows_external_path_attributes() {
+    let directory = tempfile::tempdir().unwrap();
+    let source_directory = directory.path().join("src");
+    fs::create_dir_all(&source_directory).unwrap();
+    let crate_root = source_directory.join("lib.rs");
+    fs::write(&crate_root, "#[path = \"tools_alt.rs\"] mod tools;").unwrap();
+    fs::write(source_directory.join("tools.rs"), "pub fn safe() {}").unwrap();
+    fs::write(
+        source_directory.join("tools_alt.rs"),
+        "use crate::brain::HiddenDependency;",
+    )
+    .unwrap();
+
+    let violations = scan_tools_module_from_crate_root(&crate_root);
+
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("crate::brain")),
+        "selected Tools module was not scanned: {violations:?}"
+    );
+}
+
+#[test]
+fn crate_root_tools_scanner_inspects_inline_tools_modules() {
+    let directory = tempfile::tempdir().unwrap();
+    let source_directory = directory.path().join("src");
+    fs::create_dir_all(&source_directory).unwrap();
+    let crate_root = source_directory.join("lib.rs");
+    fs::write(
+        &crate_root,
+        "mod tools { use crate::brain::HiddenDependency; }",
+    )
+    .unwrap();
+    fs::write(source_directory.join("tools.rs"), "pub fn safe() {}").unwrap();
+
+    let violations = scan_tools_module_from_crate_root(&crate_root);
+
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("crate::brain")),
+        "inline Tools module was not scanned: {violations:?}"
+    );
+}
+
+#[test]
+fn crate_root_tools_scanner_fails_closed_on_inline_path_attributes() {
+    let directory = tempfile::tempdir().unwrap();
+    let source_directory = directory.path().join("src");
+    fs::create_dir_all(&source_directory).unwrap();
+    let crate_root = source_directory.join("lib.rs");
+    fs::write(
+        &crate_root,
+        "#[path = \"tools_alt.rs\"] mod tools { mod nested; }",
+    )
+    .unwrap();
+
+    let violations = scan_tools_module_from_crate_root(&crate_root);
+
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("inline Tools module path attribute")),
+        "inline Tools path attribute did not fail closed: {violations:?}"
     );
 }
 
@@ -178,6 +247,39 @@ fn direction_guard_inspects_macro_tokens_and_fails_closed_on_unknown_macros_and_
         "inspected_json_macro.rs",
     );
     assert!(inspected_json_macro.is_empty(), "{inspected_json_macro:?}");
+
+    let shadowed_json_root = scan_source(
+        "use hostile_macros as serde_json; fn build() { let _ = serde_json::json!({}); }",
+        "shadowed_json_root.rs",
+    );
+    assert!(
+        shadowed_json_root
+            .iter()
+            .any(|violation| violation.contains("macro import")),
+        "shadowed serde_json root was accepted: {shadowed_json_root:?}"
+    );
+
+    let shadowed_serde_root = scan_source(
+        "use hostile as serde; #[derive(serde::Serialize)] struct Item;",
+        "shadowed_serde_root.rs",
+    );
+    assert!(
+        shadowed_serde_root
+            .iter()
+            .any(|violation| violation.contains("macro import")),
+        "shadowed serde root was accepted: {shadowed_serde_root:?}"
+    );
+
+    let shadowed_block_json_root = scan_source(
+        "fn build() { use hostile_macros as serde_json; let _ = serde_json::json!({}); }",
+        "shadowed_block_json_root.rs",
+    );
+    assert!(
+        shadowed_block_json_root
+            .iter()
+            .any(|violation| violation.contains("macro import")),
+        "block-scoped serde_json root was accepted: {shadowed_block_json_root:?}"
+    );
 
     let custom_attribute = scan_source("#[custom_codegen] struct Item;", "custom_attribute.rs");
     assert!(

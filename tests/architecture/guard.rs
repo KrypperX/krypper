@@ -6,6 +6,7 @@ use syn::visit::Visit;
 use syn::{Attribute, Item, Meta, Path as RustPath, UseTree};
 
 const TOOLS_MODULE_DEPTH: usize = 1;
+const INSPECTED_CRATE_ROOTS: &[&str] = &["serde", "serde_derive", "serde_json"];
 
 #[derive(Hash, Eq, PartialEq)]
 struct ModuleVisitKey {
@@ -32,6 +33,16 @@ fn path_is_ident(path: &RustPath, expected: &str) -> bool {
         && ident_name(&path.segments[0].ident) == expected
 }
 
+fn module_has_path_attribute(attributes: &[Attribute]) -> bool {
+    attributes
+        .iter()
+        .any(|attribute| path_is_ident(attribute.path(), "path"))
+}
+
+fn is_inspected_crate_root_name(name: &str) -> bool {
+    INSPECTED_CRATE_ROOTS.contains(&name)
+}
+
 struct ModuleScanContext<'a> {
     file_path: &'a Path,
     module_dir: PathBuf,
@@ -56,6 +67,93 @@ pub(super) fn scan_module_file(root: &Path) -> Vec<String> {
         &mut violations,
         &crate_root_brain_exports,
     );
+    violations
+}
+
+pub(super) fn scan_tools_module_from_crate_root(root: &Path) -> Vec<String> {
+    let mut visits = ModuleVisits::default();
+    let mut violations = Vec::new();
+    let crate_root_brain_exports = scan_crate_root_aliases(root, &mut violations);
+    let source = match fs::read_to_string(root) {
+        Ok(source) => source,
+        Err(error) => {
+            violations.push(format!(
+                "{}: unable to read Rust crate root: {error}",
+                root.display()
+            ));
+            return violations;
+        }
+    };
+    let file = match syn::parse_file(&source) {
+        Ok(file) => file,
+        Err(_) => {
+            violations.push(format!("{}: unable to parse crate root", root.display()));
+            return violations;
+        }
+    };
+    let crate_root_module_dir = module_directory(root);
+    let mut found_tools_module = false;
+    for item in &file.items {
+        let Item::Mod(module) = item else {
+            continue;
+        };
+        if ident_name(&module.ident) != "tools" || item_is_test_only(&module.attrs) {
+            continue;
+        }
+        found_tools_module = true;
+        inspect_module_attributes(
+            &module.attrs,
+            &HashSet::new(),
+            0,
+            &crate_root_brain_exports,
+            &root.display().to_string(),
+            &mut violations,
+        );
+        if let Some((_, nested)) = &module.content {
+            if module_has_path_attribute(&module.attrs) {
+                violations.push(format!(
+                    "{}: inline Tools module path attribute is not resolved",
+                    root.display()
+                ));
+            }
+            let module_dir = crate_root_module_dir.join(ident_name(&module.ident));
+            scan_items(
+                nested,
+                &ModuleScanContext {
+                    file_path: root,
+                    module_dir,
+                    module_depth: TOOLS_MODULE_DEPTH,
+                    inside_inline_module: true,
+                },
+                &mut visits,
+                &mut violations,
+                &crate_root_brain_exports,
+            );
+        } else if let Some(module_path) =
+            resolve_module(root, &crate_root_module_dir, module, false)
+        {
+            scan_file(
+                &module_path,
+                module_directory(&module_path),
+                TOOLS_MODULE_DEPTH,
+                false,
+                &mut visits,
+                &mut violations,
+                &crate_root_brain_exports,
+            );
+        } else {
+            violations.push(format!(
+                "{}: unable to resolve production Tools module",
+                root.display()
+            ));
+        }
+    }
+    if !found_tools_module {
+        violations.push(format!(
+            "{}: crate root does not declare a production Tools module",
+            root.display()
+        ));
+    }
     violations
 }
 
@@ -146,6 +244,19 @@ fn scan_items(
             ));
         }
         if let Item::Mod(module) = item {
+            if module_has_path_attribute(&module.attrs) && module.content.is_some() {
+                violations.push(format!(
+                    "{}: inline module path attribute is not resolved",
+                    context.file_path.display()
+                ));
+            }
+            if is_inspected_crate_root_name(&ident_name(&module.ident)) {
+                violations.push(format!(
+                    "{}: module shadows an inspected macro crate root `{}`",
+                    context.file_path.display(),
+                    ident_name(&module.ident)
+                ));
+            }
             inspect_module_attributes(
                 &module.attrs,
                 &inspected_macro_imports,
@@ -232,27 +343,30 @@ fn resolve_module(
     module: &syn::ItemMod,
     inside_inline_module: bool,
 ) -> Option<PathBuf> {
-    if let Some(path) = module.attrs.iter().find_map(|attribute| {
+    let path_attributes = module
+        .attrs
+        .iter()
+        .filter(|attribute| path_is_ident(attribute.path(), "path"))
+        .collect::<Vec<_>>();
+    if path_attributes.len() > 1 {
+        return None;
+    }
+    if let Some(attribute) = path_attributes.first() {
         let Meta::NameValue(name_value) = &attribute.meta else {
             return None;
         };
-        if !path_is_ident(&name_value.path, "path") {
-            return None;
-        }
         let syn::Expr::Lit(expression) = &name_value.value else {
             return None;
         };
         let syn::Lit::Str(value) = &expression.lit else {
             return None;
         };
-        Some(value.value())
-    }) {
         let base = if inside_inline_module {
             module_dir
         } else {
             file_path.parent()?
         };
-        return Some(base.join(path));
+        return Some(base.join(value.value()));
     }
     let name = ident_name(&module.ident);
     let flat = module_dir.join(format!("{name}.rs"));
@@ -369,6 +483,15 @@ impl Visit<'_> for DirectionVisitor<'_> {
         if item_is_test_only(item_attrs(item)) {
             return;
         }
+        if let Item::Mod(module) = item {
+            if is_inspected_crate_root_name(&ident_name(&module.ident)) {
+                self.violations.push(format!(
+                    "{}: module shadows an inspected macro crate root `{}`",
+                    self.origin,
+                    ident_name(&module.ident)
+                ));
+            }
+        }
         syn::visit::visit_item(self, item);
     }
 
@@ -392,6 +515,13 @@ impl Visit<'_> for DirectionVisitor<'_> {
         for attribute in &item.attrs {
             self.visit_attribute(attribute);
         }
+        inspect_macro_import_tree(
+            &item.tree,
+            &mut Vec::new(),
+            &self.origin,
+            &mut HashSet::new(),
+            self.violations,
+        );
         inspect_use_tree(
             &item.tree,
             &mut Vec::new(),
@@ -406,6 +536,15 @@ impl Visit<'_> for DirectionVisitor<'_> {
         if ident_name(&item.ident) == "self" && item.rename.is_some() {
             self.violations
                 .push(format!("{}: self crate alias is not checked", self.origin));
+        }
+        if let Some((_, rename)) = &item.rename {
+            if is_inspected_crate_root_name(&ident_name(rename)) {
+                self.violations.push(format!(
+                    "{}: extern crate alias shadows an inspected macro crate root `{}`",
+                    self.origin,
+                    ident_name(rename)
+                ));
+            }
         }
         syn::visit::visit_item_extern_crate(self, item);
     }
@@ -1271,7 +1410,13 @@ fn attribute_is_inspected(
     crate_root_brain_exports: &HashSet<String>,
 ) -> bool {
     match path_label(attribute.path()).as_str() {
-        "allow" | "cfg" | "doc" | "ignore" | "path" | "test" => true,
+        "allow" | "cfg" | "doc" | "ignore" | "test" => true,
+        "path" => match &attribute.meta {
+            Meta::NameValue(name_value) => {
+                matches!(&name_value.value, syn::Expr::Lit(expression) if matches!(&expression.lit, syn::Lit::Str(_)))
+            }
+            _ => false,
+        },
         "serde" => serde_attribute_is_inspected(attribute, module_depth, crate_root_brain_exports),
         "derive" => {
             let parser = syn::punctuated::Punctuated::<RustPath, syn::Token![,]>::parse_terminated;
@@ -1485,26 +1630,42 @@ fn inspect_macro_import_tree(
             prefix.pop();
         }
         UseTree::Name(name) => {
-            prefix.push(ident_name(&name.ident));
-            inspect_macro_import(
-                prefix,
-                ident_name(&name.ident),
-                origin,
-                imported,
-                violations,
-            );
-            prefix.pop();
+            if ident_name(&name.ident) == "self" {
+                if let Some(local_name) = prefix.last() {
+                    inspect_macro_import(prefix, local_name.clone(), origin, imported, violations);
+                }
+            } else {
+                prefix.push(ident_name(&name.ident));
+                inspect_macro_import(
+                    prefix,
+                    ident_name(&name.ident),
+                    origin,
+                    imported,
+                    violations,
+                );
+                prefix.pop();
+            }
         }
         UseTree::Rename(rename) => {
-            prefix.push(ident_name(&rename.ident));
-            inspect_macro_import(
-                prefix,
-                ident_name(&rename.rename),
-                origin,
-                imported,
-                violations,
-            );
-            prefix.pop();
+            if ident_name(&rename.ident) == "self" {
+                inspect_macro_import(
+                    prefix,
+                    ident_name(&rename.rename),
+                    origin,
+                    imported,
+                    violations,
+                );
+            } else {
+                prefix.push(ident_name(&rename.ident));
+                inspect_macro_import(
+                    prefix,
+                    ident_name(&rename.rename),
+                    origin,
+                    imported,
+                    violations,
+                );
+                prefix.pop();
+            }
         }
         UseTree::Glob(_) => {
             violations.push(format!("{origin}: glob imports can hide production macros"))
@@ -1527,6 +1688,7 @@ fn inspect_macro_import(
     let could_shadow_inspected = PRELUDE_MACROS.contains(&local_name.as_str())
         || BUILTIN_DERIVES.contains(&local_name.as_str())
         || SERDE_DERIVES.contains(&local_name.as_str())
+        || is_inspected_crate_root_name(&local_name)
         || local_name == "json";
     if !could_shadow_inspected {
         return;
@@ -1536,6 +1698,9 @@ fn inspect_macro_import(
             && matches!(source[0].as_str(), "serde" | "serde_derive")
             && SERDE_DERIVES.contains(&source[1].as_str())
             && source[1] == local_name
+        || source.len() == 1
+            && source[0] == local_name
+            && is_inspected_crate_root_name(&local_name)
         || source.len() == 2
             && matches!(source[0].as_str(), "std" | "core")
             && source[1] == local_name
