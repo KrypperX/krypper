@@ -28,6 +28,9 @@ fn real_sandbox_environment_and_network_carry_no_host_secrets() {
         path.join("src/lib.rs"),
         r#"
 #[test] fn secrets_selected_test() {
+    assert_eq!(std::env::var("CARGO_PROFILE_DEV_DEBUG").unwrap(), "0");
+    assert_eq!(std::env::var("CARGO_PROFILE_TEST_DEBUG").unwrap(), "0");
+    assert_eq!(std::env::var("CARGO_INCREMENTAL").unwrap(), "0");
     for name in ["GITHUB_TOKEN", "KRYPPER_TEST_SECRET_CANARY", "SSH_AUTH_SOCK", "DBUS_SESSION_BUS_ADDRESS"] {
         assert!(std::env::var(name).is_err(), "{name} leaked into the sandbox");
     }
