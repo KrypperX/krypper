@@ -10,32 +10,15 @@ use krypper::task_lifecycle::{
     TurnOutcome, TurnState, TurnTransitionError, WorkspaceListError, WorkspaceReadError,
     WorkspaceReplaceError, WorkspaceSearchLocation, WorkspaceWriteError,
 };
+#[path = "../src/test_support.rs"]
+mod test_support;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use test_support::TempDir;
 use uuid::Uuid;
 
 static CURRENT_DIR_LOCK: Mutex<()> = Mutex::new(());
-
-struct TempDir(PathBuf);
-
-impl TempDir {
-    fn new() -> Self {
-        let path = std::env::temp_dir().join(format!("krypper-workspace-read-{}", Uuid::new_v4()));
-        fs::create_dir(&path).unwrap();
-        Self(path)
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        fs::remove_dir_all(&self.0).unwrap();
-    }
-}
 
 struct RestoreCurrentDir(PathBuf);
 
