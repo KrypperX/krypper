@@ -1,9 +1,11 @@
 //! Atomic replacement of existing files, including unified-diff patches.
 
+use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::{Component, Path};
+use std::sync::{Mutex, OnceLock};
 
 use super::patch::{self, MAX_PATCH_BYTES};
 use super::paths::open_workspace_parent;
@@ -11,11 +13,12 @@ use super::read::read_open_text_file;
 use super::syscalls::{
     close_file, contains_nul, fstat_file, is_already_exists, is_not_found, is_regular_file,
     is_relative_workspace_path, is_symlink, open_at, path_has_trailing_separator, rename_file_at,
-    same_inode, set_mode, stat_at, sync_file, unlink_created_file, write_all_to_file,
-    write_to_file, OpenRequest, RenameFileError,
+    same_inode, set_mode, stat_at, sync_file, try_lock_file_exclusive, unlink_created_file,
+    write_all_to_file, write_to_file, OpenRequest, RenameFileError,
 };
 use super::types::{
-    CliError, CreateMode, DirHandle, OriginalFileState, PatchEvidence, WorkspaceRoot, MAX_FILE_SIZE,
+    CliError, CreateMode, DirHandle, FileIdentity, OriginalFileState, PatchEvidence, WorkspaceRoot,
+    MAX_FILE_SIZE,
 };
 
 pub(crate) fn replace_text_file_at(
@@ -32,7 +35,7 @@ pub(super) fn replace_text_file_at_with_writer<F>(
     path: &OsStr,
     match_text: &str,
     replacement_text: &str,
-    mut writer: F,
+    writer: F,
 ) -> Result<usize, CliError>
 where
     F: FnMut(&mut File, &[u8]) -> io::Result<usize>,
@@ -92,6 +95,13 @@ where
     replacement.push_str(replacement_text);
     replacement.push_str(&contents[range.end..]);
 
+    let mut operations = ReplacementOperations {
+        writer,
+        committer: rename_file_at,
+        readback: read_file_contents_at_for_verification,
+        cleanup: unlink_created_file,
+        mode_setter: set_mode,
+    };
     replace_file_contents_atomically(
         &parent,
         &name,
@@ -100,27 +110,82 @@ where
             contents: contents.as_bytes(),
         },
         replacement.as_bytes(),
-        &mut writer,
-        &mut rename_file_at,
-        &mut read_file_contents_at_for_verification,
+        &mut operations,
     )?;
     Ok(output_length)
 }
 
-pub(super) fn replace_file_contents_atomically<W, C, R>(
+pub(super) struct ReplacementOperations<W, C, R, U, M> {
+    pub(super) writer: W,
+    pub(super) committer: C,
+    pub(super) readback: R,
+    pub(super) cleanup: U,
+    pub(super) mode_setter: M,
+}
+
+static IN_PROCESS_REPLACEMENTS: OnceLock<Mutex<HashSet<FileIdentity>>> = OnceLock::new();
+
+struct InProcessReplacementLock(FileIdentity);
+
+impl InProcessReplacementLock {
+    fn try_acquire(identity: FileIdentity) -> Result<Self, CliError> {
+        let registry = IN_PROCESS_REPLACEMENTS.get_or_init(|| Mutex::new(HashSet::new()));
+        let mut identities = registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if identities.insert(identity) {
+            Ok(Self(identity))
+        } else {
+            Err(CliError::new("file is locked by another replacement"))
+        }
+    }
+}
+
+impl Drop for InProcessReplacementLock {
+    fn drop(&mut self) {
+        let registry = IN_PROCESS_REPLACEMENTS.get_or_init(|| Mutex::new(HashSet::new()));
+        let mut identities = registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        identities.remove(&self.0);
+    }
+}
+
+pub(super) fn replace_file_contents_atomically<W, C, R, U, M>(
     parent: &DirHandle,
     name: &OsStr,
     original: OriginalFileState<'_>,
     contents: &[u8],
-    writer: &mut W,
-    committer: &mut C,
-    readback: &mut R,
+    operations: &mut ReplacementOperations<W, C, R, U, M>,
 ) -> Result<(), CliError>
 where
     W: FnMut(&mut File, &[u8]) -> io::Result<usize>,
     C: FnMut(&DirHandle, &OsStr, &OsStr) -> Result<(), RenameFileError>,
     R: FnMut(&DirHandle, &OsStr) -> Result<Vec<u8>, CliError>,
+    U: FnMut(&DirHandle, &OsStr, Option<&FileIdentity>) -> io::Result<()>,
+    M: FnMut(&File, CreateMode) -> io::Result<()>,
 {
+    let _process_lock = InProcessReplacementLock::try_acquire(original.status.identity)?;
+    let lock_file = open_at(parent, name, OpenRequest::ReadFile)
+        .map_err(|_| CliError::new("unable to lock file for replacement"))?;
+    let lock_status =
+        fstat_file(&lock_file).map_err(|_| CliError::new("unable to lock file for replacement"))?;
+    if !same_inode(&original.status, &lock_status) || !is_regular_file(&lock_status) {
+        return Err(CliError::new("file changed while replacing it"));
+    }
+    try_lock_file_exclusive(&lock_file).map_err(|error| {
+        if error.kind() == io::ErrorKind::WouldBlock {
+            CliError::new("file is locked by another replacement")
+        } else {
+            CliError::new("unable to lock file for replacement")
+        }
+    })?;
+    let locked_path_status =
+        stat_at(parent, name).map_err(|_| CliError::new("file changed while replacing it"))?;
+    if !same_inode(&original.status, &locked_path_status) || !is_regular_file(&locked_path_status) {
+        return Err(CliError::new("file changed while replacing it"));
+    }
+
     let (temporary_name, temporary_file) = (0..3)
         .find_map(|_| {
             let name = OsString::from(format!(".krypper-replace-{}", uuid::Uuid::new_v4()));
@@ -143,60 +208,112 @@ where
         .map(|status| status.identity);
     let mut temporary_file = temporary_file;
     let mut failed = identity.is_none();
-    if !failed && write_all_to_file(&mut temporary_file, contents, writer).is_err() {
-        failed = true;
-    }
-    if !failed && set_mode(&temporary_file, original.status.mode).is_err() {
+    if !failed && write_all_to_file(&mut temporary_file, contents, &mut operations.writer).is_err()
+    {
         failed = true;
     }
     if !failed && sync_file(&temporary_file).is_err() {
         failed = true;
     }
-    if close_file(temporary_file).is_err() {
-        failed = true;
-    }
     if failed {
-        unlink_created_file(parent, &temporary_name, identity.as_ref());
-        return Err(CliError::new("unable to stage file replacement"));
+        let error = cleanup_failure(
+            &mut operations.cleanup,
+            parent,
+            &temporary_name,
+            identity.as_ref(),
+            "unable to stage file replacement",
+        );
+        let _ = close_file(temporary_file);
+        return Err(error);
     }
 
     let current_status = stat_at(parent, name).map_err(|_| {
-        unlink_created_file(parent, &temporary_name, identity.as_ref());
-        CliError::new("file changed while replacing it")
+        cleanup_failure(
+            &mut operations.cleanup,
+            parent,
+            &temporary_name,
+            identity.as_ref(),
+            "file changed while replacing it",
+        )
     })?;
     if !same_inode(&original.status, &current_status) || !is_regular_file(&current_status) {
-        unlink_created_file(parent, &temporary_name, identity.as_ref());
-        return Err(CliError::new("file changed while replacing it"));
+        return Err(cleanup_failure(
+            &mut operations.cleanup,
+            parent,
+            &temporary_name,
+            identity.as_ref(),
+            "file changed while replacing it",
+        ));
     }
 
     let current_contents = match read_file_contents_at_for_verification(parent, name) {
         Ok(contents) => contents,
         Err(_) => {
-            unlink_created_file(parent, &temporary_name, identity.as_ref());
-            return Err(CliError::new("unable to verify original file"));
+            return Err(cleanup_failure(
+                &mut operations.cleanup,
+                parent,
+                &temporary_name,
+                identity.as_ref(),
+                "unable to verify original file",
+            ));
         }
     };
     if current_contents != original.contents {
-        unlink_created_file(parent, &temporary_name, identity.as_ref());
-        return Err(CliError::new("file changed while replacing it"));
+        return Err(cleanup_failure(
+            &mut operations.cleanup,
+            parent,
+            &temporary_name,
+            identity.as_ref(),
+            "file changed while replacing it",
+        ));
     }
 
-    match committer(parent, &temporary_name, name) {
+    match (operations.committer)(parent, &temporary_name, name) {
         Ok(()) => {}
         Err(RenameFileError::NotCommitted) => {
-            unlink_created_file(parent, &temporary_name, identity.as_ref());
-            return Err(CliError::new("unable to replace file"));
+            return Err(cleanup_failure(
+                &mut operations.cleanup,
+                parent,
+                &temporary_name,
+                identity.as_ref(),
+                "unable to replace file",
+            ));
         }
         Err(RenameFileError::CommittedButUnverified) => {
             return Err(CliError::WorkspaceMutationCommittedButUnverified);
         }
     }
-    let stored_contents =
-        readback(parent, name).map_err(|_| CliError::WorkspaceMutationCommittedButUnverified)?;
+    if (operations.mode_setter)(&temporary_file, original.status.mode).is_err()
+        || sync_file(&temporary_file).is_err()
+    {
+        return Err(CliError::WorkspaceMutationCommittedButUnverified);
+    }
+    if close_file(temporary_file).is_err() {
+        return Err(CliError::WorkspaceMutationCommittedButUnverified);
+    }
+    let stored_contents = (operations.readback)(parent, name)
+        .map_err(|_| CliError::WorkspaceMutationCommittedButUnverified)?;
     if stored_contents != contents {
         return Err(CliError::WorkspaceMutationCommittedButUnverified);
     }
     Ok(())
+}
+
+fn cleanup_failure<U>(
+    cleanup: &mut U,
+    parent: &DirHandle,
+    temporary_name: &OsStr,
+    identity: Option<&FileIdentity>,
+    failure_message: &str,
+) -> CliError
+where
+    U: FnMut(&DirHandle, &OsStr, Option<&FileIdentity>) -> io::Result<()>,
+{
+    if cleanup(parent, temporary_name, identity).is_ok() {
+        CliError::new(failure_message)
+    } else {
+        CliError::new("replacement failed and staged file cleanup also failed")
+    }
 }
 
 pub(super) fn read_file_contents_at_for_verification(
@@ -271,9 +388,9 @@ pub(super) fn apply_patch_file_at_with_ops<W, C, R>(
     root: &WorkspaceRoot,
     path: &OsStr,
     patch_text: &str,
-    mut writer: W,
-    mut committer: C,
-    mut readback: R,
+    writer: W,
+    committer: C,
+    readback: R,
 ) -> Result<PatchEvidence, CliError>
 where
     W: FnMut(&mut File, &[u8]) -> io::Result<usize>,
@@ -331,6 +448,13 @@ where
         return Err(CliError::new("patched file exceeds 1 MiB"));
     }
 
+    let mut operations = ReplacementOperations {
+        writer,
+        committer,
+        readback,
+        cleanup: unlink_created_file,
+        mode_setter: set_mode,
+    };
     replace_file_contents_atomically(
         &parent,
         &name,
@@ -339,9 +463,7 @@ where
             contents: original.as_bytes(),
         },
         result.contents.as_bytes(),
-        &mut writer,
-        &mut committer,
-        &mut readback,
+        &mut operations,
     )?;
 
     Ok(PatchEvidence {

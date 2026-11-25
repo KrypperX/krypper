@@ -48,6 +48,10 @@ pub(crate) fn fstat_file(_file: &File) -> io::Result<FileStatus> {
     Err(unavailable())
 }
 
+pub(crate) fn try_lock_file_exclusive(_file: &File) -> io::Result<()> {
+    Err(unavailable())
+}
+
 pub(crate) fn read_link_at(_parent: &DirHandle, _name: &OsStr) -> io::Result<std::path::PathBuf> {
     Err(unavailable())
 }
@@ -64,7 +68,8 @@ pub(crate) fn unlink_created_file(
     _parent: &DirHandle,
     _name: &OsStr,
     _identity: Option<&FileIdentity>,
-) {
+) -> io::Result<()> {
+    Err(unavailable())
 }
 
 pub(crate) fn unlink_at(_parent: &DirHandle, _name: &OsStr) -> io::Result<()> {

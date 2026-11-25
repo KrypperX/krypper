@@ -160,6 +160,19 @@ pub(crate) fn fstat_file(file: &File) -> io::Result<FileStatus> {
     stat_descriptor(file.as_raw_fd())
 }
 
+pub(crate) fn try_lock_file_exclusive(file: &File) -> io::Result<()> {
+    loop {
+        // SAFETY: `file` is live for the duration of the call and flock only uses its descriptor.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
 pub(crate) fn read_link_at(parent: &DirHandle, name: &OsStr) -> io::Result<PathBuf> {
     let name = c_string(name)?;
     let mut capacity = 256;
@@ -229,21 +242,41 @@ pub(crate) fn unlink_created_file(
     parent: &DirHandle,
     name: &OsStr,
     identity: Option<&FileIdentity>,
-) {
-    let Some(identity) = identity else {
-        return;
-    };
-    let Ok(current) = stat_at(parent, name) else {
-        return;
+) -> io::Result<()> {
+    let identity = identity.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "staged file identity is unavailable",
+        )
+    })?;
+    let current = match stat_at(parent, name) {
+        Ok(current) => current,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
     };
     if &current.identity != identity {
-        return;
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "staged file identity changed before cleanup",
+        ));
     }
-    let Ok(name) = c_string(name) else {
-        return;
-    };
+    if current.kind != FileKind::Regular {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "staged file is no longer a regular file",
+        ));
+    }
+    let name = c_string(name)?;
     // SAFETY: `parent` is open, `name` is a single component, and the current file identity matches.
-    unsafe { libc::unlinkat(parent.file().as_raw_fd(), name.as_ptr(), 0) };
+    if unsafe { libc::unlinkat(parent.file().as_raw_fd(), name.as_ptr(), 0) } == 0 {
+        return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    if error.kind() == io::ErrorKind::NotFound {
+        Ok(())
+    } else {
+        Err(error)
+    }
 }
 
 pub(crate) fn unlink_at(parent: &DirHandle, name: &OsStr) -> io::Result<()> {
