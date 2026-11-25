@@ -1,3 +1,4 @@
+use super::discovery::{SkippedSkillManifest, SkippedSkillManifestKind};
 use super::{
     load_skills, SkillLoadError, MAX_SKILL_MANIFESTS, MAX_SKILL_MANIFEST_BYTES,
     SKILL_MANIFEST_SCHEMA,
@@ -68,16 +69,39 @@ fn loads_project_manifests_in_deterministic_name_order() {
     assert_eq!(first, second);
     assert_eq!(
         first
+            .skills
             .iter()
             .map(|skill| skill.name.as_str())
             .collect::<Vec<_>>(),
         ["alpha", "zeta"]
     );
-    assert_eq!(first[0].instructions.as_str(), "instructions for alpha");
-    assert_eq!(first[0].description, "short description");
     assert_eq!(
-        first[0].manifest_path,
+        first.skills[0].instructions.as_str(),
+        "instructions for alpha"
+    );
+    assert_eq!(first.skills[0].description, "short description");
+    assert_eq!(
+        first.skills[0].manifest_path,
         PathBuf::from(".krypper/skills/alpha.json")
+    );
+}
+
+#[test]
+fn malformed_manifest_does_not_hide_valid_project_manifests() {
+    let fixture = Fixture::new("partial-invalid");
+    fixture.manifest(".krypper/skills/alpha.json", "alpha");
+    fixture.write(".krypper/skills/broken.json", "{");
+
+    let loaded = load_skills(&fixture.root, &[]).unwrap();
+
+    assert_eq!(loaded.skills.len(), 1);
+    assert_eq!(loaded.skills[0].name, "alpha");
+    assert_eq!(
+        loaded.skipped_manifests,
+        [SkippedSkillManifest {
+            path: PathBuf::from(".krypper/skills/broken.json"),
+            kind: SkippedSkillManifestKind::MalformedJson,
+        }]
     );
 }
 
@@ -88,10 +112,10 @@ fn loads_explicit_paths_and_ignores_non_manifest_files() {
     fixture.write(".krypper/skills/notes.txt", "not a manifest");
 
     let skills = load_skills(&fixture.root, &[PathBuf::from("custom/explicit.json")]).unwrap();
-    assert_eq!(skills.len(), 1);
-    assert_eq!(skills[0].name, "explicit");
+    assert_eq!(skills.skills.len(), 1);
+    assert_eq!(skills.skills[0].name, "explicit");
     assert_eq!(
-        skills[0].manifest_path,
+        skills.skills[0].manifest_path,
         PathBuf::from("custom/explicit.json")
     );
 }
@@ -99,7 +123,9 @@ fn loads_explicit_paths_and_ignores_non_manifest_files() {
 #[test]
 fn missing_project_directory_loads_nothing() {
     let fixture = Fixture::new("missing");
-    assert!(load_skills(&fixture.root, &[]).unwrap().is_empty());
+    let report = load_skills(&fixture.root, &[]).unwrap();
+    assert!(report.skills.is_empty());
+    assert!(report.skipped_manifests.is_empty());
 }
 
 #[test]
@@ -146,7 +172,10 @@ fn rejects_symlinked_manifest() {
         load_skills(&fixture.root, &[PathBuf::from("alias.json")]),
         Err(SkillLoadError::Symlink)
     );
-    assert_eq!(load_skills(&fixture.root, &[]).unwrap()[0].name, "alpha");
+    assert_eq!(
+        load_skills(&fixture.root, &[]).unwrap().skills[0].name,
+        "alpha"
+    );
 }
 
 #[test]
@@ -204,7 +233,6 @@ fn rejects_oversize_manifest() {
 fn rejects_invalid_manifests() {
     let fixture = Fixture::new("invalid");
     let cases = [
-        ("malformed", "{".to_owned()),
         (
             "wrong-schema",
             json!({
@@ -328,7 +356,7 @@ fn enforces_manifest_count_limit() {
         fixture.manifest(&format!(".krypper/skills/{name}.json"), &name);
     }
     assert_eq!(
-        load_skills(&fixture.root, &[]).unwrap().len(),
+        load_skills(&fixture.root, &[]).unwrap().skills.len(),
         MAX_SKILL_MANIFESTS
     );
 
@@ -349,17 +377,17 @@ fn loading_changes_no_registered_tool_or_workspace_file() {
     fixture.manifest(".krypper/skills/alpha.json", "alpha");
     let contents = fs::read_to_string(fixture.path.join(".krypper/skills/alpha.json")).unwrap();
 
-    let skills = load_skills(&fixture.root, &[]).unwrap();
+    let report = load_skills(&fixture.root, &[]).unwrap();
     let after = registry::workspace_operations()
         .iter()
         .map(|operation| operation.name())
         .collect::<Vec<_>>();
 
     assert_eq!(before, after);
-    assert_eq!(skills.len(), 1);
+    assert_eq!(report.skills.len(), 1);
     assert_eq!(
         fs::read_to_string(fixture.path.join(".krypper/skills/alpha.json")).unwrap(),
         contents
     );
-    assert!(!Path::new(skills[0].instructions.as_str()).is_absolute());
+    assert!(!Path::new(report.skills[0].instructions.as_str()).is_absolute());
 }

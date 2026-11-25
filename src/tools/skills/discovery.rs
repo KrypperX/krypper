@@ -2,7 +2,7 @@
 
 use super::manifest::{
     parse_manifest, valid_skill_name, ParsedSkill, SkillInstructions, SkillLoadError,
-    MAX_SKILL_MANIFEST_BYTES,
+    SkillManifestError, MAX_SKILL_MANIFEST_BYTES,
 };
 use crate::tools::{list_task_directory_names_at, read_text_file_at, WorkspaceRoot};
 use std::collections::BTreeSet;
@@ -29,6 +29,38 @@ pub(crate) struct LoadedSkill {
     pub(crate) manifest_path: PathBuf,
 }
 
+/// A malformed JSON file skipped while loading the remaining manifests.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SkippedSkillManifest {
+    pub(crate) path: PathBuf,
+    pub(crate) kind: SkippedSkillManifestKind,
+}
+
+/// Bounded categories reported to the host without exposing manifest contents.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SkippedSkillManifestKind {
+    MalformedJson,
+}
+
+/// The successfully loaded skills and per-file syntax diagnostics.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct SkillLoadReport {
+    pub(crate) skills: Vec<LoadedSkill>,
+    pub(crate) skipped_manifests: Vec<SkippedSkillManifest>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SkillFileError {
+    MalformedJson,
+    Fatal(SkillLoadError),
+}
+
+impl From<SkillLoadError> for SkillFileError {
+    fn from(error: SkillLoadError) -> Self {
+        Self::Fatal(error)
+    }
+}
+
 /// Discover project manifests and load them with the host's explicit paths.
 ///
 /// Results are ordered by skill name then manifest path. Duplicate names fail
@@ -36,7 +68,7 @@ pub(crate) struct LoadedSkill {
 pub(crate) fn load_skills(
     root: &WorkspaceRoot,
     explicit_paths: &[PathBuf],
-) -> Result<Vec<LoadedSkill>, SkillLoadError> {
+) -> Result<SkillLoadReport, SkillLoadError> {
     let mut paths = discover_manifest_paths(root)?;
     for path in explicit_paths {
         paths.push(normalize_manifest_path(path)?);
@@ -48,20 +80,33 @@ pub(crate) fn load_skills(
     }
 
     let mut names = BTreeSet::new();
-    let mut skills = Vec::with_capacity(paths.len());
+    let mut report = SkillLoadReport {
+        skills: Vec::with_capacity(paths.len()),
+        skipped_manifests: Vec::new(),
+    };
     for path in paths {
-        let skill = load_one(root, &path)?;
+        let skill = match load_one(root, &path) {
+            Ok(skill) => skill,
+            Err(SkillFileError::MalformedJson) => {
+                report.skipped_manifests.push(SkippedSkillManifest {
+                    path,
+                    kind: SkippedSkillManifestKind::MalformedJson,
+                });
+                continue;
+            }
+            Err(SkillFileError::Fatal(error)) => return Err(error),
+        };
         if !names.insert(skill.name.clone()) {
             return Err(SkillLoadError::DuplicateName);
         }
-        skills.push(skill);
+        report.skills.push(skill);
     }
-    skills.sort_by(|left, right| {
+    report.skills.sort_by(|left, right| {
         left.name
             .cmp(&right.name)
             .then_with(|| left.manifest_path.cmp(&right.manifest_path))
     });
-    Ok(skills)
+    Ok(report)
 }
 
 fn discover_manifest_paths(root: &WorkspaceRoot) -> Result<Vec<PathBuf>, SkillLoadError> {
@@ -140,12 +185,12 @@ fn normalize_manifest_path(path: &Path) -> Result<PathBuf, SkillLoadError> {
     Ok(normalized)
 }
 
-fn load_one(root: &WorkspaceRoot, path: &Path) -> Result<LoadedSkill, SkillLoadError> {
+fn load_one(root: &WorkspaceRoot, path: &Path) -> Result<LoadedSkill, SkillFileError> {
     reject_symlinks(root, path)?;
     let contents = read_text_file_at(root, path.as_os_str())
         .map_err(|error| map_workspace_message(error.message()))?;
     if contents.len() > MAX_SKILL_MANIFEST_BYTES {
-        return Err(SkillLoadError::TooLarge);
+        return Err(SkillFileError::Fatal(SkillLoadError::TooLarge));
     }
     let name = path
         .file_stem()
@@ -155,7 +200,13 @@ fn load_one(root: &WorkspaceRoot, path: &Path) -> Result<LoadedSkill, SkillLoadE
         name,
         description,
         instructions,
-    } = parse_manifest(&contents, name)?;
+    } = match parse_manifest(&contents, name) {
+        Ok(manifest) => manifest,
+        Err(SkillManifestError::MalformedJson) => return Err(SkillFileError::MalformedJson),
+        Err(SkillManifestError::InvalidManifest) => {
+            return Err(SkillFileError::Fatal(SkillLoadError::InvalidManifest));
+        }
+    };
     Ok(LoadedSkill {
         name,
         description,

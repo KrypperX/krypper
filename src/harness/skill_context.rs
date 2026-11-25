@@ -122,9 +122,10 @@ mod tests {
                 manifest_path: PathBuf::from(".krypper/skills/alpha.json"),
                 instructions: "use the existing tools".to_owned(),
             }],
-            bytes: 23,
+            bytes: 39,
             truncated: false,
             neutralized_lines: 0,
+            skipped_manifests: Vec::new(),
         }
     }
 

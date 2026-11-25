@@ -31,7 +31,7 @@ content remain untrusted input.
 | Query token floor | `MIN_QUERY_BYTES` | 3 bytes | `src/harness/context.rs` |
 | Observation payload | `MAX_OBSERVATION_BYTES` | 2 MiB | `src/harness/context.rs` |
 | Activated skills | `MAX_ACTIVE_SKILLS` | 4 | `src/tools/skills/activation.rs` |
-| Skill context | `MAX_SKILL_CONTEXT_BYTES` | 2 KiB, split evenly across selected skills | `src/tools/skills/activation.rs` |
+| Skill context | `MAX_SKILL_CONTEXT_BYTES` | 2 KiB for descriptions + instructions, split evenly per skill | `src/tools/skills/activation.rs` |
 | Memory render | `MAX_MEMORY_CONTEXT_BYTES` | 4 KiB | `src/memory/retrieval.rs` |
 | Memory recall | `MemoryRecallPolicy` default | 16 records / 4 KiB | `src/memory/integration.rs` |
 | Memory query | `MAX_QUERY_RECORDS` / `MAX_QUERY_BYTES` | 64 / 32 KiB | `src/memory/contract.rs` |
@@ -69,6 +69,11 @@ memory, so a prompt can carry the sum of all four ceilings.
   results render an explicit "no bounded matches were available" line, never invented content.
 - Memory recall reports `truncated` when a query bound or the render budget dropped eligible
   records, and `skipped_expired` for records that expired before the query clock.
+- Skill loading skips and reports malformed JSON manifests individually; schema-invalid manifests
+  and workspace-boundary errors still fail closed. Descriptions use at most min(512 bytes, one
+  quarter of each skill's share); the remaining three quarters are reserved for instructions.
+  Host-only diagnostics
+  are excluded from serialized context.
 
 ## What exists versus missing
 
