@@ -92,6 +92,7 @@ pub struct OllamaDecisionSource {
     pub(super) model: String,
     pub(super) address: SocketAddr,
     profile_endpoint: Option<String>,
+    streaming_enabled: bool,
     pub(super) agent: Agent,
     pub(super) remaining_decisions: usize,
     pub(super) extension_declarations: Vec<serde_json::Value>,
@@ -107,7 +108,7 @@ impl OllamaDecisionSource {
     /// `action_budget` should match the runner's action limit so the model sees the remaining
     /// number of decisions available to the turn.
     pub fn new(model: impl Into<String>, action_budget: usize) -> Self {
-        Self::with_endpoint(model, action_budget, OLLAMA_ADDRESS)
+        Self::with_endpoint_and_extensions(model, action_budget, OLLAMA_ADDRESS, &[])
     }
 
     /// Create a source that advertises host-authorized extension declarations.
@@ -117,10 +118,30 @@ impl OllamaDecisionSource {
         address: SocketAddr,
         extension_declarations: &[serde_json::Value],
     ) -> Self {
+        let streaming_enabled = super::providers::stream_flag_enabled(
+            std::env::var_os("KRYPPER_OLLAMA_STREAM").as_deref(),
+        );
+        Self::with_endpoint_and_extensions_streaming(
+            model,
+            action_budget,
+            address,
+            extension_declarations,
+            streaming_enabled,
+        )
+    }
+
+    fn with_endpoint_and_extensions_streaming(
+        model: impl Into<String>,
+        action_budget: usize,
+        address: SocketAddr,
+        extension_declarations: &[serde_json::Value],
+        streaming_enabled: bool,
+    ) -> Self {
         Self {
             model: model.into(),
             address,
             profile_endpoint: None,
+            streaming_enabled,
             agent: model_agent(),
             remaining_decisions: action_budget,
             extension_declarations: extension_declarations.to_vec(),
@@ -137,6 +158,7 @@ impl OllamaDecisionSource {
             model: model.into(),
             address: OLLAMA_ADDRESS,
             profile_endpoint: Some(endpoint),
+            streaming_enabled: false,
             agent: hosted_model_agent(),
             remaining_decisions: action_budget,
             extension_declarations: Vec::new(),
@@ -563,12 +585,54 @@ impl OllamaDecisionSource {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn with_endpoint(
         model: impl Into<String>,
         action_budget: usize,
         address: SocketAddr,
     ) -> Self {
-        Self::with_endpoint_and_extensions(model, action_budget, address, &[])
+        Self::with_endpoint_and_extensions_streaming(model, action_budget, address, &[], false)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_streaming_endpoint(
+        model: impl Into<String>,
+        action_budget: usize,
+        address: SocketAddr,
+    ) -> Self {
+        Self::with_endpoint_and_extensions_streaming(model, action_budget, address, &[], true)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_streaming_endpoint_and_extensions(
+        model: impl Into<String>,
+        action_budget: usize,
+        address: SocketAddr,
+        extension_declarations: &[serde_json::Value],
+    ) -> Self {
+        Self::with_endpoint_and_extensions_streaming(
+            model,
+            action_budget,
+            address,
+            extension_declarations,
+            true,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_endpoint_and_extensions_non_streaming(
+        model: impl Into<String>,
+        action_budget: usize,
+        address: SocketAddr,
+        extension_declarations: &[serde_json::Value],
+    ) -> Self {
+        Self::with_endpoint_and_extensions_streaming(
+            model,
+            action_budget,
+            address,
+            extension_declarations,
+            false,
+        )
     }
 
     fn choose(
@@ -583,15 +647,102 @@ impl OllamaDecisionSource {
         let remaining = self.remaining_decisions;
         self.remaining_decisions -= 1;
 
-        let request = build_chat_request_with_extensions(
-            &self.model,
-            goal,
-            observations,
-            remaining,
-            project_guidance,
-            &self.extension_declarations,
-        )?;
+        let streaming = self.profile_endpoint.is_none() && self.streaming_enabled;
+        let request = if streaming {
+            build_streaming_chat_request_with_extensions(
+                &self.model,
+                goal,
+                observations,
+                remaining,
+                project_guidance,
+                &self.extension_declarations,
+            )?
+        } else {
+            build_chat_request_with_extensions(
+                &self.model,
+                goal,
+                observations,
+                remaining,
+                project_guidance,
+                &self.extension_declarations,
+            )?
+        };
         let advertised_tools = AdvertisedToolNames::from_request(&request)?;
+        if streaming {
+            let mut tool_calls = Vec::new();
+            let mut completed = false;
+            post_chat_stream(&self.agent, self.address, &request, |record| {
+                if completed {
+                    return Err(ModelError::InvalidToolCall(
+                        "event received after response completion",
+                    ));
+                }
+                let chunk: serde_json::Value =
+                    serde_json::from_slice(record).map_err(|_| ModelError::InvalidJson)?;
+                let message = chunk
+                    .get("message")
+                    .and_then(serde_json::Value::as_object)
+                    .ok_or(ModelError::InvalidToolCall("missing assistant message"))?;
+                if message.get("role").and_then(serde_json::Value::as_str) != Some("assistant") {
+                    return Err(ModelError::InvalidToolCall(
+                        "tool calls must come from an assistant message",
+                    ));
+                }
+                if let Some(value) = message.get("tool_calls") {
+                    let calls = value
+                        .as_array()
+                        .ok_or(ModelError::InvalidToolCall("invalid tool call chunks"))?;
+                    if tool_calls.len().saturating_add(calls.len()) > 1 {
+                        return Err(ModelError::InvalidToolCall(
+                            "expected exactly one tool call",
+                        ));
+                    }
+                    for call in calls {
+                        if let Some(arguments) = call.pointer("/function/arguments") {
+                            if serde_json::to_vec(arguments)
+                                .map_err(|_| ModelError::InvalidJson)?
+                                .len()
+                                > MAX_STREAMED_TOOL_ARGUMENT_BYTES
+                            {
+                                return Err(ModelError::ResponseTooLarge);
+                            }
+                        }
+                        tool_calls.push(call.clone());
+                    }
+                }
+                let done = chunk
+                    .get("done")
+                    .and_then(serde_json::Value::as_bool)
+                    .ok_or(ModelError::InvalidJson)?;
+                if done {
+                    match chunk.get("done_reason") {
+                        None | Some(serde_json::Value::Null) => {}
+                        Some(serde_json::Value::String(reason)) if reason == "stop" => {}
+                        Some(serde_json::Value::String(_)) => {
+                            return Err(ModelError::InvalidToolCall(
+                                "response did not stop normally",
+                            ));
+                        }
+                        Some(_) => return Err(ModelError::InvalidJson),
+                    }
+                    completed = true;
+                }
+                Ok(())
+            })?;
+            if !completed {
+                return Err(ModelError::InvalidToolCall(
+                    "stream ended before response completion",
+                ));
+            }
+            let response = serde_json::json!({
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": tool_calls
+                }
+            });
+            let response = serde_json::to_vec(&response).map_err(|_| ModelError::InvalidJson)?;
+            return parse_model_response(&response, &advertised_tools);
+        }
         let response = match self.profile_endpoint.as_deref() {
             Some(endpoint) => post_chat_at_endpoint(&self.agent, endpoint, &request)?,
             None => post_chat(&self.agent, self.address, &request)?,

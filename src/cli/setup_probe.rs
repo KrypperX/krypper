@@ -125,7 +125,7 @@ pub(super) fn test_connection(
     record
         .add_capability_fact(
             CapabilityName::NativeStreaming,
-            Some(provider.native_sse_decisions),
+            Some(provider.native_decision_streaming),
             CapabilityProvenance::Declared,
         )
         .map_err(io::Error::other)?;
@@ -271,8 +271,8 @@ fn provider_config_values(
         ("adapter", Some(provider.adapter_id.as_str().to_owned())),
         ("endpoint_policy", Some(format!("{:?}", provider.endpoint))),
         (
-            "native_sse_decisions",
-            Some(provider.native_sse_decisions.to_string()),
+            "native_decision_streaming",
+            Some(provider.native_decision_streaming.to_string()),
         ),
     ];
     values.extend(provider.auth_fields.iter().map(|field| {

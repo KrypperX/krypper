@@ -331,26 +331,37 @@ system.
 The `src/streaming.rs` module defines a versioned presentation envelope,
 fallible synchronous event sink, stream-local sequence counter, and JSONL
 writer adapter. It does **not** subscribe to the runtime or expose a CLI flag.
-OpenAI Responses, xAI Responses, and Anthropic Messages have opt-in native
-SSE decision-source paths (via `KRYPPER_RESPONSES_STREAM` for OpenAI/xAI and
-`KRYPPER_ANTHROPIC_STREAM` for Anthropic). Set either variable to `1` or `true` (case-insensitive) to enable streaming; unset, empty, `0`, `false`, and other values disable it. Previously any present value enabled streaming, so existing `yes`/`on` configurations must be changed to `1` or `true`. These paths assemble and validate
-one complete tool action before returning it; they do not execute the action.
-Their text-delta callbacks are internal and the normal `choose` entry point
-discards text deltas. Therefore this is **not** end-to-end CLI streaming.
+OpenAI Responses, xAI Responses, Anthropic Messages, and local Ollama have
+opt-in native decision-streaming paths. OpenAI/xAI use SSE through
+`KRYPPER_RESPONSES_STREAM`, Anthropic uses SSE through
+`KRYPPER_ANTHROPIC_STREAM`, and the built-in local Ollama endpoint uses NDJSON
+through `KRYPPER_OLLAMA_STREAM`. Set a variable to `1` or `true`
+(case-insensitive) to enable its path; unset, empty, `0`, `false`, and other
+values disable it. These paths assemble and validate one complete tool action
+before returning it; they do not execute the action. Ollama streaming is
+limited to ordinary action decisions on the built-in endpoint. Planning,
+review, correction, and configured profile-endpoint requests remain
+non-streaming. Model thinking, streamed text, and tool arguments are not
+written to logs or presentation events. The hosted providers' text-delta
+callbacks are internal, and the normal `choose` entry point does not expose
+them. Therefore these provider paths are **not** end-to-end CLI streaming.
 
-All other configured decision sources (Gemini, Ollama, and the
-OpenAI-compatible chat-completions providers Cloudflare Workers AI, Groq,
-OpenRouter, DeepSeek, Z.AI, and Mistral) continue using their existing
-non-streaming requests and parsers. Setting either SSE opt-in variable does
-not enable native streaming for these providers. Do not silently switch
-their tool-call protocol to an incompatible SSE parser.
+Gemini and the OpenAI-compatible chat-completions providers Cloudflare Workers
+AI, Groq, OpenRouter, DeepSeek, Z.AI, and Mistral continue using their existing
+non-streaming requests and parsers. Setting an SSE opt-in variable does not
+enable native streaming for these providers. Do not silently switch their
+tool-call protocols to an incompatible stream parser. Provider setup metadata
+reports native decision streaming independently from the wire format; model
+support for tool calling and thinking can still vary.
 
 Offline local-HTTP integration fixtures exercise successful completion,
 truncated streams, and malformed events. Equivalent successful tool calls
 are checked against the non-streaming action parsers for OpenAI, xAI, and
-Anthropic. These fixtures do not prove live provider interoperability or
-CLI rendering. Keep end-to-end streaming claims deferred until runtime
-integration and provider smoke tests are completed.
+Anthropic. Ollama local-HTTP fixtures also compare the streamed action path to
+its existing parser and reject incomplete streams. These fixtures do not prove
+live provider interoperability or CLI rendering. Keep end-to-end streaming
+claims deferred until runtime integration and provider smoke tests are
+completed.
 
 Stream sequence numbers are scoped to a single emitter, not to the persisted
 TaskSession lifecycle or activity histories. The independent lifecycle and

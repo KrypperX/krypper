@@ -4,7 +4,7 @@
 //! happen before request transmission. Ambiguous errors after transmission
 //! begins are returned rather than replaying work a provider may have billed.
 
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read};
 use std::net::SocketAddr;
 use std::time::Duration;
 use ureq::Agent;
@@ -154,18 +154,7 @@ pub(crate) fn post_chat(
     address: SocketAddr,
     body: &[u8],
 ) -> Result<Vec<u8>, ModelError> {
-    if body.len() > MAX_MODEL_REQUEST_BYTES {
-        return Err(ModelError::RequestTooLarge);
-    }
-    let response = agent
-        .post(format!("http://{address}/api/chat"))
-        .header("Content-Type", "application/json")
-        .send(body)
-        .map_err(|error| match error {
-            ureq::Error::StatusCode(status) => ModelError::HttpStatus(status),
-            ureq::Error::ConnectionFailed => ModelError::ServiceUnavailable,
-            _ => ModelError::Transport("local HTTP transport failure".to_owned()),
-        })?;
+    let response = post_ollama_chat_request(agent, address, body, false)?;
     let mut body = Vec::new();
     response
         .into_body()
@@ -177,6 +166,81 @@ pub(crate) fn post_chat(
         return Err(ModelError::ResponseTooLarge);
     }
     Ok(body)
+}
+
+/// Reads the local Ollama `/api/chat` NDJSON response incrementally.
+///
+/// The callback is invoked once for each complete JSON record. The request
+/// and response limits also bound a single unterminated record; errors stop
+/// reading immediately and are never retried after request transmission.
+pub(crate) fn post_chat_stream<F>(
+    agent: &Agent,
+    address: SocketAddr,
+    body: &[u8],
+    mut on_record: F,
+) -> Result<(), ModelError>
+where
+    F: FnMut(&[u8]) -> Result<(), ModelError>,
+{
+    let response = post_ollama_chat_request(agent, address, body, true)?;
+
+    let mut response_body = response.into_body();
+    let bounded_reader = response_body
+        .as_reader()
+        .take(MAX_MODEL_RESPONSE_BYTES.saturating_add(1) as u64);
+    let mut reader = BufReader::new(bounded_reader);
+    let mut total_bytes = 0usize;
+    let mut record = Vec::new();
+
+    loop {
+        record.clear();
+        let bytes_read = reader
+            .read_until(b'\n', &mut record)
+            .map_err(|_| ModelError::Transport("local HTTP response read failed".to_owned()))?;
+        if bytes_read == 0 {
+            break;
+        }
+        total_bytes = total_bytes.saturating_add(bytes_read);
+        if total_bytes > MAX_MODEL_RESPONSE_BYTES {
+            return Err(ModelError::ResponseTooLarge);
+        }
+        if record.last() == Some(&b'\n') {
+            record.pop();
+        }
+        if record.last() == Some(&b'\r') {
+            record.pop();
+        }
+        if record.is_empty() {
+            return Err(ModelError::InvalidJson);
+        }
+        on_record(&record)?;
+    }
+
+    Ok(())
+}
+
+fn post_ollama_chat_request(
+    agent: &Agent,
+    address: SocketAddr,
+    body: &[u8],
+    ndjson: bool,
+) -> Result<ureq::http::Response<ureq::Body>, ModelError> {
+    if body.len() > MAX_MODEL_REQUEST_BYTES {
+        return Err(ModelError::RequestTooLarge);
+    }
+    let request = agent
+        .post(format!("http://{address}/api/chat"))
+        .header("Content-Type", "application/json");
+    let request = if ndjson {
+        request.header("Accept", "application/x-ndjson")
+    } else {
+        request
+    };
+    request.send(body).map_err(|error| match error {
+        ureq::Error::StatusCode(status) => ModelError::HttpStatus(status),
+        ureq::Error::ConnectionFailed => ModelError::ServiceUnavailable,
+        _ => ModelError::Transport("local HTTP transport failure".to_owned()),
+    })
 }
 
 pub(crate) fn post_chat_at_endpoint(

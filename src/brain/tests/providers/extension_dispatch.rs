@@ -133,8 +133,12 @@ fn ollama_extension_arguments_reach_harness_dispatch() {
     ]);
     let (mut session, task_id, turn_id) = running_turn();
     let declarations = external_read_declarations();
-    let mut source =
-        OllamaDecisionSource::with_endpoint_and_extensions("test-model", 2, address, &declarations);
+    let mut source = OllamaDecisionSource::with_endpoint_and_extensions_non_streaming(
+        "test-model",
+        2,
+        address,
+        &declarations,
+    );
     assert_extension_call(
         &mut session,
         task_id,
@@ -150,8 +154,12 @@ fn ollama_extension_without_required_arguments_fails_closed() {
     let (address, server) = mock_server(vec![ok(tool_response("external_read", json!({})))]);
     let (mut session, task_id, turn_id) = running_turn();
     let declarations = external_read_declarations();
-    let mut source =
-        OllamaDecisionSource::with_endpoint_and_extensions("test-model", 2, address, &declarations);
+    let mut source = OllamaDecisionSource::with_endpoint_and_extensions_non_streaming(
+        "test-model",
+        2,
+        address,
+        &declarations,
+    );
     assert_extension_call(
         &mut session,
         task_id,
