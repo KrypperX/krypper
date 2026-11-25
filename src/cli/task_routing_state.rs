@@ -304,37 +304,15 @@ mod tests {
         CapabilitySupport, CapabilityVerification, ProviderReadiness, RoutingSelection,
         SelectionReasonCode,
     };
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
-
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new() -> Self {
-            let id = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!(
-                "krypper-task-routing-state-test-{}-{id}",
-                std::process::id()
-            ));
-            fs::create_dir(&path).unwrap();
-            Self(path)
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
+    use crate::test_support::TempDir;
 
     fn paths(directory: &TempDir) -> UserSettingsPaths {
         UserSettingsPaths {
-            model: directory.0.join("config.toml"),
-            credentials: directory.0.join("credentials.json"),
-            provider_profiles: directory.0.join("provider-profiles.json"),
-            model_evidence: directory.0.join("model-evidence.json"),
-            model_evidence_key: directory.0.join("model-evidence.key"),
+            model: directory.path().join("config.toml"),
+            credentials: directory.path().join("credentials.json"),
+            provider_profiles: directory.path().join("provider-profiles.json"),
+            model_evidence: directory.path().join("model-evidence.json"),
+            model_evidence_key: directory.path().join("model-evidence.key"),
         }
     }
 

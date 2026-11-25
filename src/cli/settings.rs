@@ -497,32 +497,12 @@ pub(super) fn open_private_file(path: &Path) -> io::Result<File> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    static NEXT_DIR: AtomicUsize = AtomicUsize::new(0);
-
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new() -> Self {
-            let id = NEXT_DIR.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir()
-                .join(format!("krypper-settings-test-{}-{id}", std::process::id()));
-            fs::create_dir(&path).unwrap();
-            Self(path)
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
+    use crate::test_support::TempDir;
 
     #[test]
     fn saved_credentials_round_trip_and_error_without_secret_disclosure() {
         let directory = TempDir::new();
-        let path = directory.0.join("krypper").join(CREDENTIALS_FILE);
+        let path = directory.path().join("krypper").join(CREDENTIALS_FILE);
         let secret = "test-token-never-print";
         let mut credentials = CredentialStore::empty();
         credentials.insert("OPENAI_API_KEY", secret.to_owned());
@@ -543,7 +523,7 @@ mod tests {
     fn saved_credentials_and_parent_directory_have_private_permissions() {
         use std::os::unix::fs::PermissionsExt;
         let directory = TempDir::new();
-        let path = directory.0.join("krypper").join(CREDENTIALS_FILE);
+        let path = directory.path().join("krypper").join(CREDENTIALS_FILE);
         let mut credentials = CredentialStore::empty();
         credentials.insert("OPENAI_API_KEY", "test-token".to_owned());
         save_credentials(&path, &credentials).unwrap();
@@ -565,7 +545,7 @@ mod tests {
     #[test]
     fn model_defaults_are_written_without_secrets() {
         let directory = TempDir::new();
-        let path = directory.0.join("krypper").join("config.toml");
+        let path = directory.path().join("krypper").join("config.toml");
         save_model_defaults(&path, "openai", "gpt-4.1").unwrap();
         let contents = fs::read_to_string(path).unwrap();
         assert_eq!(contents, "provider = \"openai\"\nmodel = \"gpt-4.1\"\n");
@@ -575,7 +555,7 @@ mod tests {
     #[test]
     fn routing_model_configuration_round_trips_optional_settings() {
         let directory = TempDir::new();
-        let path = directory.0.join("krypper").join("config.toml");
+        let path = directory.path().join("krypper").join("config.toml");
 
         save_model_configuration(
             &path,
@@ -600,7 +580,7 @@ mod tests {
     #[test]
     fn model_defaults_round_trip_quotes_and_backslashes() {
         let directory = TempDir::new();
-        let path = directory.0.join("krypper").join("config.toml");
+        let path = directory.path().join("krypper").join("config.toml");
         let model = r#"model "quoted" \\ path"#;
 
         save_model_defaults(&path, "openai", model).unwrap();
@@ -617,7 +597,7 @@ mod tests {
         use std::os::unix::fs::MetadataExt;
 
         let directory = TempDir::new();
-        let path = directory.0.join("krypper").join(CREDENTIALS_FILE);
+        let path = directory.path().join("krypper").join(CREDENTIALS_FILE);
         let mut credentials = CredentialStore::empty();
         credentials.insert("OPENAI_API_KEY", "test-token".to_owned());
         save_credentials(&path, &credentials).unwrap();
@@ -639,7 +619,7 @@ mod tests {
         use std::os::unix::ffi::OsStrExt;
 
         let directory = TempDir::new();
-        let path = directory.0.join("credential-store");
+        let path = directory.path().join("credential-store");
         let encoded_path = CString::new(path.as_os_str().as_bytes()).unwrap();
         // SAFETY: `encoded_path` is NUL-terminated and `mkfifo` does not retain it.
         let result = unsafe { libc::mkfifo(encoded_path.as_ptr(), 0o600) };
@@ -656,7 +636,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let directory = TempDir::new();
-        let path = directory.0.join("krypper").join(CREDENTIALS_FILE);
+        let path = directory.path().join("krypper").join(CREDENTIALS_FILE);
         let mut credentials = CredentialStore::empty();
         credentials.insert("OPENAI_API_KEY", "test-token".to_owned());
         save_credentials(&path, &credentials).unwrap();
@@ -676,7 +656,7 @@ mod tests {
     #[test]
     fn reports_a_directory_sync_failure_after_the_file_was_saved() {
         let directory = TempDir::new();
-        let path = directory.0.join("krypper").join("config.toml");
+        let path = directory.path().join("krypper").join("config.toml");
         let mut sync_calls = 0;
 
         let error = write_private_file_with_directory_sync(
