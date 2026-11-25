@@ -13,7 +13,7 @@ Krypper's own source is offered under Apache-2.0; see the root [LICENSE](../LICE
 
 `deny.toml` defines the automated dependency policy. The CI check examines the locked graph with all features, development dependencies, and the Linux, macOS, and Windows targets listed there. It rejects unknown licenses, dependency sources, advisories, yanked crates, and wildcard requirements. The current policy accepts Apache-2.0, BSD-3-Clause, CDLA-Permissive-2.0, ISC, MIT, Unicode-3.0, and Unlicense terms. Duplicate dependency versions are warnings so compatibility-driven pairs remain visible for review.
 
-This automated check validates package license metadata and detected license texts. It does not verify project-code ownership, contributor authorization, every bundled source file's notice, or the notice bundle for a specific distribution. Do not treat a passing check as legal clearance.
+The license decision relies on crate-supplied metadata when available; the check cannot verify that metadata against every license or notice in the package contents. It also does not verify project-code ownership, contributor authorization, every bundled source file's notice, or the notice bundle for a specific distribution. Do not treat a passing check as legal clearance.
 
 Crates.io publication is intentionally disabled in `Cargo.toml` (`publish = false`). There is no automated release workflow because no release artifact or distribution policy has been approved. Revisit release automation after the intended artifacts, signing, and notice bundle are defined and reviewed.
 
