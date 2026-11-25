@@ -31,9 +31,7 @@ fn run_registered_workspace_action(
 
 #[test]
 fn task_session_checkpoint_round_trip_preserves_lifecycle_and_allows_a_fresh_turn() {
-    let _lock = CURRENT_DIR_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lock = test_support::lock_current_dir();
     let mut session = TaskSession::new();
     let task = session.create_task("continue the bounded task");
     task.transition(TaskState::Running).unwrap();
@@ -140,9 +138,7 @@ fn task_session_snapshot_is_consistent_after_safe_checkpoint_restore() {
 
 #[test]
 fn task_session_checkpoint_preserves_manual_terminal_turns_without_outcomes() {
-    let _lock = CURRENT_DIR_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lock = test_support::lock_current_dir();
     let mut session = TaskSession::new();
     let task = session.create_task("manually transitioned task");
     task.transition(TaskState::Running).unwrap();
@@ -163,9 +159,7 @@ fn task_session_checkpoint_preserves_manual_terminal_turns_without_outcomes() {
 
 #[test]
 fn task_session_checkpoint_export_rejects_a_running_turn() {
-    let _lock = CURRENT_DIR_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lock = test_support::lock_current_dir();
     let mut session = TaskSession::new();
     let (task_id, turn_id) = running_turn(&mut session);
 
@@ -191,9 +185,7 @@ fn task_session_checkpoint_export_rejects_a_running_turn() {
 
 #[test]
 fn task_session_checkpoint_export_rejects_oversized_text() {
-    let _lock = CURRENT_DIR_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lock = test_support::lock_current_dir();
     let mut session = TaskSession::new();
     session.create_task("x".repeat(1_048_577));
 
@@ -205,9 +197,7 @@ fn task_session_checkpoint_export_rejects_oversized_text() {
 
 #[test]
 fn task_session_checkpoint_restore_rejects_malformed_unsupported_oversized_and_duplicate_data() {
-    let _lock = CURRENT_DIR_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lock = test_support::lock_current_dir();
     assert!(TaskSession::restore_checkpoint(b"{").is_err());
 
     let mut session = TaskSession::new();
@@ -231,9 +221,7 @@ fn task_session_checkpoint_restore_rejects_malformed_unsupported_oversized_and_d
 
 #[test]
 fn task_session_checkpoint_restore_rejects_inconsistent_history() {
-    let _lock = CURRENT_DIR_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _lock = test_support::lock_current_dir();
     let mut session = TaskSession::new();
     let task = session.create_task("running task");
     task.transition(TaskState::Running).unwrap();

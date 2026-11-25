@@ -27,23 +27,16 @@ mod tests {
     use super::{
         capture_workspace_root_at, create_text_file_at, read_text_file_at, search_text_files_at,
     };
+    use crate::test_support::TempDir;
     use std::ffi::OsStr;
     use std::fs;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 
     #[test]
     fn workspace_safety_operations_keep_changes_inside_the_captured_root() {
-        let path = std::env::temp_dir().join(format!(
-            "krypper-tools-workspace-safety-{}-{}",
-            std::process::id(),
-            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
-        ));
-        let workspace = path.join("workspace");
-        let outside = path.join("outside.txt");
-        fs::create_dir(&path).unwrap();
+        let directory = TempDir::with_prefix("krypper-tools-workspace-safety-");
+        let workspace = directory.path().join("workspace");
+        let outside = directory.path().join("outside.txt");
         fs::create_dir(&workspace).unwrap();
         fs::write(&outside, "outside text").unwrap();
         fs::write(workspace.join("note.txt"), "before exact match after").unwrap();
@@ -71,6 +64,5 @@ mod tests {
             "path must stay inside the current directory"
         );
         assert_eq!(fs::read_to_string(&outside).unwrap(), "outside text");
-        fs::remove_dir_all(path).unwrap();
     }
 }

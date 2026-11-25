@@ -2,6 +2,7 @@
 
 use super::super::supervisor::run;
 use super::{gate, policy, workspace};
+use crate::test_support::{lock_environment, RestoreEnvironmentVariable};
 use crate::tools::capture_workspace_root_at;
 use std::fs;
 use std::net::{TcpListener, TcpStream};
@@ -15,9 +16,10 @@ fn real_sandbox_environment_and_network_carry_no_host_secrets() {
         return;
     };
     let path = workspace();
+    let _environment_lock = lock_environment();
     let secret = format!("secret-canary-{}", Uuid::new_v4());
-    std::env::set_var("GITHUB_TOKEN", &secret);
-    std::env::set_var("KRYPPER_TEST_SECRET_CANARY", &secret);
+    let _github_token = RestoreEnvironmentVariable::set("GITHUB_TOKEN", &secret);
+    let _secret_canary = RestoreEnvironmentVariable::set("KRYPPER_TEST_SECRET_CANARY", &secret);
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let canary_address = listener.local_addr().unwrap();
     assert!(
@@ -45,8 +47,6 @@ fn real_sandbox_environment_and_network_carry_no_host_secrets() {
     .unwrap();
     let root = capture_workspace_root_at(&path).unwrap();
     let result = run(&root, &policy(&host), Some("secrets_selected_test"));
-    std::env::remove_var("GITHUB_TOKEN");
-    std::env::remove_var("KRYPPER_TEST_SECRET_CANARY");
     assert!(
         result.succeeded(),
         "secret/network fixture failed: {result:?}"
@@ -56,7 +56,6 @@ fn real_sandbox_environment_and_network_carry_no_host_secrets() {
         TcpStream::connect_timeout(&canary_address, Duration::from_millis(100)).is_ok(),
         "host loopback must remain reachable after the sandboxed run"
     );
-    fs::remove_dir_all(path).unwrap();
 }
 
 #[test]
@@ -79,5 +78,4 @@ fn real_sandbox_cleanup_releases_state_for_the_next_run() {
     assert!(second.succeeded(), "second run failed: {second:?}");
     assert!(second.cleanup_confirmed, "{second:?}");
     assert!(!second.recovery_hold, "{second:?}");
-    fs::remove_dir_all(path).unwrap();
 }

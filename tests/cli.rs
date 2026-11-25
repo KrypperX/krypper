@@ -3,6 +3,7 @@ use krypper::task_lifecycle::{TaskSession, TaskState};
 mod test_support;
 use std::fs;
 use std::io::{Read, Write};
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::mpsc::{self, Receiver};
@@ -13,21 +14,48 @@ use test_support::TempDir;
 const MAX_FILE_SIZE: usize = 1024 * 1024;
 const MAX_TASK_ACTION_LINE_BYTES: usize = MAX_FILE_SIZE + 4096;
 
-fn command(cwd: Option<&Path>, args: &[&str]) -> Command {
+struct TestCommand {
+    command: Command,
+    _config_root: TempDir,
+}
+
+impl Deref for TestCommand {
+    type Target = Command;
+
+    fn deref(&self) -> &Self::Target {
+        &self.command
+    }
+}
+
+impl DerefMut for TestCommand {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.command
+    }
+}
+
+fn command(cwd: Option<&Path>, args: &[&str]) -> TestCommand {
     let mut command = Command::new(env!("CARGO_BIN_EXE_krypper"));
     if let Some(directory) = cwd {
         command.current_dir(directory);
     }
     // Keep every test independent of a configuration file on the machine that
     // runs it; tests that exercise configuration set their own path afterward.
-    let isolated_config_root =
-        std::env::temp_dir().join(format!("krypper-cli-test-config-{}", std::process::id()));
-    command.env("KRYPPER_CONFIG", isolated_config_root.join("config.toml"));
-    command.env("XDG_CONFIG_HOME", isolated_config_root.join("xdg-config"));
-    command.env("HOME", isolated_config_root.join("home"));
-    command.env("USERPROFILE", isolated_config_root.join("home"));
+    let isolated_config_root = TempDir::with_prefix("krypper-cli-test-config-");
+    command.env(
+        "KRYPPER_CONFIG",
+        isolated_config_root.path().join("config.toml"),
+    );
+    command.env(
+        "XDG_CONFIG_HOME",
+        isolated_config_root.path().join("xdg-config"),
+    );
+    command.env("HOME", isolated_config_root.path().join("home"));
+    command.env("USERPROFILE", isolated_config_root.path().join("home"));
     command.args(args);
-    command
+    TestCommand {
+        command,
+        _config_root: isolated_config_root,
+    }
 }
 
 fn run(cwd: Option<&Path>, args: &[&str]) -> Output {
@@ -35,7 +63,8 @@ fn run(cwd: Option<&Path>, args: &[&str]) -> Output {
 }
 
 fn run_with_input(cwd: &Path, args: &[&str], input: &[u8]) -> Output {
-    let mut child: Child = command(Some(cwd), args)
+    let mut command = command(Some(cwd), args);
+    let mut child: Child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -51,7 +80,8 @@ fn run_with_input(cwd: &Path, args: &[&str], input: &[u8]) -> Output {
 }
 
 fn run_with_input_before_deadline(cwd: &Path, args: &[&str], input: &[u8]) -> Output {
-    let mut child = command(Some(cwd), args)
+    let mut command = command(Some(cwd), args);
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -3170,7 +3200,7 @@ fn write_user_config(directory: &TempDir, text: &str) -> PathBuf {
     path
 }
 
-fn task_command_with_config(directory: &TempDir, config: &Path, args: &[&str]) -> Command {
+fn task_command_with_config(directory: &TempDir, config: &Path, args: &[&str]) -> TestCommand {
     let mut task = command(Some(directory.path()), args);
     task.env("KRYPPER_CONFIG", config);
     for name in ["OPENAI_API_KEY", "GEMINI_API_KEY"] {

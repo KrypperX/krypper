@@ -22,20 +22,14 @@ pub(crate) fn run(
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::run;
+    use crate::test_support::TempDir;
     use crate::tools::capture_workspace_root_at;
     use crate::{OfflineCargoPolicy, ProcessOutcome};
     use std::fs;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 
     #[test]
     fn sandboxed_cargo_returns_a_typed_unavailable_outcome() {
-        let root = std::env::temp_dir().join(format!(
-            "krypper-macos-sandbox-unavailable-{}-{}",
-            std::process::id(),
-            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
-        ));
+        let root = TempDir::with_prefix("krypper-macos-sandbox-unavailable-");
         let workspace = root.join("workspace");
         let toolchain = root.join("toolchain");
         let registry = root.join("registry");
@@ -54,6 +48,5 @@ mod tests {
             result.diagnostic.as_deref(),
             Some("process sandbox is unavailable on this platform")
         );
-        fs::remove_dir_all(root).unwrap();
     }
 }

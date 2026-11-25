@@ -1,24 +1,18 @@
+use super::super::read::capture_workspace_root_at;
+use super::temp_dir;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
 
-use super::super::read::capture_workspace_root_at;
-use super::NEXT_TEMP;
-
-fn guidance_workspace() -> (PathBuf, PathBuf) {
-    let base = std::env::temp_dir().join(format!(
-        "krypper-guidance-read-{}-{}",
-        std::process::id(),
-        NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
-    ));
-    let workspace = base.join("workspace");
+fn guidance_workspace() -> (crate::test_support::TempDir, PathBuf) {
+    let base = temp_dir("krypper-guidance-read-");
+    let workspace = base.path().join("workspace");
     fs::create_dir_all(&workspace).unwrap();
     (base, workspace)
 }
 
 #[test]
 fn root_agents_read_is_bounded_and_does_not_load_nested_files() {
-    let (base, workspace) = guidance_workspace();
+    let (_base, workspace) = guidance_workspace();
     fs::create_dir_all(workspace.join("nested")).unwrap();
     fs::write(workspace.join("AGENTS.md"), "root guidance").unwrap();
     fs::write(workspace.join("nested/AGENTS.md"), "nested guidance").unwrap();
@@ -30,12 +24,11 @@ fn root_agents_read_is_bounded_and_does_not_load_nested_files() {
     );
     fs::remove_file(workspace.join("AGENTS.md")).unwrap();
     assert_eq!(super::read_root_agents_md_at(&root).unwrap(), None);
-    fs::remove_dir_all(base).unwrap();
 }
 
 #[test]
 fn root_agents_read_rejects_invalid_utf8_and_oversized_files() {
-    let (base, workspace) = guidance_workspace();
+    let (_base, workspace) = guidance_workspace();
     let root = capture_workspace_root_at(&workspace).unwrap();
 
     fs::write(workspace.join("AGENTS.md"), [0xff]).unwrap();
@@ -49,7 +42,6 @@ fn root_agents_read_rejects_invalid_utf8_and_oversized_files() {
         super::read_root_agents_md_at(&root),
         Err(super::RootGuidanceReadError::TooLarge)
     );
-    fs::remove_dir_all(base).unwrap();
 }
 
 #[test]
@@ -57,7 +49,7 @@ fn root_agents_read_rejects_symlinks_without_reading_outside_canary() {
     use std::os::unix::fs::symlink;
 
     let (base, workspace) = guidance_workspace();
-    let outside = base.join("outside.txt");
+    let outside = base.path().join("outside.txt");
     fs::write(&outside, "outside canary").unwrap();
     symlink(&outside, workspace.join("AGENTS.md")).unwrap();
     let root = capture_workspace_root_at(&workspace).unwrap();
@@ -67,14 +59,13 @@ fn root_agents_read_rejects_symlinks_without_reading_outside_canary() {
         Err(super::RootGuidanceReadError::Symlink)
     );
     assert_eq!(fs::read_to_string(outside).unwrap(), "outside canary");
-    fs::remove_dir_all(base).unwrap();
 }
 
 #[test]
 fn root_agents_read_reports_read_failures_and_changes_during_read() {
     use std::io::{self, Read};
 
-    let (base, workspace) = guidance_workspace();
+    let (_base, workspace) = guidance_workspace();
     let agents = workspace.join("AGENTS.md");
     fs::write(&agents, "stable guidance").unwrap();
     let root = capture_workspace_root_at(&workspace).unwrap();
@@ -94,12 +85,11 @@ fn root_agents_read_reports_read_failures_and_changes_during_read() {
         }),
         Err(super::RootGuidanceReadError::ChangedDuringRead)
     );
-    fs::remove_dir_all(base).unwrap();
 }
 
 #[test]
 fn project_guidance_is_root_to_target_ordered_and_excludes_siblings() {
-    let (base, workspace) = guidance_workspace();
+    let (_base, workspace) = guidance_workspace();
     fs::create_dir_all(workspace.join("src/deep")).unwrap();
     fs::create_dir_all(workspace.join("tests")).unwrap();
     fs::write(workspace.join("AGENTS.md"), "root guidance").unwrap();
@@ -125,7 +115,6 @@ fn project_guidance_is_root_to_target_ordered_and_excludes_siblings() {
         super::read_project_guidance_at(&root, &[PathBuf::from("note.txt")]).unwrap(),
         None
     );
-    fs::remove_dir_all(base).unwrap();
 }
 
 #[test]
@@ -133,7 +122,7 @@ fn project_guidance_rejects_out_of_workspace_targets_in_a_mixed_plan() {
     let (base, workspace) = guidance_workspace();
     fs::create_dir_all(workspace.join("src")).unwrap();
     fs::write(workspace.join("AGENTS.md"), "root guidance").unwrap();
-    let outside = base.join("outside.txt");
+    let outside = base.path().join("outside.txt");
     fs::write(&outside, "outside canary").unwrap();
     let root = capture_workspace_root_at(&workspace).unwrap();
 
@@ -147,7 +136,6 @@ fn project_guidance_rejects_out_of_workspace_targets_in_a_mixed_plan() {
 
     assert_eq!(result, Err(super::RootGuidanceReadError::InvalidTargetPath));
     assert_eq!(fs::read_to_string(outside).unwrap(), "outside canary");
-    fs::remove_dir_all(base).unwrap();
 }
 
 #[test]
@@ -157,10 +145,10 @@ fn project_guidance_rejects_symlinked_edit_targets_without_reading_canaries() {
     let (base, workspace) = guidance_workspace();
     fs::create_dir_all(workspace.join("src")).unwrap();
     fs::write(workspace.join("AGENTS.md"), "root guidance").unwrap();
-    let outside_file = base.join("outside.txt");
+    let outside_file = base.path().join("outside.txt");
     fs::write(&outside_file, "outside file canary").unwrap();
     symlink(&outside_file, workspace.join("src/linked.rs")).unwrap();
-    let outside_directory = base.join("outside-directory");
+    let outside_directory = base.path().join("outside-directory");
     fs::create_dir(&outside_directory).unwrap();
     let outside_canary = outside_directory.join("canary.txt");
     fs::write(&outside_canary, "outside directory canary").unwrap();
@@ -187,12 +175,11 @@ fn project_guidance_rejects_symlinked_edit_targets_without_reading_canaries() {
         fs::read_to_string(outside_canary).unwrap(),
         "outside directory canary"
     );
-    fs::remove_dir_all(base).unwrap();
 }
 
 #[test]
 fn project_guidance_rejects_non_directory_edit_target_parents() {
-    let (base, workspace) = guidance_workspace();
+    let (_base, workspace) = guidance_workspace();
     fs::write(workspace.join("AGENTS.md"), "root guidance").unwrap();
     fs::write(workspace.join("blocked"), "not a directory").unwrap();
     let root = capture_workspace_root_at(&workspace).unwrap();
@@ -200,7 +187,6 @@ fn project_guidance_rejects_non_directory_edit_target_parents() {
     let result = super::read_project_guidance_at(&root, &[PathBuf::from("blocked/generated.rs")]);
 
     assert_eq!(result, Err(super::RootGuidanceReadError::InvalidTargetPath));
-    fs::remove_dir_all(base).unwrap();
 }
 
 #[test]
@@ -211,7 +197,7 @@ fn nested_guidance_changed_during_a_safe_read_is_rejected() {
     fs::create_dir_all(workspace.join("src")).unwrap();
     let agents = workspace.join("src/AGENTS.md");
     fs::write(&agents, "stable guidance").unwrap();
-    let outside = base.join("outside.txt");
+    let outside = base.path().join("outside.txt");
     fs::write(&outside, "outside canary").unwrap();
     let root = capture_workspace_root_at(&workspace).unwrap();
 
@@ -228,14 +214,13 @@ fn nested_guidance_changed_during_a_safe_read_is_rejected() {
 
     assert_eq!(result, Err(super::RootGuidanceReadError::ChangedDuringRead));
     assert_eq!(fs::read_to_string(outside).unwrap(), "outside canary");
-    fs::remove_dir_all(base).unwrap();
 }
 
 #[test]
 fn nested_guidance_created_after_absence_checks_is_rejected() {
     let (base, workspace) = guidance_workspace();
     fs::create_dir_all(workspace.join("src")).unwrap();
-    let outside = base.join("outside.txt");
+    let outside = base.path().join("outside.txt");
     fs::write(&outside, "outside canary").unwrap();
     let root = capture_workspace_root_at(&workspace).unwrap();
     let mut injected = false;
@@ -259,5 +244,4 @@ fn nested_guidance_created_after_absence_checks_is_rejected() {
     );
     assert_eq!(result, Err(super::RootGuidanceReadError::ChangedDuringRead));
     assert_eq!(fs::read_to_string(outside).unwrap(), "outside canary");
-    fs::remove_dir_all(base).unwrap();
 }

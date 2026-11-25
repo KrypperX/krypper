@@ -460,6 +460,7 @@ fn python_codepoints(bytes: &[u8]) -> Vec<u32> {
 
 #[cfg(test)]
 mod rename_tests {
+    use crate::test_support::TempDir;
     use std::ffi::OsStr;
     use std::fs;
     use std::io;
@@ -468,9 +469,7 @@ mod rename_tests {
 
     #[test]
     fn reports_committed_when_directory_sync_fails_after_rename() {
-        let directory =
-            std::env::temp_dir().join(format!("krypper-rename-sync-{}", uuid::Uuid::new_v4()));
-        fs::create_dir(&directory).unwrap();
+        let directory = TempDir::with_prefix("krypper-rename-sync-");
         let staged = directory.join(".staged");
         let target = directory.join("target");
         fs::write(&staged, b"new").unwrap();
@@ -487,6 +486,5 @@ mod rename_tests {
 
         assert_eq!(result, Err(RenameFileError::CommittedButUnverified));
         assert_eq!(fs::read(&target).unwrap(), b"new");
-        fs::remove_dir_all(directory).unwrap();
     }
 }

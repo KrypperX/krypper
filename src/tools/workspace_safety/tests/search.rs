@@ -13,18 +13,10 @@ use std::fs;
 use std::io::Write;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
-
-static NEXT_SEARCH_TEMP: AtomicUsize = AtomicUsize::new(0);
-
 #[test]
 fn returns_sorted_matching_file_and_line_locations() {
-    let path = std::env::temp_dir().join(format!(
-        "krypper-search-{}-{}",
-        std::process::id(),
-        NEXT_SEARCH_TEMP.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir(&path).unwrap();
+    let directory = super::temp_dir("krypper-search-");
+    let path = directory.path();
     fs::write(path.join("b.txt"), "needle first needle duplicate\n").unwrap();
     fs::write(
         path.join("a.txt"),
@@ -35,8 +27,8 @@ fn returns_sorted_matching_file_and_line_locations() {
     fs::create_dir(path.join("nested")).unwrap();
     fs::write(path.join("nested/ignored.txt"), "needle nested\n").unwrap();
     let root = WorkspaceRoot {
-        descriptor: DirHandle::from_file(fs::File::open(&path).unwrap()),
-        path: fs::canonicalize(&path).unwrap(),
+        descriptor: DirHandle::from_file(fs::File::open(path).unwrap()),
+        path: fs::canonicalize(path).unwrap(),
     };
 
     let locations = search_text_files_at(&root, std::ffi::OsStr::new("."), "needle").unwrap();
@@ -50,21 +42,16 @@ fn returns_sorted_matching_file_and_line_locations() {
             (PathBuf::from("b.txt"), 1),
         ]
     );
-    fs::remove_dir_all(path).unwrap();
 }
 
 #[test]
 fn reports_lines_for_overlapping_multiline_literal_matches() {
-    let path = std::env::temp_dir().join(format!(
-        "krypper-search-multiline-{}-{}",
-        std::process::id(),
-        uuid::Uuid::new_v4()
-    ));
-    fs::create_dir(&path).unwrap();
+    let directory = super::temp_dir("krypper-search-multiline-");
+    let path = directory.path();
     fs::write(path.join("note.txt"), "a\na\na").unwrap();
     let root = WorkspaceRoot {
-        descriptor: DirHandle::from_file(fs::File::open(&path).unwrap()),
-        path: fs::canonicalize(&path).unwrap(),
+        descriptor: DirHandle::from_file(fs::File::open(path).unwrap()),
+        path: fs::canonicalize(path).unwrap(),
     };
 
     let locations = search_text_files_at(&root, std::ffi::OsStr::new("."), "a\na").unwrap();
@@ -76,21 +63,16 @@ fn reports_lines_for_overlapping_multiline_literal_matches() {
             (PathBuf::from("note.txt"), 2)
         ]
     );
-    fs::remove_dir_all(path).unwrap();
 }
 
 #[test]
 fn matches_utf8_literals_and_reports_the_starting_line() {
-    let path = std::env::temp_dir().join(format!(
-        "krypper-search-unicode-{}-{}",
-        std::process::id(),
-        NEXT_SEARCH_TEMP.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir(&path).unwrap();
+    let directory = super::temp_dir("krypper-search-unicode-");
+    let path = directory.path();
     fs::write(path.join("note.txt"), "雪\n猫 and 雪\n猫").unwrap();
     let root = WorkspaceRoot {
-        descriptor: DirHandle::from_file(fs::File::open(&path).unwrap()),
-        path: fs::canonicalize(&path).unwrap(),
+        descriptor: DirHandle::from_file(fs::File::open(path).unwrap()),
+        path: fs::canonicalize(path).unwrap(),
     };
 
     let locations = search_text_files_at(&root, std::ffi::OsStr::new("."), "雪\n猫").unwrap();
@@ -102,20 +84,15 @@ fn matches_utf8_literals_and_reports_the_starting_line() {
             (PathBuf::from("note.txt"), 2)
         ]
     );
-    fs::remove_dir_all(path).unwrap();
 }
 
 #[test]
 fn rejects_empty_and_oversized_queries() {
-    let path = std::env::temp_dir().join(format!(
-        "krypper-search-query-{}-{}",
-        std::process::id(),
-        NEXT_SEARCH_TEMP.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir(&path).unwrap();
+    let directory = super::temp_dir("krypper-search-query-");
+    let path = directory.path();
     let root = WorkspaceRoot {
-        descriptor: DirHandle::from_file(fs::File::open(&path).unwrap()),
-        path: fs::canonicalize(&path).unwrap(),
+        descriptor: DirHandle::from_file(fs::File::open(path).unwrap()),
+        path: fs::canonicalize(path).unwrap(),
     };
 
     assert_eq!(
@@ -134,17 +111,12 @@ fn rejects_empty_and_oversized_queries() {
         .message(),
         "search query exceeds 4 KiB"
     );
-    fs::remove_dir_all(path).unwrap();
 }
 
 #[test]
 fn rejects_invalid_utf8_and_oversized_files_without_partial_locations() {
-    let path = std::env::temp_dir().join(format!(
-        "krypper-search-file-errors-{}-{}",
-        std::process::id(),
-        NEXT_SEARCH_TEMP.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir(&path).unwrap();
+    let directory = super::temp_dir("krypper-search-file-errors-");
+    let path = directory.path();
     fs::write(path.join("a.txt"), "needle private text").unwrap();
     fs::write(
         path.join("z-invalid.txt"),
@@ -152,8 +124,8 @@ fn rejects_invalid_utf8_and_oversized_files_without_partial_locations() {
     )
     .unwrap();
     let root = WorkspaceRoot {
-        descriptor: DirHandle::from_file(fs::File::open(&path).unwrap()),
-        path: fs::canonicalize(&path).unwrap(),
+        descriptor: DirHandle::from_file(fs::File::open(path).unwrap()),
+        path: fs::canonicalize(path).unwrap(),
     };
 
     assert_eq!(
@@ -171,17 +143,12 @@ fn rejects_invalid_utf8_and_oversized_files_without_partial_locations() {
             .message(),
         "file exceeds 1 MiB"
     );
-    fs::remove_dir_all(path).unwrap();
 }
 
 #[test]
 fn stops_at_cumulative_byte_and_result_location_limits() {
-    let path = std::env::temp_dir().join(format!(
-        "krypper-search-bounds-{}-{}",
-        std::process::id(),
-        NEXT_SEARCH_TEMP.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir(&path).unwrap();
+    let directory = super::temp_dir("krypper-search-bounds-");
+    let path = directory.path();
     for index in 0..=(MAX_SEARCH_BYTES / MAX_FILE_SIZE) {
         fs::write(
             path.join(format!("bytes-{index:02}.txt")),
@@ -191,8 +158,8 @@ fn stops_at_cumulative_byte_and_result_location_limits() {
     }
     fs::write(path.join("z-invalid.txt"), [0xff]).unwrap();
     let root = WorkspaceRoot {
-        descriptor: DirHandle::from_file(fs::File::open(&path).unwrap()),
-        path: fs::canonicalize(&path).unwrap(),
+        descriptor: DirHandle::from_file(fs::File::open(path).unwrap()),
+        path: fs::canonicalize(path).unwrap(),
     };
     assert_eq!(
         search_text_files_at(&root, std::ffi::OsStr::new("."), "needle")
@@ -201,7 +168,7 @@ fn stops_at_cumulative_byte_and_result_location_limits() {
         "search exceeds 16 MiB scan limit"
     );
 
-    for entry in fs::read_dir(&path).unwrap() {
+    for entry in fs::read_dir(path).unwrap() {
         fs::remove_file(entry.unwrap().path()).unwrap();
     }
     let locations = MAX_SEARCH_LOCATIONS + 1;
@@ -213,16 +180,12 @@ fn stops_at_cumulative_byte_and_result_location_limits() {
             .message(),
         "search exceeds 10,000 result locations"
     );
-    fs::remove_dir_all(path).unwrap();
 }
 
 #[test]
 fn skips_symlinks_and_non_regular_entries_and_rejects_workspace_escapes() {
-    let parent = std::env::temp_dir().join(format!(
-        "krypper-search-paths-{}-{}",
-        std::process::id(),
-        NEXT_SEARCH_TEMP.fetch_add(1, Ordering::Relaxed)
-    ));
+    let parent_directory = super::temp_dir("krypper-search-paths-");
+    let parent = parent_directory.path();
     let path = parent.join("workspace");
     fs::create_dir_all(&path).unwrap();
     fs::write(parent.join("outside.txt"), "needle outside").unwrap();
@@ -256,16 +219,12 @@ fn skips_symlinks_and_non_regular_entries_and_rejects_workspace_escapes() {
             .message(),
         "path must stay inside the current directory"
     );
-    fs::remove_dir_all(parent).unwrap();
 }
 
 #[test]
 fn result_paths_preserve_parent_components_after_directory_symlinks() {
-    let parent = std::env::temp_dir().join(format!(
-        "krypper-search-symlink-parent-{}-{}",
-        std::process::id(),
-        uuid::Uuid::new_v4()
-    ));
+    let parent_directory = super::temp_dir("krypper-search-symlink-parent-");
+    let parent = parent_directory.path();
     let workspace = parent.join("workspace");
     fs::create_dir_all(workspace.join("actual/child")).unwrap();
     fs::create_dir_all(workspace.join("actual/target")).unwrap();
@@ -291,7 +250,6 @@ fn result_paths_preserve_parent_components_after_directory_symlinks() {
         locations,
         [(PathBuf::from("directory-link/../target/match.txt"), 1)]
     );
-    fs::remove_dir_all(parent).unwrap();
 }
 
 fn tree_workspace_root(path: &Path) -> WorkspaceRoot {
@@ -301,19 +259,16 @@ fn tree_workspace_root(path: &Path) -> WorkspaceRoot {
     }
 }
 
-fn tree_temp_path() -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "krypper-search-tree-{}-{}",
-        std::process::id(),
-        uuid::Uuid::new_v4()
-    ))
+fn tree_temp_dir() -> crate::test_support::TempDir {
+    super::temp_dir("krypper-search-tree-")
 }
 
 #[test]
 fn recursively_returns_hidden_paths_and_ordered_start_lines_without_following_entries() {
     use std::os::unix::net::UnixListener;
 
-    let workspace = std::env::temp_dir().join(format!("kt-{}", uuid::Uuid::new_v4()));
+    let workspace_directory = super::temp_dir("kt-");
+    let workspace = workspace_directory.path();
     fs::create_dir_all(workspace.join("dir")).unwrap();
     fs::write(workspace.join(".hidden"), "needle hidden\n").unwrap();
     fs::write(
@@ -330,7 +285,7 @@ fn recursively_returns_hidden_paths_and_ordered_start_lines_without_following_en
     symlink(workspace.join("dir/a.txt"), workspace.join("linked.txt")).unwrap();
     symlink(workspace.join("dir"), workspace.join("linked-dir")).unwrap();
     let _socket = UnixListener::bind(workspace.join("s")).unwrap();
-    let root = tree_workspace_root(&workspace);
+    let root = tree_workspace_root(workspace);
 
     let locations = search_tree_text_files_at(&root, std::ffi::OsStr::new("."), "needle").unwrap();
 
@@ -349,12 +304,12 @@ fn recursively_returns_hidden_paths_and_ordered_start_lines_without_following_en
             .unwrap()
             .is_empty()
     );
-    fs::remove_dir_all(workspace).unwrap();
 }
 
 #[test]
 fn recursive_search_rejects_empty_and_oversized_queries_and_workspace_escapes() {
-    let parent = tree_temp_path();
+    let parent_directory = tree_temp_dir();
+    let parent = parent_directory.path();
     let workspace = parent.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
     let root = tree_workspace_root(&workspace);
@@ -388,14 +343,14 @@ fn recursive_search_rejects_empty_and_oversized_queries_and_workspace_escapes() 
             .message(),
         "path must stay inside the current directory"
     );
-    fs::remove_dir_all(parent).unwrap();
 }
 
 #[test]
 fn recursive_search_enforces_file_and_cumulative_byte_limits() {
-    let path = tree_temp_path();
+    let directory = tree_temp_dir();
+    let path = directory.path();
     fs::create_dir_all(path.join("nested")).unwrap();
-    let root = tree_workspace_root(&path);
+    let root = tree_workspace_root(path);
 
     fs::write(path.join("nested/large.txt"), vec![b'x'; MAX_FILE_SIZE]).unwrap();
     assert!(search_tree_text_files_at(&root, std::ffi::OsStr::new("."), "absent").is_ok());
@@ -433,14 +388,14 @@ fn recursive_search_enforces_file_and_cumulative_byte_limits() {
             .message(),
         "search exceeds 16 MiB scan limit"
     );
-    fs::remove_dir_all(path).unwrap();
 }
 
 #[test]
 fn recursive_search_enforces_result_location_limit_without_partial_results() {
-    let path = tree_temp_path();
+    let directory = tree_temp_dir();
+    let path = directory.path();
     fs::create_dir_all(path.join("nested")).unwrap();
-    let root = tree_workspace_root(&path);
+    let root = tree_workspace_root(path);
     fs::write(
         path.join("nested/results.txt"),
         "needle\n".repeat(MAX_SEARCH_LOCATIONS),
@@ -464,14 +419,14 @@ fn recursive_search_enforces_result_location_limit_without_partial_results() {
             .message(),
         "search exceeds 10,000 result locations"
     );
-    fs::remove_dir_all(path).unwrap();
 }
 
 #[test]
 fn recursive_search_enforces_global_entry_and_depth_limits() {
-    let path = tree_temp_path();
+    let directory = tree_temp_dir();
+    let path = directory.path();
     fs::create_dir_all(path.join("nested")).unwrap();
-    let root = tree_workspace_root(&path);
+    let root = tree_workspace_root(path);
     for index in 0..2048 {
         fs::write(path.join(format!("root-{index:04}")), b"").unwrap();
         fs::write(path.join("nested").join(format!("child-{index:04}")), b"").unwrap();
@@ -482,16 +437,16 @@ fn recursive_search_enforces_global_entry_and_depth_limits() {
             .message(),
         "search tree exceeds 4,096 directory entry limit"
     );
-    fs::remove_dir_all(&path).unwrap();
+    fs::remove_dir_all(path).unwrap();
 
-    let mut nested = path.clone();
+    let mut nested = path.to_path_buf();
     fs::create_dir_all(&nested).unwrap();
     for depth in 1..=MAX_TREE_DIRECTORY_DEPTH {
         nested.push(format!("d{depth}"));
         fs::create_dir(&nested).unwrap();
     }
     fs::write(nested.join("at-limit.txt"), b"").unwrap();
-    let root = tree_workspace_root(&path);
+    let root = tree_workspace_root(path);
     assert!(search_tree_text_files_at(&root, std::ffi::OsStr::new("."), "needle").is_ok());
     nested.push(format!("d{}", MAX_TREE_DIRECTORY_DEPTH + 1));
     fs::create_dir(&nested).unwrap();
@@ -501,12 +456,12 @@ fn recursive_search_enforces_global_entry_and_depth_limits() {
             .message(),
         "search tree exceeds 16 directory depth limit"
     );
-    fs::remove_dir_all(path).unwrap();
 }
 
 #[test]
 fn recursive_search_rejects_invalid_utf8_after_matches_without_partial_results() {
-    let path = tree_temp_path();
+    let directory = tree_temp_dir();
+    let path = directory.path();
     fs::create_dir_all(path.join("nested")).unwrap();
     fs::write(path.join("a.txt"), "needle private text\n").unwrap();
     fs::write(
@@ -514,7 +469,7 @@ fn recursive_search_rejects_invalid_utf8_after_matches_without_partial_results()
         [b"invalid ".as_slice(), &[0xff]].concat(),
     )
     .unwrap();
-    let root = tree_workspace_root(&path);
+    let root = tree_workspace_root(path);
 
     assert_eq!(
         search_tree_text_files_at(&root, std::ffi::OsStr::new("."), "needle")
@@ -522,12 +477,12 @@ fn recursive_search_rejects_invalid_utf8_after_matches_without_partial_results()
             .message(),
         "file is not valid UTF-8"
     );
-    fs::remove_dir_all(path).unwrap();
 }
 
 #[test]
 fn searches_apply_root_and_nested_gitignore_rules_deterministically() {
-    let path = tree_temp_path();
+    let directory = tree_temp_dir();
+    let path = directory.path();
     fs::create_dir_all(path.join("nested/build")).unwrap();
     fs::create_dir_all(path.join("build")).unwrap();
     fs::create_dir_all(path.join("cache")).unwrap();
@@ -561,7 +516,7 @@ fn searches_apply_root_and_nested_gitignore_rules_deterministically() {
     ] {
         fs::write(path.join(relative_path), "needle\n").unwrap();
     }
-    let root = tree_workspace_root(&path);
+    let root = tree_workspace_root(path);
 
     let immediate = search_text_files_at(&root, std::ffi::OsStr::new("."), "needle").unwrap();
     assert_eq!(
@@ -596,16 +551,16 @@ fn searches_apply_root_and_nested_gitignore_rules_deterministically() {
         search_tree_text_files_at(&root, std::ffi::OsStr::new("."), "needle").unwrap(),
         recursive
     );
-    fs::remove_dir_all(path).unwrap();
 }
 
 #[test]
 fn invalid_gitignore_encoding_or_patterns_fail_without_partial_results() {
-    let path = tree_temp_path();
-    fs::create_dir_all(&path).unwrap();
+    let directory = tree_temp_dir();
+    let path = directory.path();
+    fs::create_dir_all(path).unwrap();
     fs::write(path.join("a-match.txt"), "needle\n").unwrap();
     fs::write(path.join(".gitignore"), "[\n").unwrap();
-    let root = tree_workspace_root(&path);
+    let root = tree_workspace_root(path);
 
     for search in [
         search_text_files_at(&root, std::ffi::OsStr::new("."), "needle"),
@@ -638,24 +593,23 @@ fn invalid_gitignore_encoding_or_patterns_fail_without_partial_results() {
             .message(),
         "ignore file is not valid UTF-8"
     );
-    fs::remove_dir_all(path).unwrap();
 }
 
 #[test]
 fn unreadable_gitignore_fails_without_partial_results() {
-    let path = tree_temp_path();
-    fs::create_dir_all(&path).unwrap();
+    let directory = tree_temp_dir();
+    let path = directory.path();
+    fs::create_dir_all(path).unwrap();
     fs::write(path.join("a-match.txt"), "needle\n").unwrap();
     let ignore_path = path.join(".gitignore");
     fs::write(&ignore_path, "*.tmp\n").unwrap();
     fs::set_permissions(&ignore_path, fs::Permissions::from_mode(0o000)).unwrap();
 
     if fs::File::open(&ignore_path).is_ok() {
-        fs::remove_dir_all(path).unwrap();
         return;
     }
 
-    let root = tree_workspace_root(&path);
+    let root = tree_workspace_root(path);
     assert_eq!(
         search_text_files_at(&root, std::ffi::OsStr::new("."), "needle")
             .unwrap_err()
@@ -668,17 +622,17 @@ fn unreadable_gitignore_fails_without_partial_results() {
             .message(),
         "unable to read ignore file"
     );
-    fs::remove_dir_all(path).unwrap();
 }
 
 #[test]
 fn ignore_rules_from_left_directories_do_not_apply_after_parent_components() {
-    let path = tree_temp_path();
+    let directory = tree_temp_dir();
+    let path = directory.path();
     fs::create_dir_all(path.join("child")).unwrap();
     fs::write(path.join("child/.gitignore"), "*.txt\n").unwrap();
     fs::write(path.join("child.txt"), "needle\n").unwrap();
     fs::write(path.join("root.txt"), "needle\n").unwrap();
-    let root = tree_workspace_root(&path);
+    let root = tree_workspace_root(path);
 
     assert_eq!(
         search_text_files_at(&root, Path::new("child/..").as_os_str(), "needle").unwrap(),
@@ -687,18 +641,18 @@ fn ignore_rules_from_left_directories_do_not_apply_after_parent_components() {
             (PathBuf::from("child/../root.txt"), 1),
         ]
     );
-    fs::remove_dir_all(path).unwrap();
 }
 
 #[test]
 fn parent_components_select_the_resolved_directory_for_listing_and_search() {
-    let path = tree_temp_path();
+    let directory = tree_temp_dir();
+    let path = directory.path();
     fs::create_dir_all(path.join("a/b")).unwrap();
     fs::write(path.join("root.txt"), "needle at root\n").unwrap();
     fs::write(path.join("a/.gitignore"), "b/\n").unwrap();
     fs::write(path.join("a/a.txt"), "needle in a\n").unwrap();
     fs::write(path.join("a/b/b.txt"), "needle in b\n").unwrap();
-    let root = tree_workspace_root(&path);
+    let root = tree_workspace_root(path);
 
     let cases = [
         (
@@ -756,13 +710,12 @@ fn parent_components_select_the_resolved_directory_for_listing_and_search() {
             "tree search {requested:?}"
         );
     }
-
-    fs::remove_dir_all(path).unwrap();
 }
 
 #[test]
 fn symlinked_gitignore_fails_closed_without_reading_outside_workspace() {
-    let parent = tree_temp_path();
+    let parent_directory = tree_temp_dir();
+    let parent = parent_directory.path();
     let path = parent.join("workspace");
     fs::create_dir_all(&path).unwrap();
     let outside_ignore = parent.join("outside.gitignore");
@@ -778,16 +731,16 @@ fn symlinked_gitignore_fails_closed_without_reading_outside_workspace() {
         "unable to read ignore file"
     );
     assert_eq!(fs::read(&outside_ignore).unwrap(), b"*.txt\n");
-    fs::remove_dir_all(parent).unwrap();
 }
 
 #[test]
 fn selected_directory_symlink_cannot_expose_git_metadata() {
-    let path = tree_temp_path();
+    let directory = tree_temp_dir();
+    let path = directory.path();
     fs::create_dir_all(path.join(".git/objects")).unwrap();
     fs::write(path.join(".git/config"), "needle in git metadata\n").unwrap();
     symlink(path.join(".git"), path.join("metadata-alias")).unwrap();
-    let root = tree_workspace_root(&path);
+    let root = tree_workspace_root(path);
 
     assert!(
         search_text_files_at(&root, Path::new("metadata-alias").as_os_str(), "needle")
@@ -799,6 +752,4 @@ fn selected_directory_symlink_cannot_expose_git_metadata() {
             .unwrap()
             .is_empty()
     );
-
-    fs::remove_dir_all(path).unwrap();
 }

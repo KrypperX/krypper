@@ -8,19 +8,18 @@ use super::record::MemoryRecord;
 use super::retrieval::append_memory_context;
 use super::scope::{MemoryQuery, WorkspaceKey};
 use super::store::MemoryStore;
+use crate::test_support::TempDir;
 use std::path::PathBuf;
-use uuid::Uuid;
 
 fn workspace(key: &str) -> WorkspaceKey {
     WorkspaceKey::new(key).expect("workspace key")
 }
 
-fn store_path() -> PathBuf {
-    std::env::temp_dir()
-        .join(format!("krypper-memory-recall-{}", Uuid::new_v4()))
-        .join("memory.jsonl")
+fn store_path() -> (TempDir, PathBuf) {
+    let directory = TempDir::with_prefix("krypper-memory-store-");
+    let path = directory.path().join("memory.jsonl");
+    (directory, path)
 }
-
 fn record(key: &str, content: &str, recorded_at: u64) -> MemoryRecord {
     MemoryRecord::new(
         workspace(key),
@@ -53,7 +52,7 @@ fn expiring(key: &str, content: &str, recorded_at: u64, until: u64) -> MemoryRec
 
 #[test]
 fn disabled_recall_reads_nothing_and_enabled_recall_keeps_provenance() {
-    let path = store_path();
+    let (_directory, path) = store_path();
     let query = MemoryQuery::new(workspace("ws-a"), 100).expect("query");
     let policy = MemoryRecallPolicy::default();
     assert_eq!(recall_opt_in(None, &query, &policy), Ok(None));
@@ -94,7 +93,7 @@ fn policy_bounds_are_validated_and_only_narrow_recall() {
         Err(MemoryError::QueryTooLarge)
     );
 
-    let path = store_path();
+    let (_directory, path) = store_path();
     let store = MemoryStore::open_opt_in(path, true).expect("store");
     store
         .append(&record("ws-a", "oldest fact", 10), 20)
@@ -164,7 +163,7 @@ fn evaluation_fixtures_measure_hits_and_hold_isolation() {
 
 #[test]
 fn memory_content_is_advisory_and_never_grants_authority() {
-    let path = store_path();
+    let (_directory, path) = store_path();
     let store = MemoryStore::open_opt_in(path, true).expect("store");
     store
         .append(

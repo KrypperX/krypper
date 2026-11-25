@@ -14,6 +14,7 @@ use super::policy::OfflineCargoPolicy;
 use super::supervisor::run;
 use super::*;
 use crate::task_lifecycle::TaskSession;
+use crate::test_support::TempDir;
 use crate::tools::capture_workspace_root_at;
 use std::ffi::OsStr;
 use std::fs;
@@ -99,8 +100,8 @@ pub(super) fn policy(host: &RealHost) -> OfflineCargoPolicy {
 }
 
 /// Smallest offline Cargo workspace that can compile one test binary without a network.
-pub(super) fn workspace() -> PathBuf {
-    let path = std::env::temp_dir().join(format!("krypper-real-sandbox-{}", Uuid::new_v4()));
+pub(super) fn workspace() -> TempDir {
+    let path = TempDir::with_prefix("krypper-real-sandbox-");
     fs::create_dir_all(path.join("src")).unwrap();
     fs::write(
         path.join("Cargo.toml"),
@@ -159,7 +160,8 @@ fn real_sandbox_isolation_blocks_host_paths_and_namespaces() {
         return;
     };
     let path = workspace();
-    let outside = Path::new("/var/tmp").join(format!("krypper-real-canary-{}", Uuid::new_v4()));
+    let outside_directory = TempDir::with_prefix("krypper-real-canary-");
+    let outside = outside_directory.path().join(Uuid::new_v4().to_string());
     let probe_name = format!("krypper-fd-write-{}", Uuid::new_v4());
     let probe_paths = [
         path.join(&probe_name),
@@ -270,8 +272,6 @@ fn assert_create_denied(path: &str, expected: std::io::ErrorKind, context: &str)
     for probe in &leaked_probe_files {
         fs::remove_file(probe).expect("remove host-side FD probe artifact");
     }
-    fs::remove_dir_all(&path).unwrap();
-    fs::remove_file(&outside).unwrap();
 
     assert!(
         leaked_probe_files.is_empty(),

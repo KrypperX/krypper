@@ -1,5 +1,5 @@
 use super::*;
-use crate::CURRENT_DIR_TEST_LOCK;
+use crate::test_support::CurrentDirGuard;
 use proptest::prelude::*;
 use std::fs;
 
@@ -13,31 +13,10 @@ impl TempWorkspace {
     }
 }
 
-struct RestoreCurrentDir(PathBuf);
-
-impl RestoreCurrentDir {
-    fn enter(path: &std::path::Path) -> Self {
-        let previous = std::env::current_dir().unwrap();
-        std::env::set_current_dir(path).unwrap();
-        Self(previous)
-    }
-}
-
-impl Drop for RestoreCurrentDir {
-    fn drop(&mut self) {
-        if let Err(error) = std::env::set_current_dir(&self.0) {
-            eprintln!("failed to restore test working directory: {error}");
-        }
-    }
-}
-
 #[test]
 fn checkpoint_preserves_only_metadata_for_workspace_activity() {
-    let _lock = CURRENT_DIR_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let workspace = TempWorkspace::new();
-    let _restore = RestoreCurrentDir::enter(workspace.0.path());
+    let _restore = CurrentDirGuard::enter(workspace.0.path());
 
     let read_secret = "read_excerpt_sentinel";
     let query_secret = "search_query_sentinel";

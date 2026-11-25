@@ -355,15 +355,12 @@ fn serialize_file_lines(lines: &[FileLine]) -> String {
 #[cfg(all(test, unix))]
 mod tests {
     use super::apply_unified_diff;
+    use crate::test_support::TempDir;
     use std::ffi::OsStr;
     use std::fs;
     use std::fs::File;
     use std::io;
     use std::os::unix::fs::{symlink, PermissionsExt};
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 
     #[test]
     fn applies_exact_hunks_and_preserves_crlf_and_unrelated_lines() {
@@ -511,7 +508,6 @@ mod tests {
         assert_eq!(result.bytes_written, fs::read(&file).unwrap().len());
         assert_eq!(result.before_diff, "keep\nold");
         assert_eq!(result.after_diff, "keep\nnew");
-        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -576,7 +572,6 @@ mod tests {
             fs::read(directory.join("invalid.txt")).unwrap(),
             [0xff, 0xfe]
         );
-        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -676,18 +671,11 @@ mod tests {
             "workspace file replacement committed but could not be verified; inspect it before retrying"
         );
         assert_eq!(fs::read(&file).unwrap(), b"new\n");
-
-        fs::remove_dir_all(directory).unwrap();
     }
 
-    fn create_workspace(label: &str) -> (PathBuf, super::super::WorkspaceRoot) {
-        let directory = std::env::temp_dir().join(format!(
-            "krypper-patch-{label}-{}-{}",
-            std::process::id(),
-            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir(&directory).unwrap();
-        let root = super::super::capture_workspace_root_at(&directory).unwrap();
+    fn create_workspace(label: &str) -> (TempDir, super::super::WorkspaceRoot) {
+        let directory = TempDir::with_prefix(&format!("krypper-patch-{label}-"));
+        let root = super::super::capture_workspace_root_at(directory.path()).unwrap();
         (directory, root)
     }
 }

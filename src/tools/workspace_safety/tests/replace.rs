@@ -1,23 +1,18 @@
 use std::fs;
 use std::io;
-use std::sync::atomic::Ordering;
 
 use super::super::replace::{replace_text_file_at, replace_text_file_at_with_writer};
 use super::super::types::{DirHandle, WorkspaceRoot, MAX_FILE_SIZE};
-use super::NEXT_TEMP;
+use super::temp_dir;
 
 #[test]
 fn replacement_changes_only_one_exact_match_in_an_existing_file() {
-    let path = std::env::temp_dir().join(format!(
-        "krypper-replace-{}-{}",
-        std::process::id(),
-        NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir(&path).unwrap();
+    let directory = temp_dir("krypper-replace-");
+    let path = directory.path();
     fs::write(path.join("note.txt"), "before exact match after").unwrap();
     let root = WorkspaceRoot {
-        descriptor: DirHandle::from_file(fs::File::open(&path).unwrap()),
-        path: fs::canonicalize(&path).unwrap(),
+        descriptor: DirHandle::from_file(fs::File::open(path).unwrap()),
+        path: fs::canonicalize(path).unwrap(),
     };
 
     let result = replace_text_file_at(
@@ -32,7 +27,6 @@ fn replacement_changes_only_one_exact_match_in_an_existing_file() {
         fs::read_to_string(path.join("note.txt")).unwrap(),
         "before new text after"
     );
-    fs::remove_dir_all(path).unwrap();
 }
 
 #[cfg(unix)]
@@ -40,20 +34,16 @@ fn replacement_changes_only_one_exact_match_in_an_existing_file() {
 fn replacement_preserves_permission_bits_and_replaces_only_the_named_hardlink() {
     use std::os::unix::fs::PermissionsExt;
 
-    let path = std::env::temp_dir().join(format!(
-        "krypper-replace-metadata-{}-{}",
-        std::process::id(),
-        NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir(&path).unwrap();
+    let directory = temp_dir("krypper-replace-metadata-");
+    let path = directory.path();
     let target = path.join("note.txt");
     let other_link = path.join("note-link.txt");
     fs::write(&target, "before old after").unwrap();
     fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
     fs::hard_link(&target, &other_link).unwrap();
     let root = WorkspaceRoot {
-        descriptor: DirHandle::from_file(fs::File::open(&path).unwrap()),
-        path: fs::canonicalize(&path).unwrap(),
+        descriptor: DirHandle::from_file(fs::File::open(path).unwrap()),
+        path: fs::canonicalize(path).unwrap(),
     };
 
     replace_text_file_at(&root, std::ffi::OsStr::new("note.txt"), "old", "new").unwrap();
@@ -64,7 +54,6 @@ fn replacement_preserves_permission_bits_and_replaces_only_the_named_hardlink() 
         fs::metadata(&target).unwrap().permissions().mode() & 0o777,
         0o640
     );
-    fs::remove_dir_all(path).unwrap();
 }
 
 #[cfg(unix)]
@@ -81,16 +70,12 @@ fn staged_replacement_stays_private_until_it_is_committed() {
     };
     use super::super::types::OriginalFileState;
 
-    let path = std::env::temp_dir().join(format!(
-        "krypper-replace-private-stage-{}-{}",
-        std::process::id(),
-        NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir(&path).unwrap();
+    let directory = temp_dir("krypper-replace-private-stage-");
+    let path = directory.path();
     let target = path.join("note.txt");
     fs::write(&target, "original").unwrap();
     fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
-    let parent = DirHandle::from_file(fs::File::open(&path).unwrap());
+    let parent = DirHandle::from_file(fs::File::open(path).unwrap());
     let original_status = stat_at(&parent, std::ffi::OsStr::new("note.txt")).unwrap();
 
     let mut operations = ReplacementOperations {
@@ -128,7 +113,6 @@ fn staged_replacement_stays_private_until_it_is_committed() {
             & 0o777,
         0o640
     );
-    fs::remove_dir_all(path).unwrap();
 }
 
 #[cfg(target_os = "linux")]
@@ -136,19 +120,15 @@ fn staged_replacement_stays_private_until_it_is_committed() {
 fn replacement_rejects_an_existing_advisory_lock() {
     use super::super::syscalls::try_lock_file_exclusive;
 
-    let path = std::env::temp_dir().join(format!(
-        "krypper-replace-locked-{}-{}",
-        std::process::id(),
-        NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir(&path).unwrap();
+    let directory = temp_dir("krypper-replace-locked-");
+    let path = directory.path();
     let target = path.join("note.txt");
     fs::write(&target, "original contents").unwrap();
     let lock = fs::File::open(&target).unwrap();
     try_lock_file_exclusive(&lock).unwrap();
     let root = WorkspaceRoot {
-        descriptor: DirHandle::from_file(fs::File::open(&path).unwrap()),
-        path: fs::canonicalize(&path).unwrap(),
+        descriptor: DirHandle::from_file(fs::File::open(path).unwrap()),
+        path: fs::canonicalize(path).unwrap(),
     };
 
     let error = replace_text_file_at(
@@ -161,9 +141,8 @@ fn replacement_rejects_an_existing_advisory_lock() {
 
     assert_eq!(error.message(), "file is locked by another replacement");
     assert_eq!(fs::read_to_string(&target).unwrap(), "original contents");
-    assert_eq!(fs::read_dir(&path).unwrap().count(), 1);
+    assert_eq!(fs::read_dir(path).unwrap().count(), 1);
     drop(lock);
-    fs::remove_dir_all(path).unwrap();
 }
 
 #[cfg(unix)]
@@ -172,15 +151,11 @@ fn replacement_rejects_in_process_concurrent_mutation_of_the_same_file() {
     use std::sync::mpsc;
     use std::time::Duration;
 
-    let path = std::env::temp_dir().join(format!(
-        "krypper-replace-in-process-lock-{}-{}",
-        std::process::id(),
-        NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir(&path).unwrap();
+    let directory = temp_dir("krypper-replace-in-process-lock-");
+    let path = directory.path();
     fs::write(path.join("note.txt"), "first|second").unwrap();
 
-    let worker_path = path.clone();
+    let worker_path = path.to_path_buf();
     let (entered_tx, entered_rx) = mpsc::sync_channel(1);
     let (continue_tx, continue_rx) = mpsc::sync_channel(1);
     let worker = std::thread::spawn(move || {
@@ -212,8 +187,8 @@ fn replacement_rejects_in_process_concurrent_mutation_of_the_same_file() {
     }
 
     let root = WorkspaceRoot {
-        descriptor: DirHandle::from_file(fs::File::open(&path).unwrap()),
-        path: fs::canonicalize(&path).unwrap(),
+        descriptor: DirHandle::from_file(fs::File::open(path).unwrap()),
+        path: fs::canonicalize(path).unwrap(),
     };
     let error =
         replace_text_file_at(&root, std::ffi::OsStr::new("note.txt"), "second", "TWO").unwrap_err();
@@ -225,23 +200,18 @@ fn replacement_rejects_in_process_concurrent_mutation_of_the_same_file() {
         fs::read_to_string(path.join("note.txt")).unwrap(),
         "ONE|second"
     );
-    fs::remove_dir_all(path).unwrap();
 }
 
 #[test]
 fn replacement_does_not_sweep_unowned_lookalike_temporary_files() {
-    let path = std::env::temp_dir().join(format!(
-        "krypper-replace-stale-temp-{}-{}",
-        std::process::id(),
-        NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir(&path).unwrap();
+    let directory = temp_dir("krypper-replace-stale-temp-");
+    let path = directory.path();
     fs::write(path.join("note.txt"), "before old after").unwrap();
     let stale_name = ".krypper-replace-00000000-0000-4000-8000-000000000000";
     fs::write(path.join(stale_name), "leave this file for inspection").unwrap();
     let root = WorkspaceRoot {
-        descriptor: DirHandle::from_file(fs::File::open(&path).unwrap()),
-        path: fs::canonicalize(&path).unwrap(),
+        descriptor: DirHandle::from_file(fs::File::open(path).unwrap()),
+        path: fs::canonicalize(path).unwrap(),
     };
 
     replace_text_file_at(&root, std::ffi::OsStr::new("note.txt"), "old", "new").unwrap();
@@ -254,20 +224,15 @@ fn replacement_does_not_sweep_unowned_lookalike_temporary_files() {
         fs::read_to_string(path.join("note.txt")).unwrap(),
         "before new after"
     );
-    fs::remove_dir_all(path).unwrap();
 }
 
 #[test]
 fn staged_file_cleanup_refuses_to_remove_a_replaced_name() {
     use super::super::syscalls::{stat_at, unlink_created_file};
 
-    let path = std::env::temp_dir().join(format!(
-        "krypper-replace-cleanup-identity-{}-{}",
-        std::process::id(),
-        NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir(&path).unwrap();
-    let parent = DirHandle::from_file(fs::File::open(&path).unwrap());
+    let directory = temp_dir("krypper-replace-cleanup-identity-");
+    let path = directory.path();
+    let parent = DirHandle::from_file(fs::File::open(path).unwrap());
     let temporary_name = std::ffi::OsStr::new(".krypper-replace-test-id");
     fs::write(path.join(temporary_name), "staged").unwrap();
     let staged = stat_at(&parent, temporary_name).unwrap();
@@ -281,21 +246,16 @@ fn staged_file_cleanup_refuses_to_remove_a_replaced_name() {
         fs::read_to_string(path.join(temporary_name)).unwrap(),
         "different file"
     );
-    fs::remove_dir_all(path).unwrap();
 }
 
 #[test]
 fn replacement_accepts_a_result_at_the_one_mib_limit() {
-    let path = std::env::temp_dir().join(format!(
-        "krypper-replace-limit-{}-{}",
-        std::process::id(),
-        NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir(&path).unwrap();
+    let directory = temp_dir("krypper-replace-limit-");
+    let path = directory.path();
     fs::write(path.join("note.txt"), "old").unwrap();
     let root = WorkspaceRoot {
-        descriptor: DirHandle::from_file(fs::File::open(&path).unwrap()),
-        path: fs::canonicalize(&path).unwrap(),
+        descriptor: DirHandle::from_file(fs::File::open(path).unwrap()),
+        path: fs::canonicalize(path).unwrap(),
     };
     let replacement = "x".repeat(MAX_FILE_SIZE);
 
@@ -306,21 +266,16 @@ fn replacement_accepts_a_result_at_the_one_mib_limit() {
         fs::read_to_string(path.join("note.txt")).unwrap(),
         replacement
     );
-    fs::remove_dir_all(path).unwrap();
 }
 
 #[test]
 fn replacement_rejects_empty_missing_and_ambiguous_matches_without_changes() {
-    let path = std::env::temp_dir().join(format!(
-        "krypper-replace-matches-{}-{}",
-        std::process::id(),
-        NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir(&path).unwrap();
+    let directory = temp_dir("krypper-replace-matches-");
+    let path = directory.path();
     fs::write(path.join("note.txt"), "aaaa").unwrap();
     let root = WorkspaceRoot {
-        descriptor: DirHandle::from_file(fs::File::open(&path).unwrap()),
-        path: fs::canonicalize(&path).unwrap(),
+        descriptor: DirHandle::from_file(fs::File::open(path).unwrap()),
+        path: fs::canonicalize(path).unwrap(),
     };
 
     for (match_text, expected_error) in [
@@ -338,22 +293,16 @@ fn replacement_rejects_empty_missing_and_ambiguous_matches_without_changes() {
         assert_eq!(error.message(), expected_error);
         assert_eq!(fs::read_to_string(path.join("note.txt")).unwrap(), "aaaa");
     }
-
-    fs::remove_dir_all(path).unwrap();
 }
 
 #[test]
 fn failed_replacement_keeps_the_original_and_removes_its_partial_stage() {
-    let path = std::env::temp_dir().join(format!(
-        "krypper-replace-write-failure-{}-{}",
-        std::process::id(),
-        NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir(&path).unwrap();
+    let directory = temp_dir("krypper-replace-write-failure-");
+    let path = directory.path();
     fs::write(path.join("note.txt"), "before exact match after").unwrap();
     let root = WorkspaceRoot {
-        descriptor: DirHandle::from_file(fs::File::open(&path).unwrap()),
-        path: fs::canonicalize(&path).unwrap(),
+        descriptor: DirHandle::from_file(fs::File::open(path).unwrap()),
+        path: fs::canonicalize(path).unwrap(),
     };
     let mut writes = 0;
 
@@ -380,8 +329,7 @@ fn failed_replacement_keeps_the_original_and_removes_its_partial_stage() {
         fs::read_to_string(path.join("note.txt")).unwrap(),
         "before exact match after"
     );
-    assert_eq!(fs::read_dir(&path).unwrap().count(), 1);
-    fs::remove_dir_all(path).unwrap();
+    assert_eq!(fs::read_dir(path).unwrap().count(), 1);
 }
 
 #[test]
@@ -393,14 +341,10 @@ fn replacement_reports_when_staged_file_cleanup_fails() {
     use super::super::syscalls::{rename_file_at, set_mode, stat_at};
     use super::super::types::OriginalFileState;
 
-    let path = std::env::temp_dir().join(format!(
-        "krypper-replace-cleanup-failure-{}-{}",
-        std::process::id(),
-        NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir(&path).unwrap();
+    let directory = temp_dir("krypper-replace-cleanup-failure-");
+    let path = directory.path();
     fs::write(path.join("note.txt"), "original contents").unwrap();
-    let parent = DirHandle::from_file(fs::File::open(&path).unwrap());
+    let parent = DirHandle::from_file(fs::File::open(path).unwrap());
     let original_status = stat_at(&parent, std::ffi::OsStr::new("note.txt")).unwrap();
 
     let mut operations = ReplacementOperations {
@@ -441,8 +385,7 @@ fn replacement_reports_when_staged_file_cleanup_fails() {
         fs::read_to_string(path.join("note.txt")).unwrap(),
         "original contents"
     );
-    assert_eq!(fs::read_dir(&path).unwrap().count(), 2);
-    fs::remove_dir_all(path).unwrap();
+    assert_eq!(fs::read_dir(path).unwrap().count(), 2);
 }
 
 #[cfg(unix)]
@@ -457,16 +400,12 @@ fn replacement_reports_commit_when_post_rename_mode_restore_fails() {
     use super::super::syscalls::{rename_file_at, stat_at, unlink_created_file};
     use super::super::types::OriginalFileState;
 
-    let path = std::env::temp_dir().join(format!(
-        "krypper-replace-mode-failure-{}-{}",
-        std::process::id(),
-        NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir(&path).unwrap();
+    let directory = temp_dir("krypper-replace-mode-failure-");
+    let path = directory.path();
     let target = path.join("note.txt");
     fs::write(&target, "original").unwrap();
     fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
-    let parent = DirHandle::from_file(fs::File::open(&path).unwrap());
+    let parent = DirHandle::from_file(fs::File::open(path).unwrap());
     let original_status = stat_at(&parent, std::ffi::OsStr::new("note.txt")).unwrap();
 
     let mut operations = ReplacementOperations {
@@ -500,21 +439,16 @@ fn replacement_reports_commit_when_post_rename_mode_restore_fails() {
         fs::metadata(&target).unwrap().permissions().mode() & 0o777 & !0o600,
         0
     );
-    fs::remove_dir_all(path).unwrap();
 }
 
 #[test]
 fn replacement_rejects_unsafe_paths_non_regular_files_and_oversize_content() {
     use std::os::unix::fs::symlink;
 
-    let path = std::env::temp_dir().join(format!(
-        "krypper-replace-safety-{}-{}",
-        std::process::id(),
-        NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
-    ));
+    let directory = temp_dir("krypper-replace-safety-");
+    let path = directory.path();
     let outside = path.join("outside");
     let workspace = path.join("workspace");
-    fs::create_dir(&path).unwrap();
     fs::create_dir(&workspace).unwrap();
     fs::write(&outside, "outside text").unwrap();
     fs::write(workspace.join("note.txt"), "regular text").unwrap();
@@ -597,5 +531,4 @@ fn replacement_rejects_unsafe_paths_non_regular_files_and_oversize_content() {
     assert_eq!(fs::read_to_string(outside).unwrap(), "outside text");
     assert_eq!(fs::read_dir(&workspace).unwrap().count(), 6);
     assert!(!workspace.join("missing-parent").exists());
-    fs::remove_dir_all(path).unwrap();
 }

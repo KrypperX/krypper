@@ -57,5 +57,4 @@ fn real_offline_cargo_behavior_is_preserved_through_the_harness() {
     assert!(result.succeeded(), "{result:?}");
     assert_eq!(result.test_filter.as_deref(), Some("selected_test"));
     assert_eq!(result.executed_tests, Some(1));
-    fs::remove_dir_all(path).unwrap();
 }

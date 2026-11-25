@@ -55,6 +55,7 @@ pub fn connect_stdio_authorized(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::TempDir;
     use std::fs;
     use std::thread;
     use std::time::Duration;
@@ -179,8 +180,8 @@ mod tests {
             generation: 3,
             task_authorized: true,
         };
-        let marker = std::env::temp_dir().join(format!("krypper-mcp-authorized-{task_id}"));
-        let _ = fs::remove_file(&marker);
+        let marker_directory = TempDir::with_prefix("krypper-mcp-authorized-");
+        let marker = marker_directory.path().join(task_id.to_string());
         let script = format!("printf spawned > '{}'\n", marker.display());
         let result = connect_stdio_authorized(
             &script_config(script),
@@ -194,7 +195,6 @@ mod tests {
         ));
         thread::sleep(Duration::from_millis(50));
         assert!(!marker.exists());
-        let _ = fs::remove_file(&marker);
     }
 
     #[test]

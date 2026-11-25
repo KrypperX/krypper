@@ -133,5 +133,4 @@ fn real_sandbox_limits_and_cancellation_stay_bounded() {
         "{cancelled:?}"
     );
     assert!(cancelled.cleanup_confirmed);
-    fs::remove_dir_all(path).unwrap();
 }

@@ -123,9 +123,9 @@ mod tests {
     use crate::task_lifecycle::{
         TaskSession, TaskSessionCheckpointError, TaskState, TurnOutcome, TurnState,
     };
-    use crate::CURRENT_DIR_TEST_LOCK;
+    use crate::test_support::CurrentDirGuard;
     use std::io;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     use uuid::Uuid;
 
     struct TempWorkspace(crate::test_support::TempDir);
@@ -139,22 +139,6 @@ mod tests {
 
         fn path(&self) -> &Path {
             self.0.path()
-        }
-    }
-
-    struct RestoreCurrentDir(PathBuf);
-
-    impl RestoreCurrentDir {
-        fn enter(path: &Path) -> Self {
-            let previous = std::env::current_dir().expect("read current directory");
-            std::env::set_current_dir(path).expect("set temporary workspace");
-            Self(previous)
-        }
-    }
-
-    impl Drop for RestoreCurrentDir {
-        fn drop(&mut self) {
-            std::env::set_current_dir(&self.0).expect("restore current directory");
         }
     }
 
@@ -334,10 +318,7 @@ mod tests {
     fn resume_without_override_uses_the_current_workspace() {
         let workspace = TempWorkspace::new();
         let (checkpoint, task_id, _) = running_task_checkpoint(workspace.path());
-        let _lock = CURRENT_DIR_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _restore = RestoreCurrentDir::enter(workspace.path());
+        let _restore = CurrentDirGuard::enter(workspace.path());
 
         let resumed =
             prepare_resumed_session(&checkpoint, None).expect("restore from the current workspace");

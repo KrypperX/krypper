@@ -1,4 +1,4 @@
-use std::sync::atomic::AtomicUsize;
+use crate::test_support::TempDir;
 
 pub(super) use super::listing::quote_json;
 pub(super) use super::read::{
@@ -9,7 +9,9 @@ pub(super) use super::read::{
 pub(super) use super::syscalls::write_to_file;
 pub(super) use super::types::RootGuidanceReadError;
 
-static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
+pub(super) fn temp_dir(prefix: &str) -> TempDir {
+    TempDir::with_prefix(prefix)
+}
 
 mod guidance;
 mod mutation;
