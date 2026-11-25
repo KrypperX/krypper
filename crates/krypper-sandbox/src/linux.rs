@@ -1,145 +1,26 @@
 //! Process supervision: leases, bounded pipes, reaping and the two run entry points.
 
-use crate::sandbox::{host_command, sandbox};
+use crate::host::{effective_uid, host_command};
+use crate::sandbox::sandbox;
 use crate::{RunLimits, SandboxOutcome, SandboxResource, SandboxRunRequest, SandboxRunResult};
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
-use std::os::fd::AsRawFd;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::fs::{self, OpenOptions};
+use std::io::{self, Read};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, MutexGuard, TryLockError};
+use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-static ACTIVE: Mutex<()> = Mutex::new(());
-static UNCERTAIN_CLEANUP: AtomicBool = AtomicBool::new(false);
+mod process;
+mod recovery;
+
+use process::{bounded_host, drain, nonblocking, reap, ManagedChild};
+use recovery::{
+    hold_for_recovery, is_cleanup_uncertain, mark_cleanup_uncertain, try_active_lock,
+    ActiveLockError, HostLease, HostLeaseError,
+};
 const POST_EXIT_PIPE_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
-
-// All system-manager commands have fixed executables, bounded output and a hard wait.
-// No caller-provided command, bus address, environment, or shell is accepted.
-
-struct ManagedChild(Option<std::process::Child>);
-impl ManagedChild {
-    fn child_mut(&mut self) -> io::Result<&mut std::process::Child> {
-        self.0
-            .as_mut()
-            .ok_or_else(|| io::Error::other("host child process was already detached"))
-    }
-}
-fn reap(child: &mut std::process::Child) -> bool {
-    let start = Instant::now();
-    while start.elapsed() < Duration::from_secs(2) {
-        match child.try_wait() {
-            Ok(Some(_)) => return true,
-            Err(_) => return false,
-            _ => {}
-        }
-        thread::sleep(Duration::from_millis(5));
-    }
-    false
-}
-impl Drop for ManagedChild {
-    fn drop(&mut self) {
-        if let Some(mut child) = self.0.take() {
-            if matches!(child.try_wait(), Ok(Some(_))) {
-                return;
-            }
-            let _ = child.kill();
-            if !reap(&mut child) {
-                // Keep the wait handle until the kernel permits reaping; never claim cleanup.
-                thread::spawn(move || {
-                    let _ = child.wait();
-                });
-            }
-        }
-    }
-}
-
-fn bounded_host(command: &mut Command) -> io::Result<String> {
-    let mut child = ManagedChild(Some(command.spawn()?));
-    let mut stdout = child
-        .child_mut()?
-        .stdout
-        .take()
-        .ok_or_else(|| io::Error::other("missing pipe"))?;
-    nonblocking(&stdout)?;
-    let mut stderr = child.child_mut()?.stderr.take();
-    if let Some(pipe) = &stderr {
-        nonblocking(pipe)?;
-    }
-    let mut errors = Vec::new();
-    let start = Instant::now();
-    let mut output = Vec::new();
-    loop {
-        let remaining = (16 * 1024usize).saturating_sub(output.len() + errors.len());
-        drain(&mut stdout, &mut output, remaining)?;
-        if let Some(pipe) = &mut stderr {
-            let remaining = (16 * 1024usize).saturating_sub(output.len() + errors.len());
-            drain(pipe, &mut errors, remaining)?;
-        }
-        if output.len() + errors.len() >= 16 * 1024 || start.elapsed() > Duration::from_secs(5) {
-            let child = child.child_mut()?;
-            let _ = child.kill();
-            let _ = reap(child);
-            return Err(io::Error::other("host command exceeded bound"));
-        }
-        if let Some(status) = child.child_mut()?.try_wait()? {
-            let remaining = (16 * 1024usize).saturating_sub(output.len() + errors.len());
-            drain(&mut stdout, &mut output, remaining)?;
-            if !status.success() {
-                if let Some(pipe) = &mut stderr {
-                    let remaining = (16 * 1024usize).saturating_sub(output.len() + errors.len());
-                    drain(pipe, &mut errors, remaining)?;
-                }
-                return Err(io::Error::other(format!(
-                    "host command failed: {}",
-                    String::from_utf8_lossy(&errors[..errors.len().min(512)])
-                )));
-            }
-            return String::from_utf8(output).map_err(io::Error::other);
-        }
-        thread::sleep(Duration::from_millis(5));
-    }
-}
-
-fn nonblocking(pipe: &impl AsRawFd) -> io::Result<()> {
-    // SAFETY: `pipe` is borrowed for the whole function, so its descriptor stays open;
-    // `F_GETFL`/`F_SETFL` take and return plain integers and touch no memory.
-    let flags = unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_GETFL) };
-    if flags < 0
-        // SAFETY: same descriptor and same reasoning as the `F_GETFL` call above.
-        || unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
-    {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-// Return true only at EOF. Read at most one bounded chunk per stream per poll.
-fn drain(pipe: &mut impl Read, bytes: &mut Vec<u8>, remaining: usize) -> io::Result<bool> {
-    let mut buffer = [0; 8192];
-    let count = remaining.min(buffer.len());
-    if count == 0 {
-        return Ok(false);
-    }
-    match pipe.read(&mut buffer[..count]) {
-        Ok(0) => Ok(true),
-        Ok(n) => {
-            bytes.extend_from_slice(&buffer[..n]);
-            Ok(false)
-        }
-        Err(e)
-            if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::Interrupted =>
-        {
-            Ok(false)
-        }
-        Err(e) => Err(e),
-    }
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PostExitDrain {
@@ -207,234 +88,6 @@ fn cpu_usage_usec(group: &Path) -> io::Result<u64> {
                 .and_then(|value| value.parse::<u64>().ok())
         })
         .ok_or_else(|| io::Error::other("CPU accounting unavailable"))
-}
-
-// One host-wide lease survives caller crashes. A later process must establish that the
-// previous unit and its cgroup are empty before it may run another profile.
-struct HostLease {
-    _lock: File,
-    receipt: PathBuf,
-}
-
-#[derive(Debug)]
-enum HostLeaseError {
-    Unavailable(io::Error),
-    CleanupUnconfirmed(io::Error),
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PreviousUnitState {
-    NotLoaded,
-    Stopped,
-}
-
-impl HostLease {
-    fn acquire() -> Result<Self, HostLeaseError> {
-        let uid = effective_uid();
-        let directory = PathBuf::from(format!("/run/user/{uid}"));
-        let metadata = fs::symlink_metadata(&directory).map_err(HostLeaseError::Unavailable)?;
-        if !metadata.is_dir() || metadata.uid() != uid || metadata.mode() & 0o022 != 0 {
-            return Err(HostLeaseError::Unavailable(io::Error::other(
-                "untrusted runtime directory",
-            )));
-        }
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(directory.join("krypper-offline-cargo.lock"))
-            .map_err(HostLeaseError::Unavailable)?;
-        let metadata = file.metadata().map_err(HostLeaseError::Unavailable)?;
-        if !metadata.is_file()
-            || metadata.uid() != uid
-            || metadata.nlink() != 1
-            || metadata.len() > 4096
-        {
-            return Err(HostLeaseError::Unavailable(io::Error::other(
-                "untrusted execution lease",
-            )));
-        }
-        // SAFETY: `file` owns a live descriptor for the duration of the call, and `flock`
-        // takes only that descriptor and an integer operation.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return Err(HostLeaseError::Unavailable(io::Error::other(
-                "another offline profile is active",
-            )));
-        }
-        let mut lease = Self {
-            _lock: file,
-            receipt: directory.join("krypper-offline-cargo.receipt"),
-        };
-        lease.recover_previous()?;
-        Ok(lease)
-    }
-
-    fn recover_previous(&mut self) -> Result<(), HostLeaseError> {
-        let uid = effective_uid();
-        let mut previous = String::new();
-        let receipt = match OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(&self.receipt)
-        {
-            Ok(mut receipt) => {
-                let metadata = receipt
-                    .metadata()
-                    .map_err(HostLeaseError::CleanupUnconfirmed)?;
-                if !metadata.is_file()
-                    || metadata.uid() != uid
-                    || metadata.nlink() != 1
-                    || metadata.len() > 4096
-                {
-                    return Err(HostLeaseError::CleanupUnconfirmed(io::Error::other(
-                        "untrusted cleanup receipt",
-                    )));
-                }
-                (&mut receipt)
-                    .take(4097)
-                    .read_to_string(&mut previous)
-                    .map_err(HostLeaseError::CleanupUnconfirmed)?;
-                receipt
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(HostLeaseError::CleanupUnconfirmed(error)),
-        };
-        if previous.is_empty() {
-            return Err(HostLeaseError::CleanupUnconfirmed(io::Error::other(
-                "incomplete cleanup receipt",
-            )));
-        }
-
-        let mut lines = previous.lines();
-        let unit = lines.next().unwrap_or("");
-        let id = unit
-            .strip_prefix("krypper-test-")
-            .and_then(|s| s.strip_suffix(".service"));
-        if id.and_then(|s| Uuid::parse_str(s).ok()).is_none() {
-            return Err(HostLeaseError::CleanupUnconfirmed(io::Error::other(
-                "unconfirmed execution lease",
-            )));
-        }
-        let group = lines.next();
-        if lines.next().is_some() {
-            return Err(HostLeaseError::CleanupUnconfirmed(io::Error::other(
-                "invalid cleanup receipt",
-            )));
-        }
-
-        let state = bounded_host(host_command("/usr/bin/systemctl").args([
-            "--user",
-            "show",
-            unit,
-            "--property=LoadState,ActiveState",
-        ]))
-        .map_err(HostLeaseError::CleanupUnconfirmed)?;
-        parse_previous_unit_state(&state).map_err(HostLeaseError::CleanupUnconfirmed)?;
-        if let Some(group) = group {
-            let group = Path::new(group);
-            if !group.starts_with("/sys/fs/cgroup")
-                || group.file_name().and_then(|s| s.to_str()) != Some(unit)
-                || group
-                    .components()
-                    .any(|c| matches!(c, std::path::Component::ParentDir))
-            {
-                return Err(HostLeaseError::CleanupUnconfirmed(io::Error::other(
-                    "untrusted cleanup identity",
-                )));
-            }
-            if group.exists()
-                && !fs::read_to_string(group.join("cgroup.events"))
-                    .map_err(HostLeaseError::CleanupUnconfirmed)?
-                    .lines()
-                    .any(|l| l == "populated 0")
-            {
-                return Err(HostLeaseError::CleanupUnconfirmed(io::Error::other(
-                    "previous cgroup is not empty",
-                )));
-            }
-        }
-        drop(receipt);
-        self.record("").map_err(HostLeaseError::CleanupUnconfirmed)
-    }
-    fn record(&mut self, text: &str) -> io::Result<()> {
-        let directory = receipt_parent(&self.receipt)?;
-        if text.is_empty() {
-            match fs::remove_file(&self.receipt) {
-                Ok(()) => {}
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e),
-            }
-        } else {
-            let temporary = directory.join(format!(".krypper-cargo-{}", Uuid::new_v4()));
-            let update = (|| -> io::Result<()> {
-                let mut file = OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .mode(0o600)
-                    .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-                    .open(&temporary)?;
-                file.write_all(text.as_bytes())?;
-                file.sync_all()?;
-                fs::rename(&temporary, &self.receipt)
-            })();
-            if update.is_err() {
-                let _ = fs::remove_file(temporary);
-            }
-            update?;
-        }
-        File::open(directory)?.sync_all()
-    }
-}
-
-fn receipt_parent(receipt: &Path) -> io::Result<&Path> {
-    receipt
-        .parent()
-        .ok_or_else(|| io::Error::other("invalid cleanup receipt path"))
-}
-
-fn parse_previous_unit_state(output: &str) -> io::Result<PreviousUnitState> {
-    let mut load_state = None;
-    let mut active_state = None;
-    for line in output.lines() {
-        let Some((key, value)) = line.split_once('=') else {
-            return Err(io::Error::other("invalid previous systemd unit state"));
-        };
-        match key {
-            "LoadState" if load_state.replace(value).is_none() => {}
-            "ActiveState" if active_state.replace(value).is_none() => {}
-            _ => return Err(io::Error::other("invalid previous systemd unit state")),
-        }
-    }
-
-    match (load_state, active_state) {
-        (Some("not-found"), Some("inactive")) => Ok(PreviousUnitState::NotLoaded),
-        (Some("loaded"), Some("inactive" | "failed")) => Ok(PreviousUnitState::Stopped),
-        _ => Err(io::Error::other("previous process cleanup is unconfirmed")),
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ActiveLockError {
-    Busy,
-    Poisoned,
-}
-
-fn try_active_lock(lock: &Mutex<()>) -> Result<MutexGuard<'_, ()>, ActiveLockError> {
-    match lock.try_lock() {
-        Ok(guard) => Ok(guard),
-        Err(TryLockError::WouldBlock) => Err(ActiveLockError::Busy),
-        Err(TryLockError::Poisoned(_)) => Err(ActiveLockError::Poisoned),
-    }
-}
-
-fn hold_for_recovery(result: &mut SandboxRunResult, diagnostic: impl Into<String>) {
-    result.outcome = SandboxOutcome::OutcomeUnknown;
-    result.cleanup_confirmed = false;
-    result.recovery_hold = true;
-    result.diagnostic = Some(diagnostic.into());
 }
 
 pub(super) struct Supervisor {
@@ -594,24 +247,8 @@ fn control_group_path(path: &Path) -> io::Result<PathBuf> {
 
 #[cfg(test)]
 mod path_invariant_tests {
-    use super::{control_group_path, receipt_parent};
-    use std::path::{Path, PathBuf};
-
-    #[test]
-    fn cleanup_receipt_requires_a_parent_directory() {
-        assert!(receipt_parent(Path::new("krypper.receipt")).is_ok());
-        assert!(receipt_parent(Path::new("")).is_err());
-    }
-
-    #[test]
-    fn recording_rejects_a_receipt_without_a_parent_instead_of_panicking() {
-        let mut lease = super::HostLease {
-            _lock: std::fs::File::open("/dev/null").expect("open inert lock fixture"),
-            receipt: PathBuf::new(),
-        };
-
-        assert!(lease.record("").is_err());
-    }
+    use super::control_group_path;
+    use std::path::Path;
 
     #[test]
     fn control_group_paths_must_be_absolute_and_contained() {
@@ -628,7 +265,7 @@ mod path_invariant_tests {
 impl Drop for Supervisor {
     fn drop(&mut self) {
         if !self.clean() {
-            UNCERTAIN_CLEANUP.store(true, Ordering::SeqCst);
+            mark_cleanup_uncertain();
         }
     }
 }
@@ -681,11 +318,11 @@ fn run_with_containment(request: SandboxRunRequest, contained: bool) -> SandboxR
         result.diagnostic = Some("captured sandbox descriptor is not a directory".into());
         return result;
     }
-    if UNCERTAIN_CLEANUP.load(Ordering::SeqCst) {
+    if is_cleanup_uncertain() {
         hold_for_recovery(&mut result, "previous process cleanup is unconfirmed");
         return result;
     }
-    let _guard = match try_active_lock(&ACTIVE) {
+    let _guard = match try_active_lock() {
         Ok(guard) => guard,
         Err(ActiveLockError::Busy) => {
             return SandboxRunResult::empty(run_id, SandboxOutcome::Denied, 0);
@@ -721,7 +358,7 @@ fn run_with_containment(request: SandboxRunRequest, contained: bool) -> SandboxR
         Ok(s) => s,
         Err(e) => {
             result.diagnostic = Some(e.to_string());
-            result.cleanup_confirmed = !UNCERTAIN_CLEANUP.load(Ordering::SeqCst);
+            result.cleanup_confirmed = !is_cleanup_uncertain();
             if result.cleanup_confirmed {
                 let _ = lease.record("");
             } else {
@@ -754,7 +391,7 @@ fn run_with_containment(request: SandboxRunRequest, contained: bool) -> SandboxR
         let mut command = sandbox(&directories, &supervisor.group)?;
         command.args(cargo_command_args(test_filter.as_deref()));
         result.outcome = SandboxOutcome::SpawnFailed;
-        let mut child = ManagedChild(Some(command.spawn()?));
+        let mut child = ManagedChild::new(command.spawn()?);
         launched = true;
         let (mut out, mut err) = {
             let child = child.child_mut()?;
@@ -878,7 +515,7 @@ fn run_with_containment(request: SandboxRunRequest, contained: bool) -> SandboxR
     result.cleanup_confirmed &= supervisor.clean();
     result.elapsed_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
     if !result.cleanup_confirmed {
-        UNCERTAIN_CLEANUP.store(true, Ordering::SeqCst);
+        mark_cleanup_uncertain();
         result.outcome = SandboxOutcome::OutcomeUnknown;
         result.recovery_hold = true;
     }
@@ -979,11 +616,6 @@ fn resolve_outcome(
         StopReason::Signaled(signal) => SandboxOutcome::Signaled(signal),
         StopReason::Unknown => SandboxOutcome::OutcomeUnknown,
     }
-}
-
-pub(super) fn effective_uid() -> u32 {
-    // SAFETY: `geteuid` takes no arguments, has no preconditions and cannot fail.
-    unsafe { libc::geteuid() }
 }
 
 #[cfg(test)]
@@ -1108,7 +740,7 @@ mod internal_outcome_tests {
         );
 
         let result = {
-            let _guard = super::ACTIVE.lock().unwrap();
+            let _guard = super::recovery::try_active_lock().unwrap();
             super::run_with_containment(request, true)
         };
 
@@ -1204,64 +836,9 @@ mod internal_outcome_tests {
 }
 
 #[cfg(test)]
-mod recovery_state_tests {
-    use super::{parse_previous_unit_state, try_active_lock, ActiveLockError, PreviousUnitState};
-    use std::sync::Mutex;
-
-    #[test]
-    fn previous_unit_state_distinguishes_not_loaded_from_unknown() {
-        assert_eq!(
-            parse_previous_unit_state("LoadState=not-found\nActiveState=inactive\n").unwrap(),
-            PreviousUnitState::NotLoaded
-        );
-        assert_eq!(
-            parse_previous_unit_state("LoadState=loaded\nActiveState=inactive\n").unwrap(),
-            PreviousUnitState::Stopped
-        );
-        assert_eq!(
-            parse_previous_unit_state("LoadState=loaded\nActiveState=failed\n").unwrap(),
-            PreviousUnitState::Stopped
-        );
-
-        for unknown in [
-            "LoadState=error\nActiveState=inactive\n",
-            "LoadState=not-found\nActiveState=active\n",
-            "LoadState=loaded\nActiveState=active\n",
-            "LoadState=loaded\nActiveState=activating\n",
-            "ActiveState=inactive\n",
-            "LoadState=loaded\nActiveState=inactive\nExtra=value\n",
-        ] {
-            assert!(
-                parse_previous_unit_state(unknown).is_err(),
-                "unrecognized state must retain the recovery hold: {unknown:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn active_lock_reports_busy_and_poisoned_as_different_states() {
-        let busy = Mutex::new(());
-        let _guard = busy.lock().unwrap();
-        assert!(matches!(try_active_lock(&busy), Err(ActiveLockError::Busy)));
-
-        let poisoned = Mutex::new(());
-        std::thread::scope(|scope| {
-            let join = scope.spawn(|| {
-                let _guard = poisoned.lock().unwrap();
-                panic!("simulate a supervisor panic while holding the lock");
-            });
-            assert!(join.join().is_err());
-        });
-        assert!(matches!(
-            try_active_lock(&poisoned),
-            Err(ActiveLockError::Poisoned)
-        ));
-    }
-}
-
-#[cfg(test)]
 mod post_exit_drain_tests {
-    use super::{drain_after_child_exit, nonblocking, PostExitDrain};
+    use super::process::nonblocking;
+    use super::{drain_after_child_exit, PostExitDrain};
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
