@@ -289,8 +289,8 @@ pub(crate) fn analyze_plan(
                 continue;
             };
             let changed_file = changed.iter().find(|file| {
-                workspace_path_comparison_key(&file.path)
-                    == workspace_path_comparison_key(&location.path)
+                workspace_path_comparison_key(&file.path, cfg!(windows))
+                    == workspace_path_comparison_key(&location.path, cfg!(windows))
             });
             let after_line = changed_file.and_then(|file| {
                 file.before
@@ -342,6 +342,13 @@ pub(crate) fn analyze_plan(
 }
 
 fn unique_mutation_targets(plan: &WorkspacePlan) -> Result<BTreeSet<PathBuf>, ImpactAnalysisError> {
+    unique_mutation_targets_with_case_sensitivity(plan, cfg!(windows))
+}
+
+fn unique_mutation_targets_with_case_sensitivity(
+    plan: &WorkspacePlan,
+    case_insensitive_paths: bool,
+) -> Result<BTreeSet<PathBuf>, ImpactAnalysisError> {
     let mut normalized_targets = BTreeSet::new();
     let mut targets = BTreeSet::new();
     for path in plan
@@ -351,7 +358,10 @@ fn unique_mutation_targets(plan: &WorkspacePlan) -> Result<BTreeSet<PathBuf>, Im
     {
         let normalized = normalize_workspace_relative_path(path)
             .ok_or(ImpactAnalysisError::UnsupportedMutation)?;
-        if !normalized_targets.insert(workspace_path_comparison_key(&normalized)) {
+        if !normalized_targets.insert(workspace_path_comparison_key(
+            &normalized,
+            case_insensitive_paths,
+        )) {
             return Err(ImpactAnalysisError::ConflictingEdits);
         }
         targets.insert(path.clone());
@@ -504,16 +514,13 @@ fn normalize_workspace_relative_path(path: &Path) -> Option<PathBuf> {
     (!normalized.as_os_str().is_empty()).then_some(normalized)
 }
 
-fn workspace_path_comparison_key(path: &Path) -> PathBuf {
-    #[cfg(windows)]
-    {
+fn workspace_path_comparison_key(path: &Path, case_insensitive_paths: bool) -> PathBuf {
+    if case_insensitive_paths {
         // Windows paths are case-insensitive. Lowercase only the comparison key, preserving the
         // caller's original path for all reads and writes. Lossy conversion errs on the safe side
         // by rejecting potentially equivalent non-Unicode paths as duplicates.
         PathBuf::from(path.to_string_lossy().to_lowercase())
-    }
-    #[cfg(not(windows))]
-    {
+    } else {
         path.to_path_buf()
     }
 }
@@ -763,9 +770,8 @@ mod tests {
         );
     }
 
-    #[cfg(windows)]
     #[test]
-    fn duplicate_case_equivalent_targets_are_rejected_on_windows() {
+    fn case_equivalent_targets_follow_filesystem_path_case_sensitivity() {
         let plan = WorkspacePlan::try_from_actions(
             vec![
                 WorkspaceAction::ReplaceText {
@@ -784,8 +790,14 @@ mod tests {
         .expect("valid bounded plan");
 
         assert_eq!(
-            unique_mutation_targets(&plan),
+            unique_mutation_targets_with_case_sensitivity(&plan, true),
             Err(ImpactAnalysisError::ConflictingEdits)
+        );
+        assert_eq!(
+            unique_mutation_targets_with_case_sensitivity(&plan, false)
+                .expect("case-sensitive paths remain distinct")
+                .len(),
+            2
         );
     }
 
