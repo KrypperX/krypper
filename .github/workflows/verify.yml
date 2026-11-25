@@ -8,6 +8,7 @@ permissions:
   contents: read
 jobs:
   verify-platforms:
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -20,10 +21,20 @@ jobs:
             run_catalog: false
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc
         with:
+          toolchain: stable
           components: rustfmt, clippy
+      - name: Cache Cargo registry and build artifacts
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-verify-stable-${{ hashFiles('Cargo.toml', 'Cargo.lock') }}
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
       - name: Check Rust targets
@@ -37,6 +48,9 @@ jobs:
       - name: Test Rust targets
         if: runner.os != 'Windows'
         run: cargo test --all-targets --locked
+      - name: Test Rust documentation examples
+        if: runner.os != 'Windows'
+        run: cargo test --doc --locked
       - name: Verify pinned model catalog input
         if: matrix.run_catalog
         run: |
@@ -54,6 +68,7 @@ jobs:
     if: always()
     needs: verify-platforms
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Require all platform checks to pass
         run: test "${{ needs.verify-platforms.result }}" = "success"

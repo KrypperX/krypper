@@ -12,13 +12,25 @@ permissions:
 jobs:
   msrv:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Read rust-version from Cargo.toml
         id: msrv
         run: echo "version=$(sed -n 's/^rust-version = \"\(.*\)\"$/\1/p' Cargo.toml)" >> "$GITHUB_OUTPUT"
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc
         with:
           toolchain: ${{ steps.msrv.outputs.version }}
-      - name: Build with the minimum supported Rust version
-        run: cargo build --all-targets --locked
+      - name: Cache Cargo registry and build artifacts
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-msrv-${{ steps.msrv.outputs.version }}-${{ hashFiles('Cargo.toml', 'Cargo.lock') }}
+      - name: Test all targets with the minimum supported Rust version
+        run: cargo test --all-targets --locked
+      - name: Test documentation examples with the minimum supported Rust version
+        run: cargo test --doc --locked

@@ -31,14 +31,17 @@ stub; `TaskSession::new_in_workspace` reports
 The Linux process sandbox and supervisor are not compiled there. Do not replace
 these failures with an unconfined implementation; native containment and process
 supervision require a separate reviewed port.
-The CI matrix runs the full suite on Linux and macOS and checks all targets on
-Windows without running tests.
+The CI matrix runs the full test suite and documentation examples on Linux and
+macOS. Windows is compile-checked without running tests. The MSRV job runs the
+all-target test suite and documentation examples with the declared minimum
+version.
 
 ## Rust toolchain
 
 The minimum supported Rust version is `1.89.0`, declared by `rust-version` in
-`Cargo.toml`. The MSRV workflow builds all targets with that version; stable
-toolchains are used for the platform verification matrix.
+`Cargo.toml`. The MSRV workflow runs all-target tests and documentation examples
+with that version; stable toolchains are used for the platform verification
+matrix.
 
 ## Current implementation
 
