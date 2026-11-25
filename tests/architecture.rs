@@ -4,7 +4,10 @@ use std::path::Path;
 #[path = "architecture/guard.rs"]
 mod guard;
 
-use guard::{scan_crate_root_aliases, scan_module_file, scan_source, scan_source_at_depth};
+use guard::{
+    scan_crate_root_aliases, scan_module_file, scan_source, scan_source_at_depth,
+    scan_source_with_root_exports,
+};
 
 #[test]
 fn production_tools_modules_do_not_import_brain() {
@@ -146,6 +149,25 @@ fn direction_guard_inspects_macro_tokens_and_fails_closed_on_unknown_macros_and_
         "{custom_attribute:?}"
     );
 
+    let module_attribute = scan_source("#[custom_codegen] mod nested {}", "module_attribute.rs");
+    assert!(
+        module_attribute
+            .iter()
+            .any(|violation| violation.contains("uninspected production module attribute")),
+        "{module_attribute:?}"
+    );
+
+    let conditional_module_path = scan_source(
+        "#[cfg_attr(unix, path = \"selected.rs\")] mod nested;",
+        "conditional_module_path.rs",
+    );
+    assert!(
+        conditional_module_path
+            .iter()
+            .any(|violation| violation.contains("uninspected production module attribute")),
+        "{conditional_module_path:?}"
+    );
+
     let shadowed_derive = scan_source(
         "use untrusted::Serialize; #[derive(Serialize)] struct Item;",
         "shadowed_derive.rs",
@@ -162,6 +184,43 @@ fn direction_guard_inspects_macro_tokens_and_fails_closed_on_unknown_macros_and_
         "inspected_derive.rs",
     );
     assert!(inspected_derive.is_empty(), "{inspected_derive:?}");
+
+    let serde_path = scan_source(
+        r#"use serde::Serialize;
+            #[derive(Serialize)]
+            struct Item { #[serde(serialize_with = "crate::brain::serialize")] value: String }
+        "#,
+        "serde_path.rs",
+    );
+    assert!(
+        serde_path
+            .iter()
+            .any(|violation| violation.contains("uninspected production attribute `serde`")),
+        "{serde_path:?}"
+    );
+
+    let serde_relative_path = scan_source(
+        r#"use serde::Serialize;
+            #[derive(Serialize)]
+            struct Item { #[serde(with = "super::brain::codec")] value: String }
+        "#,
+        "serde_relative_path.rs",
+    );
+    assert!(
+        serde_relative_path
+            .iter()
+            .any(|violation| violation.contains("uninspected production attribute `serde`")),
+        "{serde_relative_path:?}"
+    );
+
+    let serde_rename = scan_source(
+        r#"use serde::Serialize;
+            #[derive(Serialize)]
+            struct Item { #[serde(rename = "crate::brain")] value: String }
+        "#,
+        "serde_rename.rs",
+    );
+    assert!(serde_rename.is_empty(), "{serde_rename:?}");
 
     let include = scan_source("include!(\"generated.rs\");", "included_source.rs");
     assert!(
@@ -192,6 +251,36 @@ fn direction_guard_ignores_test_only_associated_items() {
 }
 
 #[test]
+fn direction_guard_ignores_test_only_fields_and_variants() {
+    let source = r#"
+        struct Widget {
+            #[cfg(test)]
+            test_only: crate::brain::TestOnly,
+        }
+        enum Event {
+            #[cfg(all(test, unix))]
+            TestOnly(crate::brain::TestOnly),
+        }
+    "#;
+
+    let violations = scan_source(source, "test_only_fields.rs");
+
+    assert!(violations.is_empty(), "{violations:?}");
+}
+
+#[test]
+fn direction_guard_still_checks_production_fields_and_variants() {
+    let source = r#"
+        struct Widget { production: crate::brain::Production }
+        enum Event { Production(crate::brain::Production) }
+    "#;
+
+    let violations = scan_source(source, "production_fields.rs");
+
+    assert_eq!(violations.len(), 2, "{violations:?}");
+}
+
+#[test]
 fn crate_root_aliases_are_rejected() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("lib.rs");
@@ -205,5 +294,47 @@ fn crate_root_aliases_are_rejected() {
             .iter()
             .any(|violation| violation.contains("alias")),
         "{violations:?}"
+    );
+}
+
+#[test]
+fn crate_root_brain_reexports_and_globs_are_rejected() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("lib.rs");
+
+    for (root_source, exported_name) in [
+        ("pub(crate) use brain as brain_api;", "brain_api"),
+        (
+            "pub(crate) use crate::brain::Decision as PublicDecision;",
+            "PublicDecision",
+        ),
+    ] {
+        fs::write(&root, root_source).unwrap();
+        let mut violations = Vec::new();
+
+        let brain_exports = scan_crate_root_aliases(&root, &mut violations);
+
+        assert!(
+            brain_exports.contains(exported_name),
+            "source `{root_source}` did not record its Brain export: {brain_exports:?}"
+        );
+
+        let tool_source = format!("use crate::{exported_name};");
+        let tool_violations =
+            scan_source_with_root_exports(&tool_source, "tools_alias.rs", 1, &brain_exports);
+        assert!(
+            !tool_violations.is_empty(),
+            "Tools import through `{exported_name}` was not rejected"
+        );
+    }
+
+    fs::write(&root, "pub(crate) use brain::*;").unwrap();
+    let mut violations = Vec::new();
+    let _ = scan_crate_root_aliases(&root, &mut violations);
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("Brain glob import")),
+        "Brain glob should fail closed: {violations:?}"
     );
 }
