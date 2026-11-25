@@ -7,6 +7,20 @@ use syn::{Attribute, Item, Meta, Path as RustPath, UseTree};
 
 const TOOLS_MODULE_DEPTH: usize = 1;
 
+#[derive(Hash, Eq, PartialEq)]
+struct ModuleVisitKey {
+    file_path: PathBuf,
+    module_dir: PathBuf,
+    module_depth: usize,
+    inside_inline_module: bool,
+}
+
+#[derive(Default)]
+struct ModuleVisits {
+    visited: HashSet<ModuleVisitKey>,
+    active_files: HashSet<PathBuf>,
+}
+
 fn ident_name(ident: &Ident) -> String {
     let name = ident.to_string();
     name.strip_prefix("r#").unwrap_or(&name).to_owned()
@@ -26,7 +40,7 @@ struct ModuleScanContext<'a> {
 }
 
 pub(super) fn scan_module_file(root: &Path) -> Vec<String> {
-    let mut visited = HashSet::new();
+    let mut visits = ModuleVisits::default();
     let mut violations = Vec::new();
     let crate_root = root
         .parent()
@@ -38,7 +52,7 @@ pub(super) fn scan_module_file(root: &Path) -> Vec<String> {
         module_directory(root),
         TOOLS_MODULE_DEPTH,
         false,
-        &mut visited,
+        &mut visits,
         &mut violations,
         &crate_root_brain_exports,
     );
@@ -50,16 +64,32 @@ fn scan_file(
     module_dir: PathBuf,
     module_depth: usize,
     inside_inline_module: bool,
-    visited: &mut HashSet<PathBuf>,
+    visits: &mut ModuleVisits,
     violations: &mut Vec<String>,
     crate_root_brain_exports: &HashSet<String>,
 ) {
     let normalized = file_path
         .canonicalize()
         .unwrap_or_else(|_| file_path.to_path_buf());
-    if !visited.insert(normalized) {
+    if visits.active_files.contains(&normalized) {
+        violations.push(format!(
+            "{}: recursive module source is not inspected",
+            file_path.display()
+        ));
         return;
     }
+    let key = ModuleVisitKey {
+        file_path: normalized.clone(),
+        module_dir: module_dir
+            .canonicalize()
+            .unwrap_or_else(|_| module_dir.clone()),
+        module_depth,
+        inside_inline_module,
+    };
+    if !visits.visited.insert(key) {
+        return;
+    }
+    visits.active_files.insert(normalized.clone());
     let source = match fs::read_to_string(file_path) {
         Ok(source) => source,
         Err(error) => {
@@ -67,6 +97,7 @@ fn scan_file(
                 "{}: unable to read Rust source: {error}",
                 file_path.display()
             ));
+            visits.active_files.remove(&normalized);
             return;
         }
     };
@@ -75,6 +106,7 @@ fn scan_file(
             "{}: unable to parse Rust source",
             file_path.display()
         ));
+        visits.active_files.remove(&normalized);
         return;
     };
     scan_items(
@@ -85,16 +117,17 @@ fn scan_file(
             module_depth,
             inside_inline_module,
         },
-        visited,
+        visits,
         violations,
         crate_root_brain_exports,
     );
+    visits.active_files.remove(&normalized);
 }
 
 fn scan_items(
     items: &[Item],
     context: &ModuleScanContext<'_>,
-    visited: &mut HashSet<PathBuf>,
+    visits: &mut ModuleVisits,
     violations: &mut Vec<String>,
     crate_root_brain_exports: &HashSet<String>,
 ) {
@@ -131,7 +164,7 @@ fn scan_items(
                         module_depth: context.module_depth + 1,
                         inside_inline_module: true,
                     },
-                    visited,
+                    visits,
                     violations,
                     crate_root_brain_exports,
                 );
@@ -146,7 +179,7 @@ fn scan_items(
                     module_directory(&module_path),
                     context.module_depth + 1,
                     false,
-                    visited,
+                    visits,
                     violations,
                     crate_root_brain_exports,
                 );
@@ -268,7 +301,7 @@ pub(super) fn scan_source_with_root_exports(
             module_depth,
             inside_inline_module: false,
         },
-        &mut HashSet::new(),
+        &mut ModuleVisits::default(),
         &mut violations,
         crate_root_brain_exports,
     );
@@ -634,6 +667,16 @@ pub(super) fn scan_crate_root_aliases(
         violations.push(format!("{}: unable to parse crate root", root.display()));
         return crate_root_brain_exports;
     };
+    let mut macro_import_violations = Vec::new();
+    let root_inspected_macro_imports =
+        inspected_macro_imports(&file.items, root, &mut macro_import_violations);
+    violations.extend(macro_import_violations);
+    let root_item_names = file
+        .items
+        .iter()
+        .filter_map(root_item_name)
+        .map(ident_name)
+        .collect::<HashSet<_>>();
     for item in &file.items {
         if item_is_test_only(item_attrs(item)) {
             continue;
@@ -753,15 +796,69 @@ pub(super) fn scan_crate_root_aliases(
         }
 
         for item in &file.items {
-            let Item::Type(type_alias) = item else {
-                continue;
-            };
-            if item_is_test_only(&type_alias.attrs)
-                || !type_alias_contains_brain_import(&type_alias.ty, 0, &crate_root_brain_exports)
+            if item_is_test_only(item_attrs(item))
+                || matches!(
+                    item,
+                    Item::Use(_) | Item::Mod(_) | Item::ExternCrate(_) | Item::Macro(_)
+                )
             {
                 continue;
             }
-            added_export |= crate_root_brain_exports.insert(ident_name(&type_alias.ident));
+            match item {
+                Item::Impl(implementation)
+                    if item_contains_brain_import(
+                        item,
+                        0,
+                        &crate_root_brain_exports,
+                        &root_inspected_macro_imports,
+                    ) =>
+                {
+                    if let Some(name) = root_impl_target_name(implementation) {
+                        if root_item_names.contains(&name) {
+                            added_export |= crate_root_brain_exports.insert(name);
+                        }
+                    }
+                }
+                Item::ForeignMod(foreign_mod) => {
+                    for foreign_item in &foreign_mod.items {
+                        if matches!(
+                            foreign_item,
+                            syn::ForeignItem::Macro(_) | syn::ForeignItem::Verbatim(_)
+                        ) {
+                            violations.push(format!(
+                                "{}: crate-root foreign macro or syntax is not inspected",
+                                root.display()
+                            ));
+                            continue;
+                        }
+                        if item_is_test_only(foreign_item_attrs(foreign_item))
+                            || !foreign_item_contains_brain_import(
+                                foreign_item,
+                                &crate_root_brain_exports,
+                                &root_inspected_macro_imports,
+                            )
+                        {
+                            continue;
+                        }
+                        if let Some(name) = foreign_item_name(foreign_item) {
+                            added_export |= crate_root_brain_exports.insert(ident_name(name));
+                        }
+                    }
+                }
+                _ => {
+                    let Some(name) = root_item_name(item) else {
+                        continue;
+                    };
+                    if item_contains_brain_import(
+                        item,
+                        0,
+                        &crate_root_brain_exports,
+                        &root_inspected_macro_imports,
+                    ) {
+                        added_export |= crate_root_brain_exports.insert(ident_name(name));
+                    }
+                }
+            }
         }
 
         if !added_export {
@@ -844,17 +941,17 @@ fn items_contain_brain_import(
     crate_root_brain_exports: &HashSet<String>,
     visited: &mut HashSet<PathBuf>,
 ) -> bool {
+    let mut macro_import_violations = Vec::new();
+    let inspected_macros =
+        inspected_macro_imports(items, source_file, &mut macro_import_violations);
+    if !macro_import_violations.is_empty() {
+        return true;
+    }
     items.iter().any(|item| {
         if item_is_test_only(item_attrs(item)) {
             return false;
         }
         match item {
-            Item::Use(item) => use_tree_contains_brain_import(
-                &item.tree,
-                &mut Vec::new(),
-                module_depth,
-                crate_root_brain_exports,
-            ),
             Item::Mod(nested) => module_contains_brain_import(
                 nested,
                 source_file,
@@ -867,69 +964,129 @@ fn items_contain_brain_import(
             // A macro can emit an import or public facade that is absent from
             // this AST. Mark the containing root module as uninspectable.
             Item::Macro(_) => true,
-            Item::Type(type_alias) => type_alias_contains_brain_import(
-                &type_alias.ty,
+            _ => item_contains_brain_import(
+                item,
                 module_depth,
                 crate_root_brain_exports,
+                &inspected_macros,
             ),
-            _ => false,
         }
     })
 }
 
-fn type_alias_contains_brain_import(
-    ty: &syn::Type,
+fn item_contains_brain_import(
+    item: &Item,
     module_depth: usize,
     crate_root_brain_exports: &HashSet<String>,
+    inspected_macro_imports: &HashSet<String>,
 ) -> bool {
-    let mut visitor = BrainPathProbe {
+    let mut violations = Vec::new();
+    let mut visitor = DirectionVisitor {
+        origin: "facade item".to_owned(),
         module_depth,
         crate_root_brain_exports,
+        inspected_macro_imports,
+        violations: &mut violations,
+    };
+    visitor.visit_item(item);
+    if !violations.is_empty() {
+        return true;
+    }
+    let mut root_facade_probe = RootFacadePathProbe {
+        exports: crate_root_brain_exports,
         found: false,
     };
-    visitor.visit_type(ty);
-    visitor.found
+    root_facade_probe.visit_item(item);
+    root_facade_probe.found
 }
 
-fn use_tree_contains_brain_import(
-    tree: &UseTree,
-    prefix: &mut Vec<String>,
-    module_depth: usize,
+fn foreign_item_contains_brain_import(
+    item: &syn::ForeignItem,
     crate_root_brain_exports: &HashSet<String>,
+    inspected_macro_imports: &HashSet<String>,
 ) -> bool {
-    match tree {
-        UseTree::Path(path) => {
-            prefix.push(ident_name(&path.ident));
-            let found = use_tree_contains_brain_import(
-                &path.tree,
-                prefix,
-                module_depth,
-                crate_root_brain_exports,
-            );
-            prefix.pop();
-            found
+    let mut violations = Vec::new();
+    let mut visitor = DirectionVisitor {
+        origin: "crate-root foreign item".to_owned(),
+        module_depth: 0,
+        crate_root_brain_exports,
+        inspected_macro_imports,
+        violations: &mut violations,
+    };
+    visitor.visit_foreign_item(item);
+    if !violations.is_empty() {
+        return true;
+    }
+    let mut root_facade_probe = RootFacadePathProbe {
+        exports: crate_root_brain_exports,
+        found: false,
+    };
+    root_facade_probe.visit_foreign_item(item);
+    root_facade_probe.found
+}
+
+fn foreign_item_name(item: &syn::ForeignItem) -> Option<&Ident> {
+    match item {
+        syn::ForeignItem::Fn(item) => Some(&item.sig.ident),
+        syn::ForeignItem::Static(item) => Some(&item.ident),
+        syn::ForeignItem::Type(item) => Some(&item.ident),
+        _ => None,
+    }
+}
+
+fn foreign_item_attrs(item: &syn::ForeignItem) -> &[Attribute] {
+    match item {
+        syn::ForeignItem::Fn(item) => &item.attrs,
+        syn::ForeignItem::Static(item) => &item.attrs,
+        syn::ForeignItem::Type(item) => &item.attrs,
+        syn::ForeignItem::Macro(item) => &item.attrs,
+        syn::ForeignItem::Verbatim(_) => &[],
+        _ => &[],
+    }
+}
+
+fn root_impl_target_name(implementation: &syn::ItemImpl) -> Option<String> {
+    let syn::Type::Path(type_path) = implementation.self_ty.as_ref() else {
+        return None;
+    };
+    type_path
+        .path
+        .segments
+        .last()
+        .map(|segment| ident_name(&segment.ident))
+}
+
+struct RootFacadePathProbe<'a> {
+    exports: &'a HashSet<String>,
+    found: bool,
+}
+
+impl<'ast> Visit<'ast> for RootFacadePathProbe<'_> {
+    fn visit_path(&mut self, path: &'ast RustPath) {
+        if path.leading_colon.is_none()
+            && path
+                .segments
+                .first()
+                .is_some_and(|segment| self.exports.contains(&ident_name(&segment.ident)))
+        {
+            self.found = true;
         }
-        UseTree::Name(name) => {
-            prefix.push(ident_name(&name.ident));
-            let found = path_starts_with_brain(prefix, module_depth)
-                || path_starts_with_brain_export(prefix, module_depth, crate_root_brain_exports);
-            prefix.pop();
-            found
-        }
-        UseTree::Rename(rename) => {
-            prefix.push(ident_name(&rename.ident));
-            let found = path_starts_with_brain(prefix, module_depth)
-                || path_starts_with_brain_export(prefix, module_depth, crate_root_brain_exports);
-            prefix.pop();
-            found
-        }
-        UseTree::Glob(_) => {
-            path_starts_with_brain(prefix, module_depth)
-                || path_starts_with_brain_export(prefix, module_depth, crate_root_brain_exports)
-        }
-        UseTree::Group(group) => group.items.iter().any(|item| {
-            use_tree_contains_brain_import(item, prefix, module_depth, crate_root_brain_exports)
-        }),
+        syn::visit::visit_path(self, path);
+    }
+}
+
+fn root_item_name(item: &Item) -> Option<&Ident> {
+    match item {
+        Item::Const(item) => Some(&item.ident),
+        Item::Enum(item) => Some(&item.ident),
+        Item::Fn(item) => Some(&item.sig.ident),
+        Item::Static(item) => Some(&item.ident),
+        Item::Struct(item) => Some(&item.ident),
+        Item::Trait(item) => Some(&item.ident),
+        Item::TraitAlias(item) => Some(&item.ident),
+        Item::Type(item) => Some(&item.ident),
+        Item::Union(item) => Some(&item.ident),
+        _ => None,
     }
 }
 
@@ -1441,9 +1598,9 @@ fn macro_tokens_contain_forbidden_path(
         if path_starts_with_brain(&segments, module_depth)
             || path_starts_with_brain_export(&segments, module_depth, crate_root_brain_exports)
             || path_resolves_to_crate_root(&segments, module_depth)
-                && tokens.get(end).is_some_and(
+                && (tokens.get(end).is_some_and(
                     |token| matches!(token, TokenTree::Ident(ident) if ident_name(ident) == "as"),
-                )
+                ) || token_path_is_grouped(&tokens, end))
             || path_resolves_to_crate_root(&segments, module_depth)
                 && tokens.get(end).is_some_and(
                     |token| matches!(token, TokenTree::Punct(punct) if punct.as_char() == '*'),
@@ -1457,6 +1614,12 @@ fn macro_tokens_contain_forbidden_path(
         }
     }
     false
+}
+
+fn token_path_is_grouped(tokens: &[TokenTree], end: usize) -> bool {
+    matches!(tokens.get(end), Some(TokenTree::Punct(punct)) if punct.as_char() == ':')
+        && matches!(tokens.get(end + 1), Some(TokenTree::Punct(punct)) if punct.as_char() == ':')
+        && matches!(tokens.get(end + 2), Some(TokenTree::Group(_)))
 }
 
 fn token_path_at(tokens: &[TokenTree], start: usize) -> Option<(Vec<String>, usize)> {

@@ -144,6 +144,16 @@ fn direction_guard_inspects_macro_tokens_and_fails_closed_on_unknown_macros_and_
         "{alias_violations:?}"
     );
 
+    let grouped_root_import = r#"fn build() { format!("{}", { use crate::{brain as root}; let _: Option<root::ModelError> = None; 0 }); }"#;
+    let grouped_root_import_violations =
+        scan_source(grouped_root_import, "macro_grouped_root_import.rs");
+    assert!(
+        grouped_root_import_violations
+            .iter()
+            .any(|violation| violation.contains("macro tokens")),
+        "grouped crate-root import inside macro tokens was not rejected: {grouped_root_import_violations:?}"
+    );
+
     let unknown_macro = scan_source("external_macro!();", "unknown_macro.rs");
     assert!(
         unknown_macro
@@ -508,6 +518,59 @@ fn crate_root_external_facades_that_reexport_brain_are_rejected() {
 }
 
 #[test]
+fn crate_root_named_items_and_nested_facades_that_expose_brain_are_rejected() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("lib.rs");
+    fs::write(
+        &root,
+        r#"
+            pub(crate) struct Wrapper {
+                pub(crate) error: crate::brain::ModelError,
+            }
+            pub(crate) fn model_error() -> Option<crate::brain::ModelError> { None }
+            pub(crate) struct ImplWrapper;
+            impl ImplWrapper {
+                pub(crate) fn model_error() -> Option<crate::brain::ModelError> { None }
+            }
+            extern "C" {
+                pub(crate) fn foreign_model_error() -> Option<crate::brain::ModelError>;
+            }
+            pub(crate) mod compatibility {
+                pub(crate) struct NestedWrapper {
+                    pub(crate) error: crate::brain::ModelError,
+                }
+                pub(crate) fn nested_model_error() -> Option<crate::brain::ModelError> { None }
+            }
+        "#,
+    )
+    .unwrap();
+    let mut violations = Vec::new();
+
+    let brain_exports = scan_crate_root_aliases(&root, &mut violations);
+
+    for (facade, item) in [
+        ("Wrapper", ""),
+        ("model_error", ""),
+        ("ImplWrapper", ""),
+        ("foreign_model_error", ""),
+        ("compatibility", "NestedWrapper"),
+        ("compatibility", "nested_model_error"),
+    ] {
+        let tool_source = if item.is_empty() {
+            format!("use crate::{facade};")
+        } else {
+            format!("use crate::{facade}::{item};")
+        };
+        let tool_violations =
+            scan_source_with_root_exports(&tool_source, "tools_named_facade.rs", 1, &brain_exports);
+        assert!(
+            !tool_violations.is_empty(),
+            "Tools import through `{facade}::{item}` was not rejected; exports: {brain_exports:?}"
+        );
+    }
+}
+
+#[test]
 fn module_scanner_resolves_inline_path_attributes_and_reports_read_failures() {
     let directory = tempfile::tempdir().unwrap();
     let source_directory = directory.path().join("src");
@@ -547,5 +610,41 @@ fn module_scanner_resolves_inline_path_attributes_and_reports_read_failures() {
             .iter()
             .any(|violation| violation.contains("unable to read Rust source")),
         "an unreadable path target did not fail closed: {violations:?}"
+    );
+}
+
+#[test]
+fn module_scanner_revisits_shared_source_in_each_module_context() {
+    let directory = tempfile::tempdir().unwrap();
+    let source_directory = directory.path().join("src");
+    let nested_directory = source_directory.join("tools/nested");
+    fs::create_dir_all(&nested_directory).unwrap();
+    fs::write(source_directory.join("lib.rs"), "mod tools;").unwrap();
+    let tools_root = source_directory.join("tools.rs");
+    fs::write(
+        &tools_root,
+        r#"
+            mod nested {
+                #[path = "shared.rs"]
+                mod deep;
+            }
+            #[path = "tools/nested/shared.rs"]
+            mod shallow;
+        "#,
+    )
+    .unwrap();
+    fs::write(
+        nested_directory.join("shared.rs"),
+        "use super::super::brain::ModelError;",
+    )
+    .unwrap();
+
+    let violations = scan_module_file(&tools_root);
+
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("crate::brain")),
+        "shared source was not scanned with its shallower module depth: {violations:?}"
     );
 }
