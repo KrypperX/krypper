@@ -477,6 +477,38 @@ fn direction_guard_ignores_test_only_associated_items() {
 }
 
 #[test]
+fn direction_guard_fails_closed_on_unrecognized_rust_syntax() {
+    let item_source = "macro facade { () => { use crate::brain::Decision; } }";
+    let parsed_item = syn::parse_file(item_source).expect("macro item should parse as verbatim");
+    assert!(matches!(
+        parsed_item.items.first(),
+        Some(syn::Item::Verbatim(_))
+    ));
+    let item_violations = scan_source(item_source, "unrecognized_item.rs");
+    assert!(
+        item_violations
+            .iter()
+            .any(|violation| violation.contains("uninspected production Rust item syntax")),
+        "unrecognized item syntax was accepted: {item_violations:?}"
+    );
+
+    let type_source = "unsafe<'a> crate::brain::Decision";
+    let parsed_type = syn::parse_str::<syn::Type>(type_source)
+        .expect("unsupported type syntax should be retained as verbatim");
+    assert!(matches!(parsed_type, syn::Type::Verbatim(_)));
+    let type_violations = scan_source(
+        &format!("type Hidden = {type_source};"),
+        "unrecognized_type.rs",
+    );
+    assert!(
+        type_violations
+            .iter()
+            .any(|violation| violation.contains("uninspected production Rust type syntax")),
+        "unrecognized type syntax was accepted: {type_violations:?}"
+    );
+}
+
+#[test]
 fn direction_guard_ignores_test_only_fields_and_variants() {
     let source = r#"
         struct Widget {
@@ -521,6 +553,32 @@ fn crate_root_aliases_are_rejected() {
             .any(|violation| violation.contains("alias")),
         "{violations:?}"
     );
+}
+
+#[test]
+fn crate_root_item_attribute_macros_fail_closed() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("lib.rs");
+
+    for source in [
+        "#[opaque::facade] use std::fmt::Debug;",
+        "#[opaque::facade] extern crate std;",
+        "#[opaque::facade] extern \"C\" { fn generated(); }",
+        "#[opaque::facade] pub struct Marker;",
+        "#[opaque::facade] mod facade {}",
+    ] {
+        fs::write(&root, source).unwrap();
+        let mut violations = Vec::new();
+
+        scan_crate_root_aliases(&root, &mut violations);
+
+        assert!(
+            violations.iter().any(|violation| {
+                violation.contains("uninspected production crate-root item attribute")
+            }),
+            "opaque crate-root item attribute was accepted for `{source}`: {violations:?}"
+        );
+    }
 }
 
 #[test]

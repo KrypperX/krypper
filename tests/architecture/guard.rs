@@ -494,9 +494,22 @@ struct DirectionVisitor<'a> {
     violations: &'a mut Vec<String>,
 }
 
+impl DirectionVisitor<'_> {
+    fn reject_uninspected_syntax(&mut self, syntax: &str) {
+        self.violations.push(format!(
+            "{}: uninspected production Rust {syntax}",
+            self.origin
+        ));
+    }
+}
+
 impl Visit<'_> for DirectionVisitor<'_> {
     fn visit_item(&mut self, item: &Item) {
         if item_is_test_only(item_attrs(item)) {
+            return;
+        }
+        if matches!(item, Item::Verbatim(_)) {
+            self.reject_uninspected_syntax("item syntax");
             return;
         }
         if let Item::Mod(module) = item {
@@ -509,6 +522,76 @@ impl Visit<'_> for DirectionVisitor<'_> {
             }
         }
         syn::visit::visit_item(self, item);
+    }
+
+    fn visit_foreign_item(&mut self, item: &syn::ForeignItem) {
+        if matches!(item, syn::ForeignItem::Verbatim(_)) {
+            self.reject_uninspected_syntax("foreign-item syntax");
+            return;
+        }
+        syn::visit::visit_foreign_item(self, item);
+    }
+
+    fn visit_expr(&mut self, expression: &syn::Expr) {
+        if matches!(expression, syn::Expr::Verbatim(_)) {
+            self.reject_uninspected_syntax("expression syntax");
+            return;
+        }
+        syn::visit::visit_expr(self, expression);
+    }
+
+    fn visit_impl_item(&mut self, item: &syn::ImplItem) {
+        if matches!(item, syn::ImplItem::Verbatim(_)) {
+            self.reject_uninspected_syntax("impl-item syntax");
+            return;
+        }
+        if impl_item_is_test_only(item) {
+            return;
+        }
+        syn::visit::visit_impl_item(self, item);
+    }
+
+    fn visit_lit(&mut self, literal: &syn::Lit) {
+        if matches!(literal, syn::Lit::Verbatim(_)) {
+            self.reject_uninspected_syntax("literal syntax");
+            return;
+        }
+        syn::visit::visit_lit(self, literal);
+    }
+
+    fn visit_pat(&mut self, pattern: &syn::Pat) {
+        if matches!(pattern, syn::Pat::Verbatim(_)) {
+            self.reject_uninspected_syntax("pattern syntax");
+            return;
+        }
+        syn::visit::visit_pat(self, pattern);
+    }
+
+    fn visit_trait_item(&mut self, item: &syn::TraitItem) {
+        if matches!(item, syn::TraitItem::Verbatim(_)) {
+            self.reject_uninspected_syntax("trait-item syntax");
+            return;
+        }
+        if trait_item_is_test_only(item) {
+            return;
+        }
+        syn::visit::visit_trait_item(self, item);
+    }
+
+    fn visit_type(&mut self, ty: &syn::Type) {
+        if matches!(ty, syn::Type::Verbatim(_)) {
+            self.reject_uninspected_syntax("type syntax");
+            return;
+        }
+        syn::visit::visit_type(self, ty);
+    }
+
+    fn visit_type_param_bound(&mut self, bound: &syn::TypeParamBound) {
+        if matches!(bound, syn::TypeParamBound::Verbatim(_)) {
+            self.reject_uninspected_syntax("type-bound syntax");
+            return;
+        }
+        syn::visit::visit_type_param_bound(self, bound);
     }
 
     fn visit_attribute(&mut self, attribute: &Attribute) {
@@ -617,20 +700,6 @@ impl Visit<'_> for DirectionVisitor<'_> {
             ));
         }
         syn::visit::visit_item_macro(self, item);
-    }
-
-    fn visit_impl_item(&mut self, item: &syn::ImplItem) {
-        if impl_item_is_test_only(item) {
-            return;
-        }
-        syn::visit::visit_impl_item(self, item);
-    }
-
-    fn visit_trait_item(&mut self, item: &syn::TraitItem) {
-        if trait_item_is_test_only(item) {
-            return;
-        }
-        syn::visit::visit_trait_item(self, item);
     }
 
     fn visit_field(&mut self, field: &syn::Field) {
@@ -836,6 +905,13 @@ pub(super) fn scan_crate_root_aliases(
         if item_is_test_only(item_attrs(item)) {
             continue;
         }
+        if matches!(item, Item::Verbatim(_)) {
+            violations.push(format!(
+                "{}: uninspected production crate-root Rust syntax",
+                root.display()
+            ));
+            continue;
+        }
         if item_attrs(item)
             .iter()
             .any(|attribute| path_is_ident(attribute.path(), "macro_use"))
@@ -844,6 +920,21 @@ pub(super) fn scan_crate_root_aliases(
                 "{}: crate-root macro imports are not inspected",
                 root.display()
             ));
+        }
+        let root_item_attributes = item_attrs(item);
+        for attribute in root_item_attributes {
+            if !attribute_is_inspected(
+                attribute,
+                &root_inspected_macro_imports,
+                0,
+                &crate_root_brain_exports,
+            ) {
+                violations.push(format!(
+                    "{}: uninspected production crate-root item attribute `{}`",
+                    root.display(),
+                    path_label(attribute.path())
+                ));
+            }
         }
         match item {
             Item::Use(item) => {
@@ -855,22 +946,7 @@ pub(super) fn scan_crate_root_aliases(
                     &mut crate_root_brain_exports,
                 );
             }
-            Item::Mod(module) if ident_name(&module.ident) == "tools" => {
-                for attribute in &module.attrs {
-                    if !attribute_is_inspected(
-                        attribute,
-                        &HashSet::new(),
-                        0,
-                        &crate_root_brain_exports,
-                    ) {
-                        violations.push(format!(
-                            "{}: uninspected crate-root Tools module attribute `{}`",
-                            root.display(),
-                            path_label(attribute.path())
-                        ));
-                    }
-                }
-            }
+            Item::Mod(_) => {}
             Item::ExternCrate(item)
                 if ident_name(&item.ident) == "self" && item.rename.is_some() =>
             {
@@ -1431,7 +1507,7 @@ fn attribute_is_inspected(
     crate_root_brain_exports: &HashSet<String>,
 ) -> bool {
     match path_label(attribute.path()).as_str() {
-        "allow" | "cfg" | "doc" | "ignore" | "test" => true,
+        "allow" | "cfg" | "doc" | "ignore" | "link" | "test" => true,
         "path" => match &attribute.meta {
             Meta::NameValue(name_value) => {
                 matches!(&name_value.value, syn::Expr::Lit(expression) if matches!(&expression.lit, syn::Lit::Str(_)))
