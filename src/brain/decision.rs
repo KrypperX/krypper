@@ -295,9 +295,11 @@ impl OllamaDecisionSource {
             self.repository_context.as_ref(),
         )
         .map_err(|_| WorkspacePlanError::ModelRequestFailed)?;
+        let advertised_tools = AdvertisedToolNames::from_request(&request)
+            .map_err(|_| WorkspacePlanError::ModelRequestFailed)?;
         let response = post_chat(&self.agent, self.address, &request)
             .map_err(|_| WorkspacePlanError::ModelRequestFailed)?;
-        parse_model_plan_response(&response, maximum)
+        parse_model_plan_response(&response, maximum, &advertised_tools)
     }
 
     pub(crate) fn review_correction_impact_plan(
@@ -331,9 +333,15 @@ impl OllamaDecisionSource {
             self.repository_context.as_ref(),
         )
         .map_err(|_| WorkspacePlanError::ModelRequestFailed)?;
+        let advertised_tools = AdvertisedToolNames::from_request(&request)
+            .map_err(|_| WorkspacePlanError::ModelRequestFailed)?;
         let response = post_chat(&self.agent, self.address, &request)
             .map_err(|_| WorkspacePlanError::ModelRequestFailed)?;
-        parse_model_plan_response(&response, maximum_operations.min(MAX_PLAN_OPERATIONS))
+        parse_model_plan_response(
+            &response,
+            maximum_operations.min(MAX_PLAN_OPERATIONS),
+            &advertised_tools,
+        )
     }
 
     pub(crate) fn accept_impact_reviewed_plan(

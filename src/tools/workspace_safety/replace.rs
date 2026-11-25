@@ -118,7 +118,7 @@ fn replace_text_file_at_with_writer_and_revision<F>(
     match_text: &str,
     replacement_text: &str,
     expected_revision: Option<&str>,
-    mut writer: F,
+    writer: F,
 ) -> Result<usize, CliError>
 where
     F: FnMut(&mut File, &[u8]) -> io::Result<usize>,
@@ -496,9 +496,9 @@ fn apply_patch_file_at_with_ops_and_revision<W, C, R>(
     path: &OsStr,
     patch_text: &str,
     expected_revision: Option<&str>,
-    mut writer: W,
-    mut committer: C,
-    mut readback: R,
+    writer: W,
+    committer: C,
+    readback: R,
 ) -> Result<PatchEvidence, CliError>
 where
     W: FnMut(&mut File, &[u8]) -> io::Result<usize>,

@@ -1,5 +1,4 @@
 use super::{read_repository_context_json, run_task_with_endpoint, run_task_with_selection_loader};
-use crate::brain::ModelProvider;
 use crate::task_lifecycle::{TaskSession, TaskState, TurnActivitySummary, TurnOutcome, TurnState};
 use serde_json::{json, Value};
 use std::ffi::OsString;
