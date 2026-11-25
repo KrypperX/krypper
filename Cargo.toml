@@ -29,4 +29,6 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 proptest = { version = "1.12", default-features = false, features = ["std"] }
+proc-macro2 = "1.0"
+syn = { version = "3.0.9", features = ["full", "visit"] }
 tempfile = "3.27"
