@@ -14,24 +14,23 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use uuid::Uuid;
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 struct TempWorkspace {
-    root: PathBuf,
+    _root: test_support::TempDir,
     workspace: PathBuf,
 }
 
 impl TempWorkspace {
     fn new() -> Self {
-        let root =
-            std::env::temp_dir().join(format!("krypper-completion-correction-{}", Uuid::new_v4()));
-        let workspace = root.join("workspace");
+        let root = test_support::TempDir::with_prefix("krypper-completion-correction-");
+        let workspace = root.path().join("workspace");
         fs::create_dir_all(&workspace).expect("create fixture workspace");
-        Self { root, workspace }
-    }
-}
-
-impl Drop for TempWorkspace {
-    fn drop(&mut self) {
-        fs::remove_dir_all(&self.root).expect("remove fixture workspace");
+        Self {
+            _root: root,
+            workspace: workspace.to_path_buf(),
+        }
     }
 }
 
@@ -344,7 +343,7 @@ fn duplicate_or_truncated_post_correction_evidence_cannot_succeed() {
 #[test]
 fn denied_correction_uses_task_session_safety_and_stops() {
     let workspace = TempWorkspace::new();
-    let outside = workspace.root.join("outside.txt");
+    let outside = workspace._root.path().join("outside.txt");
     let (mut session, task_id, turn_id) = running_turn(&workspace.workspace, "fixture task");
     let mut decisions = |_: &str, _: &[WorkspaceObservation]| complete_action();
     let mut planner_calls = 0;

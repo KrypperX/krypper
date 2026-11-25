@@ -62,29 +62,20 @@ pub(super) fn write_task_checkpoint(path: &Path, bytes: &[u8]) -> io::Result<()>
 mod tests {
     use super::{read_task_checkpoint, validate_checkpoint_output_path, write_task_checkpoint};
     use crate::task_lifecycle::MAX_TASK_SESSION_CHECKPOINT_BYTES;
+    use crate::test_support::TempDir;
     use std::fs;
     use std::io;
-    use std::path::{Path, PathBuf};
-    use uuid::Uuid;
+    use std::path::Path;
 
-    struct FixtureDirectory(PathBuf);
+    struct FixtureDirectory(TempDir);
 
     impl FixtureDirectory {
         fn new() -> Self {
-            let path =
-                std::env::temp_dir().join(format!("krypper-checkpoint-files-{}", Uuid::new_v4()));
-            fs::create_dir(&path).expect("create checkpoint fixture directory");
-            Self(path)
+            Self(TempDir::with_prefix("krypper-checkpoint-files-"))
         }
 
         fn path(&self) -> &Path {
-            &self.0
-        }
-    }
-
-    impl Drop for FixtureDirectory {
-        fn drop(&mut self) {
-            drop(fs::remove_dir_all(&self.0));
+            self.0.path()
         }
     }
 

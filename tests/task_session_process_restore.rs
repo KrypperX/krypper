@@ -4,7 +4,6 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use uuid::Uuid;
 
 #[path = "../examples/task_session_process_restore.rs"]
 mod process_example;
@@ -18,25 +17,15 @@ const FIRST_FILE: &str = "first-turn.txt";
 const FIRST_CONTENT: &str = "checkpoint-fixture-payload-must-not-be-serialized";
 const CHECKPOINT_FILE: &str = "task-session.checkpoint.json";
 
-struct TemporaryState(PathBuf);
+struct TemporaryState(tempfile::TempDir);
 
 impl TemporaryState {
     fn new() -> io::Result<Self> {
-        let path = env::temp_dir().join(format!("krypper process restore {}", Uuid::new_v4()));
-        fs::create_dir(&path)?;
-        Ok(Self(path))
+        tempfile::tempdir().map(Self)
     }
 
     fn state_dir(&self) -> PathBuf {
-        self.0.join("caller state")
-    }
-}
-
-impl Drop for TemporaryState {
-    fn drop(&mut self) {
-        if let Err(error) = fs::remove_dir_all(&self.0) {
-            eprintln!("failed to remove test-owned temporary state: {error}");
-        }
+        self.0.path().join("caller state")
     }
 }
 

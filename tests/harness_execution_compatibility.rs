@@ -9,22 +9,23 @@ use std::fs;
 use std::path::PathBuf;
 use uuid::Uuid;
 
-struct TempWorkspace(PathBuf);
+#[path = "../src/test_support.rs"]
+mod test_support;
+
+struct TempWorkspace {
+    _root: test_support::TempDir,
+    workspace: PathBuf,
+}
 
 impl TempWorkspace {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!("krypper-harness-{}", Uuid::new_v4()));
-        fs::create_dir(&root).expect("create temporary root");
-        let workspace = root.join("workspace");
+        let root = test_support::TempDir::with_prefix("krypper-harness-");
+        let workspace = root.path().join("workspace");
         fs::create_dir(&workspace).expect("create task workspace");
-        Self(workspace)
-    }
-}
-
-impl Drop for TempWorkspace {
-    fn drop(&mut self) {
-        fs::remove_dir_all(self.0.parent().expect("workspace has a temporary root"))
-            .expect("remove temporary root");
+        Self {
+            _root: root,
+            workspace,
+        }
     }
 }
 
@@ -51,7 +52,8 @@ fn start_turn(session: &mut TaskSession, goal: &str) -> (Uuid, Uuid) {
 #[test]
 fn harness_execution_keeps_agent_loop_types_and_ordered_task_behavior() {
     let workspace = TempWorkspace::new();
-    let mut session = TaskSession::new_in_workspace(&workspace.0).expect("bind task workspace");
+    let mut session =
+        TaskSession::new_in_workspace(&workspace.workspace).expect("bind task workspace");
     let goal = "Create and read a workspace note";
     let (task_id, turn_id) = start_turn(&mut session, goal);
 
@@ -165,7 +167,8 @@ fn harness_execution_keeps_agent_loop_types_and_ordered_task_behavior() {
 #[test]
 fn harness_execution_records_decision_budget_stop_and_failure_outcome() {
     let workspace = TempWorkspace::new();
-    let mut session = TaskSession::new_in_workspace(&workspace.0).expect("bind task workspace");
+    let mut session =
+        TaskSession::new_in_workspace(&workspace.workspace).expect("bind task workspace");
     let goal = "Create a file before the decision budget ends";
     let (task_id, turn_id) = start_turn(&mut session, goal);
     let contents = "created before budget";
@@ -208,7 +211,7 @@ fn harness_execution_records_decision_budget_stop_and_failure_outcome() {
         }]
     );
     assert_eq!(
-        fs::read_to_string(workspace.0.join("budget.txt")).expect("created file"),
+        fs::read_to_string(workspace.workspace.join("budget.txt")).expect("created file"),
         contents
     );
 
@@ -247,13 +250,10 @@ fn harness_execution_records_decision_budget_stop_and_failure_outcome() {
 #[test]
 fn harness_execution_rejects_workspace_escape_without_changing_outside_file() {
     let workspace = TempWorkspace::new();
-    let outside_file = workspace
-        .0
-        .parent()
-        .expect("workspace has a temporary root")
-        .join("outside.txt");
+    let outside_file = workspace._root.path().join("outside.txt");
     fs::write(&outside_file, "original contents").expect("write outside sentinel");
-    let mut session = TaskSession::new_in_workspace(&workspace.0).expect("bind task workspace");
+    let mut session =
+        TaskSession::new_in_workspace(&workspace.workspace).expect("bind task workspace");
     let goal = "Create a file inside the task workspace";
     let (task_id, turn_id) = start_turn(&mut session, goal);
     let mut decisions = |_: &str, _: &[WorkspaceObservation]| WorkspaceAction::CreateFile {
@@ -324,10 +324,7 @@ fn harness_execution_keeps_success_and_denied_cross_run_read_isolated() {
     const SENTINEL: &str = "private sentinel";
 
     let workspace_group = TempWorkspace::new();
-    let root = workspace_group
-        .0
-        .parent()
-        .expect("temporary workspace has a group root");
+    let root = workspace_group._root.path();
     let success_workspace = root.join("success");
     let failed_workspace = root.join("failure");
     fs::create_dir(&success_workspace).expect("create success workspace");

@@ -7,29 +7,27 @@ use std::io::{Cursor, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::thread::{self, JoinHandle};
-use uuid::Uuid;
 
 struct TempWorkspace {
     root: PathBuf,
+    _directory: crate::test_support::TempDir,
     workspace: PathBuf,
 }
 
 impl TempWorkspace {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!("krypper-verified-cli-{}", Uuid::new_v4()));
-        let workspace = root.join("workspace");
+        let root = crate::test_support::TempDir::with_prefix("krypper-verified-cli-");
+        let workspace = root.path().join("workspace");
         fs::create_dir_all(&workspace).expect("create fixture workspace");
-        Self { root, workspace }
+        Self {
+            root: root.path().to_path_buf(),
+            _directory: root,
+            workspace: workspace.to_path_buf(),
+        }
     }
 
     fn path(&self) -> &Path {
         &self.workspace
-    }
-}
-
-impl Drop for TempWorkspace {
-    fn drop(&mut self) {
-        fs::remove_dir_all(&self.root).expect("remove fixture workspace");
     }
 }
 

@@ -9,26 +9,23 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
-
-static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
-
 struct Fixture {
     path: PathBuf,
     root: WorkspaceRoot,
+    _directory: crate::test_support::TempDir,
 }
 
 impl Fixture {
     fn new(label: &str) -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "krypper-skills-{}-{}-{}",
-            label,
-            std::process::id(),
-            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir(&path).unwrap();
+        let directory =
+            crate::test_support::TempDir::with_prefix(&format!("krypper-skills-{label}-"));
+        let path = directory.path().to_path_buf();
         let root = capture_workspace_root_at(&path).unwrap();
-        Self { path, root }
+        Self {
+            path,
+            root,
+            _directory: directory,
+        }
     }
 
     fn write(&self, relative: &str, contents: &str) {
@@ -39,12 +36,6 @@ impl Fixture {
 
     fn manifest(&self, file: &str, name: &str) {
         self.write(file, &manifest_json(name));
-    }
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
     }
 }
 

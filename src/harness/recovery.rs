@@ -124,28 +124,21 @@ mod tests {
         TaskSession, TaskSessionCheckpointError, TaskState, TurnOutcome, TurnState,
     };
     use crate::CURRENT_DIR_TEST_LOCK;
-    use std::fs;
     use std::io;
     use std::path::{Path, PathBuf};
     use uuid::Uuid;
 
-    struct TempWorkspace(PathBuf);
+    struct TempWorkspace(crate::test_support::TempDir);
 
     impl TempWorkspace {
         fn new() -> Self {
-            let path = std::env::temp_dir().join(format!("krypper-recovery-{}", Uuid::new_v4()));
-            fs::create_dir(&path).expect("create temporary workspace");
-            Self(path)
+            Self(crate::test_support::TempDir::with_prefix(
+                "krypper-recovery-",
+            ))
         }
 
         fn path(&self) -> &Path {
-            &self.0
-        }
-    }
-
-    impl Drop for TempWorkspace {
-        fn drop(&mut self) {
-            fs::remove_dir_all(&self.0).expect("remove temporary workspace");
+            self.0.path()
         }
     }
 

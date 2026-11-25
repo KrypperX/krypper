@@ -6,6 +6,7 @@ pub(crate) struct TempDir {
 }
 
 impl TempDir {
+    #[allow(dead_code)]
     pub(crate) fn new() -> Self {
         Self::with_prefix("krypper-test-")
     }
