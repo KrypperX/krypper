@@ -8,9 +8,11 @@ use krypper_sandbox::{
     run_offline_cargo, DirectoryDescriptors, RunLimits, SandboxOutcome, SandboxResource,
     SandboxRunRequest, SandboxRunResult,
 };
+#[cfg(target_os = "linux")]
 use std::path::Path;
 #[cfg(target_os = "linux")]
 use std::sync::atomic::Ordering;
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -132,6 +134,7 @@ fn paths_overlap(left: &Path, right: &Path) -> bool {
     left.starts_with(right) || right.starts_with(left)
 }
 
+#[cfg(target_os = "linux")]
 fn setup_failed(
     test_filter: Option<&str>,
     diagnostic: impl Into<String>,
@@ -217,6 +220,7 @@ pub(super) fn record_test_evidence(result: &mut ProcessResult) {
     }
 }
 
+#[cfg(all(test, target_os = "linux"))]
 pub(super) fn record_raw_output(result: &mut ProcessResult, stdout: Vec<u8>, stderr: Vec<u8>) {
     result.output_bytes = stdout.len().saturating_add(stderr.len());
     result.stdout = String::from_utf8_lossy(&stdout).into_owned();

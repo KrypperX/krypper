@@ -78,6 +78,7 @@ impl RunLimits {
 }
 
 /// Captured directory descriptors for the authorized workspace and trusted offline runtime.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[derive(Debug)]
 pub struct DirectoryDescriptors {
     workspace: File,
@@ -95,6 +96,7 @@ impl DirectoryDescriptors {
         }
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn all_are_directories(&self) -> bool {
         [&self.workspace, &self.toolchain, &self.registry]
             .iter()
@@ -103,6 +105,7 @@ impl DirectoryDescriptors {
 }
 
 /// The only request accepted by this runner: one bounded offline Cargo test attempt.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub struct SandboxRunRequest {
     pub(crate) run_id: Uuid,
     pub(crate) directories: Option<DirectoryDescriptors>,
@@ -206,7 +209,7 @@ pub fn run_offline_cargo(request: SandboxRunRequest) -> SandboxRunResult {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod directory_descriptor_tests {
     use super::DirectoryDescriptors;
     use std::fs::{self, File};

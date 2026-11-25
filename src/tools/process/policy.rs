@@ -4,7 +4,7 @@
 use crate::tools::process_profile::ProcessProfile;
 #[cfg(target_os = "linux")]
 use crate::tools::{capture_workspace_root_at, WorkspaceRoot};
-#[cfg(target_os = "linux")]
+#[cfg(all(test, target_os = "linux"))]
 use std::ffi::OsString;
 #[cfg(target_os = "linux")]
 use std::fs::File;
@@ -95,7 +95,7 @@ pub(crate) fn validate_test_filter(test_filter: Option<&str>) -> Result<(), &'st
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(test, target_os = "linux"))]
 pub(super) fn cargo_command_args(
     profile: &ProcessProfile<'_>,
     test_filter: Option<&str>,
