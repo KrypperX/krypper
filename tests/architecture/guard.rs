@@ -1589,24 +1589,17 @@ fn serde_string_contains_brain_path(
     module_depth: usize,
     crate_root_brain_exports: &HashSet<String>,
 ) -> bool {
-    if syn::parse_str::<RustPath>(value).is_ok_and(|path| {
-        path_starts_with_brain(
-            &path
-                .segments
-                .iter()
-                .map(|segment| ident_name(&segment.ident))
-                .collect::<Vec<_>>(),
-            module_depth,
-        )
-    }) || syn::parse_str::<RustPath>(value).is_ok_and(|path| {
+    if let Ok(path) = syn::parse_str::<RustPath>(value) {
         let segments = path
             .segments
             .iter()
             .map(|segment| ident_name(&segment.ident))
             .collect::<Vec<_>>();
-        path_starts_with_brain_export(&segments, module_depth, crate_root_brain_exports)
-    }) {
-        return true;
+        if path_starts_with_brain(&segments, module_depth)
+            || path_starts_with_brain_export(&segments, module_depth, crate_root_brain_exports)
+        {
+            return true;
+        }
     }
 
     let mut visitor = BrainPathProbe {
