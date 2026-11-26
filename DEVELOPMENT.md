@@ -72,6 +72,12 @@ matrix.
   identity, ownership, running-turn checks, and workspace binding in Core; its
   workspace operations delegate to Tools after those checks. The CLI uses the
   same Tools operations.
+- [`src/contracts.rs`](src/contracts.rs) groups provider-independent data
+  contracts and pure helpers shared across implementation boundaries. The
+  process-attempt result vocabulary is defined in
+  [`src/contracts/process_execution.rs`](src/contracts/process_execution.rs);
+  Tools still owns process policy and execution. Existing `crate::tools::process`
+  and crate-root re-exports preserve the established paths.
 - [`src/task_lifecycle.rs`](src/task_lifecycle.rs) re-exports that lifecycle
   API as a compatibility facade for existing callers, including the types
   exposed by `core::task`.

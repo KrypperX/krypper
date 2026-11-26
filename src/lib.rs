@@ -20,7 +20,8 @@ pub mod streaming;
 pub mod task_lifecycle;
 pub(crate) mod tools;
 
-pub use tools::process::{OfflineCargoPolicy, ProcessOutcome, ProcessResource, ProcessResult};
+pub use contracts::process_execution::{ProcessOutcome, ProcessResource, ProcessResult};
+pub use tools::process::OfflineCargoPolicy;
 
 pub use brain::{
     BrainReflectionError, ModelError, ModelProvider, OllamaDecisionSource, WorkspacePlan,
