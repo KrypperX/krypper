@@ -5,6 +5,20 @@ use crate::tools::capture_workspace_root_at;
 use crate::tools::process::run_without_landlock_for_test;
 use std::fs;
 
+fn landlock_status(
+    result: &crate::tools::process::ProcessResult,
+) -> Option<krypper_sandbox::SandboxEvidenceStatus> {
+    result
+        .sandbox_evidence
+        .as_ref()
+        .and_then(|evidence| {
+            evidence.controls().iter().find(|record| {
+                record.control == krypper_sandbox::SandboxControl::LandlockFilesystemWrites
+            })
+        })
+        .map(|record| record.status)
+}
+
 #[test]
 #[ignore = "opt-in real-sandbox evidence: set KRYPPER_REAL_SANDBOX=1 on a provisioned Linux host"]
 fn real_sandbox_landlock_limits_writes_and_reaches_descendants() {
@@ -161,15 +175,7 @@ fn landlock_allows_profile_scratch_and_denies_unlisted_tmp() {
         "the Bubblewrap-only write control must execute: {baseline:?}"
     );
     assert!(baseline.cleanup_confirmed, "{baseline:?}");
-    let baseline_landlock_status = baseline
-        .sandbox_evidence
-        .as_ref()
-        .and_then(|evidence| {
-            evidence.controls().iter().find(|record| {
-                record.control == krypper_sandbox::SandboxControl::LandlockFilesystemWrites
-            })
-        })
-        .map(|record| record.status);
+    let baseline_landlock_status = landlock_status(&baseline);
     assert_eq!(
         baseline_landlock_status,
         Some(krypper_sandbox::SandboxEvidenceStatus::Unavailable),
@@ -192,15 +198,7 @@ fn landlock_allows_profile_scratch_and_denies_unlisted_tmp() {
     );
     assert!(result.cleanup_confirmed, "{result:?}");
     assert!(!result.recovery_hold, "{result:?}");
-    let status = result
-        .sandbox_evidence
-        .as_ref()
-        .and_then(|evidence| {
-            evidence.controls().iter().find(|record| {
-                record.control == krypper_sandbox::SandboxControl::LandlockFilesystemWrites
-            })
-        })
-        .map(|record| record.status);
+    let status = landlock_status(&result);
     assert_eq!(
         status,
         Some(krypper_sandbox::SandboxEvidenceStatus::Applied),
