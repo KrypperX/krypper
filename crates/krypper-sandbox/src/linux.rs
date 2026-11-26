@@ -4,7 +4,8 @@ use crate::host::effective_uid;
 use crate::sandbox::sandbox;
 use crate::seccomp::compile_filter;
 use crate::{
-    runner_handshake::{RunnerHandshakePipes, RunnerStatus, ACK_FD, STATUS_FD},
+    runner_handshake::RunnerHandshakePipes,
+    runner_protocol::{RunnerStatus, ACK_FD, STATUS_FD},
     validate_test_filter, LandlockRequirement, RunLimits, SandboxBackend, SandboxExecutionBackend,
     SandboxIsolationEvidence, SandboxOutcome, SandboxRunRequest, SandboxRunResult,
     SandboxRunnerPin, SpawnGateError, ValidatedExecutionRequirements,

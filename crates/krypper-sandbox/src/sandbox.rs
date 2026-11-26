@@ -1,6 +1,7 @@
 //! The Linux sandbox command: host executable lookup and the contained child command.
 
-use crate::runner_handshake::{RunnerHandshakePipes, ACK_FD, STATUS_FD};
+use crate::runner_handshake::RunnerHandshakePipes;
+use crate::runner_protocol::{ACK_FD, STATUS_FD};
 use crate::{
     DirectoryDescriptors, PinnedResourceAccess, SandboxControl, SandboxIsolationEvidence,
     SandboxRunnerPin, ValidatedExecutionRequirements,
@@ -213,6 +214,11 @@ pub(super) fn sandbox(
         "/tmp/target",
         "--dir",
         "/tmp/tmp",
+    ]);
+    command.args([
+        "--symlink",
+        "/cargo/registry",
+        "/tmp/home/registry",
         "--chdir",
         "/workspace",
     ]);

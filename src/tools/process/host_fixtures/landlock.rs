@@ -20,7 +20,7 @@ use std::io::ErrorKind;
 use std::os::unix::fs::MetadataExt;
 use std::process::Command;
 
-fn assert_landlock_denies_write(path: &str) {
+fn assert_denies_write(path: &str) {
     match OpenOptions::new().write(true).create_new(true).open(path) {
         Err(error) => {
             assert_eq!(error.kind(), ErrorKind::PermissionDenied, "{path}: {error}");
@@ -28,7 +28,7 @@ fn assert_landlock_denies_write(path: &str) {
         Ok(file) => {
             drop(file);
             let cleanup = std::fs::remove_file(path);
-            panic!("Landlock allowed unlisted write {path}; cleanup={cleanup:?}");
+            panic!("Sandbox allowed an unlisted write {path}; cleanup={cleanup:?}");
         }
     }
 }
@@ -38,12 +38,14 @@ fn landlock_descendant_probe() {
     let Some(path) = std::env::var_os("KRYPPER_LANDLOCK_DESCENDANT_PATH") else {
         return;
     };
-    assert_landlock_denies_write(path.to_str().expect("UTF-8 probe path"));
+    assert_denies_write(path.to_str().expect("UTF-8 probe path"));
 }
 
 #[test]
 fn landlock_allows_profile_scratch_and_denies_unlisted_tmp() {
     assert_eq!(std::env::var("TMPDIR").as_deref(), Ok("/tmp/tmp"));
+    assert_eq!(std::env::var("CARGO_HOME").as_deref(), Ok("/tmp/home"));
+    assert_eq!(std::fs::read_link("/tmp/home/registry").unwrap(), std::path::Path::new("/cargo/registry"));
 
     let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").unwrap();
     let tmp_mount = mountinfo
@@ -54,6 +56,12 @@ fn landlock_allows_profile_scratch_and_denies_unlisted_tmp() {
     assert!(fields[5].split(',').any(|option| option == "rw"), "/tmp must be writable in Bubblewrap before Landlock");
     let separator = fields.iter().position(|field| *field == "-").expect("mountinfo separator");
     assert_eq!(fields.get(separator + 1), Some(&"tmpfs"), "/tmp must be Bubblewrap's tmpfs");
+    let registry_mount = mountinfo
+        .lines()
+        .find(|line| line.split_whitespace().nth(4) == Some("/cargo/registry"))
+        .expect("Bubblewrap read-only registry mount");
+    let registry_fields = registry_mount.split_whitespace().collect::<Vec<_>>();
+    assert!(registry_fields[5].split(',').any(|option| option == "ro"), "registry must be mounted read-only");
     let effective_uid = std::fs::read_to_string("/proc/self/status")
         .unwrap()
         .lines()
@@ -72,10 +80,14 @@ fn landlock_allows_profile_scratch_and_denies_unlisted_tmp() {
         });
         std::fs::remove_file(probe).unwrap();
     }
+    assert_denies_write(&format!(
+        "/tmp/home/registry/krypper-landlock-registry-denied-{}",
+        std::process::id()
+    ));
 
     let process_id = std::process::id();
     let denied_path = format!("/tmp/krypper-landlock-denied-{process_id}");
-    assert_landlock_denies_write(&denied_path);
+    assert_denies_write(&denied_path);
     let descendant_path = format!("/tmp/krypper-landlock-descendant-denied-{process_id}");
     let child = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "landlock_descendant_probe"])

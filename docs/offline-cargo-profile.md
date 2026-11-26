@@ -61,9 +61,10 @@ fixtures on a provisioned host.
 The Product adapter requests optional Landlock filesystem-write confinement for
 this fixed Linux profile. The pinned in-sandbox runner applies the policy after
 Bubblewrap creates its filesystem view and before Cargo starts. Writes are
-allowed under `/tmp/home`, `/tmp/target`, `/tmp/tmp`, and Cargo's `/cargo`
-scratch area; `/cargo/registry` remains a read-only mount. The fixed `TMPDIR`
-is `/tmp/tmp`. If the kernel does not provide a supported Landlock ABI, the
+allowed only under `/tmp/home`, `/tmp/target`, and `/tmp/tmp`. `CARGO_HOME` is
+the `/tmp/home` scratch directory; its `registry` entry points to the separate
+read-only `/cargo/registry` mount, which is outside Landlock's write allowlist.
+The fixed `TMPDIR` is `/tmp/tmp`. If the kernel does not provide a supported Landlock ABI, the
 result reports `unavailable` and Cargo may continue only after the existing
 required controls pass. A setup error after ABI support is detected fails the
 run before Cargo starts. `applied` means the runner completed setup; only the
@@ -244,8 +245,9 @@ There is no optional namespace flag or direct-spawn fallback.
   the verified cgroup before Bubblewrap exec. Ambient descriptors are marked
   close-on-exec; stdin is closed and the payload receives no TTY.
 - The root is read-only; `/tmp` is a private 1 GiB tmpfs and `/cargo` a private
-  16 MiB tmpfs with a read-only registry submount. The build target and HOME
-  live in `/tmp`. The minimal `/dev` is private. Writable tmpfs storage also
+  16 MiB tmpfs containing a read-only registry mount. `CARGO_HOME`, the build
+  target, HOME and temporary files live in fixed `/tmp` subdirectories. The
+  minimal `/dev` is private. Writable tmpfs storage also
   counts against the hard memory ceiling; no host output files are promoted.
 - Start from an empty payload environment: only fixed PATH, HOME, TMPDIR,
   CARGO_HOME, CARGO_BUILD_JOBS (one), CARGO_PROFILE_DEV_DEBUG (zero),

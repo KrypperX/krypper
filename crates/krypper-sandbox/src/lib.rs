@@ -17,6 +17,8 @@ use uuid::Uuid;
 mod landlock;
 #[cfg(target_os = "linux")]
 mod runner_handshake;
+#[doc(hidden)]
+pub mod runner_protocol;
 
 /// Result of querying and applying the fixed filesystem-write restriction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -165,7 +167,7 @@ pub const OFFLINE_CARGO_TEST_ENVIRONMENT: &[(&str, &str)] = &[
     ("PATH", "/toolchain/bin:/usr/bin:/bin"),
     ("HOME", "/tmp/home"),
     ("TMPDIR", "/tmp/tmp"),
-    ("CARGO_HOME", "/cargo"),
+    ("CARGO_HOME", "/tmp/home"),
     ("CARGO_BUILD_JOBS", "1"),
     ("CARGO_PROFILE_DEV_DEBUG", "0"),
     ("CARGO_PROFILE_TEST_DEBUG", "0"),

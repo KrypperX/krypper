@@ -1,8 +1,9 @@
 //! Optional filesystem write confinement for the fixed offline Cargo runner.
 //!
 //! This is applied inside Bubblewrap, before Cargo is executed. The Bwrap mounts remain the
-//! primary boundary; Landlock limits writes to prepared Cargo and temporary work directories.
+//! primary boundary; Landlock limits writes to prepared scratch and temporary work directories.
 
+use crate::runner_protocol::{MAX_LANDLOCK_ABI, MIN_LANDLOCK_ABI};
 use std::fs::OpenOptions;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
@@ -13,8 +14,6 @@ const LANDLOCK_ADD_RULE: libc::c_long = 445;
 const LANDLOCK_RESTRICT_SELF: libc::c_long = 446;
 const CREATE_RULESET_VERSION: libc::c_uint = 1;
 const RULE_PATH_BENEATH: libc::c_uint = 1;
-const MAX_SUPPORTED_ABI: i32 = 12;
-const MIN_REQUIRED_ABI: i32 = 3;
 
 const ACCESS_FS_WRITE_FILE: u64 = 1 << 1;
 const ACCESS_FS_REMOVE_DIR: u64 = 1 << 4;
@@ -69,7 +68,7 @@ pub(crate) fn apply_fixed_write_policy() -> io::Result<LandlockStatus> {
         Err(error) => return Err(error),
     };
 
-    if !(MIN_REQUIRED_ABI..=MAX_SUPPORTED_ABI).contains(&abi) {
+    if !(MIN_LANDLOCK_ABI..=MAX_LANDLOCK_ABI).contains(&abi) {
         return Ok(LandlockStatus::Unavailable { abi: Some(abi) });
     }
 
@@ -85,6 +84,8 @@ pub(crate) fn apply_fixed_write_policy() -> io::Result<LandlockStatus> {
         handled_access_fs |= ACCESS_FS_IOCTL_DEV;
     }
     let ruleset_attr = RulesetAttr { handled_access_fs };
+    // SAFETY: `ruleset_attr` has the UAPI's C layout and remains valid for this call; its exact
+    // size and the fixed zero flags select the handled-filesystem-rights ruleset operation.
     let ruleset_fd = unsafe {
         libc::syscall(
             LANDLOCK_CREATE_RULESET,
@@ -96,12 +97,14 @@ pub(crate) fn apply_fixed_write_policy() -> io::Result<LandlockStatus> {
     if ruleset_fd < 0 {
         return Err(io::Error::last_os_error());
     }
+    // SAFETY: the successful syscall returned a fresh owned descriptor, transferred to File.
     let ruleset = unsafe { std::fs::File::from_raw_fd(ruleset_fd as RawFd) };
 
-    for scratch in ["/tmp/home", "/tmp/target", "/tmp/tmp", "/cargo"] {
+    for scratch in ["/tmp/home", "/tmp/target", "/tmp/tmp"] {
         add_write_rule(ruleset.as_raw_fd(), scratch, handled_access_fs)?;
     }
 
+    // SAFETY: `ruleset` owns a live Landlock ruleset descriptor and the fixed zero flags are valid.
     let result = unsafe { libc::syscall(LANDLOCK_RESTRICT_SELF, ruleset.as_raw_fd(), 0u32) };
     if result < 0 {
         return Err(io::Error::last_os_error());
@@ -111,6 +114,8 @@ pub(crate) fn apply_fixed_write_policy() -> io::Result<LandlockStatus> {
 }
 
 fn query_abi() -> io::Result<i32> {
+    // SAFETY: the version-query form requires a null attribute pointer and zero size; both are
+    // passed with the fixed version flag and the kernel does not dereference the null pointer.
     let result = unsafe {
         libc::syscall(
             LANDLOCK_CREATE_RULESET,
@@ -135,6 +140,8 @@ fn add_write_rule(ruleset_fd: RawFd, path: &str, access: u64) -> io::Result<()> 
         allowed_access: access,
         parent_fd: directory.as_raw_fd(),
     };
+    // SAFETY: `rule` has the UAPI's packed 12-byte layout and is live for the call; `directory`
+    // keeps its parent descriptor open, while the ruleset descriptor is borrowed and valid.
     let result = unsafe {
         libc::syscall(
             LANDLOCK_ADD_RULE,

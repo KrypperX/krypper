@@ -2,6 +2,9 @@
 
 #[cfg(target_os = "linux")]
 mod linux {
+    use krypper_sandbox::runner_protocol::{
+        encode_status, RunnerStatus, ACK_FD, ACK_FRAME, STATUS_FD,
+    };
     use krypper_sandbox::{apply_landlock_write_policy, LandlockSetupStatus};
     use std::collections::BTreeMap;
     use std::fs::File;
@@ -11,12 +14,6 @@ mod linux {
     use std::path::Path;
     use std::process::Command;
 
-    const STATUS_FD: i32 = 204;
-    const ACK_FD: i32 = 205;
-    const PROTOCOL_VERSION: u16 = 1;
-    const STATUS_FRAME_LEN: usize = 20;
-    const STATUS_MAGIC: &[u8; 8] = b"KRYLLND1";
-    const ACK_FRAME: &[u8; 8] = b"KRYACK1\n";
     const CARGO_EXECUTABLE: &str = "/toolchain/bin/cargo";
     const CARGO_FIXED_ARGUMENTS: &[&str] = &["test", "--offline", "--locked", "--all-targets"];
     const EXPECTED_CWD: &str = "/workspace";
@@ -36,11 +33,15 @@ mod linux {
         }
 
         let status = match apply_landlock_write_policy() {
-            Ok(LandlockSetupStatus::Applied { abi }) => (1, abi, 0),
-            Ok(LandlockSetupStatus::Unavailable { abi }) => (2, abi.unwrap_or(0), 0),
-            Err(error) => (3, 0, error.raw_os_error().unwrap_or(libc::EIO)),
+            Ok(LandlockSetupStatus::Applied { abi }) => RunnerStatus::Applied { abi },
+            Ok(LandlockSetupStatus::Unavailable { abi }) => RunnerStatus::Unavailable { abi },
+            Err(error) => RunnerStatus::Failed {
+                errno: error.raw_os_error().unwrap_or(libc::EIO),
+            },
         };
-        if status.0 == 2 && requirement == Requirement::Required {
+        if matches!(status, RunnerStatus::Unavailable { .. })
+            && requirement == Requirement::Required
+        {
             return report_status(status);
         }
 
@@ -48,10 +49,13 @@ mod linux {
             return 126;
         };
         let Some(mut acknowledgement) = take_fd(ACK_FD) else {
-            let _ = write_status(&mut status_pipe, (3, 0, libc::EBADF));
+            let _ = write_status(
+                &mut status_pipe,
+                RunnerStatus::Failed { errno: libc::EBADF },
+            );
             return 125;
         };
-        if status.0 == 3 {
+        if matches!(status, RunnerStatus::Failed { .. }) {
             let _ = write_status(&mut status_pipe, status);
             return 125;
         }
@@ -144,8 +148,14 @@ mod linux {
 
     fn take_fd(fd: i32) -> Option<File> {
         // Check ownership before converting the descriptor into an owning File.
+        // SAFETY: `fd` is one of the two fixed inherited protocol descriptors; F_GETFD reads
+        // its descriptor flags and does not dereference any user pointer.
         let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+        if flags < 0 {
+            return None;
+        }
+        // SAFETY: the preceding F_GETFD confirmed `fd` is open; F_SETFD updates only its flags.
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
             return None;
         }
         // SAFETY: this process inherited the fixed descriptor from the sandbox supervisor and
@@ -157,11 +167,11 @@ mod linux {
         let Some(mut status_pipe) = take_fd(STATUS_FD) else {
             return 126;
         };
-        let _ = write_status(&mut status_pipe, (3, 0, errno));
+        let _ = write_status(&mut status_pipe, RunnerStatus::Failed { errno });
         125
     }
 
-    fn report_status(status: (u8, i32, i32)) -> i32 {
+    fn report_status(status: RunnerStatus) -> i32 {
         let Some(mut status_pipe) = take_fd(STATUS_FD) else {
             return 126;
         };
@@ -169,14 +179,8 @@ mod linux {
         125
     }
 
-    fn write_status(pipe: &mut File, (kind, abi, errno): (u8, i32, i32)) -> std::io::Result<()> {
-        let mut frame = [0u8; STATUS_FRAME_LEN];
-        frame[..8].copy_from_slice(STATUS_MAGIC);
-        frame[8..10].copy_from_slice(&PROTOCOL_VERSION.to_be_bytes());
-        frame[10] = kind;
-        frame[12..16].copy_from_slice(&(abi as u32).to_be_bytes());
-        frame[16..20].copy_from_slice(&errno.to_be_bytes());
-        pipe.write_all(&frame)
+    fn write_status(pipe: &mut File, status: RunnerStatus) -> std::io::Result<()> {
+        pipe.write_all(&encode_status(status))
     }
 
     #[cfg(test)]
