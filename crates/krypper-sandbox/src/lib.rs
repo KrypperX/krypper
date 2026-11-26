@@ -253,6 +253,7 @@ impl SandboxIsolationEvidence {
         &self.controls
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn request(&mut self, control: SandboxControl) {
         if self.controls.iter().any(|record| record.control == control) {
             return;
@@ -281,14 +282,17 @@ impl SandboxIsolationEvidence {
         }
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn mark_applied(&mut self) {
         self.transition_requested(SandboxEvidenceStatus::Applied);
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn mark_unknown(&mut self) {
         self.transition_requested(SandboxEvidenceStatus::Unknown);
     }
 
+    #[cfg(target_os = "linux")]
     fn transition_requested(&mut self, status: SandboxEvidenceStatus) {
         for record in &mut self.controls {
             if record.status == SandboxEvidenceStatus::Requested {

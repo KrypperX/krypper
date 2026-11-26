@@ -221,6 +221,13 @@ pub(super) fn record_test_evidence(result: &mut ProcessResult) {
     }
 }
 
+#[cfg(all(test, target_os = "linux"))]
+pub(super) fn record_raw_output(result: &mut ProcessResult, stdout: Vec<u8>, stderr: Vec<u8>) {
+    result.output_bytes = stdout.len().saturating_add(stderr.len());
+    result.stdout = String::from_utf8_lossy(&stdout).into_owned();
+    result.stderr = String::from_utf8_lossy(&stderr).into_owned();
+}
+
 #[cfg(test)]
 mod isolation_evidence_tests {
     use super::from_runner;
@@ -281,11 +288,4 @@ mod isolation_evidence_tests {
 
         assert!(json.get("sandbox_evidence").is_none());
     }
-}
-
-#[cfg(all(test, target_os = "linux"))]
-pub(super) fn record_raw_output(result: &mut ProcessResult, stdout: Vec<u8>, stderr: Vec<u8>) {
-    result.output_bytes = stdout.len().saturating_add(stderr.len());
-    result.stdout = String::from_utf8_lossy(&stdout).into_owned();
-    result.stderr = String::from_utf8_lossy(&stderr).into_owned();
 }
