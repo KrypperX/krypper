@@ -3,7 +3,10 @@
 use crate::host::effective_uid;
 use crate::sandbox::sandbox;
 use crate::seccomp::compile_filter;
-use crate::{RunLimits, SandboxOutcome, SandboxRunRequest, SandboxRunResult};
+use crate::{
+    RunLimits, SandboxBackend, SandboxIsolationEvidence, SandboxOutcome, SandboxRunRequest,
+    SandboxRunResult,
+};
 use std::io;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -54,6 +57,8 @@ fn run_with_containment(request: SandboxRunRequest, contained: bool) -> SandboxR
     };
     let output = limits.output_bytes;
     let mut result = SandboxRunResult::empty(run_id, SandboxOutcome::SandboxUnavailable, 0);
+    let mut evidence = SandboxIsolationEvidence::new(Some(SandboxBackend::Bubblewrap));
+    result.sandbox_evidence = Some(evidence.clone());
     if validate_test_filter(test_filter.as_deref()).is_err() {
         result.outcome = SandboxOutcome::InvalidTestFilter;
         result.diagnostic = Some("test_filter is invalid".into());
@@ -86,7 +91,8 @@ fn run_with_containment(request: SandboxRunRequest, contained: bool) -> SandboxR
     let _guard = match try_active_lock() {
         Ok(guard) => guard,
         Err(ActiveLockError::Busy) => {
-            return SandboxRunResult::empty(run_id, SandboxOutcome::Denied, 0);
+            result.outcome = SandboxOutcome::Denied;
+            return result;
         }
         Err(ActiveLockError::Poisoned) => {
             hold_for_recovery(
@@ -115,9 +121,11 @@ fn run_with_containment(request: SandboxRunRequest, contained: bool) -> SandboxR
     if lease.record(&format!("{unit}\n")).is_err() {
         return result;
     }
-    let mut supervisor = match Supervisor::create(result.run_id, limits) {
+    let mut supervisor = match Supervisor::create(result.run_id, limits, &mut evidence) {
         Ok(s) => s,
         Err(e) => {
+            evidence.mark_unknown();
+            result.sandbox_evidence = Some(evidence);
             result.diagnostic = Some(e.to_string());
             result.cleanup_confirmed = !is_cleanup_uncertain();
             if result.cleanup_confirmed {
@@ -131,6 +139,7 @@ fn run_with_containment(request: SandboxRunRequest, contained: bool) -> SandboxR
     };
     result.output_limit = output;
     let mut launched = false;
+    let mut setup_confirmed = false;
     let started = Instant::now();
     let execution = (|| -> io::Result<()> {
         lease.record(&format!(
@@ -138,17 +147,17 @@ fn run_with_containment(request: SandboxRunRequest, contained: bool) -> SandboxR
             supervisor.unit(),
             supervisor.group().display()
         ))?;
-        let mut probe = sandbox(&directories, supervisor.group(), &filter)?;
+        let mut probe = sandbox(&directories, supervisor.group(), &filter, &mut evidence)?;
         probe.args(["--", "/usr/bin/true"]);
-        if !bounded_host(&mut probe)?.is_empty() {
-            return Err(io::Error::other("unexpected sandbox output"));
-        }
-        supervisor.verify()?;
+        confirm_setup(&mut evidence, bounded_host(&mut probe), || {
+            supervisor.verify()
+        })?;
+        setup_confirmed = true;
         if cancelled.load(Ordering::SeqCst) {
             settle_before_launch(&mut result, &mut supervisor, StopReason::Cancelled);
             return Ok(());
         }
-        let mut command = sandbox(&directories, supervisor.group(), &filter)?;
+        let mut command = sandbox(&directories, supervisor.group(), &filter, &mut evidence)?;
         command.args(cargo_command_args(test_filter.as_deref()));
         result.outcome = SandboxOutcome::SpawnFailed;
         let mut child = ManagedChild::new(command.spawn()?);
@@ -188,6 +197,10 @@ fn run_with_containment(request: SandboxRunRequest, contained: bool) -> SandboxR
             result.outcome = SandboxOutcome::SandboxSetupFailed;
         }
     }
+    if !setup_confirmed {
+        evidence.mark_unknown();
+    }
+    result.sandbox_evidence = Some(evidence);
     result.cleanup_confirmed &= supervisor.clean();
     result.elapsed_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
     if !result.cleanup_confirmed {
@@ -199,6 +212,19 @@ fn run_with_containment(request: SandboxRunRequest, contained: bool) -> SandboxR
         let _ = lease.clear_receipt();
     }
     result
+}
+
+fn confirm_setup(
+    evidence: &mut SandboxIsolationEvidence,
+    readiness_output: io::Result<String>,
+    verify_cgroup: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
+    if !readiness_output?.is_empty() {
+        return Err(io::Error::other("unexpected sandbox output"));
+    }
+    verify_cgroup()?;
+    evidence.mark_applied();
+    Ok(())
 }
 
 fn settle_before_launch(
@@ -366,5 +392,78 @@ mod internal_outcome_tests {
                 resource: SandboxResource::Processes
             }
         );
+    }
+}
+
+#[cfg(test)]
+mod isolation_evidence_tests {
+    use super::confirm_setup;
+    use crate::{SandboxBackend, SandboxControl, SandboxEvidenceStatus, SandboxIsolationEvidence};
+    use std::cell::Cell;
+    use std::io;
+
+    fn requested_evidence() -> SandboxIsolationEvidence {
+        let mut evidence = SandboxIsolationEvidence::new(Some(SandboxBackend::Bubblewrap));
+        evidence.request(SandboxControl::NetworkNamespace);
+        evidence.request(SandboxControl::MemoryLimit);
+        evidence
+    }
+
+    #[test]
+    fn setup_is_applied_only_after_readiness_and_cgroup_readback_succeed() {
+        let mut evidence = requested_evidence();
+        confirm_setup(&mut evidence, Ok(String::new()), || Ok(())).unwrap();
+
+        assert!(evidence
+            .controls()
+            .iter()
+            .all(|record| record.status == SandboxEvidenceStatus::Applied));
+        assert!(!evidence
+            .controls()
+            .iter()
+            .any(|record| record.status == SandboxEvidenceStatus::Observed));
+    }
+
+    #[test]
+    fn failed_readiness_keeps_payload_unlaunched_and_controls_unknown() {
+        let mut evidence = requested_evidence();
+        let cgroup_readback_called = Cell::new(false);
+        let payload_started = Cell::new(false);
+        let attempt = (|| {
+            confirm_setup(
+                &mut evidence,
+                Err(io::Error::other("readiness failed")),
+                || {
+                    cgroup_readback_called.set(true);
+                    Ok(())
+                },
+            )?;
+            payload_started.set(true);
+            Ok::<(), io::Error>(())
+        })();
+        evidence.mark_unknown();
+
+        assert!(attempt.is_err());
+        assert!(!cgroup_readback_called.get());
+        assert!(!payload_started.get());
+        assert!(evidence
+            .controls()
+            .iter()
+            .all(|record| record.status == SandboxEvidenceStatus::Unknown));
+    }
+
+    #[test]
+    fn failed_cgroup_readback_does_not_mark_controls_applied() {
+        let mut evidence = requested_evidence();
+        let result = confirm_setup(&mut evidence, Ok(String::new()), || {
+            Err(io::Error::other("cgroup readback failed"))
+        });
+
+        assert!(result.is_err());
+        evidence.mark_unknown();
+        assert!(evidence
+            .controls()
+            .iter()
+            .all(|record| record.status == SandboxEvidenceStatus::Unknown));
     }
 }

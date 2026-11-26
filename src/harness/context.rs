@@ -537,6 +537,9 @@ fn observation_size(observation: &WorkspaceObservation) -> usize {
             .len()
             .saturating_add(result.stderr.len())
             .saturating_add(result.test_filter.as_ref().map_or(0, String::len))
+            .saturating_add(result.sandbox_evidence.as_ref().map_or(0, |evidence| {
+                serde_json::to_vec(evidence).map_or(usize::MAX, |encoded| encoded.len())
+            }))
             .saturating_add(512),
         WorkspaceObservation::FileRead { path, contents } => {
             path.to_string_lossy().len().saturating_add(contents.len())
@@ -814,6 +817,9 @@ mod tests {
                 output_limit: 0,
                 resource_events: Vec::new(),
                 recovery_hold: false,
+                sandbox_evidence: Some(krypper_sandbox::SandboxIsolationEvidence::new(Some(
+                    krypper_sandbox::SandboxBackend::Bubblewrap,
+                ))),
             },
         };
 
@@ -823,6 +829,64 @@ mod tests {
         assert!(json.contains("\"tests_ran\":false"));
         assert!(json.contains("\"executed_tests\":0"));
         assert!(json.contains("\"outcome\":\"no_tests_matched\""));
+        assert!(json.contains("\"sandbox_evidence\""));
+    }
+
+    #[test]
+    fn process_sandbox_evidence_counts_toward_the_observation_budget() {
+        const OBSERVATION_LIMIT: usize = 2 * 1024 * 1024;
+        let evidence = krypper_sandbox::SandboxIsolationEvidence::new(Some(
+            krypper_sandbox::SandboxBackend::Bubblewrap,
+        ));
+        let evidence_size = serde_json::to_vec(&evidence).unwrap().len();
+        let fixed_size = 512 + evidence_size;
+
+        let within = WorkspaceObservation::ProcessFinished {
+            result: crate::ProcessResult {
+                run_id: uuid::Uuid::new_v4(),
+                outcome: crate::ProcessOutcome::Exited(0),
+                stdout: "x".repeat(OBSERVATION_LIMIT - fixed_size),
+                stderr: String::new(),
+                truncated: false,
+                diagnostic: None,
+                cleanup_confirmed: true,
+                test_filter: None,
+                tests_ran: false,
+                executed_tests: None,
+                elapsed_ms: 0,
+                output_bytes: 0,
+                output_limit: 0,
+                resource_events: Vec::new(),
+                recovery_hold: false,
+                sandbox_evidence: Some(evidence.clone()),
+            },
+        };
+        assert!(model_observations(&[within]).is_ok());
+
+        let over = WorkspaceObservation::ProcessFinished {
+            result: crate::ProcessResult {
+                run_id: uuid::Uuid::new_v4(),
+                outcome: crate::ProcessOutcome::Exited(0),
+                stdout: "x".repeat(OBSERVATION_LIMIT - fixed_size + 1),
+                stderr: String::new(),
+                truncated: false,
+                diagnostic: None,
+                cleanup_confirmed: true,
+                test_filter: None,
+                tests_ran: false,
+                executed_tests: None,
+                elapsed_ms: 0,
+                output_bytes: 0,
+                output_limit: 0,
+                resource_events: Vec::new(),
+                recovery_hold: false,
+                sandbox_evidence: Some(evidence),
+            },
+        };
+        assert!(matches!(
+            model_observations(&[over]),
+            Err(ContextError::ObservationsTooLarge)
+        ));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! The Linux sandbox command: host executable lookup and the contained child command.
 
-use crate::DirectoryDescriptors;
+use crate::{DirectoryDescriptors, SandboxControl, SandboxIsolationEvidence};
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -21,6 +21,7 @@ pub(super) fn sandbox(
     directories: &DirectoryDescriptors,
     group: &Path,
     filter: &[u8],
+    evidence: &mut SandboxIsolationEvidence,
 ) -> io::Result<Command> {
     let filter_file = sealed_filter_fd(filter)?;
     let pinned_filter = duplicate_fd_at_or_above(filter_file.as_raw_fd(), FIRST_PINNED_FD)?;
@@ -40,97 +41,177 @@ pub(super) fn sandbox(
         .write(true)
         .open(group.join("cgroup.procs"))?;
     let mut command = crate::host::host_command("/usr/bin/bwrap");
-    command.stderr(Stdio::piped()).args([
-        "--unshare-user",
-        "--unshare-pid",
-        "--unshare-net",
-        "--unshare-ipc",
-        "--unshare-uts",
-        "--unshare-cgroup",
-        "--disable-userns",
-        "--assert-userns-disabled",
-        "--die-with-parent",
-        "--new-session",
-        "--seccomp",
-        "203",
-        "--cap-drop",
-        "ALL",
-        "--ro-bind",
-        "/usr",
-        "/usr",
-        "--symlink",
-        "usr/bin",
-        "/bin",
-        "--ro-bind",
-        "/lib",
-        "/lib",
-        "--ro-bind",
-        "/lib64",
-        "/lib64",
-        "--ro-bind-fd",
-        "200",
-        "/workspace",
-        "--ro-bind-fd",
-        "201",
-        "/toolchain",
-        "--size",
-        "16777216",
-        "--tmpfs",
-        "/cargo",
-        "--ro-bind-fd",
-        "202",
-        "/cargo/registry",
-        "--proc",
-        "/proc",
-        "--remount-ro",
-        "/proc",
-        "--dev",
-        "/dev",
-        "--size",
-        "1073741824",
-        "--tmpfs",
-        "/tmp",
-        "--dir",
-        "/tmp/home",
-        "--chdir",
-        "/workspace",
-        "--clearenv",
-        "--setenv",
-        "PATH",
-        "/toolchain/bin:/usr/bin:/bin",
-        "--setenv",
-        "HOME",
-        "/tmp/home",
-        "--setenv",
-        "TMPDIR",
-        "/tmp",
-        "--setenv",
-        "CARGO_HOME",
-        "/cargo",
-        "--setenv",
-        "CARGO_BUILD_JOBS",
-        "1",
-        "--setenv",
-        "CARGO_PROFILE_DEV_DEBUG",
-        "0",
-        "--setenv",
-        "CARGO_PROFILE_TEST_DEBUG",
-        "0",
-        "--setenv",
-        "CARGO_INCREMENTAL",
-        "0",
-        "--setenv",
-        "CARGO_TARGET_DIR",
-        "/tmp/target",
-        "--setenv",
-        "RUSTC",
-        "/toolchain/bin/rustc",
-        "--setenv",
-        "LANG",
-        "C",
-        "--remount-ro",
-        "/",
-    ]);
+    evidence.request(SandboxControl::SandboxRuntime);
+    command.stderr(Stdio::piped());
+    push_control_args(
+        &mut command,
+        evidence,
+        SandboxControl::UserNamespace,
+        &["--unshare-user"],
+    );
+    push_control_args(
+        &mut command,
+        evidence,
+        SandboxControl::PidNamespace,
+        &["--unshare-pid"],
+    );
+    push_control_args(
+        &mut command,
+        evidence,
+        SandboxControl::NetworkNamespace,
+        &["--unshare-net"],
+    );
+    push_control_args(
+        &mut command,
+        evidence,
+        SandboxControl::IpcNamespace,
+        &["--unshare-ipc"],
+    );
+    push_control_args(
+        &mut command,
+        evidence,
+        SandboxControl::UtsNamespace,
+        &["--unshare-uts"],
+    );
+    push_control_args(
+        &mut command,
+        evidence,
+        SandboxControl::CgroupNamespace,
+        &["--unshare-cgroup"],
+    );
+    push_control_args(
+        &mut command,
+        evidence,
+        SandboxControl::UserNamespace,
+        &["--disable-userns", "--assert-userns-disabled"],
+    );
+    push_control_args(
+        &mut command,
+        evidence,
+        SandboxControl::ProcessLifecycle,
+        &["--die-with-parent", "--new-session"],
+    );
+    push_control_args(
+        &mut command,
+        evidence,
+        SandboxControl::SeccompFilter,
+        &["--seccomp", "203"],
+    );
+    push_control_args(
+        &mut command,
+        evidence,
+        SandboxControl::CapabilityDrop,
+        &["--cap-drop", "ALL"],
+    );
+    push_control_args(
+        &mut command,
+        evidence,
+        SandboxControl::ReadOnlySystemMounts,
+        &[
+            "--ro-bind",
+            "/usr",
+            "/usr",
+            "--symlink",
+            "usr/bin",
+            "/bin",
+            "--ro-bind",
+            "/lib",
+            "/lib",
+            "--ro-bind",
+            "/lib64",
+            "/lib64",
+        ],
+    );
+    push_control_args(
+        &mut command,
+        evidence,
+        SandboxControl::ReadOnlyWorkspace,
+        &["--ro-bind-fd", "200", "/workspace"],
+    );
+    push_control_args(
+        &mut command,
+        evidence,
+        SandboxControl::ReadOnlyToolchain,
+        &["--ro-bind-fd", "201", "/toolchain"],
+    );
+    push_control_args(
+        &mut command,
+        evidence,
+        SandboxControl::TemporaryFilesystems,
+        &["--size", "16777216", "--tmpfs", "/cargo"],
+    );
+    push_control_args(
+        &mut command,
+        evidence,
+        SandboxControl::ReadOnlyRegistry,
+        &["--ro-bind-fd", "202", "/cargo/registry"],
+    );
+    push_control_args(
+        &mut command,
+        evidence,
+        SandboxControl::ProcMount,
+        &["--proc", "/proc", "--remount-ro", "/proc"],
+    );
+    push_control_args(
+        &mut command,
+        evidence,
+        SandboxControl::DeviceMount,
+        &["--dev", "/dev"],
+    );
+    push_control_args(
+        &mut command,
+        evidence,
+        SandboxControl::TemporaryFilesystems,
+        &["--size", "1073741824", "--tmpfs", "/tmp"],
+    );
+    command.args(["--dir", "/tmp/home", "--chdir", "/workspace"]);
+    push_control_args(
+        &mut command,
+        evidence,
+        SandboxControl::ClearedEnvironment,
+        &[
+            "--clearenv",
+            "--setenv",
+            "PATH",
+            "/toolchain/bin:/usr/bin:/bin",
+            "--setenv",
+            "HOME",
+            "/tmp/home",
+            "--setenv",
+            "TMPDIR",
+            "/tmp",
+            "--setenv",
+            "CARGO_HOME",
+            "/cargo",
+            "--setenv",
+            "CARGO_BUILD_JOBS",
+            "1",
+            "--setenv",
+            "CARGO_PROFILE_DEV_DEBUG",
+            "0",
+            "--setenv",
+            "CARGO_PROFILE_TEST_DEBUG",
+            "0",
+            "--setenv",
+            "CARGO_INCREMENTAL",
+            "0",
+            "--setenv",
+            "CARGO_TARGET_DIR",
+            "/tmp/target",
+            "--setenv",
+            "RUSTC",
+            "/toolchain/bin/rustc",
+            "--setenv",
+            "LANG",
+            "C",
+        ],
+    );
+    push_control_args(
+        &mut command,
+        evidence,
+        SandboxControl::ReadOnlyRoot,
+        &["--remount-ro", "/"],
+    );
     // Pinned directory descriptors remove validation-to-mount pathname races; cgroup
     // attachment precedes sandbox exec.
     //
@@ -205,6 +286,16 @@ pub(super) fn sandbox(
     Ok(command)
 }
 
+fn push_control_args(
+    command: &mut Command,
+    evidence: &mut SandboxIsolationEvidence,
+    control: SandboxControl,
+    arguments: &[&str],
+) {
+    command.args(arguments);
+    evidence.request(control);
+}
+
 fn sealed_filter_fd(filter: &[u8]) -> io::Result<OwnedFd> {
     if filter.is_empty()
         || !filter.len().is_multiple_of(BPF_INSTRUCTION_BYTES)
@@ -257,7 +348,10 @@ fn duplicate_fd_at_or_above(fd: RawFd, minimum: RawFd) -> io::Result<OwnedFd> {
 #[cfg(test)]
 mod tests {
     use super::{duplicate_fd_at_or_above, sandbox, sealed_filter_fd, FIRST_PINNED_FD, SECCOMP_FD};
-    use crate::DirectoryDescriptors;
+    use crate::{
+        DirectoryDescriptors, SandboxBackend, SandboxControl, SandboxEvidenceStatus,
+        SandboxIsolationEvidence,
+    };
     use std::fs::{self, File};
     use std::os::fd::AsRawFd;
     use uuid::Uuid;
@@ -305,7 +399,9 @@ mod tests {
             File::open(root.join("registry")).unwrap(),
         );
         let filter = [0x06, 0, 0, 0, 0, 0, 0, 0];
-        let command = sandbox(&directories, &group, &filter).unwrap();
+        let mut evidence = SandboxIsolationEvidence::new(Some(SandboxBackend::Bubblewrap));
+        let command = sandbox(&directories, &group, &filter, &mut evidence).unwrap();
+        assert_eq!(command.get_program().to_string_lossy(), "/usr/bin/bwrap");
         let args = command
             .get_args()
             .map(|argument| argument.to_string_lossy().into_owned())
@@ -316,6 +412,40 @@ mod tests {
             .unwrap();
         assert_eq!(args.get(seccomp + 1).map(String::as_str), Some("203"));
         assert_eq!(SECCOMP_FD, 203);
+        assert!(evidence.controls().iter().any(|record| {
+            record.control == SandboxControl::SandboxRuntime
+                && record.status == SandboxEvidenceStatus::Requested
+        }));
+        for (control, argument) in [
+            (SandboxControl::UserNamespace, "--unshare-user"),
+            (SandboxControl::PidNamespace, "--unshare-pid"),
+            (SandboxControl::NetworkNamespace, "--unshare-net"),
+            (SandboxControl::IpcNamespace, "--unshare-ipc"),
+            (SandboxControl::UtsNamespace, "--unshare-uts"),
+            (SandboxControl::CgroupNamespace, "--unshare-cgroup"),
+            (SandboxControl::SeccompFilter, "--seccomp"),
+            (SandboxControl::CapabilityDrop, "--cap-drop"),
+            (SandboxControl::ReadOnlySystemMounts, "/usr"),
+            (SandboxControl::ReadOnlyWorkspace, "/workspace"),
+            (SandboxControl::ReadOnlyToolchain, "/toolchain"),
+            (SandboxControl::ReadOnlyRegistry, "/cargo/registry"),
+            (SandboxControl::TemporaryFilesystems, "--tmpfs"),
+            (SandboxControl::DeviceMount, "--dev"),
+            (SandboxControl::ProcMount, "--proc"),
+            (SandboxControl::ReadOnlyRoot, "/"),
+            (SandboxControl::ClearedEnvironment, "--clearenv"),
+            (SandboxControl::ProcessLifecycle, "--die-with-parent"),
+        ] {
+            assert!(args.iter().any(|value| value == argument));
+            assert!(evidence.controls().iter().any(|record| {
+                record.control == control && record.status == SandboxEvidenceStatus::Requested
+            }));
+        }
+        assert!(!evidence
+            .controls()
+            .iter()
+            .any(|record| record.status == SandboxEvidenceStatus::Observed));
+        assert_eq!(evidence.controls().len(), 19);
         drop(command);
         fs::remove_dir_all(root).unwrap();
     }

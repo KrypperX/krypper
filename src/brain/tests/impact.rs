@@ -487,6 +487,7 @@ fn process_result(outcome: ProcessOutcome, succeeded: bool) -> ProcessResult {
         output_limit: 1024,
         resource_events: Vec::new(),
         recovery_hold: false,
+        sandbox_evidence: None,
     }
 }
 

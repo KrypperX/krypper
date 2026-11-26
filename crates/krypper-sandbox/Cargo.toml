@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 libc = "0.2"
+serde = { version = "1", features = ["derive"] }
 uuid = { version = "1", features = ["v4"] }
 
 [target.'cfg(all(target_os = "linux", target_endian = "little", any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64")))'.dependencies]

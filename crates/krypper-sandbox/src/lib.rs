@@ -4,6 +4,7 @@
 //! The Product Tools layer owns authorization and passes only captured directory handles,
 //! bounded limits, a test filter, and cancellation state.
 
+use serde::Serialize;
 use std::fs::File;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -163,6 +164,139 @@ pub enum SandboxResource {
     FileSize,
 }
 
+/// Runtime selected by the fixed host sandbox implementation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxBackend {
+    Bubblewrap,
+}
+
+/// Fixed controls represented in sandbox setup evidence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxControl {
+    SandboxRuntime,
+    UserNamespace,
+    PidNamespace,
+    NetworkNamespace,
+    IpcNamespace,
+    UtsNamespace,
+    CgroupNamespace,
+    SeccompFilter,
+    CapabilityDrop,
+    ReadOnlySystemMounts,
+    ReadOnlyWorkspace,
+    ReadOnlyToolchain,
+    ReadOnlyRegistry,
+    TemporaryFilesystems,
+    DeviceMount,
+    ProcMount,
+    ReadOnlyRoot,
+    ClearedEnvironment,
+    ProcessLifecycle,
+    MemoryLimit,
+    SwapLimit,
+    ProcessLimit,
+    CpuLimit,
+    WallClockLimit,
+    CgroupCleanup,
+}
+
+/// Evidence state for a requested control. `Observed` is reserved for a direct behavioral probe;
+/// ordinary command readiness never produces it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxEvidenceStatus {
+    Requested,
+    Applied,
+    Observed,
+    Unavailable,
+    Unknown,
+}
+
+/// One typed, bounded control record. The fixed enum prevents model or host text from becoming
+/// control evidence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct SandboxControlEvidence {
+    pub control: SandboxControl,
+    pub status: SandboxEvidenceStatus,
+}
+
+/// Bounded setup evidence carried with one sandbox result.
+///
+/// The runner can emit at most one record for each fixed control variant. Its private fields and
+/// lack of `Deserialize` keep external data from populating policy-facing evidence.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct SandboxIsolationEvidence {
+    backend: Option<SandboxBackend>,
+    controls: Vec<SandboxControlEvidence>,
+}
+
+impl SandboxIsolationEvidence {
+    const MAX_CONTROL_RECORDS: usize = 25;
+
+    /// Create an empty evidence value for serialization and result construction.
+    pub fn new(backend: Option<SandboxBackend>) -> Self {
+        Self {
+            backend,
+            controls: Vec::new(),
+        }
+    }
+
+    /// Selected backend identity, absent when this platform has no sandbox backend.
+    pub fn backend(&self) -> Option<SandboxBackend> {
+        self.backend
+    }
+
+    /// Fixed control records in the order they were requested.
+    pub fn controls(&self) -> &[SandboxControlEvidence] {
+        &self.controls
+    }
+
+    pub(crate) fn request(&mut self, control: SandboxControl) {
+        if self.controls.iter().any(|record| record.control == control) {
+            return;
+        }
+        if self.controls.len() < Self::MAX_CONTROL_RECORDS {
+            self.controls.push(SandboxControlEvidence {
+                control,
+                status: SandboxEvidenceStatus::Requested,
+            });
+        }
+    }
+
+    pub(crate) fn unavailable(&mut self, control: SandboxControl) {
+        if let Some(record) = self
+            .controls
+            .iter_mut()
+            .find(|record| record.control == control)
+        {
+            record.status = SandboxEvidenceStatus::Unavailable;
+        } else if self.controls.len() < Self::MAX_CONTROL_RECORDS {
+            self.controls.push(SandboxControlEvidence {
+                control,
+                status: SandboxEvidenceStatus::Unavailable,
+            });
+        }
+    }
+
+    pub(crate) fn mark_applied(&mut self) {
+        self.transition_requested(SandboxEvidenceStatus::Applied);
+    }
+
+    pub(crate) fn mark_unknown(&mut self) {
+        self.transition_requested(SandboxEvidenceStatus::Unknown);
+    }
+
+    fn transition_requested(&mut self, status: SandboxEvidenceStatus) {
+        for record in &mut self.controls {
+            if record.status == SandboxEvidenceStatus::Requested {
+                record.status = status;
+            }
+        }
+    }
+}
+
 /// Data returned by the supervisor. Output stays as raw bytes until Product applies its policy.
 #[derive(Debug)]
 pub struct SandboxRunResult {
@@ -179,6 +313,7 @@ pub struct SandboxRunResult {
     pub resource_events: Vec<SandboxResource>,
     pub recovery_hold: bool,
     pub test_evidence_available: bool,
+    pub sandbox_evidence: Option<SandboxIsolationEvidence>,
 }
 
 impl SandboxRunResult {
@@ -197,6 +332,7 @@ impl SandboxRunResult {
             resource_events: Vec::new(),
             recovery_hold: false,
             test_evidence_available: false,
+            sandbox_evidence: None,
         }
     }
 }
