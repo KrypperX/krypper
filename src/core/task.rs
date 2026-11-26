@@ -1,9 +1,10 @@
 use crate::tools::{capture_workspace_root, WorkspaceRoot};
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(test)]
-use std::sync::{mpsc, Mutex};
-use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak};
 use uuid::Uuid;
 
 /// The lifecycle states supported by a task.
@@ -622,8 +623,9 @@ pub struct Task {
     pub(super) turns: Vec<Turn>,
 }
 
-/// Serializes Product-managed workspace mutations against process runs and tracks their epoch.
-/// This fence does not observe writes made directly by the embedding host.
+/// Serializes Product-managed workspace mutations for one captured workspace identity against
+/// process runs and tracks its revision across sessions in this process. It does not observe
+/// direct host writes.
 #[derive(Debug, Default)]
 pub(super) struct WorkspaceRevisionFence {
     lock: RwLock<()>,
@@ -633,6 +635,11 @@ pub(super) struct WorkspaceRevisionFence {
     #[cfg(test)]
     read_attempt_hook: std::sync::Mutex<Option<Arc<ReadAttemptHook>>>,
 }
+
+type WorkspaceFenceRegistry = Mutex<HashMap<(u64, u64), Weak<WorkspaceRevisionFence>>>;
+
+// Weak entries share fences by filesystem identity without retaining idle workspaces.
+static WORKSPACE_REVISION_FENCES: OnceLock<WorkspaceFenceRegistry> = OnceLock::new();
 
 #[cfg(test)]
 #[derive(Debug)]
@@ -668,6 +675,20 @@ impl ReadAttemptHook {
 }
 
 impl WorkspaceRevisionFence {
+    pub(super) fn for_identity(identity: (u64, u64)) -> Arc<Self> {
+        let fences = WORKSPACE_REVISION_FENCES.get_or_init(Default::default);
+        let mut fences = fences
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        fences.retain(|_, fence| fence.strong_count() > 0);
+        if let Some(fence) = fences.get(&identity).and_then(Weak::upgrade) {
+            return fence;
+        }
+        let fence = Arc::new(Self::default());
+        fences.insert(identity, Arc::downgrade(&fence));
+        fence
+    }
+
     pub(super) fn begin_read(&self) -> Result<(RwLockReadGuard<'_, ()>, u64), ()> {
         #[cfg(test)]
         if let Some(hook) = self
@@ -725,18 +746,29 @@ impl Task {
     ///
     /// Workspace operations report an error if that directory cannot be resolved.
     pub fn new(description: impl Into<String>) -> Self {
-        Self::new_with_workspace_root(description, capture_workspace_root().map(Arc::new))
+        let workspace_root = capture_workspace_root().map(Arc::new);
+        let workspace_revision = match &workspace_root {
+            Ok(root) => root
+                .identity()
+                .map(|identity| {
+                    WorkspaceRevisionFence::for_identity((identity.volume, identity.file))
+                })
+                .unwrap_or_else(|_| Arc::new(WorkspaceRevisionFence::default())),
+            Err(_) => Arc::new(WorkspaceRevisionFence::default()),
+        };
+        Self::new_with_workspace_root(description, workspace_root, workspace_revision)
     }
 
     pub(super) fn new_with_workspace_root(
         description: impl Into<String>,
         workspace_root: Result<Arc<WorkspaceRoot>, String>,
+        workspace_revision: Arc<WorkspaceRevisionFence>,
     ) -> Self {
         Self {
             id: Uuid::new_v4(),
             description: description.into(),
             workspace_root,
-            workspace_revision: Arc::new(WorkspaceRevisionFence::default()),
+            workspace_revision,
             state: TaskState::Pending,
             events: Vec::new(),
             history: Vec::new(),

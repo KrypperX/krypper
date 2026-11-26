@@ -599,7 +599,16 @@ impl TaskSession {
                     task_id: Some(task_id),
                 }
             })?;
-            let task = checkpoint_task.restore(task_id, workspace_root, &mut identifiers)?;
+            let workspace_revision = crate::core::task::WorkspaceRevisionFence::for_identity((
+                workspace_device,
+                workspace_inode,
+            ));
+            let task = checkpoint_task.restore(
+                task_id,
+                workspace_root,
+                workspace_revision,
+                &mut identifiers,
+            )?;
             validate_restored_task(&task)?;
             tasks.push(task);
         }
@@ -730,6 +739,7 @@ impl CheckpointTask {
         self,
         task_id: Uuid,
         workspace_root: WorkspaceRoot,
+        workspace_revision: Arc<crate::core::task::WorkspaceRevisionFence>,
         identifiers: &mut HashSet<Uuid>,
     ) -> Result<Task, TaskSessionCheckpointError> {
         let events = self
@@ -777,7 +787,7 @@ impl CheckpointTask {
             id: task_id,
             description: self.description,
             workspace_root: Ok(Arc::new(workspace_root)),
-            workspace_revision: Arc::default(),
+            workspace_revision,
             state: self.state.into(),
             events,
             history,

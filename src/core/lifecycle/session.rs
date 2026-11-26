@@ -14,7 +14,7 @@ use super::process_authorization::{
 };
 use crate::core::task::{
     Task, TaskActivityEvent, TaskHistoryEvent, TaskState, TransitionError, TurnActivitySummary,
-    TurnCompletionError, TurnOutcome, TurnState,
+    TurnCompletionError, TurnOutcome, TurnState, WorkspaceRevisionFence,
 };
 use crate::tools::{
     apply_patch_file_at_with_revision, capture_workspace_root,
@@ -246,8 +246,20 @@ impl TaskSession {
             Some(root) => Ok(Arc::clone(root)),
             None => capture_workspace_root().map(Arc::new),
         };
-        self.tasks
-            .push(Task::new_with_workspace_root(description, workspace_root));
+        let workspace_revision = match &workspace_root {
+            Ok(root) => match root.identity() {
+                Ok(identity) => {
+                    WorkspaceRevisionFence::for_identity((identity.volume, identity.file))
+                }
+                Err(_) => Arc::new(WorkspaceRevisionFence::default()),
+            },
+            Err(_) => Arc::new(WorkspaceRevisionFence::default()),
+        };
+        self.tasks.push(Task::new_with_workspace_root(
+            description,
+            workspace_root,
+            workspace_revision,
+        ));
         self.tasks
             .last_mut()
             .expect("invariant: a task was just appended")
@@ -1480,6 +1492,166 @@ mod process_grant_tests {
                 .unwrap()
                 .consumed
         );
+    }
+
+    #[test]
+    fn sibling_task_workspace_mutation_invalidates_one_shot_approval() {
+        let workspace = TempDir::with_prefix("process-grant-sibling-revision-");
+        let mut session = TaskSession::new_in_workspace(workspace.path()).unwrap();
+        let authorized_task_id = session.create_task("authorized task").id();
+        let sibling_task_id = session.create_task("sibling writer task").id();
+        let authorized_revision = Arc::clone(
+            &session
+                .get_task(authorized_task_id)
+                .unwrap()
+                .workspace_revision,
+        );
+        let sibling_revision = Arc::clone(
+            &session
+                .get_task(sibling_task_id)
+                .unwrap()
+                .workspace_revision,
+        );
+        assert!(Arc::ptr_eq(&authorized_revision, &sibling_revision));
+
+        let (_runtime, policy) = policy_fixture();
+        session
+            .authorize_offline_cargo_test_once(
+                authorized_task_id,
+                policy,
+                Some("selected_case"),
+                Duration::from_secs(60),
+            )
+            .unwrap();
+        let authorized_turn = running_turn(&mut session, authorized_task_id);
+        let sibling_turn = running_turn(&mut session, sibling_task_id);
+        session
+            .create_workspace_file(
+                sibling_task_id,
+                sibling_turn,
+                Path::new("sibling-created.txt"),
+                "changed by another task",
+            )
+            .unwrap();
+
+        assert_eq!(authorized_revision.current_revision(), 1);
+        let result = session
+            .run_offline_cargo_tests(authorized_task_id, authorized_turn, Some("selected_case"))
+            .unwrap();
+        assert_eq!(result.outcome, crate::ProcessOutcome::Denied);
+        assert!(
+            !session
+                .process_grants
+                .lock()
+                .unwrap()
+                .get(&authorized_task_id)
+                .unwrap()
+                .lock()
+                .unwrap()
+                .current
+                .as_ref()
+                .unwrap()
+                .consumed
+        );
+    }
+
+    #[test]
+    fn another_session_mutation_invalidates_one_shot_for_same_workspace() {
+        let workspace = TempDir::with_prefix("process-grant-other-session-revision-");
+        let mut authorized_session = TaskSession::new_in_workspace(workspace.path()).unwrap();
+        let mut writer_session = TaskSession::new_in_workspace(workspace.path()).unwrap();
+        let authorized_task_id = authorized_session.create_task("authorized task").id();
+        let writer_task_id = writer_session.create_task("writer task").id();
+        let authorized_revision = Arc::clone(
+            &authorized_session
+                .get_task(authorized_task_id)
+                .unwrap()
+                .workspace_revision,
+        );
+        let writer_revision = Arc::clone(
+            &writer_session
+                .get_task(writer_task_id)
+                .unwrap()
+                .workspace_revision,
+        );
+        assert!(Arc::ptr_eq(&authorized_revision, &writer_revision));
+
+        let (_runtime, policy) = policy_fixture();
+        authorized_session
+            .authorize_offline_cargo_test_once(
+                authorized_task_id,
+                policy,
+                Some("selected_case"),
+                Duration::from_secs(60),
+            )
+            .unwrap();
+        let authorized_turn = running_turn(&mut authorized_session, authorized_task_id);
+        let writer_turn = running_turn(&mut writer_session, writer_task_id);
+        writer_session
+            .create_workspace_file(
+                writer_task_id,
+                writer_turn,
+                Path::new("other-session-created.txt"),
+                "changed by another session",
+            )
+            .unwrap();
+
+        let result = authorized_session
+            .run_offline_cargo_tests(authorized_task_id, authorized_turn, Some("selected_case"))
+            .unwrap();
+        assert_eq!(result.outcome, crate::ProcessOutcome::Denied);
+        assert!(
+            !authorized_session
+                .process_grants
+                .lock()
+                .unwrap()
+                .get(&authorized_task_id)
+                .unwrap()
+                .lock()
+                .unwrap()
+                .current
+                .as_ref()
+                .unwrap()
+                .consumed
+        );
+    }
+
+    #[test]
+    fn sibling_task_workspace_mutation_waits_for_process_read_lease() {
+        let workspace = TempDir::with_prefix("process-grant-sibling-lease-");
+        let mut session = TaskSession::new_in_workspace(workspace.path()).unwrap();
+        let first_task_id = session.create_task("process task").id();
+        let sibling_task_id = session.create_task("sibling writer task").id();
+        let first_revision =
+            Arc::clone(&session.get_task(first_task_id).unwrap().workspace_revision);
+        let sibling_revision = Arc::clone(
+            &session
+                .get_task(sibling_task_id)
+                .unwrap()
+                .workspace_revision,
+        );
+        assert!(Arc::ptr_eq(&first_revision, &sibling_revision));
+
+        let (read_lease, _) = first_revision.begin_read().unwrap();
+        let mutation_revision = Arc::clone(&sibling_revision);
+        let (mutation_done, mutation_result) = mpsc::sync_channel(1);
+        let writer = thread::spawn(move || {
+            let _mutation = mutation_revision.begin_mutation().unwrap();
+            mutation_done.send(()).unwrap();
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while sibling_revision.pending_mutations() == 0 && std::time::Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert_eq!(sibling_revision.pending_mutations(), 1);
+        assert!(mutation_result.try_recv().is_err());
+
+        drop(read_lease);
+        mutation_result
+            .recv_timeout(Duration::from_secs(2))
+            .expect("sibling mutation should proceed after the process read lease ends");
+        writer.join().unwrap();
+        assert_eq!(first_revision.current_revision(), 1);
     }
 
     #[test]

@@ -157,15 +157,16 @@ spawn call; setup failures and cancellation before the gate do not consume it,
 while a failed spawn does. Cancellation after a process has started is
 best-effort.
 
-TaskSession workspace mutation methods share a per-task read/write revision
-fence. A process holds a read lease from intent preparation through completion;
-the four mutation methods take the write lease and advance the revision before
-attempting a change. This invalidates a one-shot approval after any
-TaskSession-managed mutation, including a failed mutation attempt. Direct host
-writes that bypass TaskSession are outside this in-process fence and remain the
-trusted embedding's responsibility. The digest binds captured directory
-identities, not content snapshots; the host must keep the selected workspace,
-toolchain, and registry integrity appropriate for its use.
+TaskSession workspace mutation methods share an in-process read/write revision
+fence keyed by captured workspace identity, including across tasks and sessions
+using the same workspace. A process holds a read lease from intent preparation
+through completion; the four mutation methods take the matching write lease and
+advance the revision before attempting a change. This invalidates a one-shot
+approval after any TaskSession-managed mutation to that workspace, including a
+failed mutation attempt. Direct host writes that bypass TaskSession are outside
+this fence and remain the trusted embedding's responsibility. The digest binds
+captured directory identities, not content snapshots; the host must keep the
+selected workspace, toolchain, and registry integrity appropriate for its use.
 
 The separate opt-in `run_goal_turn_with_process_failure_correction` Harness
 path may start one same-task follow-up turn after a complete, cleanup-confirmed
