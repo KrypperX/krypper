@@ -372,8 +372,6 @@ fn valid_workspace_relative_path(value: &str) -> bool {
             }))
 }
 
-/// A finite set of hard bounds. The runner validates these against its own fixed ceilings.
-
 #[cfg(target_os = "linux")]
 mod host;
 #[cfg(target_os = "linux")]
