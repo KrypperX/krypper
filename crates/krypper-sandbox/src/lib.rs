@@ -39,12 +39,12 @@ pub enum LandlockSetupStatus {
 pub fn apply_landlock_write_policy() -> io::Result<LandlockSetupStatus> {
     #[cfg(target_os = "linux")]
     {
-        return landlock::apply_fixed_write_policy().map(|status| match status {
+        landlock::apply_fixed_write_policy().map(|status| match status {
             landlock::LandlockStatus::Applied { abi } => LandlockSetupStatus::Applied { abi },
             landlock::LandlockStatus::Unavailable { abi } => {
                 LandlockSetupStatus::Unavailable { abi }
             }
-        });
+        })
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -67,10 +67,12 @@ pub enum LandlockRequirement {
 ///
 /// This is private to the sandbox crate so callers cannot substitute another executable.
 #[derive(Debug)]
+#[cfg(target_os = "linux")]
 pub(crate) struct SandboxRunnerPin {
     executable: File,
 }
 
+#[cfg(target_os = "linux")]
 impl SandboxRunnerPin {
     /// Open and pin `krypper-sandbox-runner` beside the current host executable. Cargo's test
     /// layout may place the test executable in `deps/` and the runner in the parent build dir.
@@ -984,6 +986,7 @@ impl SandboxIsolationEvidence {
         );
     }
 
+    #[cfg(target_os = "linux")]
     fn set_status(&mut self, control: SandboxControl, status: SandboxEvidenceStatus) {
         if let Some(record) = self
             .controls

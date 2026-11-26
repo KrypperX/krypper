@@ -1,8 +1,6 @@
 //! Bounded status and acknowledgement protocol for the fixed in-sandbox runner.
 
-use crate::runner_protocol::{
-    decode_status, RunnerStatus, ACK_FD, ACK_FRAME, STATUS_FD, STATUS_FRAME_LEN,
-};
+use crate::runner_protocol::{decode_status, RunnerStatus, ACK_FRAME, STATUS_FRAME_LEN};
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};

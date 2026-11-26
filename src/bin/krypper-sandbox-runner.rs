@@ -20,7 +20,7 @@ mod linux {
     const CARGO_EXECUTABLE: &str = "/toolchain/bin/cargo";
     const EXPECTED_CWD: &str = WORKSPACE_MOUNT.1;
 
-    fn run() -> i32 {
+    pub(super) fn run() -> i32 {
         let Ok(arguments) = std::env::args_os()
             .map(|argument| argument.into_string())
             .collect::<Result<Vec<_>, _>>()
@@ -129,7 +129,7 @@ mod linux {
             return false;
         }
         let actual = std::env::vars_os()
-            .map(|(name, value)| (name.into_string().ok()?, value.into_string().ok()?))
+            .map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
             .collect::<Option<BTreeMap<_, _>>>();
         let Some(actual) = actual else {
             return false;
