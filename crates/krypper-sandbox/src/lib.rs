@@ -86,6 +86,7 @@ pub enum SandboxExecutable {
 }
 
 impl SandboxExecutable {
+    #[cfg(target_os = "linux")]
     pub(crate) fn path(self) -> &'static str {
         match self {
             Self::Cargo => "/toolchain/bin/cargo",

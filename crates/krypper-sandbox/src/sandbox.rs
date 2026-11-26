@@ -371,7 +371,7 @@ mod tests {
     use super::{duplicate_fd_at_or_above, sandbox, sealed_filter_fd, FIRST_PINNED_FD, SECCOMP_FD};
     use crate::{
         DirectoryDescriptors, SandboxBackend, SandboxControl, SandboxEvidenceStatus,
-        SandboxIsolationEvidence,
+        SandboxIsolationEvidence, ValidatedExecutionRequirements,
     };
     use std::fs::{self, File};
     use std::os::fd::AsRawFd;
