@@ -1,10 +1,10 @@
 //! Model error taxonomy and its formatting.
 
 use crate::agent_loop::DecisionFailureCode;
-use crate::harness::context::ContextError;
 use serde_json::Value;
 use std::fmt;
 
+use super::context::ContextError;
 use super::limits::*;
 use super::providers::*;
 

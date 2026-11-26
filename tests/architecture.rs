@@ -5,8 +5,9 @@ use std::path::Path;
 mod guard;
 
 use guard::{
-    scan_crate_root_aliases, scan_module_file, scan_source, scan_source_at_depth,
-    scan_source_with_root_exports, scan_tools_module_from_crate_root,
+    scan_brain_context_source, scan_brain_harness_context_dependencies, scan_crate_root_aliases,
+    scan_module_file, scan_source, scan_source_at_depth, scan_source_with_root_exports,
+    scan_tools_module_from_crate_root,
 };
 
 #[test]
@@ -19,6 +20,260 @@ fn production_tools_modules_do_not_import_brain() {
         "production Tools modules must not depend on Brain:\n{}",
         violations.join("\n")
     );
+}
+
+#[test]
+fn production_brain_modules_do_not_import_harness_context() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/brain");
+    let violations = scan_brain_harness_context_dependencies(&root);
+
+    assert!(
+        violations.is_empty(),
+        "production Brain modules must use the shared context contract instead of Harness context:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn brain_context_guard_detects_grouped_and_qualified_paths_but_ignores_tests() {
+    let source = r#"
+        use crate::{harness::context::{ContextError, RepositoryContext}};
+        mod nested {
+            fn access() { let _: crate::harness::context::RepositorySnippet; }
+        }
+        macro_rules! hidden_dependency {
+            () => { use crate::harness::context::ContextError; };
+        }
+        #[cfg(test)]
+        mod tests {
+            use crate::harness::context::ContextError;
+        }
+    "#;
+
+    let violations = scan_brain_context_source(source, "brain_fixture.rs");
+
+    assert_eq!(violations.len(), 4, "{violations:?}");
+}
+
+#[test]
+fn brain_context_guard_detects_harness_alias_imports() {
+    let source = r#"
+        use crate::harness as h;
+        use h::context::RepositoryContext;
+
+        fn aliased_path() {
+            let _: h::context::RepositorySnippet;
+        }
+    "#;
+
+    let violations = scan_brain_context_source(source, "brain_alias_fixture.rs");
+
+    assert_eq!(violations.len(), 2, "{violations:?}");
+}
+
+#[test]
+fn brain_context_guard_resolves_parent_aliases_after_super() {
+    let source = r#"
+        use crate::harness as h;
+        mod nested {
+            use super::h::context::RepositoryContext;
+        }
+    "#;
+
+    let violations = scan_brain_context_source(source, "brain_super_alias_fixture.rs");
+
+    assert_eq!(violations.len(), 1, "{violations:?}");
+}
+
+#[test]
+fn brain_context_guard_super_skips_block_import_scopes() {
+    let source = r#"
+        use crate::harness as h;
+        mod nested {
+            use crate::brain as h;
+            fn access() {
+                use super::h::context::RepositoryContext;
+            }
+        }
+    "#;
+
+    let violations = scan_brain_context_source(source, "brain_block_super_alias_fixture.rs");
+
+    assert_eq!(violations.len(), 1, "{violations:?}");
+}
+
+#[test]
+fn brain_context_guard_respects_alias_shadowing_between_modules() {
+    let inline_source = r#"
+        use crate::harness as h;
+        mod nested {
+            use crate::brain as h;
+            use h::context::RepositoryContext;
+        }
+        mod sibling {
+            use crate::brain as h;
+            use h::context::RepositoryContext;
+        }
+    "#;
+    let inline_violations =
+        scan_brain_context_source(inline_source, "brain_shadowed_alias_fixture.rs");
+    assert!(inline_violations.is_empty(), "{inline_violations:?}");
+
+    let directory = tempfile::tempdir().unwrap();
+    let brain_directory = directory.path().join("brain");
+    fs::create_dir_all(&brain_directory).unwrap();
+    fs::write(
+        brain_directory.join("mod.rs"),
+        "use crate::harness as h; mod nested;",
+    )
+    .unwrap();
+    fs::write(
+        brain_directory.join("nested.rs"),
+        "use crate::brain as h; use h::context::RepositoryContext;",
+    )
+    .unwrap();
+    let external_violations = scan_brain_harness_context_dependencies(&brain_directory);
+    assert!(external_violations.is_empty(), "{external_violations:?}");
+}
+
+#[test]
+fn brain_context_guard_revisits_shared_path_files_for_each_alias_context() {
+    let directory = tempfile::tempdir().unwrap();
+    let brain_directory = directory.path().join("brain");
+    fs::create_dir_all(&brain_directory).unwrap();
+    fs::write(
+        brain_directory.join("mod.rs"),
+        "mod safe; mod unsafe_module;",
+    )
+    .unwrap();
+    fs::write(
+        brain_directory.join("safe.rs"),
+        "use crate::brain as h; #[path = \"shared.rs\"] mod shared;",
+    )
+    .unwrap();
+    fs::write(
+        brain_directory.join("unsafe_module.rs"),
+        "use crate::harness as h; #[path = \"shared.rs\"] mod shared;",
+    )
+    .unwrap();
+    fs::write(
+        brain_directory.join("shared.rs"),
+        "use super::h::context::RepositoryContext;",
+    )
+    .unwrap();
+
+    let violations = scan_brain_harness_context_dependencies(&brain_directory);
+
+    assert_eq!(violations.len(), 1, "{violations:?}");
+}
+
+#[test]
+fn brain_context_guard_detects_self_alias_imports() {
+    let source = r#"
+        use crate::harness::{self as h};
+        use h::context::RepositoryContext;
+    "#;
+
+    let violations = scan_brain_context_source(source, "brain_self_alias_fixture.rs");
+
+    assert_eq!(violations.len(), 1, "{violations:?}");
+}
+
+#[test]
+fn brain_context_guard_rejects_harness_globs() {
+    let direct_glob = r#"
+        use crate::harness::*;
+        fn direct_glob_path() { let _: context::RepositoryContext; }
+    "#;
+    let alias_glob = r#"
+        use crate::harness as h;
+        use h::*;
+        fn alias_glob_path() { let _: context::RepositoryContext; }
+    "#;
+
+    let direct_violations = scan_brain_context_source(direct_glob, "brain_direct_glob_fixture.rs");
+    let alias_violations = scan_brain_context_source(alias_glob, "brain_alias_glob_fixture.rs");
+
+    assert_eq!(direct_violations.len(), 1, "{direct_violations:?}");
+    assert_eq!(alias_violations.len(), 1, "{alias_violations:?}");
+}
+
+#[test]
+fn brain_context_guard_rejects_hidden_harness_imports_in_macros() {
+    let source = r#"
+        macro_rules! hidden_alias {
+            () => {
+                use crate::harness as h;
+                use h::context::RepositoryContext;
+            };
+        }
+        macro_rules! hidden_glob {
+            () => { use crate::harness::*; };
+        }
+    "#;
+
+    let violations = scan_brain_context_source(source, "brain_macro_fixture.rs");
+
+    assert_eq!(violations.len(), 2, "{violations:?}");
+}
+
+#[test]
+fn brain_context_guard_resolves_outer_harness_aliases_in_macros() {
+    let source = r#"
+        use crate::harness as h;
+        macro_rules! hidden_alias {
+            () => { use h::context::RepositoryContext; };
+        }
+        macro_rules! hidden_glob {
+            () => { use h::*; };
+        }
+    "#;
+
+    let violations = scan_brain_context_source(source, "brain_outer_alias_macro_fixture.rs");
+
+    assert_eq!(violations.len(), 2, "{violations:?}");
+}
+
+#[test]
+fn brain_context_guard_carries_parent_aliases_into_external_modules() {
+    let directory = tempfile::tempdir().unwrap();
+    let brain_directory = directory.path().join("brain");
+    fs::create_dir_all(&brain_directory).unwrap();
+    fs::write(
+        brain_directory.join("mod.rs"),
+        "use crate::harness as h; mod nested;",
+    )
+    .unwrap();
+    fs::write(
+        brain_directory.join("nested.rs"),
+        "use super::h::context::RepositoryContext;",
+    )
+    .unwrap();
+
+    let violations = scan_brain_harness_context_dependencies(&brain_directory);
+
+    assert_eq!(violations.len(), 1, "{violations:?}");
+}
+
+#[test]
+fn brain_context_guard_follows_external_path_attributes() {
+    let directory = tempfile::tempdir().unwrap();
+    let brain_directory = directory.path().join("src/brain");
+    fs::create_dir_all(&brain_directory).unwrap();
+    fs::write(
+        brain_directory.join("mod.rs"),
+        "#[path = \"../../outside.rs\"] mod external;",
+    )
+    .unwrap();
+    fs::write(
+        directory.path().join("outside.rs"),
+        "use crate::harness::context::RepositoryContext;",
+    )
+    .unwrap();
+
+    let violations = scan_brain_harness_context_dependencies(&brain_directory);
+
+    assert_eq!(violations.len(), 1, "{violations:?}");
 }
 
 #[test]

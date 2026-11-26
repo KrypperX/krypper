@@ -1,3 +1,6 @@
+use super::context::{
+    append_project_guidance, build_reflection_prompt, build_reflective_plan_prompt,
+};
 use super::{
     consume_decision_budget, encode_model_request, parse_model_plan_response, post_chat,
     validate_model_name_for_provider, workspace_tool_definitions, AdvertisedToolNames, ModelError,
@@ -5,9 +8,6 @@ use super::{
     WorkspacePlanError, MAX_PLAN_OPERATIONS,
 };
 use crate::agent_loop::{GoalTurnResult, GoalTurnStopReason, WorkspaceObservation};
-use crate::harness::context::{
-    append_project_guidance, build_reflection_prompt, build_reflective_plan_prompt,
-};
 use crate::harness::execution::workspace_mutation_target;
 use crate::harness::verification::{
     CompletionEvidenceSource, CompletionVerification, CompletionVerificationStatus,

@@ -3,7 +3,6 @@
 use crate::agent_loop::{
     BoundedDecisionSource, GoalTurnResult, WorkspaceAction, WorkspaceObservation,
 };
-use crate::harness::context::RepositoryContext;
 use crate::harness::execution::{
     CompletionCorrectionError, CompletionCorrectionResult, ProcessFailureCorrectionError,
     ProcessFailureCorrectionResult,
@@ -19,6 +18,7 @@ use std::path::PathBuf;
 use ureq::Agent;
 
 use super::action::action_from_error;
+use super::context::RepositoryContext;
 use super::errors::*;
 use super::http::*;
 use super::limits::*;
