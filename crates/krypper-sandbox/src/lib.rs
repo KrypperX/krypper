@@ -15,6 +15,8 @@ use uuid::Uuid;
 
 #[cfg(target_os = "linux")]
 mod landlock;
+#[doc(hidden)]
+pub mod runner_contract;
 #[cfg(target_os = "linux")]
 mod runner_handshake;
 #[doc(hidden)]
@@ -148,7 +150,6 @@ const MAX_ARGUMENT_BYTES: usize = 256;
 const MAX_ARGUMENTS: usize = 16;
 const MAX_ENVIRONMENT_NAMES: usize = 16;
 
-const FIXED_CARGO_ARGUMENTS: &[&str] = &["test", "--offline", "--locked", "--all-targets"];
 const FIXED_CARGO_ENVIRONMENT_NAMES: &[&str] = &[
     "PATH",
     "HOME",
@@ -347,7 +348,7 @@ impl ValidatedExecutionRequirements {
             EXECUTION_REQUIREMENTS_VERSION,
             "offline_cargo_test",
             SandboxExecutable::Cargo,
-            FIXED_CARGO_ARGUMENTS
+            runner_contract::FIXED_CARGO_ARGUMENTS
                 .iter()
                 .map(|argument| (*argument).to_owned())
                 .collect(),
@@ -746,15 +747,10 @@ impl SandboxRunRequest {
 }
 
 pub(crate) fn validate_test_filter(test_filter: Option<&str>) -> Result<(), &'static str> {
-    const MAX_TEST_FILTER_BYTES: usize = 256;
     let Some(test_filter) = test_filter else {
         return Ok(());
     };
-    if test_filter.is_empty()
-        || test_filter.len() > MAX_TEST_FILTER_BYTES
-        || test_filter.chars().any(char::is_control)
-        || test_filter.trim_start().starts_with('-')
-    {
+    if !runner_contract::is_valid_test_filter(test_filter) {
         return Err("test_filter is invalid");
     }
     Ok(())

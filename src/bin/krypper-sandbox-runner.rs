@@ -2,6 +2,7 @@
 
 #[cfg(target_os = "linux")]
 mod linux {
+    use krypper_sandbox::runner_contract::{is_valid_test_filter, FIXED_CARGO_ARGUMENTS};
     use krypper_sandbox::runner_protocol::{
         encode_status, RunnerStatus, ACK_FD, ACK_FRAME, STATUS_FD,
     };
@@ -15,7 +16,6 @@ mod linux {
     use std::process::Command;
 
     const CARGO_EXECUTABLE: &str = "/toolchain/bin/cargo";
-    const CARGO_FIXED_ARGUMENTS: &[&str] = &["test", "--offline", "--locked", "--all-targets"];
     const EXPECTED_CWD: &str = "/workspace";
 
     fn run() -> i32 {
@@ -102,29 +102,22 @@ mod linux {
             return None;
         }
         let cargo_arguments = &arguments[9..];
-        if cargo_arguments.len() < CARGO_FIXED_ARGUMENTS.len()
+        if cargo_arguments.len() < FIXED_CARGO_ARGUMENTS.len()
             || !cargo_arguments
                 .iter()
-                .take(CARGO_FIXED_ARGUMENTS.len())
+                .take(FIXED_CARGO_ARGUMENTS.len())
                 .map(String::as_str)
-                .eq(CARGO_FIXED_ARGUMENTS.iter().copied())
+                .eq(FIXED_CARGO_ARGUMENTS.iter().copied())
         {
             return None;
         }
-        match cargo_arguments.len() - CARGO_FIXED_ARGUMENTS.len() {
-            0 => Some(requirement),
-            2 if cargo_arguments[4] == "--" && valid_filter(&cargo_arguments[5]) => {
+        match &cargo_arguments[FIXED_CARGO_ARGUMENTS.len()..] {
+            [] => Some(requirement),
+            [separator, filter] if separator.as_str() == "--" && is_valid_test_filter(filter) => {
                 Some(requirement)
             }
             _ => None,
         }
-    }
-
-    fn valid_filter(filter: &str) -> bool {
-        !filter.is_empty()
-            && filter.len() <= 256
-            && !filter.chars().any(char::is_control)
-            && !filter.trim_start().starts_with('-')
     }
 
     fn valid_execution_context() -> bool {

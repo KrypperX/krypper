@@ -45,7 +45,10 @@ fn landlock_descendant_probe() {
 fn landlock_allows_profile_scratch_and_denies_unlisted_tmp() {
     assert_eq!(std::env::var("TMPDIR").as_deref(), Ok("/tmp/tmp"));
     assert_eq!(std::env::var("CARGO_HOME").as_deref(), Ok("/tmp/home"));
-    assert_eq!(std::fs::read_link("/tmp/home/registry").unwrap(), std::path::Path::new("/cargo/registry"));
+    assert_eq!(
+        std::fs::read_link("/tmp/home/registry").unwrap(),
+        std::path::Path::new("/cargo/registry")
+    );
 
     let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").unwrap();
     let tmp_mount = mountinfo
@@ -53,7 +56,10 @@ fn landlock_allows_profile_scratch_and_denies_unlisted_tmp() {
         .find(|line| line.split_whitespace().nth(4) == Some("/tmp"))
         .expect("Bubblewrap /tmp tmpfs mount");
     let fields = tmp_mount.split_whitespace().collect::<Vec<_>>();
-    assert!(fields[5].split(',').any(|option| option == "rw"), "/tmp must be writable in Bubblewrap before Landlock");
+    assert!(
+        fields[5].split(',').any(|option| option == "rw"),
+        "/tmp must be writable in Bubblewrap before Landlock"
+    );
     let separator = fields.iter().position(|field| *field == "-").expect("mountinfo separator");
     assert_eq!(fields.get(separator + 1), Some(&"tmpfs"), "/tmp must be Bubblewrap's tmpfs");
     let registry_mount = mountinfo
@@ -61,7 +67,10 @@ fn landlock_allows_profile_scratch_and_denies_unlisted_tmp() {
         .find(|line| line.split_whitespace().nth(4) == Some("/cargo/registry"))
         .expect("Bubblewrap read-only registry mount");
     let registry_fields = registry_mount.split_whitespace().collect::<Vec<_>>();
-    assert!(registry_fields[5].split(',').any(|option| option == "ro"), "registry must be mounted read-only");
+    assert!(
+        registry_fields[5].split(',').any(|option| option == "ro"),
+        "registry must be mounted read-only"
+    );
     let effective_uid = std::fs::read_to_string("/proc/self/status")
         .unwrap()
         .lines()
@@ -71,7 +80,11 @@ fn landlock_allows_profile_scratch_and_denies_unlisted_tmp() {
         .expect("effective uid in proc status");
     let tmp_metadata = std::fs::metadata("/tmp").unwrap();
     assert_eq!(tmp_metadata.uid(), effective_uid, "/tmp must be owned by the sandbox uid");
-    assert_ne!(tmp_metadata.mode() & 0o200, 0, "/tmp must grant its owner write access before Landlock");
+    assert_ne!(
+        tmp_metadata.mode() & 0o200,
+        0,
+        "/tmp must grant its owner write access before Landlock"
+    );
 
     for directory in ["/tmp/home", "/tmp/target", "/tmp/tmp"] {
         let probe = format!("{directory}/landlock-allowed-{}", std::process::id());
