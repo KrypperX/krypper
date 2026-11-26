@@ -890,8 +890,14 @@ fn run_offline_cargo_with_backend(
             SandboxOutcome::SandboxUnavailable,
             output_limit,
         );
-        result.diagnostic =
-            Some("selected backend cannot provide required sandbox controls".into());
+        result.diagnostic = Some(
+            if backend.identity().is_none() {
+                "process sandbox is unavailable on this platform"
+            } else {
+                "selected backend cannot provide required sandbox controls"
+            }
+            .into(),
+        );
 
         let mut evidence = SandboxIsolationEvidence::new(backend.identity());
         for control in OFFLINE_CARGO_REQUIRED_CONTROLS {
@@ -1124,6 +1130,10 @@ mod execution_contract_tests {
         );
 
         assert_eq!(result.outcome, SandboxOutcome::SandboxUnavailable);
+        assert_eq!(
+            result.diagnostic.as_deref(),
+            Some("process sandbox is unavailable on this platform")
+        );
         assert_eq!(backend.setup_attempts.load(Ordering::SeqCst), 0);
         assert_eq!(backend.payload_launches.load(Ordering::SeqCst), 0);
         let evidence = result.sandbox_evidence.expect("unsupported evidence");
