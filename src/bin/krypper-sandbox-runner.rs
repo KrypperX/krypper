@@ -2,7 +2,9 @@
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use krypper_sandbox::runner_contract::{is_valid_test_filter, FIXED_CARGO_ARGUMENTS};
+    use krypper_sandbox::runner_contract::{
+        is_valid_test_filter, FIXED_CARGO_ARGUMENTS, RUNNER_MOUNT_PATH,
+    };
     use krypper_sandbox::runner_protocol::{
         encode_status, RunnerStatus, ACK_FD, ACK_FRAME, STATUS_FD,
     };
@@ -84,7 +86,7 @@ mod linux {
 
     fn parse_invocation(arguments: &[String]) -> Option<Requirement> {
         if arguments.len() < 13
-            || arguments[0] != "/run/krypper-sandbox-runner"
+            || arguments[0] != RUNNER_MOUNT_PATH
             || arguments[1] != "--krypper-landlock-runner-v1"
             || arguments[2] != "--status-fd"
             || arguments[3] != STATUS_FD.to_string()
@@ -121,7 +123,7 @@ mod linux {
     }
 
     fn valid_execution_context() -> bool {
-        if std::env::current_exe().ok().as_deref() != Some(Path::new("/run/krypper-sandbox-runner"))
+        if std::env::current_exe().ok().as_deref() != Some(Path::new(RUNNER_MOUNT_PATH))
             || std::env::current_dir().ok().as_deref() != Some(Path::new(EXPECTED_CWD))
         {
             return false;
@@ -179,10 +181,11 @@ mod linux {
     #[cfg(test)]
     mod tests {
         use super::{parse_invocation, Requirement, ACK_FD, CARGO_EXECUTABLE, STATUS_FD};
+        use krypper_sandbox::runner_contract::RUNNER_MOUNT_PATH;
 
         fn invocation(requirement: &str, cargo_tail: &[&str]) -> Vec<String> {
             let mut args = vec![
-                "/run/krypper-sandbox-runner".to_owned(),
+                RUNNER_MOUNT_PATH.to_owned(),
                 "--krypper-landlock-runner-v1".to_owned(),
                 "--status-fd".to_owned(),
                 STATUS_FD.to_string(),

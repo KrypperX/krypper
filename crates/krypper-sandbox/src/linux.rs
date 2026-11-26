@@ -4,6 +4,7 @@ use crate::host::effective_uid;
 use crate::sandbox::sandbox;
 use crate::seccomp::compile_filter;
 use crate::{
+    runner_contract::RUNNER_MOUNT_PATH,
     runner_handshake::RunnerHandshakePipes,
     runner_protocol::{RunnerStatus, ACK_FD, STATUS_FD},
     validate_test_filter, LandlockRequirement, RunLimits, SandboxBackend, SandboxExecutionBackend,
@@ -446,7 +447,7 @@ fn landlock_runner_command_args(
 ) -> Vec<std::ffi::OsString> {
     let mut args = vec![
         "--".into(),
-        "/run/krypper-sandbox-runner".into(),
+        RUNNER_MOUNT_PATH.into(),
         "--krypper-landlock-runner-v1".into(),
         "--status-fd".into(),
         STATUS_FD.to_string().into(),
