@@ -18,7 +18,9 @@
   "config_override": false,
   "credential_count": 0,
   "fallback_budget_micro_usd": null,
+  "full_access_available": false,
   "model": "gpt-4.1",
+  "permission_mode": "ask",
   "provider": "openai",
   "provider_profile_count": 0,
   "provider_readiness": {

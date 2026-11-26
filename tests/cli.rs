@@ -1087,7 +1087,7 @@ fn task_composes_actions_from_the_observed_search_location_interactively() {
     let search_observation = String::from_utf8(output.clone()).unwrap();
     assert_eq!(
         search_observation,
-        "Observation 1: search-tree in . found 1 locations\n  \"nested space/quoted \\\" slash \\\\ café/notes.txt\":2\n"
+        "Permission mode: Ask\nObservation 1: search-tree in . found 1 locations\n  \"nested space/quoted \\\" slash \\\\ café/notes.txt\":2\n"
     );
     let location = search_observation.lines().nth(1).unwrap().trim();
     let (path_prefix, observed_line) = location.rsplit_once("\":").unwrap();
