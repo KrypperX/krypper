@@ -132,3 +132,115 @@ pub(super) fn drain(
         Err(e) => Err(e),
     }
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PostExitDrain {
+    Complete,
+    OutputLimit,
+    Cancelled,
+    DeadlineExpired,
+}
+
+pub(super) fn drain_after_child_exit(
+    stdout_pipe: &mut impl Read,
+    stderr_pipe: &mut impl Read,
+    stdout: &mut Vec<u8>,
+    stderr: &mut Vec<u8>,
+    output_limit: usize,
+    timeout: Duration,
+    mut cancelled: impl FnMut() -> bool,
+) -> io::Result<PostExitDrain> {
+    let started = Instant::now();
+    let mut stdout_eof = false;
+    let mut stderr_eof = false;
+    loop {
+        let remaining = output_limit.saturating_sub(stdout.len() + stderr.len());
+        stdout_eof |= drain(stdout_pipe, stdout, remaining)?;
+        let remaining = output_limit.saturating_sub(stdout.len() + stderr.len());
+        stderr_eof |= drain(stderr_pipe, stderr, remaining)?;
+        if stdout.len() + stderr.len() >= output_limit {
+            return Ok(PostExitDrain::OutputLimit);
+        }
+        if cancelled() {
+            return Ok(PostExitDrain::Cancelled);
+        }
+        if stdout_eof && stderr_eof {
+            return Ok(PostExitDrain::Complete);
+        }
+        if started.elapsed() >= timeout {
+            return Ok(PostExitDrain::DeadlineExpired);
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[cfg(test)]
+mod post_exit_drain_tests {
+    use super::{drain_after_child_exit, nonblocking, PostExitDrain};
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    struct ProcessGroup(libc::pid_t);
+
+    impl Drop for ProcessGroup {
+        fn drop(&mut self) {
+            // SAFETY: this test created the process group with the child PID as its ID.
+            unsafe {
+                libc::kill(-self.0, libc::SIGKILL);
+            }
+        }
+    }
+
+    #[test]
+    fn inherited_pipe_writer_does_not_extend_the_post_exit_deadline() {
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "(sleep 30) & printf 'leader output\\n'; exit 0"])
+            .process_group(0)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().unwrap();
+        let _process_group = ProcessGroup(child.id() as libc::pid_t);
+        let mut stdout_pipe = child.stdout.take().unwrap();
+        let mut stderr_pipe = child.stderr.take().unwrap();
+        nonblocking(&stdout_pipe).unwrap();
+        nonblocking(&stderr_pipe).unwrap();
+        assert_eq!(child.wait().unwrap().code(), Some(0));
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let started = Instant::now();
+        let drain = drain_after_child_exit(
+            &mut stdout_pipe,
+            &mut stderr_pipe,
+            &mut stdout,
+            &mut stderr,
+            1024,
+            Duration::from_millis(100),
+            || false,
+        )
+        .unwrap();
+
+        assert_eq!(drain, PostExitDrain::DeadlineExpired);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(stdout, b"leader output\n");
+
+        // SAFETY: this test created the isolated group and its sleeping descendant.
+        let killed = unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL) };
+        assert_eq!(killed, 0);
+        assert_eq!(
+            drain_after_child_exit(
+                &mut stdout_pipe,
+                &mut stderr_pipe,
+                &mut stdout,
+                &mut stderr,
+                1024,
+                Duration::from_secs(1),
+                || false,
+            )
+            .unwrap(),
+            PostExitDrain::Complete
+        );
+    }
+}
