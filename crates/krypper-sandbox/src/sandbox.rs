@@ -186,46 +186,15 @@ pub(super) fn sandbox(
         &["--size", "1073741824", "--tmpfs", "/tmp"],
     );
     command.args(["--dir", "/tmp/home", "--chdir", "/workspace"]);
+    let mut environment_args = vec!["--clearenv"];
+    for (name, value) in crate::OFFLINE_CARGO_TEST_ENVIRONMENT {
+        environment_args.extend(["--setenv", name, value]);
+    }
     push_control_args(
         &mut command,
         evidence,
         SandboxControl::ClearedEnvironment,
-        &[
-            "--clearenv",
-            "--setenv",
-            "PATH",
-            "/toolchain/bin:/usr/bin:/bin",
-            "--setenv",
-            "HOME",
-            "/tmp/home",
-            "--setenv",
-            "TMPDIR",
-            "/tmp",
-            "--setenv",
-            "CARGO_HOME",
-            "/cargo",
-            "--setenv",
-            "CARGO_BUILD_JOBS",
-            "1",
-            "--setenv",
-            "CARGO_PROFILE_DEV_DEBUG",
-            "0",
-            "--setenv",
-            "CARGO_PROFILE_TEST_DEBUG",
-            "0",
-            "--setenv",
-            "CARGO_INCREMENTAL",
-            "0",
-            "--setenv",
-            "CARGO_TARGET_DIR",
-            "/tmp/target",
-            "--setenv",
-            "RUSTC",
-            "/toolchain/bin/rustc",
-            "--setenv",
-            "LANG",
-            "C",
-        ],
+        &environment_args,
     );
     push_control_args(
         &mut command,

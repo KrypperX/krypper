@@ -132,6 +132,41 @@ that turn; it does not retry a process automatically. Activity/checkpoint
 records retain only success and output byte-count metadata, never process
 output, runtime paths, or the authorization grant.
 
+The legacy `authorize_offline_cargo_tests` method remains an unbounded,
+standing grant for the lifetime of its TaskSession. Trusted embedding code may
+instead use `authorize_offline_cargo_tests_scoped` for one exact optional
+filter and a lifetime from one instant through 24 hours, or
+`authorize_offline_cargo_test_once` for one exact optional filter with the same
+expiry bound. In those APIs, `None` approves only a run with no filter. Empty,
+option-like, control-character, overlong, zero-lifetime, and over-24-hour
+requests are rejected. Replacing or revoking a grant advances its task-local
+epoch and signals cancellation to the previous policy; epoch exhaustion fails
+closed. A one-shot grant is never widened to the standing session grant.
+
+Every authorization is bound to a versioned SHA-256 encoding of the fixed
+operation and profile, ordered executable arguments (including a selected
+filter in its actual Cargo argument position), cwd, policy and effective
+limits, environment names and values, network/syscall/process-tree controls,
+task/session/grant identities and epoch, grant mode/scope/expiry, captured
+workspace/toolchain/registry directory identities, and the TaskSession
+workspace mutation revision. The final Product-owned spawn gate rechecks the
+active grant and current intent immediately before spawn. It holds the grant
+state lock through the spawn call, so a concurrent revoke or replacement
+linearizes before or after that start. A one-shot is consumed just before the
+spawn call; setup failures and cancellation before the gate do not consume it,
+while a failed spawn does. Cancellation after a process has started is
+best-effort.
+
+TaskSession workspace mutation methods share a per-task read/write revision
+fence. A process holds a read lease from intent preparation through completion;
+the four mutation methods take the write lease and advance the revision before
+attempting a change. This invalidates a one-shot approval after any
+TaskSession-managed mutation, including a failed mutation attempt. Direct host
+writes that bypass TaskSession are outside this in-process fence and remain the
+trusted embedding's responsibility. The digest binds captured directory
+identities, not content snapshots; the host must keep the selected workspace,
+toolchain, and registry integrity appropriate for its use.
+
 The separate opt-in `run_goal_turn_with_process_failure_correction` Harness
 path may start one same-task follow-up turn after a complete, cleanup-confirmed
 Cargo nonzero exit or a consistent `NoTestsMatched` result. Brain receives the

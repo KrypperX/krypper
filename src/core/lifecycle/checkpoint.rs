@@ -608,7 +608,7 @@ impl TaskSession {
             id: session_id,
             workspace_root: None,
             tasks,
-            process_policies: Default::default(),
+            process_grants: Default::default(),
             #[cfg(test)]
             test_process_results: Default::default(),
             #[cfg(test)]
@@ -777,6 +777,7 @@ impl CheckpointTask {
             id: task_id,
             description: self.description,
             workspace_root: Ok(Arc::new(workspace_root)),
+            workspace_revision: Arc::default(),
             state: self.state.into(),
             events,
             history,

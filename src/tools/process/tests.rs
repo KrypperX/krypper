@@ -340,7 +340,7 @@ fn invalid_filter_returns_before_workspace_process_launch() {
     let policy = OfflineCargoPolicy::new(&runtime, &runtime).unwrap();
     let root = capture_workspace_root_at(&path).unwrap();
 
-    let result = run(&root, &policy, Some("--list"));
+    let result = run_for_test(&root, &policy, Some("--list"));
 
     assert_eq!(result.outcome, ProcessOutcome::InvalidTestFilter);
     assert!(
@@ -761,7 +761,7 @@ fn unavailable_host_controls_never_launch_workspace_code() {
     .unwrap();
     let policy = OfflineCargoPolicy::new(Path::new(&toolchain), Path::new(&registry)).unwrap();
     let root = capture_workspace_root_at(&path).unwrap();
-    let result = run(&root, &policy, None);
+    let result = run_for_test(&root, &policy, None);
     assert!(
         matches!(
             result.outcome,
@@ -892,7 +892,7 @@ assert_eq!(std::env::current_dir().unwrap().to_str().unwrap(), "/workspace");
     let policy = OfflineCargoPolicy::new(Path::new(&toolchain), Path::new(&registry)).unwrap();
     let limits = policy.profile().limits();
     let root = capture_workspace_root_at(&path).unwrap();
-    let no_match = run(&root, &policy, Some("test_name_that_does_not_exist"));
+    let no_match = run_for_test(&root, &policy, Some("test_name_that_does_not_exist"));
     assert_eq!(
         no_match.outcome,
         ProcessOutcome::NoTestsMatched,
@@ -911,7 +911,7 @@ assert_eq!(std::env::current_dir().unwrap().to_str().unwrap(), "/workspace");
         ("#[test] fn floods() { use std::io::Write; for _ in 0..4096 { std::io::stdout().write_all(&[b'x';1024]).unwrap(); } }", Duration::from_secs(10), 8192, ProcessOutcome::OutputLimitExceeded),
     ] {
         fs::write(path.join("src/lib.rs"), source).unwrap();
-        let result = run_with_bounds(
+        let result = run_with_bounds_for_test(
             &root,
             &policy,
             None,
@@ -930,7 +930,7 @@ assert_eq!(std::env::current_dir().unwrap().to_str().unwrap(), "/workspace");
         ("#[test] fn processes() { let mut children = Vec::new(); for _ in 0..256 { match std::process::Command::new(\"/usr/bin/sleep\").arg(\"20\").spawn() { Ok(child) => children.push(child), Err(_) => break, } } std::process::exit(0); }", ProcessResource::Processes),
     ] {
         fs::write(path.join("src/lib.rs"), source).unwrap();
-        let result = run_with_bounds(
+        let result = run_with_bounds_for_test(
             &root,
             &policy,
             None,
@@ -956,7 +956,7 @@ assert_eq!(std::env::current_dir().unwrap().to_str().unwrap(), "/workspace");
         thread::sleep(Duration::from_secs(2));
         cancel.store(true, Ordering::SeqCst);
     });
-    let result = run(&root, &policy, None);
+    let result = run_for_test(&root, &policy, None);
     trigger.join().unwrap();
     assert_eq!(result.outcome, ProcessOutcome::Cancelled, "{result:?}");
     assert!(result.cleanup_confirmed);
@@ -970,7 +970,7 @@ fn real_product_workspace_runs_the_fixed_profile() {
     let workspace = std::env::var_os("KRYPPER_TEST_WORKSPACE").expect("workspace required");
     let policy = OfflineCargoPolicy::new(Path::new(&toolchain), Path::new(&registry)).unwrap();
     let root = capture_workspace_root_at(Path::new(&workspace)).unwrap();
-    let result = run(&root, &policy, None);
+    let result = run_for_test(&root, &policy, None);
     assert!(result.succeeded(), "{result:?}");
     println!(
         "{:?} {} stdout bytes / {} stderr bytes; cleanup={}",

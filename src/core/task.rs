@@ -1,6 +1,9 @@
 use crate::tools::{capture_workspace_root, WorkspaceRoot};
 use std::fmt;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::{mpsc, Mutex};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use uuid::Uuid;
 
 /// The lifecycle states supported by a task.
@@ -611,11 +614,110 @@ pub struct Task {
     pub(super) id: Uuid,
     pub(super) description: String,
     pub(super) workspace_root: Result<Arc<WorkspaceRoot>, String>,
+    pub(super) workspace_revision: Arc<WorkspaceRevisionFence>,
     pub(super) state: TaskState,
     pub(super) events: Vec<TaskEvent>,
     pub(super) history: Vec<TaskHistoryEvent>,
     pub(super) activity_history: Vec<TaskActivityEvent>,
     pub(super) turns: Vec<Turn>,
+}
+
+/// Serializes Product-managed workspace mutations against process runs and tracks their epoch.
+/// This fence does not observe writes made directly by the embedding host.
+#[derive(Debug, Default)]
+pub(super) struct WorkspaceRevisionFence {
+    lock: RwLock<()>,
+    revision: AtomicU64,
+    #[cfg(test)]
+    pending_mutations: AtomicU64,
+    #[cfg(test)]
+    read_attempt_hook: std::sync::Mutex<Option<Arc<ReadAttemptHook>>>,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+pub(super) struct ReadAttemptHook {
+    arrived_sender: mpsc::SyncSender<()>,
+    arrived_receiver: Mutex<mpsc::Receiver<()>>,
+    proceed_sender: mpsc::SyncSender<()>,
+    proceed_receiver: Mutex<mpsc::Receiver<()>>,
+}
+
+#[cfg(test)]
+impl ReadAttemptHook {
+    pub(super) fn wait_until_read_attempted(&self) -> Result<(), ()> {
+        self.arrived_receiver
+            .lock()
+            .map_err(|_| ())?
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .map_err(|_| ())
+    }
+
+    pub(super) fn allow_read(&self) {
+        let _ = self.proceed_sender.send(());
+    }
+
+    fn pause_before_read(&self) -> Result<(), ()> {
+        self.arrived_sender.send(()).map_err(|_| ())?;
+        self.proceed_receiver
+            .lock()
+            .map_err(|_| ())?
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .map_err(|_| ())
+    }
+}
+
+impl WorkspaceRevisionFence {
+    pub(super) fn begin_read(&self) -> Result<(RwLockReadGuard<'_, ()>, u64), ()> {
+        #[cfg(test)]
+        if let Some(hook) = self
+            .read_attempt_hook
+            .lock()
+            .ok()
+            .and_then(|mut hook| hook.take())
+        {
+            hook.pause_before_read()?;
+        }
+        let guard = self.lock.read().map_err(|_| ())?;
+        let revision = self.revision.load(Ordering::Acquire);
+        Ok((guard, revision))
+    }
+
+    pub(super) fn begin_mutation(&self) -> Result<RwLockWriteGuard<'_, ()>, ()> {
+        #[cfg(test)]
+        self.pending_mutations.fetch_add(1, Ordering::SeqCst);
+        let result = self.lock.write();
+        #[cfg(test)]
+        self.pending_mutations.fetch_sub(1, Ordering::SeqCst);
+        let guard = result.map_err(|_| ())?;
+        let revision = self.revision.load(Ordering::Relaxed);
+        let next = revision.checked_add(1).ok_or(())?;
+        self.revision.store(next, Ordering::Release);
+        Ok(guard)
+    }
+
+    #[cfg(test)]
+    pub(super) fn pending_mutations(&self) -> u64 {
+        self.pending_mutations.load(Ordering::SeqCst)
+    }
+
+    #[cfg(test)]
+    pub(super) fn pause_next_read_for_test(&self) -> Arc<ReadAttemptHook> {
+        let (arrived_sender, arrived_receiver) = mpsc::sync_channel(1);
+        let (proceed_sender, proceed_receiver) = mpsc::sync_channel(1);
+        let hook = Arc::new(ReadAttemptHook {
+            arrived_sender,
+            arrived_receiver: Mutex::new(arrived_receiver),
+            proceed_sender,
+            proceed_receiver: Mutex::new(proceed_receiver),
+        });
+        *self.read_attempt_hook.lock().unwrap() = Some(Arc::clone(&hook));
+        hook
+    }
+
+    pub(super) fn current_revision(&self) -> u64 {
+        self.revision.load(Ordering::Acquire)
+    }
 }
 
 impl Task {
@@ -634,6 +736,7 @@ impl Task {
             id: Uuid::new_v4(),
             description: description.into(),
             workspace_root,
+            workspace_revision: Arc::new(WorkspaceRevisionFence::default()),
             state: TaskState::Pending,
             events: Vec::new(),
             history: Vec::new(),

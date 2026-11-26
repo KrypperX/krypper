@@ -51,7 +51,10 @@ matrix.
 - [`src/core/lifecycle.rs`](src/core/lifecycle.rs) defines `TaskSession` and
   owns session-wide task ordering and lifecycle coordination, snapshots, and
   checkpoint serialization, validation, workspace binding, and lifecycle
-  state. It re-exports the task domain types for compatibility.
+  state. Process grants remain host-owned and ephemeral; checkpoint restoration
+  starts with no grants. `TaskSession` also fences its managed workspace writes
+  with a per-task revision shared with offline Cargo authorization. It re-exports
+  the task domain types for compatibility.
 - [`src/tools.rs`](src/tools.rs) exposes the existing workspace operations to
   task-turn and CLI callers through one crate-internal Tools boundary.
   [`src/tools/registry.rs`](src/tools/registry.rs) provides a typed registry of

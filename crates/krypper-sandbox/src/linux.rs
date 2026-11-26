@@ -5,10 +5,11 @@ use crate::sandbox::sandbox;
 use crate::seccomp::compile_filter;
 use crate::{
     validate_test_filter, RunLimits, SandboxBackend, SandboxExecutionBackend,
-    SandboxIsolationEvidence, SandboxOutcome, SandboxRunRequest, SandboxRunResult,
+    SandboxIsolationEvidence, SandboxOutcome, SandboxRunRequest, SandboxRunResult, SpawnGateError,
     ValidatedExecutionRequirements,
 };
 use std::io;
+use std::process::Command;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
@@ -73,6 +74,7 @@ fn run_with_containment(request: SandboxRunRequest, contained: bool) -> SandboxR
         test_filter,
         limits,
         cancelled,
+        mut spawn_gate,
     } = request;
     let Some(limits) = RunLimits::new(
         limits.wall_millis,
@@ -203,7 +205,20 @@ fn run_with_containment(request: SandboxRunRequest, contained: bool) -> SandboxR
         )?;
         command.args(cargo_command_args(&requirements, test_filter.as_deref()));
         result.outcome = SandboxOutcome::SpawnFailed;
-        let mut child = ManagedChild::new(command.spawn()?);
+        let Some(gate) = spawn_gate.take() else {
+            result.outcome = SandboxOutcome::Denied;
+            result.diagnostic = Some("product spawn authorization gate is missing".into());
+            return Ok(());
+        };
+        let child = match gate(command, Box::new(|mut command: Command| command.spawn())) {
+            Ok(child) => child,
+            Err(SpawnGateError::Denied) => {
+                result.outcome = SandboxOutcome::Denied;
+                return Ok(());
+            }
+            Err(SpawnGateError::Spawn(error)) => return Err(error),
+        };
+        let mut child = ManagedChild::new(child);
         launched = true;
         let (out, err) = {
             let child = child.child_mut()?;
@@ -305,7 +320,7 @@ mod internal_outcome_tests {
     use super::{
         record_event, resolve_outcome, run_without_containment, SandboxRunRequest, StopReason,
     };
-    use crate::{RunLimits, SandboxOutcome, SandboxResource};
+    use crate::{RunLimits, SandboxOutcome, SandboxResource, SpawnGateError};
     use std::fs::File;
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
@@ -359,7 +374,10 @@ mod internal_outcome_tests {
             None,
             RunLimits::new(2_000, 1_000_000, 1024 * 1024, 8192, 1).unwrap(),
             Arc::new(AtomicBool::new(false)),
-        );
+        )
+        .with_spawn_gate(Box::new(|command, spawn| {
+            spawn(command).map_err(SpawnGateError::Spawn)
+        }));
         let result = run_without_containment(request);
         assert_eq!(result.outcome, SandboxOutcome::SandboxUnavailable);
         assert!(result.cleanup_confirmed);
@@ -383,7 +401,10 @@ mod internal_outcome_tests {
             None,
             RunLimits::offline_cargo_test(),
             Arc::new(AtomicBool::new(false)),
-        );
+        )
+        .with_spawn_gate(Box::new(|command, spawn| {
+            spawn(command).map_err(SpawnGateError::Spawn)
+        }));
 
         let result = {
             let _guard = super::recovery::try_active_lock().unwrap();

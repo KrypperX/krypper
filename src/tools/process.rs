@@ -16,7 +16,7 @@ mod tests;
 
 pub use self::outcome::{ProcessOutcome, ProcessResource};
 pub use self::policy::OfflineCargoPolicy;
-pub(crate) use self::policy::{validate_test_filter, MAX_TEST_FILTER_BYTES};
+pub(crate) use self::policy::{validate_test_filter, ProcessPolicyFacts, MAX_TEST_FILTER_BYTES};
 pub use self::result::ProcessResult;
 pub(crate) use self::supervisor::run;
 
@@ -37,6 +37,40 @@ use std::time::Duration;
 #[cfg(all(test, target_os = "linux"))]
 use uuid::Uuid;
 
+#[cfg(test)]
+pub(crate) fn run_for_test(
+    root: &crate::tools::WorkspaceRoot,
+    policy: &OfflineCargoPolicy,
+    test_filter: Option<&str>,
+) -> ProcessResult {
+    run(root, policy, test_filter, allow_spawn_for_test())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn run_with_bounds_for_test(
+    root: &crate::tools::WorkspaceRoot,
+    policy: &OfflineCargoPolicy,
+    test_filter: Option<&str>,
+    wall: Duration,
+    output: usize,
+    cpu_budget_usec: u64,
+) -> ProcessResult {
+    run_with_bounds(
+        root,
+        policy,
+        test_filter,
+        wall,
+        output,
+        cpu_budget_usec,
+        allow_spawn_for_test(),
+    )
+}
+
+#[cfg(test)]
+fn allow_spawn_for_test() -> krypper_sandbox::SpawnAuthorizationGate {
+    Box::new(|command, spawn| spawn(command).map_err(krypper_sandbox::SpawnGateError::Spawn))
+}
+
 /// The effective user id of this process.
 #[cfg(target_os = "linux")]
 fn effective_uid() -> u32 {
@@ -46,7 +80,7 @@ fn effective_uid() -> u32 {
 
 #[cfg(all(test, target_os = "macos"))]
 mod unsupported_platform_tests {
-    use super::{run, OfflineCargoPolicy, ProcessOutcome};
+    use super::{run_for_test as run, OfflineCargoPolicy, ProcessOutcome};
     use crate::test_support::TempDir;
     use crate::tools::capture_workspace_root_at;
     use std::fs;

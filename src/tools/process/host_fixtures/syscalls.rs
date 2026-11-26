@@ -355,8 +355,11 @@ fn fixed_policy_and_descendant() {
     .unwrap();
 
     let root = capture_workspace_root_at(&path).unwrap();
-    let result =
-        crate::tools::process::run(&root, &policy(&host), Some("fixed_policy_and_descendant"));
+    let result = crate::tools::process::run_for_test(
+        &root,
+        &policy(&host),
+        Some("fixed_policy_and_descendant"),
+    );
     assert!(
         result.succeeded(),
         "syscall-filter Cargo fixture failed: {result:?}"

@@ -1,6 +1,6 @@
 //! Bounded limits and cancellation against the real sandbox, gated on a real host.
 
-use super::super::supervisor::{run, run_with_bounds};
+use super::super::{run_for_test as run, run_with_bounds_for_test as run_with_bounds};
 use super::{gate, policy, workspace};
 use crate::tools::capture_workspace_root_at;
 use crate::tools::process::{ProcessOutcome, ProcessResource};
