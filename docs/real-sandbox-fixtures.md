@@ -32,6 +32,11 @@ Setting the gate is a claim about the host, so the gate then probes every prereq
 | Unified cgroup v2 | `/sys/fs/cgroup/cgroup.controllers` is readable |
 | User systemd manager | `/run/user/<uid>/systemd/private` exists |
 
+The existence check does not validate Bubblewrap's version or option support. The fixed command
+requires Bubblewrap 0.10.0 or a compatible build that accepts all options it uses, including
+`--ro-bind-fd`. The product readiness probe runs the exact command before starting Cargo and fails
+setup if the installed build rejects an option; ordinary CI does not establish host compatibility.
+
 `KRYPPER_TEST_TOOLCHAIN` and `KRYPPER_TEST_REGISTRY` must also point at preprovisioned
 directories; `OfflineCargoPolicy::new` validates that `bin/cargo` and `bin/rustc` are real ELF
 executables. These variables configure the test harness only. They are never product request

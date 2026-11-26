@@ -103,12 +103,16 @@ and does not alter the process profile or default Harness behavior.
 ## Required host capabilities
 
 The initial supported deployment is a non-root Linux user service with
-cgroup v2 delegation, an accessible user systemd manager, and Bubblewrap 0.9
-or compatible required options. The implementation requires `cgroup.kill`,
+cgroup v2 delegation, an accessible user systemd manager, and Bubblewrap
+0.10.0 or a compatible build that accepts every option used by the fixed
+command, including `--ro-bind-fd`. The implementation requires `cgroup.kill`,
 `close_range(CLOSE_RANGE_CLOEXEC)`, mandatory user/mount/PID/network/IPC/UTS/
-cgroup namespaces, and disabled nested user namespaces. Tested host:
-Linux 6.8, systemd 255 and Bubblewrap 0.9.0. Other deployments are unverified;
-missing primitives fail closed.
+cgroup namespaces, and disabled nested user namespaces. A historical fixture
+run recorded Linux 6.8, systemd 255 and Bubblewrap 0.9.0; it predates the
+current seccomp command and is not runtime evidence for the current Product
+revision. A version string alone does not establish option compatibility. No
+current-revision host fixture result is recorded here; other deployments are
+unverified, and missing primitives or options fail closed.
 
 The embedding process must be in the delegated user-manager cgroup subtree.
 A login session outside that subtree can create a user unit but cannot
@@ -123,6 +127,8 @@ workspace code can launch, Tools reads back finite `cpu.max`, `memory.max`,
 `memory.swap.max`, and `pids.max` and verifies attachment and whole-tree kill
 access. A trusted `/usr/bin/true` probe uses the exact sandbox mounts, namespace
 flags, descriptor handling and resource attachment that the Cargo launch uses.
+It also detects Bubblewrap builds that reject required command options before
+Cargo or workspace code is launched.
 There is no optional namespace flag or direct-spawn fallback.
 
 ## Confinement and fixed bounds
