@@ -4,8 +4,9 @@ use crate::host::effective_uid;
 use crate::sandbox::sandbox;
 use crate::seccomp::compile_filter;
 use crate::{
-    validate_test_filter, RunLimits, SandboxBackend, SandboxIsolationEvidence, SandboxOutcome,
-    SandboxRunRequest, SandboxRunResult, ValidatedExecutionRequirements,
+    validate_test_filter, RunLimits, SandboxBackend, SandboxExecutionBackend,
+    SandboxIsolationEvidence, SandboxOutcome, SandboxRunRequest, SandboxRunResult,
+    ValidatedExecutionRequirements,
 };
 use std::io;
 use std::sync::atomic::Ordering;
@@ -26,8 +27,37 @@ use recovery::{
     hold_for_recovery, is_cleanup_uncertain, mark_cleanup_uncertain, try_active_lock,
     ActiveLockError, HostLease, HostLeaseError,
 };
-pub(super) fn run(request: SandboxRunRequest) -> SandboxRunResult {
-    run_with_containment(request, effective_uid() != 0)
+struct Backend;
+
+pub(super) fn backend() -> &'static dyn SandboxExecutionBackend {
+    static BACKEND: Backend = Backend;
+    &BACKEND
+}
+
+impl SandboxExecutionBackend for Backend {
+    fn identity(&self) -> Option<SandboxBackend> {
+        Some(SandboxBackend::Bubblewrap)
+    }
+
+    fn supports_control(&self, control: crate::SandboxControl) -> bool {
+        match control {
+            crate::SandboxControl::SeccompFilter => {
+                cfg!(all(
+                    target_endian = "little",
+                    any(
+                        target_arch = "x86_64",
+                        target_arch = "aarch64",
+                        target_arch = "riscv64"
+                    )
+                ))
+            }
+            _ => true,
+        }
+    }
+
+    fn run(&self, request: SandboxRunRequest) -> SandboxRunResult {
+        run_with_containment(request, effective_uid() != 0)
+    }
 }
 
 #[cfg(test)]

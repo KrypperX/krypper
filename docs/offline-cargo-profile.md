@@ -43,10 +43,20 @@ Cargo's fixed `--` separator.
 
 Legacy version 1 `ProcessProfile` values remain metadata-only. Only the fixed
 version 2 profile has execution requirements and can be passed by the Tools
-adapter to `SandboxRunRequest`. That common runner boundary validates the exact
-contract, captured resource roles, and effective limits before platform
-dispatch or the readiness probe. On unsupported platforms, a valid request
-returns the existing unavailable outcome without attempting a process launch.
+adapter to `SandboxRunRequest`. The common runner boundary validates the exact
+contract, captured resource roles, and effective limits, then compares the
+profile's required controls with the selected backend's declared capabilities.
+If any required control is missing, or the platform has no backend, the request
+returns `SandboxUnavailable` before backend setup or payload launch. A declared
+capability means the backend can attempt to establish that control; it does not
+prove that the current host provides it or that setup succeeded.
+
+The Linux backend still performs its host prerequisite checks, exact Bubblewrap
+readiness probe, and cgroup readback before launching Cargo. A setup failure
+returns a typed non-success result and never falls back to a less restricted
+launch. `SandboxIsolationEvidence` remains separate from backend capabilities:
+it records per-run setup status, while behavioral enforcement still requires
+fixtures on a provisioned host.
 
 `ProfileLimits` are hard profile ceilings: wall time is stored in seconds and
 CPU time in milliseconds. Each request carries separate effective `RunLimits`

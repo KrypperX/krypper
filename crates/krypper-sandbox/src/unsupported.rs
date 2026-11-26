@@ -1,8 +1,30 @@
 use crate::{
-    SandboxControl, SandboxIsolationEvidence, SandboxOutcome, SandboxRunRequest, SandboxRunResult,
+    SandboxBackend, SandboxControl, SandboxExecutionBackend, SandboxIsolationEvidence,
+    SandboxOutcome, SandboxRunRequest, SandboxRunResult,
 };
 
-pub(super) fn run(request: SandboxRunRequest) -> SandboxRunResult {
+struct Backend;
+
+pub(super) fn backend() -> &'static dyn SandboxExecutionBackend {
+    static BACKEND: Backend = Backend;
+    &BACKEND
+}
+
+impl SandboxExecutionBackend for Backend {
+    fn identity(&self) -> Option<SandboxBackend> {
+        None
+    }
+
+    fn supports_control(&self, _control: SandboxControl) -> bool {
+        false
+    }
+
+    fn run(&self, request: SandboxRunRequest) -> SandboxRunResult {
+        run_unsupported(request)
+    }
+}
+
+fn run_unsupported(request: SandboxRunRequest) -> SandboxRunResult {
     let mut result = SandboxRunResult::empty(request.run_id, SandboxOutcome::SandboxUnavailable, 0);
     result.diagnostic = Some("process sandbox is unavailable on this platform".into());
     let mut evidence = SandboxIsolationEvidence::new(None);
