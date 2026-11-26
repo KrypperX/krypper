@@ -4,15 +4,20 @@
 //! workspace files, provider settings, and checkpoints cannot select it.
 
 /// The permission profile selected by a user for a task.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PermissionMode {
     /// Ask before effects that exceed bounded workspace authority.
-    #[default]
     Ask,
     /// Automatically allow bounded workspace effects and the fixed offline process profile.
     RiskBased,
     /// Unrestricted host execution is not supported by the current runner.
     FullAccess,
+}
+
+impl Default for PermissionMode {
+    fn default() -> Self {
+        Self::Ask
+    }
 }
 
 impl PermissionMode {
