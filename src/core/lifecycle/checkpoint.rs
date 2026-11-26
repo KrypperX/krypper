@@ -1,5 +1,5 @@
 use super::*;
-use crate::tools::encode_workspace_path;
+use crate::tools::{encode_workspace_path, FileIdentity};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -477,7 +477,7 @@ impl TaskSession {
         }
         let mut tasks = Vec::with_capacity(self.tasks.len());
         let mut workspace_path: Option<Vec<u8>> = None;
-        let mut workspace_identity: Option<(u64, u64)> = None;
+        let mut workspace_identity: Option<FileIdentity> = None;
         for task in &self.tasks {
             let workspace_root = task.workspace_root.as_ref().map_err(|_| {
                 TaskSessionCheckpointError::WorkspaceUnavailable {
@@ -489,8 +489,6 @@ impl TaskSession {
                     task_id: Some(task.id),
                 }
             })?;
-            let task_workspace_identity =
-                (task_workspace_identity.volume, task_workspace_identity.file);
             let task_workspace_path = encode_workspace_path(workspace_root.path().as_os_str());
             if workspace_path
                 .as_deref()
@@ -599,10 +597,11 @@ impl TaskSession {
                     task_id: Some(task_id),
                 }
             })?;
-            let workspace_revision = crate::core::task::WorkspaceRevisionFence::for_identity((
-                workspace_device,
-                workspace_inode,
-            ));
+            let workspace_revision =
+                crate::core::task::WorkspaceRevisionFence::for_identity(FileIdentity {
+                    volume: workspace_device,
+                    file: workspace_inode,
+                });
             let task = checkpoint_task.restore(
                 task_id,
                 workspace_root,
@@ -628,7 +627,7 @@ impl TaskSession {
 
 fn checkpoint_task(
     task: &Task,
-    workspace_identity: (u64, u64),
+    workspace_identity: FileIdentity,
 ) -> Result<CheckpointTask, TaskSessionCheckpointError> {
     validate_restored_task(task)?;
     let workspace_root = task.workspace_root.as_ref().map_err(|_| {
@@ -636,14 +635,12 @@ fn checkpoint_task(
             task_id: Some(task.id),
         }
     })?;
-    let (workspace_device, workspace_inode) = workspace_identity;
-
     Ok(CheckpointTask {
         id: task.id.to_string(),
         description: task.description.clone(),
         workspace_path: encode_workspace_path(workspace_root.path().as_os_str()),
-        workspace_device,
-        workspace_inode,
+        workspace_device: workspace_identity.volume,
+        workspace_inode: workspace_identity.file,
         state: task.state.into(),
         events: task
             .events

@@ -18,8 +18,8 @@ pub(crate) use workspace_safety::{
     create_text_file_at, encode_workspace_path, list_directory, list_task_directory_names_at,
     preview_replace_text, preview_workspace_patch, read_project_guidance_at,
     read_root_agents_md_at, read_text_file, read_text_file_at, replace_text_file_at_with_revision,
-    search_text_files_at, search_tree_text_files_at, text_revision, CliError, PatchEvidence,
-    RootGuidanceReadError, WorkspaceRoot, MAX_PATCH_BYTES,
+    search_text_files_at, search_tree_text_files_at, text_revision, CliError, FileIdentity,
+    PatchEvidence, RootGuidanceReadError, WorkspaceRoot, MAX_PATCH_BYTES,
 };
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 //! TaskSession-owned grants and canonical binding for the fixed offline Cargo operation.
 
 use crate::tools::process::{OfflineCargoPolicy, ProcessPolicyFacts};
+use crate::tools::FileIdentity;
 use krypper_sandbox::{
     NetworkRequirement, PinnedResourceAccess, PinnedResourceId, ProcessTreeRequirement, RunLimits,
     SandboxExecutable, SyscallRequirement,
@@ -194,7 +195,7 @@ pub(super) struct ProcessIntent {
     pub(super) scope: GrantScope,
     pub(super) filter: Option<String>,
     pub(super) expiry: Option<(u64, u32)>,
-    pub(super) workspace_identity: (u64, u64),
+    pub(super) workspace_identity: FileIdentity,
     pub(super) workspace_revision: u64,
     pub(super) facts: ProcessPolicyFacts,
 }
@@ -204,7 +205,7 @@ impl ProcessIntent {
         grant: &ProcessGrant,
         session_id: Uuid,
         filter: Option<&str>,
-        workspace_identity: (u64, u64),
+        workspace_identity: FileIdentity,
         workspace_revision: u64,
         facts: ProcessPolicyFacts,
     ) -> Self {
@@ -542,12 +543,12 @@ impl CanonicalEncoder {
         Ok(())
     }
 
-    fn identity(&mut self, tag: u16, identity: Option<(u64, u64)>) {
+    fn identity(&mut self, tag: u16, identity: Option<FileIdentity>) {
         match identity {
-            Some((device, inode)) => {
+            Some(identity) => {
                 let mut encoded = vec![1];
-                encoded.extend_from_slice(&device.to_be_bytes());
-                encoded.extend_from_slice(&inode.to_be_bytes());
+                encoded.extend_from_slice(&identity.volume.to_be_bytes());
+                encoded.extend_from_slice(&identity.file.to_be_bytes());
                 self.field(tag, &encoded);
             }
             None => self.field(tag, &[0]),
@@ -563,6 +564,7 @@ mod tests {
     };
     use crate::test_support::TempDir;
     use crate::tools::process::{OfflineCargoPolicy, ProcessPolicyFacts};
+    use crate::tools::FileIdentity;
     use krypper_sandbox::ValidatedExecutionRequirements;
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -585,7 +587,10 @@ mod tests {
             scope: GrantScope::ExactFilter,
             filter: Some("focused_case".into()),
             expiry: Some((1_800_000_000, 123_456_789)),
-            workspace_identity: (10, 11),
+            workspace_identity: FileIdentity {
+                volume: 10,
+                file: 11,
+            },
             workspace_revision: 12,
             facts: ProcessPolicyFacts {
                 profile_version: 2,
@@ -601,8 +606,14 @@ mod tests {
                 profile_limits: limits,
                 effective_limits: limits.to_run_limits().unwrap(),
                 requirements,
-                toolchain_identity: Some((20, 21)),
-                registry_identity: Some((30, 31)),
+                toolchain_identity: Some(FileIdentity {
+                    volume: 20,
+                    file: 21,
+                }),
+                registry_identity: Some(FileIdentity {
+                    volume: 30,
+                    file: 31,
+                }),
             },
         }
     }
@@ -640,7 +651,10 @@ mod tests {
             &grant,
             Uuid::from_u128(4),
             filter,
-            (10, 11),
+            FileIdentity {
+                volume: 10,
+                file: 11,
+            },
             12,
             grant.policy.authorization_facts().unwrap(),
         );
@@ -689,13 +703,19 @@ mod tests {
         changed.grant_epoch += 1;
         assert_ne!(changed.digest().unwrap(), digest);
         let mut changed = original.clone();
-        changed.facts.toolchain_identity = Some((99, 21));
+        changed.facts.toolchain_identity = Some(FileIdentity {
+            volume: 99,
+            file: 21,
+        });
         assert_ne!(changed.digest().unwrap(), digest);
         let mut changed = original.clone();
-        changed.workspace_identity.1 += 1;
+        changed.workspace_identity.file += 1;
         assert_ne!(changed.digest().unwrap(), digest);
         let mut changed = original.clone();
-        changed.facts.registry_identity = Some((30, 99));
+        changed.facts.registry_identity = Some(FileIdentity {
+            volume: 30,
+            file: 99,
+        });
         assert_ne!(changed.digest().unwrap(), digest);
         let mut changed = original.clone();
         changed.facts.effective_limits.wall_millis -= 1;
@@ -819,7 +839,18 @@ mod tests {
             epoch: grant.epoch,
             current: Some(grant.clone()),
         };
-        let mut changed_intent = intent();
+        let mut changed_intent = ProcessIntent::for_grant(
+            &grant,
+            Uuid::from_u128(4),
+            Some("selected"),
+            FileIdentity {
+                volume: 10,
+                file: 11,
+            },
+            12,
+            grant.policy.authorization_facts().unwrap(),
+        );
+        assert_eq!(changed_intent.digest().unwrap(), digest);
         changed_intent.workspace_revision += 1;
         let changed_digest = changed_intent.digest().unwrap();
         let changed = start_if_authorized(&mut state, &grant, digest, Some(changed_digest), || {

@@ -26,7 +26,7 @@ use crate::tools::{
 use krypper_sandbox::{SpawnAuthorizationGate, SpawnGateError};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLockWriteGuard};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -248,9 +248,7 @@ impl TaskSession {
         };
         let workspace_revision = match &workspace_root {
             Ok(root) => match root.identity() {
-                Ok(identity) => {
-                    WorkspaceRevisionFence::for_identity((identity.volume, identity.file))
-                }
+                Ok(identity) => WorkspaceRevisionFence::for_identity(identity),
                 Err(_) => Arc::new(WorkspaceRevisionFence::default()),
             },
             Err(_) => Arc::new(WorkspaceRevisionFence::default()),
@@ -695,16 +693,16 @@ impl TaskSession {
                 .unwrap_or_else(|| crate::ProcessResult::denied(test_filter)));
         }
         let policy = Arc::clone(&grant.policy);
-        let spawn_gate = process_spawn_gate(
+        let spawn_gate = process_spawn_gate(ProcessSpawnGateContext {
             state,
-            grant,
-            intent,
+            expected: grant,
+            expected_intent: intent,
             expected_digest,
-            Arc::clone(&task.workspace_revision),
-            Arc::clone(root),
-            self.id,
-            test_filter.map(str::to_owned),
-        );
+            revision: Arc::clone(&task.workspace_revision),
+            root: Arc::clone(root),
+            session_id: self.id,
+            test_filter: test_filter.map(str::to_owned),
+        });
         Ok(crate::tools::process::run(
             root,
             &policy,
@@ -840,16 +838,12 @@ impl TaskSession {
                 message: format!("task workspace could not be resolved: {message}"),
             }
         })?;
-        if !workspace_revision_fence_is_registered_for_root(&task.workspace_revision, root) {
-            return Err(WorkspaceCreateDirectoryError::Directory {
-                message: "workspace revision state is unavailable".into(),
-            });
-        }
-        let _mutation = task.workspace_revision.begin_mutation().map_err(|_| {
-            WorkspaceCreateDirectoryError::Directory {
-                message: "workspace revision state is unavailable".into(),
-            }
-        })?;
+        let _mutation =
+            begin_managed_workspace_mutation(&task.workspace_revision, root).map_err(|_| {
+                WorkspaceCreateDirectoryError::Directory {
+                    message: "workspace revision state is unavailable".into(),
+                }
+            })?;
         create_directory_at(root, path.as_os_str()).map_err(|error| {
             WorkspaceCreateDirectoryError::Directory {
                 message: error.message().to_owned(),
@@ -938,17 +932,12 @@ impl TaskSession {
             .map_err(|message| WorkspaceWriteError::File {
                 message: format!("task workspace could not be resolved: {message}"),
             })?;
-        if !workspace_revision_fence_is_registered_for_root(&task.workspace_revision, root) {
-            return Err(WorkspaceWriteError::File {
-                message: "workspace revision state is unavailable".into(),
-            });
-        }
         let _mutation =
-            task.workspace_revision
-                .begin_mutation()
-                .map_err(|_| WorkspaceWriteError::File {
+            begin_managed_workspace_mutation(&task.workspace_revision, root).map_err(|_| {
+                WorkspaceWriteError::File {
                     message: "workspace revision state is unavailable".into(),
-                })?;
+                }
+            })?;
         create_text_file_at(root, path.as_os_str(), text).map_err(|error| {
             WorkspaceWriteError::File {
                 message: error.message().to_owned(),
@@ -999,17 +988,12 @@ impl TaskSession {
             .map_err(|message| WorkspaceReplaceError::File {
                 message: format!("task workspace could not be resolved: {message}"),
             })?;
-        if !workspace_revision_fence_is_registered_for_root(&task.workspace_revision, root) {
-            return Err(WorkspaceReplaceError::File {
-                message: "workspace revision state is unavailable".into(),
-            });
-        }
         let _mutation =
-            task.workspace_revision
-                .begin_mutation()
-                .map_err(|_| WorkspaceReplaceError::File {
+            begin_managed_workspace_mutation(&task.workspace_revision, root).map_err(|_| {
+                WorkspaceReplaceError::File {
                     message: "workspace revision state is unavailable".into(),
-                })?;
+                }
+            })?;
         replace_text_file_at_with_revision(
             root,
             path.as_os_str(),
@@ -1044,17 +1028,12 @@ impl TaskSession {
             .map_err(|message| WorkspaceReplaceError::File {
                 message: format!("task workspace could not be resolved: {message}"),
             })?;
-        if !workspace_revision_fence_is_registered_for_root(&task.workspace_revision, root) {
-            return Err(WorkspaceReplaceError::File {
-                message: "workspace revision state is unavailable".into(),
-            });
-        }
         let _mutation =
-            task.workspace_revision
-                .begin_mutation()
-                .map_err(|_| WorkspaceReplaceError::File {
+            begin_managed_workspace_mutation(&task.workspace_revision, root).map_err(|_| {
+                WorkspaceReplaceError::File {
                     message: "workspace revision state is unavailable".into(),
-                })?;
+                }
+            })?;
         apply_patch_file_at_with_revision(root, path.as_os_str(), patch, expected_revision).map_err(
             |error| WorkspaceReplaceError::File {
                 message: error.message().to_owned(),
@@ -1083,7 +1062,7 @@ fn process_intent(
         grant,
         session_id,
         test_filter,
-        (identity.volume, identity.file),
+        identity,
         revision,
         facts,
     ))
@@ -1096,19 +1075,41 @@ fn workspace_revision_fence_is_registered_for_root(
     let Ok(identity) = root.identity() else {
         return false;
     };
-    WorkspaceRevisionFence::is_registered_for_identity(revision, (identity.volume, identity.file))
+    WorkspaceRevisionFence::is_registered_for_identity(revision, identity)
 }
 
-fn process_spawn_gate(
+fn begin_managed_workspace_mutation<'a>(
+    revision: &'a Arc<WorkspaceRevisionFence>,
+    root: &WorkspaceRoot,
+) -> Result<RwLockWriteGuard<'a, ()>, ()> {
+    if !workspace_revision_fence_is_registered_for_root(revision, root) {
+        return Err(());
+    }
+    revision.begin_mutation()
+}
+
+struct ProcessSpawnGateContext {
     state: Arc<Mutex<ProcessGrantState>>,
     expected: ProcessGrant,
     expected_intent: ProcessIntent,
     expected_digest: [u8; 32],
-    revision: Arc<crate::core::task::WorkspaceRevisionFence>,
+    revision: Arc<WorkspaceRevisionFence>,
     root: Arc<WorkspaceRoot>,
     session_id: Uuid,
     test_filter: Option<String>,
-) -> SpawnAuthorizationGate {
+}
+
+fn process_spawn_gate(context: ProcessSpawnGateContext) -> SpawnAuthorizationGate {
+    let ProcessSpawnGateContext {
+        state,
+        expected,
+        expected_intent,
+        expected_digest,
+        revision,
+        root,
+        session_id,
+        test_filter,
+    } = context;
     Box::new(move |command, spawn_action| {
         if !workspace_revision_fence_is_registered_for_root(&revision, &root) {
             return Err(SpawnGateError::Denied);
@@ -1518,8 +1519,7 @@ mod process_grant_tests {
                     .unwrap()
                 )
             );
-            assert_eq!(identity.volume, current_intent.workspace_identity.0);
-            assert_eq!(identity.file, current_intent.workspace_identity.1);
+            assert_eq!(identity, current_intent.workspace_identity);
         }
 
         let result = session
@@ -1878,11 +1878,11 @@ mod process_grant_tests {
     }
 
     #[test]
-    fn product_spawn_gate_consumes_one_shot_at_spawn_even_on_spawn_failure() {
+    fn product_spawn_gate_rechecks_workspace_fence_and_consumes_one_shot_at_spawn() {
         let workspace = TempDir::with_prefix("process-grant-gate-workspace-");
         let root = Arc::new(capture_workspace_root_at_with_error(workspace.path()).unwrap());
         let identity = root.identity().unwrap();
-        let revision = WorkspaceRevisionFence::for_identity((identity.volume, identity.file));
+        let revision = WorkspaceRevisionFence::for_identity(identity);
         let (_runtime, policy) = policy_fixture();
         let expiry = GrantExpiry::from_lifetime(Duration::from_secs(60)).unwrap();
         let mut grant = ProcessGrant {
@@ -1912,16 +1912,16 @@ mod process_grant_tests {
             epoch: grant.epoch,
             current: Some(grant.clone()),
         }));
-        let gate = process_spawn_gate(
-            Arc::clone(&state),
-            grant.clone(),
-            intent.clone(),
-            digest,
-            Arc::clone(&revision),
-            Arc::clone(&root),
+        let gate = process_spawn_gate(ProcessSpawnGateContext {
+            state: Arc::clone(&state),
+            expected: grant.clone(),
+            expected_intent: intent.clone(),
+            expected_digest: digest,
+            revision: Arc::clone(&revision),
+            root: Arc::clone(&root),
             session_id,
-            Some("selected_case".into()),
-        );
+            test_filter: Some("selected_case".into()),
+        });
         let spawn_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let spawn_calls_for_denied = Arc::clone(&spawn_calls);
         let denied = gate(
@@ -1935,16 +1935,43 @@ mod process_grant_tests {
         assert_eq!(spawn_calls.load(Ordering::SeqCst), 0);
         assert!(!state.lock().unwrap().current.as_ref().unwrap().consumed);
 
-        let gate = process_spawn_gate(
-            Arc::clone(&state),
-            grant,
-            intent.clone(),
-            digest,
+        let fallback_revision = Arc::new(WorkspaceRevisionFence::default());
+        assert!(!workspace_revision_fence_is_registered_for_root(
+            &fallback_revision,
+            &root
+        ));
+        let fence_gate = process_spawn_gate(ProcessSpawnGateContext {
+            state: Arc::clone(&state),
+            expected: grant.clone(),
+            expected_intent: intent.clone(),
+            expected_digest: digest,
+            revision: fallback_revision,
+            root: Arc::clone(&root),
+            session_id,
+            test_filter: Some("selected_case".into()),
+        });
+        let spawn_calls_for_fence = Arc::clone(&spawn_calls);
+        let fence_denied = fence_gate(
+            command_for_intent(&intent),
+            Box::new(move |_command| {
+                spawn_calls_for_fence.fetch_add(1, Ordering::SeqCst);
+                Err::<std::process::Child, _>(std::io::Error::other("injected spawn failure"))
+            }),
+        );
+        assert!(matches!(fence_denied, Err(SpawnGateError::Denied)));
+        assert_eq!(spawn_calls.load(Ordering::SeqCst), 0);
+        assert!(!state.lock().unwrap().current.as_ref().unwrap().consumed);
+
+        let gate = process_spawn_gate(ProcessSpawnGateContext {
+            state: Arc::clone(&state),
+            expected: grant,
+            expected_intent: intent.clone(),
+            expected_digest: digest,
             revision,
             root,
             session_id,
-            Some("selected_case".into()),
-        );
+            test_filter: Some("selected_case".into()),
+        });
         let spawn_calls_for_failed = Arc::clone(&spawn_calls);
         let result = gate(
             command_for_intent(&intent),

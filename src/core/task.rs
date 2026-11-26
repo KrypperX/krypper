@@ -1,4 +1,4 @@
-use crate::tools::{capture_workspace_root, WorkspaceRoot};
+use crate::tools::{capture_workspace_root, FileIdentity, WorkspaceRoot};
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -636,7 +636,7 @@ pub(super) struct WorkspaceRevisionFence {
     read_attempt_hook: std::sync::Mutex<Option<Arc<ReadAttemptHook>>>,
 }
 
-type WorkspaceFenceRegistry = Mutex<HashMap<(u64, u64), Weak<WorkspaceRevisionFence>>>;
+type WorkspaceFenceRegistry = Mutex<HashMap<FileIdentity, Weak<WorkspaceRevisionFence>>>;
 
 // Weak entries share fences by filesystem identity without retaining idle workspaces.
 static WORKSPACE_REVISION_FENCES: OnceLock<WorkspaceFenceRegistry> = OnceLock::new();
@@ -675,7 +675,7 @@ impl ReadAttemptHook {
 }
 
 impl WorkspaceRevisionFence {
-    pub(super) fn for_identity(identity: (u64, u64)) -> Arc<Self> {
+    pub(super) fn for_identity(identity: FileIdentity) -> Arc<Self> {
         let fences = WORKSPACE_REVISION_FENCES.get_or_init(Default::default);
         let mut fences = fences
             .lock()
@@ -689,7 +689,7 @@ impl WorkspaceRevisionFence {
         fence
     }
 
-    pub(super) fn is_registered_for_identity(fence: &Arc<Self>, identity: (u64, u64)) -> bool {
+    pub(super) fn is_registered_for_identity(fence: &Arc<Self>, identity: FileIdentity) -> bool {
         WORKSPACE_REVISION_FENCES
             .get()
             .and_then(|fences| fences.lock().ok())
@@ -758,9 +758,7 @@ impl Task {
         let workspace_revision = match &workspace_root {
             Ok(root) => root
                 .identity()
-                .map(|identity| {
-                    WorkspaceRevisionFence::for_identity((identity.volume, identity.file))
-                })
+                .map(WorkspaceRevisionFence::for_identity)
                 .unwrap_or_else(|_| Arc::new(WorkspaceRevisionFence::default())),
             Err(_) => Arc::new(WorkspaceRevisionFence::default()),
         };

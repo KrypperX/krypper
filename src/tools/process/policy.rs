@@ -1,6 +1,7 @@
 //! The fixed offline Cargo policy: limits, test filters and the trusted toolchain profile.
 
 use crate::tools::process_profile::ProcessProfile;
+use crate::tools::FileIdentity;
 #[cfg(target_os = "linux")]
 use crate::tools::{capture_workspace_root_at, WorkspaceRoot};
 use krypper_sandbox::{ProfileLimits, RunLimits, ValidatedExecutionRequirements};
@@ -42,8 +43,8 @@ pub(crate) struct ProcessPolicyFacts {
     pub(crate) profile_limits: ProfileLimits,
     pub(crate) effective_limits: RunLimits,
     pub(crate) requirements: ValidatedExecutionRequirements,
-    pub(crate) toolchain_identity: Option<(u64, u64)>,
-    pub(crate) registry_identity: Option<(u64, u64)>,
+    pub(crate) toolchain_identity: Option<FileIdentity>,
+    pub(crate) registry_identity: Option<FileIdentity>,
 }
 
 impl OfflineCargoPolicy {
@@ -102,12 +103,10 @@ impl OfflineCargoPolicy {
         let (toolchain_identity, registry_identity) = (
             self.toolchain
                 .identity()
-                .map(|identity| (identity.volume, identity.file))
                 .map_err(|_| "toolchain identity is unavailable")
                 .map(Some)?,
             self.registry
                 .identity()
-                .map(|identity| (identity.volume, identity.file))
                 .map_err(|_| "registry identity is unavailable")
                 .map(Some)?,
         );
