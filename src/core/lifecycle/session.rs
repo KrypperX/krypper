@@ -1233,12 +1233,12 @@ mod process_grant_tests {
             "/run/krypper-sandbox-runner",
             "--krypper-landlock-runner-v1",
             "--status-fd",
-            "204",
-            "--ack-fd",
-            "205",
-            "--optional",
-            "--",
         ]);
+        command
+            .arg(krypper_sandbox::runner_protocol::STATUS_FD.to_string())
+            .arg("--ack-fd")
+            .arg(krypper_sandbox::runner_protocol::ACK_FD.to_string())
+            .args(["--optional", "--"]);
         command.arg(&intent.facts.executable);
         command.args(&intent.facts.arguments);
         if let Some(filter) = &intent.filter {
@@ -1268,12 +1268,12 @@ mod process_grant_tests {
             "/run/krypper-sandbox-runner",
             "--krypper-landlock-runner-v1",
             "--status-fd",
-            "204",
-            "--ack-fd",
-            "205",
-            "--optional",
-            "--",
         ]);
+        command
+            .arg(krypper_sandbox::runner_protocol::STATUS_FD.to_string())
+            .arg("--ack-fd")
+            .arg(krypper_sandbox::runner_protocol::ACK_FD.to_string())
+            .args(["--optional", "--"]);
         command.arg(&intent.facts.executable);
         command.args(&intent.facts.arguments);
         if let Some(filter) = &intent.filter {

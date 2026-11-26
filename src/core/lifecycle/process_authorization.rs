@@ -2,6 +2,7 @@
 
 use crate::tools::process::{OfflineCargoPolicy, ProcessPolicyFacts};
 use crate::tools::FileIdentity;
+use krypper_sandbox::runner_protocol::{ACK_FD, STATUS_FD};
 use krypper_sandbox::{
     NetworkRequirement, PinnedResourceAccess, PinnedResourceId, ProcessTreeRequirement, RunLimits,
     SandboxExecutable, SyscallRequirement,
@@ -375,9 +376,9 @@ pub(super) fn launch_command_matches_intent(command: &Command, intent: &ProcessI
         RUNNER_PATH.to_owned(),
         "--krypper-landlock-runner-v1".to_owned(),
         "--status-fd".to_owned(),
-        "204".to_owned(),
+        STATUS_FD.to_string(),
         "--ack-fd".to_owned(),
-        "205".to_owned(),
+        ACK_FD.to_string(),
         "--optional".to_owned(),
         "--".to_owned(),
         intent.facts.executable.clone(),
