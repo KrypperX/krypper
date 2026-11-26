@@ -1214,24 +1214,16 @@ mod process_grant_tests {
 
     fn command_for_intent(intent: &ProcessIntent) -> Command {
         let mut command = Command::new("/usr/bin/bwrap");
-        for (fd, path) in [
-            ("200", "/workspace"),
-            ("201", "/toolchain"),
-            ("202", "/cargo/registry"),
-        ] {
-            command.args(["--ro-bind-fd", fd, path]);
+        for (fd, path) in krypper_sandbox::runner_contract::FIXED_FD_MOUNTS {
+            command.arg("--ro-bind-fd").arg(fd.to_string()).arg(path);
         }
-        command
-            .arg("--ro-bind-fd")
-            .arg(krypper_sandbox::runner_contract::RUNNER_MOUNT_FD.to_string())
-            .arg(krypper_sandbox::runner_contract::RUNNER_MOUNT_PATH);
         command.arg("--clearenv");
         for (name, value) in krypper_sandbox::OFFLINE_CARGO_TEST_ENVIRONMENT {
             command.args(["--setenv", name, value]);
         }
         command.args([
             "--chdir",
-            "/workspace",
+            krypper_sandbox::runner_contract::WORKSPACE_MOUNT.1,
             "--",
             krypper_sandbox::runner_contract::RUNNER_MOUNT_PATH,
             "--krypper-landlock-runner-v1",
@@ -1253,23 +1245,15 @@ mod process_grant_tests {
     fn command_with_extra_separator(intent: &ProcessIntent) -> Command {
         let mut command = Command::new("/usr/bin/bwrap");
         command.arg("--").arg("--clearenv");
-        for (fd, path) in [
-            ("200", "/workspace"),
-            ("201", "/toolchain"),
-            ("202", "/cargo/registry"),
-        ] {
-            command.args(["--ro-bind-fd", fd, path]);
+        for (fd, path) in krypper_sandbox::runner_contract::FIXED_FD_MOUNTS {
+            command.arg("--ro-bind-fd").arg(fd.to_string()).arg(path);
         }
-        command
-            .arg("--ro-bind-fd")
-            .arg(krypper_sandbox::runner_contract::RUNNER_MOUNT_FD.to_string())
-            .arg(krypper_sandbox::runner_contract::RUNNER_MOUNT_PATH);
         for (name, value) in krypper_sandbox::OFFLINE_CARGO_TEST_ENVIRONMENT {
             command.args(["--setenv", name, value]);
         }
         command.args([
             "--chdir",
-            "/workspace",
+            krypper_sandbox::runner_contract::WORKSPACE_MOUNT.1,
             "--",
             krypper_sandbox::runner_contract::RUNNER_MOUNT_PATH,
             "--krypper-landlock-runner-v1",

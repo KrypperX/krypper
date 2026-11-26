@@ -3,7 +3,7 @@
 #[cfg(target_os = "linux")]
 mod linux {
     use krypper_sandbox::runner_contract::{
-        is_valid_test_filter, FIXED_CARGO_ARGUMENTS, RUNNER_MOUNT_PATH,
+        is_valid_test_filter, FIXED_CARGO_ARGUMENTS, RUNNER_MOUNT_PATH, WORKSPACE_MOUNT,
     };
     use krypper_sandbox::runner_protocol::{
         encode_status, RunnerStatus, ACK_FD, ACK_FRAME, STATUS_FD,
@@ -18,7 +18,7 @@ mod linux {
     use std::process::Command;
 
     const CARGO_EXECUTABLE: &str = "/toolchain/bin/cargo";
-    const EXPECTED_CWD: &str = "/workspace";
+    const EXPECTED_CWD: &str = WORKSPACE_MOUNT.1;
 
     fn run() -> i32 {
         let Ok(arguments) = std::env::args_os()

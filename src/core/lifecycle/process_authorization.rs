@@ -2,7 +2,7 @@
 
 use crate::tools::process::{OfflineCargoPolicy, ProcessPolicyFacts};
 use crate::tools::FileIdentity;
-use krypper_sandbox::runner_contract::{RUNNER_MOUNT_FD, RUNNER_MOUNT_PATH};
+use krypper_sandbox::runner_contract::{FIXED_FD_MOUNTS, RUNNER_MOUNT_PATH, WORKSPACE_MOUNT};
 use krypper_sandbox::runner_protocol::{ACK_FD, STATUS_FD};
 use krypper_sandbox::{
     NetworkRequirement, PinnedResourceAccess, PinnedResourceId, ProcessTreeRequirement, RunLimits,
@@ -317,12 +317,6 @@ impl ProcessIntent {
 /// Confirm the fixed payload tail and the payload cwd/environment encoded in the Sandbox command.
 /// The helper's other arguments remain owned by the closed Sandbox implementation.
 pub(super) fn launch_command_matches_intent(command: &Command, intent: &ProcessIntent) -> bool {
-    const FIXED_FD_MOUNTS: [(i32, &str); 4] = [
-        (200, "/workspace"),
-        (201, "/toolchain"),
-        (202, "/cargo/registry"),
-        (RUNNER_MOUNT_FD, RUNNER_MOUNT_PATH),
-    ];
     if command.get_program() != OsStr::new("/usr/bin/bwrap") || command.get_current_dir().is_some()
     {
         return false;
@@ -350,9 +344,9 @@ pub(super) fn launch_command_matches_intent(command: &Command, intent: &ProcessI
             .filter(|pair| pair[0] == OsStr::new("--chdir"))
             .count()
             != 1
-        || !args
-            .windows(2)
-            .any(|pair| pair[0] == OsStr::new("--chdir") && pair[1] == OsStr::new("/workspace"))
+        || !args.windows(2).any(|pair| {
+            pair[0] == OsStr::new("--chdir") && pair[1] == OsStr::new(WORKSPACE_MOUNT.1)
+        })
     {
         return false;
     }

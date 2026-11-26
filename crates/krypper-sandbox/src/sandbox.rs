@@ -1,6 +1,9 @@
 //! The Linux sandbox command: host executable lookup and the contained child command.
 
-use crate::runner_contract::{RUNNER_MOUNT_FD, RUNNER_MOUNT_PATH};
+use crate::runner_contract::{
+    REGISTRY_MOUNT, RESOURCE_FD_MOUNTS, RUNNER_MOUNT, RUNNER_MOUNT_FD, TOOLCHAIN_MOUNT,
+    WORKSPACE_MOUNT,
+};
 use crate::runner_handshake::RunnerHandshakePipes;
 use crate::runner_protocol::{ACK_FD, STATUS_FD};
 use crate::{
@@ -57,7 +60,7 @@ pub(super) fn sandbox(
                 .map(Into::into)
         })
         .collect::<io::Result<Vec<OwnedFd>>>()?;
-    if roots.len() != 3 {
+    if roots.len() != RESOURCE_FD_MOUNTS.len() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "sandbox resource roles do not match the fixed profile",
@@ -165,17 +168,17 @@ pub(super) fn sandbox(
             "/lib64",
         ],
     );
-    push_control_args(
+    push_read_only_fd_mount(
         &mut command,
         evidence,
         SandboxControl::ReadOnlyWorkspace,
-        &["--ro-bind-fd", "200", "/workspace"],
+        WORKSPACE_MOUNT,
     );
-    push_control_args(
+    push_read_only_fd_mount(
         &mut command,
         evidence,
         SandboxControl::ReadOnlyToolchain,
-        &["--ro-bind-fd", "201", "/toolchain"],
+        TOOLCHAIN_MOUNT,
     );
     push_control_args(
         &mut command,
@@ -183,11 +186,11 @@ pub(super) fn sandbox(
         SandboxControl::TemporaryFilesystems,
         &["--size", "16777216", "--tmpfs", "/cargo"],
     );
-    push_control_args(
+    push_read_only_fd_mount(
         &mut command,
         evidence,
         SandboxControl::ReadOnlyRegistry,
-        &["--ro-bind-fd", "202", "/cargo/registry"],
+        REGISTRY_MOUNT,
     );
     push_control_args(
         &mut command,
@@ -217,17 +220,18 @@ pub(super) fn sandbox(
     ]);
     command.args([
         "--symlink",
-        "/cargo/registry",
+        REGISTRY_MOUNT.1,
         "/tmp/home/registry",
         "--chdir",
-        "/workspace",
+        WORKSPACE_MOUNT.1,
     ]);
     if pinned_runner.is_some() {
-        command
-            .arg("--ro-bind-fd")
-            .arg(RUNNER_MOUNT_FD.to_string())
-            .arg(RUNNER_MOUNT_PATH);
-        evidence.request(SandboxControl::LandlockFilesystemWrites);
+        push_read_only_fd_mount(
+            &mut command,
+            evidence,
+            SandboxControl::LandlockFilesystemWrites,
+            RUNNER_MOUNT,
+        );
     }
     let mut environment_args = vec!["--clearenv"];
     for (name, value) in crate::OFFLINE_CARGO_TEST_ENVIRONMENT {
@@ -289,8 +293,8 @@ pub(super) fn sandbox(
             {
                 return Err(io::Error::last_os_error());
             }
-            for (i, fd) in roots.iter().enumerate() {
-                if libc::dup2(fd.as_raw_fd(), 200 + i as i32) < 0 {
+            for (fd, (target, _)) in roots.iter().zip(RESOURCE_FD_MOUNTS) {
+                if libc::dup2(fd.as_raw_fd(), target) < 0 {
                     return Err(io::Error::last_os_error());
                 }
             }
@@ -343,6 +347,16 @@ fn push_control_args(
 ) {
     command.args(arguments);
     evidence.request(control);
+}
+
+fn push_read_only_fd_mount(
+    command: &mut Command,
+    evidence: &mut SandboxIsolationEvidence,
+    control: SandboxControl,
+    (fd, path): (i32, &str),
+) {
+    let fd = fd.to_string();
+    push_control_args(command, evidence, control, &["--ro-bind-fd", &fd, path]);
 }
 
 fn sealed_filter_fd(filter: &[u8]) -> io::Result<OwnedFd> {
@@ -489,9 +503,9 @@ mod tests {
             (SandboxControl::SeccompFilter, "--seccomp"),
             (SandboxControl::CapabilityDrop, "--cap-drop"),
             (SandboxControl::ReadOnlySystemMounts, "/usr"),
-            (SandboxControl::ReadOnlyWorkspace, "/workspace"),
-            (SandboxControl::ReadOnlyToolchain, "/toolchain"),
-            (SandboxControl::ReadOnlyRegistry, "/cargo/registry"),
+            (SandboxControl::ReadOnlyWorkspace, WORKSPACE_MOUNT.1),
+            (SandboxControl::ReadOnlyToolchain, TOOLCHAIN_MOUNT.1),
+            (SandboxControl::ReadOnlyRegistry, REGISTRY_MOUNT.1),
             (SandboxControl::TemporaryFilesystems, "--tmpfs"),
             (SandboxControl::DeviceMount, "--dev"),
             (SandboxControl::ProcMount, "--proc"),
