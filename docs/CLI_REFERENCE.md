@@ -59,6 +59,38 @@ caller decision per line from standard input when `--model` is omitted. Enter `r
 `search <directory> <query>`, `search-tree <directory> <query>`, `continue`,
 `complete [result]`, or `cancel`.
 
+### Permission modes
+
+The default permission mode is `ask`. Save a per-user preference or override it
+for one task:
+
+```sh
+krypper setup --permission-mode ask
+krypper setup --permission-mode risk-based
+krypper task --goal "Review this workspace" --max-actions 5 --permission-mode ask
+```
+
+The permission preference is stored in a separate per-user file, independent of
+provider credentials and model defaults. `KRYPPER_CONFIG`, workspace files,
+model output, and checkpoints cannot select or elevate a permission mode.
+`task --no-config` uses Ask unless the task has an explicit `--permission-mode`.
+The active mode is printed before the task runs. It is chosen for each
+invocation; a checkpoint does not restore an older mode.
+
+Both Ask and Risk-based keep the existing workspace boundary for file actions.
+The host policy asks before process or external effects in Ask mode. Risk-based
+automatically permits bounded workspace actions and the fixed offline Cargo
+profile only when its trusted host configuration is present. Unknown effects
+need approval or fail closed. The current CLI has no trusted host
+toolchain/registry setting for offline Cargo, no interactive approval channel
+for external effects, and no generic process, external-file, or network action;
+those effects therefore remain unavailable. `krypper setup --status` reports
+the selected mode and states that Full Access is unavailable. Selecting
+`full-access` fails with an error; it is never treated as Ask or Risk-based.
+The currently executable task actions stay within the workspace, so Ask and
+Risk-based have the same effect today. Choosing Risk-based does not add process,
+external-file, or network tools.
+
 ### Verified planning and correction
 
 Opt in to a local planned workflow by adding `--verified` and one or more

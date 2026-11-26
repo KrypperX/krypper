@@ -118,6 +118,10 @@ impl OperationDefinition {
         self.description
     }
 
+    pub(crate) const fn effect_class(self) -> EffectClass {
+        self.effect_class
+    }
+
     /// Adds descriptive effect and authorization metadata for provider-facing tool declarations.
     ///
     /// Execution continues to use the existing TaskSession and Tools authorization checks.
@@ -291,6 +295,13 @@ const WORKSPACE_OPERATIONS: [OperationDefinition; 10] = [
 
 pub(crate) fn workspace_operations() -> &'static [OperationDefinition] {
     &WORKSPACE_OPERATIONS
+}
+
+pub(crate) fn effect_class_for(name: &str) -> Option<EffectClass> {
+    workspace_operations()
+        .iter()
+        .find(|operation| operation.name() == name)
+        .map(OperationDefinition::effect_class)
 }
 
 #[cfg(test)]

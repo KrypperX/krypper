@@ -223,6 +223,7 @@ mod tests {
         UserSettingsPaths {
             model: directory.path().join("config.toml"),
             credentials: directory.path().join("credentials.json"),
+            permission_mode: directory.path().join("permission-mode"),
             provider_profiles: directory.path().join("provider-profiles.json"),
             model_evidence: directory.path().join("model-evidence.json"),
             model_evidence_key: directory.path().join("model-evidence.key"),

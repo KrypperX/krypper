@@ -4,6 +4,7 @@ use super::config::{
     config_path, validate_route_settings, RoutingMode, MAX_FALLBACK_BUDGET_MICRO_USD,
 };
 use crate::brain::{is_provider_credential_name, validate_model_name_for_provider, ModelProvider};
+use crate::tools::permission_policy::PermissionMode;
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -14,7 +15,9 @@ const CREDENTIALS_FILE: &str = "credentials.json";
 const PROVIDER_PROFILES_FILE: &str = "provider-profiles.json";
 const MODEL_EVIDENCE_FILE: &str = "model-evidence.json";
 const MODEL_EVIDENCE_KEY_FILE: &str = "model-evidence.key";
+const PERMISSION_MODE_FILE: &str = "permission-mode";
 const MAX_CREDENTIAL_BYTES: u64 = 64 * 1024;
+const MAX_PERMISSION_MODE_BYTES: u64 = 128;
 static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 
 pub(super) struct CredentialStore {
@@ -74,6 +77,7 @@ impl CredentialStore {
 pub(super) struct UserSettingsPaths {
     pub(super) model: PathBuf,
     pub(super) credentials: PathBuf,
+    pub(super) permission_mode: PathBuf,
     pub(super) provider_profiles: PathBuf,
     pub(super) model_evidence: PathBuf,
     pub(super) model_evidence_key: PathBuf,
@@ -89,11 +93,83 @@ pub(super) fn user_settings_paths() -> Result<Option<UserSettingsPaths>, String>
     };
     Ok(Some(UserSettingsPaths {
         credentials: model.with_file_name(CREDENTIALS_FILE),
+        permission_mode: model.with_file_name(PERMISSION_MODE_FILE),
         provider_profiles: model.with_file_name(PROVIDER_PROFILES_FILE),
         model_evidence: model.with_file_name(MODEL_EVIDENCE_FILE),
         model_evidence_key: model.with_file_name(MODEL_EVIDENCE_KEY_FILE),
         model,
     }))
+}
+
+/// Load the permission preference from its dedicated per-user file.
+///
+/// This deliberately does not use `KRYPPER_CONFIG`, which may point into a
+/// project. A missing file means the conservative Ask mode.
+pub(super) fn load_permission_mode(path: &Path) -> Result<PermissionMode, String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(cause) if cause.kind() == io::ErrorKind::NotFound => return Ok(PermissionMode::Ask),
+        Err(cause) => {
+            return Err(file_error(
+                "cannot inspect permission settings",
+                path,
+                cause,
+            ))
+        }
+    };
+    if !metadata.file_type().is_file() {
+        return Err(format!(
+            "permission settings '{}' are not a regular file",
+            path.display()
+        ));
+    }
+    let file = open_private_file(path)
+        .map_err(|cause| file_error("cannot read permission settings", path, cause))?;
+    let opened_metadata = file
+        .metadata()
+        .map_err(|cause| file_error("cannot inspect permission settings", path, cause))?;
+    if !opened_metadata.is_file() {
+        return Err(format!(
+            "permission settings '{}' are not a regular file",
+            path.display()
+        ));
+    }
+    ensure_private_permissions(path, &opened_metadata, "permission settings")?;
+    let mut bytes = Vec::new();
+    file.take(MAX_PERMISSION_MODE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|cause| file_error("cannot read permission settings", path, cause))?;
+    if bytes.len() as u64 > MAX_PERMISSION_MODE_BYTES {
+        return Err(format!(
+            "permission settings '{}' are larger than {MAX_PERMISSION_MODE_BYTES} bytes",
+            path.display()
+        ));
+    }
+    let value = std::str::from_utf8(&bytes)
+        .map_err(|_| {
+            format!(
+                "permission settings '{}' are not valid UTF-8",
+                path.display()
+            )
+        })?
+        .trim();
+    PermissionMode::parse(value).map_err(|message| {
+        format!(
+            "invalid permission settings '{}': {message}",
+            path.display()
+        )
+    })
+}
+
+pub(super) fn save_permission_mode(path: &Path, mode: PermissionMode) -> Result<(), String> {
+    if mode == PermissionMode::FullAccess {
+        return Err(
+            "Full Access is unavailable: Krypper has no unrestricted host execution path"
+                .to_owned(),
+        );
+    }
+    let contents = format!("{}\n", mode.as_str());
+    write_private_file(path, contents.as_bytes(), "permission settings")
 }
 
 pub(super) fn load_credentials(path: &Path) -> Result<Option<CredentialStore>, String> {
@@ -224,6 +300,7 @@ pub(super) fn remove_settings(paths: &UserSettingsPaths) -> Result<(), String> {
     remove_file_if_present(&paths.provider_profiles, "provider profiles")?;
     remove_file_if_present(&paths.model_evidence, "provider evidence")?;
     remove_file_if_present(&paths.model_evidence_key, "provider evidence key")?;
+    remove_file_if_present(&paths.permission_mode, "permission settings")?;
     remove_file_if_present(
         &paths.model.with_file_name("model-catalog-cache.json"),
         "model catalog cache",
@@ -498,6 +575,54 @@ pub(super) fn open_private_file(path: &Path) -> io::Result<File> {
 mod tests {
     use super::*;
     use crate::test_support::TempDir;
+
+    #[test]
+    fn permission_mode_is_per_user_and_defaults_to_ask() {
+        let directory = TempDir::new();
+        let path = directory.path().join("krypper").join(PERMISSION_MODE_FILE);
+
+        assert_eq!(load_permission_mode(&path).unwrap(), PermissionMode::Ask);
+        save_permission_mode(&path, PermissionMode::RiskBased).unwrap();
+        assert_eq!(
+            load_permission_mode(&path).unwrap(),
+            PermissionMode::RiskBased
+        );
+
+        write_private_file(&path, b"full-access\n", "permission settings").unwrap();
+        let error = load_permission_mode(&path).unwrap_err();
+        assert!(error.contains("Full Access is unavailable"));
+    }
+
+    #[test]
+    fn permission_mode_settings_reject_oversized_files() {
+        let directory = TempDir::new();
+        let path = directory.path().join("krypper").join(PERMISSION_MODE_FILE);
+        save_permission_mode(&path, PermissionMode::Ask).unwrap();
+
+        let oversized = vec![b'a'; MAX_PERMISSION_MODE_BYTES as usize + 1];
+        write_private_file(&path, &oversized, "permission settings").unwrap();
+        assert!(load_permission_mode(&path)
+            .unwrap_err()
+            .contains("larger than"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permission_mode_settings_reject_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let directory = TempDir::new();
+        let settings_directory = directory.path().join("krypper");
+        fs::create_dir_all(&settings_directory).unwrap();
+        let path = settings_directory.join(PERMISSION_MODE_FILE);
+        let target = directory.path().join("target");
+        fs::write(&target, b"risk-based\n").unwrap();
+        symlink(&target, &path).unwrap();
+
+        assert!(load_permission_mode(&path)
+            .unwrap_err()
+            .contains("not a regular file"));
+    }
 
     #[test]
     fn saved_credentials_round_trip_and_error_without_secret_disclosure() {

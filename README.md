@@ -28,7 +28,7 @@ The executable is `target/release/krypper`. Run it from the directory you want t
 | `krypper task --goal <goal> --max-actions <n>` | Run a bounded task |
 | `krypper models` | Browse the offline catalog; refresh and show provenance explicitly |
 | `krypper context --goal <goal>` | Show bounded offline repository context, or an opt-in Rust module map |
-| `krypper setup` | Choose a provider and model for this user |
+| `krypper setup` | Choose a provider, model, and permission mode for this user |
 
 ## Quick start
 
@@ -51,7 +51,7 @@ Task actions can also be selected by an explicitly configured model. See the [CL
 - **macOS:** workspace operations and MCP stdio connections are supported. Sandboxed Cargo tests are unavailable and return a typed `SandboxUnavailable` result because the Linux confinement backend is not used there.
 - **Windows:** only the compile-checked platform foundation is available. Native workspace containment is not implemented, and `TaskSession::new_in_workspace` reports `TaskSessionWorkspaceErrorKind::PlatformUnavailable`; MCP stdio and sandboxed Cargo tests are unavailable. Use WSL2 for the Linux workflow until the Windows backend is implemented.
 
-Run `krypper setup` from any directory to choose a provider, search the offline model catalog, review the selection, and save your default model. Credential input is hidden. On Unix, the local credential directory and file are restricted to your user; other platforms inherit permissions from the per-user config directory. The credential file is not encrypted; environment variables override saved credentials. Use `krypper setup --status` or `krypper setup --status --json` to inspect routing/readiness without showing credential values. Automatic routing is opt-in with `krypper setup --routing-mode automatic`; cross-provider data transfer and bounded fallback require separate flags. `krypper setup --reset` removes local settings and routing evidence.
+Run `krypper setup` from any directory to choose a provider, search the offline model catalog, review the selection, and save your default model. Credential input is hidden. On Unix, the local credential directory and file are restricted to your user; other platforms inherit permissions from the per-user config directory. The credential file is not encrypted; environment variables override saved credentials. Use `krypper setup --status` or `krypper setup --status --json` to inspect routing/readiness without showing credential values. Automatic routing is opt-in with `krypper setup --routing-mode automatic`; cross-provider data transfer and bounded fallback require separate flags. Choose a per-user task permission profile with `krypper setup --permission-mode ask` or `krypper setup --permission-mode risk-based`; Ask is the default. Full Access is reported as unavailable and cannot be selected because the current CLI does not have unrestricted host execution. `krypper setup --reset` removes local settings, including the permission mode, and routing evidence.
 
 For a temporary Cloudflare Workers AI or AI Gateway setup that keeps credentials only in the current shell, source the Bash helper from the repository root:
 
