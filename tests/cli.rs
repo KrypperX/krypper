@@ -1089,7 +1089,11 @@ fn task_composes_actions_from_the_observed_search_location_interactively() {
         search_observation,
         "Permission mode: Ask\nObservation 1: search-tree in . found 1 locations\n  \"nested space/quoted \\\" slash \\\\ café/notes.txt\":2\n"
     );
-    let location = search_observation.lines().nth(1).unwrap().trim();
+    let location = search_observation
+        .lines()
+        .find(|line| line.starts_with("  "))
+        .expect("search output includes a location")
+        .trim();
     let (path_prefix, observed_line) = location.rsplit_once("\":").unwrap();
     let observed_path_token = format!("{path_prefix}\"");
     let observed_line = observed_line.parse::<usize>().unwrap();
