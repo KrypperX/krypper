@@ -9,8 +9,9 @@ use super::model_catalog::{cache_path_for_user_settings, load_catalog, CatalogOr
 use super::model_routing::ModelRoutingService;
 use super::provider_profiles::load_provider_profiles;
 use super::settings::{
-    load_credentials, remove_settings, save_credentials, save_model_configuration,
-    user_settings_paths, valid_credential, CredentialStore, UserSettingsPaths,
+    load_credentials, load_permission_mode, remove_settings, save_credentials,
+    save_model_configuration, save_permission_mode, user_settings_paths, valid_credential,
+    CredentialStore, UserSettingsPaths,
 };
 use super::setup_probe::test_connection;
 use crate::brain::{
@@ -18,6 +19,7 @@ use crate::brain::{
     AnthropicWorkspaceId, AuthFieldRole, CloudflareAccountId, CloudflareGatewayId,
     ProviderDescriptor,
 };
+use crate::tools::permission_policy::PermissionMode;
 use std::ffi::OsString;
 use std::io::{self, IsTerminal, Read, Write};
 #[cfg(test)]
@@ -42,6 +44,13 @@ pub(super) fn run(
         .any(|argument| argument == "--routing-mode")
     {
         return set_routing_mode(arguments, output, error);
+    }
+
+    if arguments
+        .iter()
+        .any(|argument| argument == "--permission-mode")
+    {
+        return set_permission_mode(arguments, output, error);
     }
 
     let (mode, status_json) = match arguments {
@@ -79,6 +88,43 @@ pub(super) fn run(
         return reset_settings(&paths, input, output, error);
     }
     configure(&paths, input, output, error)
+}
+
+fn set_permission_mode(
+    arguments: &[OsString],
+    output: &mut dyn Write,
+    error: &mut dyn Write,
+) -> io::Result<i32> {
+    if arguments.len() != 2 || arguments[0] != "--permission-mode" {
+        return usage_error(error, Some("setup"), "use --permission-mode ask|risk-based");
+    }
+    let Some(value) = arguments[1].to_str() else {
+        return usage_error(error, Some("setup"), "permission mode must be valid UTF-8");
+    };
+    let mode = match PermissionMode::parse(value) {
+        Ok(mode) => mode,
+        Err(message) => return usage_error(error, Some("setup"), message),
+    };
+    let Some(paths) = user_settings_paths().map_err(io::Error::other)? else {
+        return usage_error(
+            error,
+            Some("setup"),
+            "cannot find a user configuration directory; set XDG_CONFIG_HOME or HOME",
+        );
+    };
+    if let Err(message) = save_permission_mode(&paths.permission_mode, mode) {
+        return usage_error(error, Some("setup"), &message);
+    }
+    writeln!(
+        output,
+        "Saved {} permission mode for this user.",
+        mode.as_str()
+    )?;
+    writeln!(
+        output,
+        "Full Access is unavailable until Krypper has a verified unrestricted host execution path."
+    )?;
+    Ok(0)
 }
 
 fn set_routing_mode(
@@ -246,6 +292,8 @@ fn show_status(output: &mut dyn Write, json: bool) -> io::Result<i32> {
         Ok(Some(paths)) => paths,
         Ok(None) => {
             writeln!(output, "No per-user configuration directory is available.")?;
+            writeln!(output, "Permission mode: ask (default)")?;
+            writeln!(output, "Full Access: unavailable")?;
             return Ok(0);
         }
         Err(message) => {
@@ -269,6 +317,13 @@ fn show_status(output: &mut dyn Write, json: bool) -> io::Result<i32> {
         }
     };
     let credential_count = credentials.as_ref().map_or(0, |store| store.len());
+    let permission_mode = match load_permission_mode(&paths.permission_mode) {
+        Ok(mode) => mode,
+        Err(message) => {
+            writeln!(output, "krypper setup: {message}")?;
+            return Ok(2);
+        }
+    };
     let profile_count = match load_provider_profiles(&paths.provider_profiles) {
         Ok(profiles) => profiles.len(),
         Err(message) => {
@@ -322,6 +377,8 @@ fn show_status(output: &mut dyn Write, json: bool) -> io::Result<i32> {
             },
             "credential_count": credential_count,
             "provider_profile_count": profile_count,
+            "permission_mode": permission_mode.as_str(),
+            "full_access_available": false,
             "config_override": has_config_override(),
         });
         serde_json::to_writer_pretty(&mut *output, &value)?;
@@ -336,6 +393,11 @@ fn show_status(output: &mut dyn Write, json: bool) -> io::Result<i32> {
         profile_count,
         &paths,
         has_config_override(),
+    )?;
+    writeln!(output, "Permission mode: {}", permission_mode.as_str())?;
+    writeln!(
+        output,
+        "Full Access: unavailable (no unrestricted host execution path)"
     )?;
     match readiness {
         Some(readiness) => writeln!(
@@ -456,7 +518,7 @@ fn reset_settings(
     if !prompt_yes_no(
         input,
         output,
-        "Remove saved defaults, provider profiles, stored credentials, and local provider evidence from this user account? [y/N] ",
+        "Remove saved defaults, permission mode, provider profiles, stored credentials, and local provider evidence from this user account? [y/N] ",
         false,
     )? {
         writeln!(output, "No settings removed.")?;
@@ -980,6 +1042,7 @@ mod tests {
         let paths = UserSettingsPaths {
             model: PathBuf::from("/user/config/krypper/config.toml"),
             credentials: PathBuf::from("/user/config/krypper/credentials.json"),
+            permission_mode: PathBuf::from("/user/config/krypper/permission-mode"),
             provider_profiles: PathBuf::from("/user/config/krypper/provider-profiles.json"),
             model_evidence: PathBuf::from("/user/config/krypper/model-evidence.json"),
             model_evidence_key: PathBuf::from("/user/config/krypper/model-evidence.key"),
@@ -1015,6 +1078,7 @@ mod tests {
         let paths = UserSettingsPaths {
             model: PathBuf::from("/user/config/krypper/config.toml"),
             credentials: PathBuf::from("/user/config/krypper/credentials.json"),
+            permission_mode: PathBuf::from("/user/config/krypper/permission-mode"),
             provider_profiles: PathBuf::from("/user/config/krypper/provider-profiles.json"),
             model_evidence: PathBuf::from("/user/config/krypper/model-evidence.json"),
             model_evidence_key: PathBuf::from("/user/config/krypper/model-evidence.key"),

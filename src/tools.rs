@@ -4,6 +4,7 @@ pub mod extension_contract;
 // The MCP transport is not wired into the CLI or harness yet; it is exercised by its tests.
 #[allow(dead_code, unused_imports)]
 pub mod mcp_transport;
+pub(crate) mod permission_policy;
 pub mod process;
 pub mod process_profile;
 pub(crate) mod registry;

@@ -1,7 +1,7 @@
+use super::turn::ActionPermissionGate;
 use super::{
-    run_goal_turn_with_budget, workspace_action_name, workspace_mutation_target,
-    BoundedDecisionSource, GoalTurnError, GoalTurnResult, GoalTurnStopReason, WorkspaceAction,
-    WorkspaceObservation,
+    workspace_action_name, workspace_mutation_target, BoundedDecisionSource, GoalTurnError,
+    GoalTurnResult, GoalTurnStopReason, WorkspaceAction, WorkspaceObservation,
 };
 use crate::brain::{OllamaDecisionSource, WorkspacePlan, WorkspacePlanError};
 use crate::harness::context::collect_repository_context;
@@ -441,9 +441,11 @@ pub fn run_goal_turn_with_plan<D: BoundedDecisionSource + ?Sized>(
         max_actions,
         plan,
         control_source,
+        None,
     )
 }
 
+#[allow(clippy::too_many_arguments)] // Keeps the existing plan execution inputs explicit.
 fn run_goal_turn_with_plan_result<D, E>(
     session: &mut TaskSession,
     task_id: Uuid,
@@ -452,6 +454,7 @@ fn run_goal_turn_with_plan_result<D, E>(
     max_actions: usize,
     plan: Result<WorkspacePlan, E>,
     control_source: &mut D,
+    permission_gate: Option<&mut ActionPermissionGate<'_>>,
 ) -> Result<GoalTurnResult, GoalTurnError>
 where
     D: BoundedDecisionSource + ?Sized,
@@ -466,6 +469,7 @@ where
         plan,
         None,
         control_source,
+        permission_gate,
     )
 }
 
@@ -478,6 +482,55 @@ pub fn run_goal_turn_with_impact_checked_plan<D: BoundedDecisionSource + ?Sized>
     max_actions: usize,
     plan: Result<ImpactCheckedPlan, WorkspacePlanError>,
     control_source: &mut D,
+) -> Result<GoalTurnResult, GoalTurnError> {
+    run_goal_turn_with_impact_checked_plan_and_gate(
+        session,
+        task_id,
+        turn_id,
+        goal,
+        max_actions,
+        plan,
+        control_source,
+        None,
+    )
+}
+
+/// Runs an impact-checked plan through the same host permission gate as model-selected actions.
+#[allow(clippy::too_many_arguments)] // Mirrors the existing planned-turn API plus its host gate.
+pub(crate) fn run_goal_turn_with_impact_checked_plan_and_permission_gate<
+    D: BoundedDecisionSource + ?Sized,
+>(
+    session: &mut TaskSession,
+    task_id: Uuid,
+    turn_id: Uuid,
+    goal: &str,
+    max_actions: usize,
+    plan: Result<ImpactCheckedPlan, WorkspacePlanError>,
+    control_source: &mut D,
+    permission_gate: &mut ActionPermissionGate<'_>,
+) -> Result<GoalTurnResult, GoalTurnError> {
+    run_goal_turn_with_impact_checked_plan_and_gate(
+        session,
+        task_id,
+        turn_id,
+        goal,
+        max_actions,
+        plan,
+        control_source,
+        Some(permission_gate),
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // Keeps plan validation and host authorization in one path.
+fn run_goal_turn_with_impact_checked_plan_and_gate<D: BoundedDecisionSource + ?Sized>(
+    session: &mut TaskSession,
+    task_id: Uuid,
+    turn_id: Uuid,
+    goal: &str,
+    max_actions: usize,
+    plan: Result<ImpactCheckedPlan, WorkspacePlanError>,
+    control_source: &mut D,
+    mut permission_gate: Option<&mut ActionPermissionGate<'_>>,
 ) -> Result<GoalTurnResult, GoalTurnError> {
     match plan {
         Ok(checked) => {
@@ -501,6 +554,7 @@ pub fn run_goal_turn_with_impact_checked_plan<D: BoundedDecisionSource + ?Sized>
                 execution_plan,
                 revisions,
                 control_source,
+                permission_gate.as_deref_mut(),
             )
         }
         Err(error) => run_goal_turn_with_plan_result(
@@ -511,6 +565,7 @@ pub fn run_goal_turn_with_impact_checked_plan<D: BoundedDecisionSource + ?Sized>
             max_actions,
             Err(error),
             control_source,
+            permission_gate,
         ),
     }
 }
@@ -525,6 +580,7 @@ fn run_goal_turn_with_plan_and_revisions<D, E>(
     plan: Result<WorkspacePlan, E>,
     expected_revisions: Option<&BTreeMap<std::path::PathBuf, String>>,
     control_source: &mut D,
+    permission_gate: Option<&mut ActionPermissionGate<'_>>,
 ) -> Result<GoalTurnResult, GoalTurnError>
 where
     D: BoundedDecisionSource + ?Sized,
@@ -574,7 +630,16 @@ where
         control_source,
     };
 
-    run_goal_turn_with_budget(session, task_id, turn_id, goal, max_actions, &mut source)
+    super::turn::run_goal_turn_with_budget_and_extensions_and_gate(
+        session,
+        task_id,
+        turn_id,
+        goal,
+        max_actions,
+        &mut source,
+        None,
+        permission_gate,
+    )
 }
 
 // The correction needs a plan decision, a workspace operation, and task control.
@@ -640,8 +705,8 @@ pub fn run_goal_turn_with_impact_checked_completion_correction<D, E, P, PE>(
     max_actions: usize,
     initial_plan: Option<Result<ImpactCheckedPlan, WorkspacePlanError>>,
     required_checks: &[RequiredCompletionCheck],
-    mut check_evidence: E,
-    mut correction_plan: P,
+    check_evidence: E,
+    correction_plan: P,
     decision_source: &mut D,
 ) -> Result<CompletionCorrectionResult, CompletionCorrectionError>
 where
@@ -660,7 +725,103 @@ where
     ) -> Result<ImpactCheckedPlan, PE>,
     PE: fmt::Display,
 {
-    let initial_result = run_goal_turn_with_impact_checked_plan(
+    run_goal_turn_with_impact_checked_completion_correction_and_gate(
+        session,
+        task_id,
+        turn_id,
+        goal,
+        max_actions,
+        initial_plan,
+        required_checks,
+        check_evidence,
+        correction_plan,
+        decision_source,
+        None,
+    )
+}
+
+/// Runs impact-checked completion correction through the host action permission gate.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_goal_turn_with_impact_checked_completion_correction_and_permission_gate<
+    D,
+    E,
+    P,
+    PE,
+>(
+    session: &mut TaskSession,
+    task_id: Uuid,
+    turn_id: Uuid,
+    goal: &str,
+    max_actions: usize,
+    initial_plan: Option<Result<ImpactCheckedPlan, WorkspacePlanError>>,
+    required_checks: &[RequiredCompletionCheck],
+    check_evidence: E,
+    correction_plan: P,
+    decision_source: &mut D,
+    permission_gate: &mut ActionPermissionGate<'_>,
+) -> Result<CompletionCorrectionResult, CompletionCorrectionError>
+where
+    D: BoundedDecisionSource + ?Sized,
+    E: FnMut(&TaskSession, &GoalTurnResult) -> Vec<CompletionCheckEvidence>,
+    P: FnMut(
+        &mut D,
+        &TaskSession,
+        Uuid,
+        Uuid,
+        Option<&ProcessResult>,
+        &GoalTurnResult,
+        &CompletionVerification,
+        &str,
+        usize,
+    ) -> Result<ImpactCheckedPlan, PE>,
+    PE: fmt::Display,
+{
+    run_goal_turn_with_impact_checked_completion_correction_and_gate(
+        session,
+        task_id,
+        turn_id,
+        goal,
+        max_actions,
+        initial_plan,
+        required_checks,
+        check_evidence,
+        correction_plan,
+        decision_source,
+        Some(permission_gate),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_goal_turn_with_impact_checked_completion_correction_and_gate<D, E, P, PE>(
+    session: &mut TaskSession,
+    task_id: Uuid,
+    turn_id: Uuid,
+    goal: &str,
+    max_actions: usize,
+    initial_plan: Option<Result<ImpactCheckedPlan, WorkspacePlanError>>,
+    required_checks: &[RequiredCompletionCheck],
+    mut check_evidence: E,
+    mut correction_plan: P,
+    decision_source: &mut D,
+    mut permission_gate: Option<&mut ActionPermissionGate<'_>>,
+) -> Result<CompletionCorrectionResult, CompletionCorrectionError>
+where
+    D: BoundedDecisionSource + ?Sized,
+    E: FnMut(&TaskSession, &GoalTurnResult) -> Vec<CompletionCheckEvidence>,
+    P: FnMut(
+        &mut D,
+        &TaskSession,
+        Uuid,
+        Uuid,
+        Option<&ProcessResult>,
+        &GoalTurnResult,
+        &CompletionVerification,
+        &str,
+        usize,
+    ) -> Result<ImpactCheckedPlan, PE>,
+    PE: fmt::Display,
+{
+    let initial_result = run_goal_turn_with_impact_checked_plan_and_gate(
         session,
         task_id,
         turn_id,
@@ -668,6 +829,7 @@ where
         max_actions,
         initial_plan.unwrap_or(Err(WorkspacePlanError::InvalidResponse)),
         decision_source,
+        permission_gate.as_deref_mut(),
     )
     .map_err(CompletionCorrectionError::Execution)?;
     let initial_is_complete = matches!(
@@ -732,7 +894,7 @@ where
         remaining_actions,
     )
     .map_err(|_| WorkspacePlanError::InvalidResponse);
-    let correction_result = match run_goal_turn_with_impact_checked_plan(
+    let correction_result = match run_goal_turn_with_impact_checked_plan_and_gate(
         session,
         task_id,
         correction_turn_id,
@@ -740,6 +902,7 @@ where
         remaining_actions,
         plan,
         decision_source,
+        permission_gate,
     ) {
         Ok(result) => result,
         Err(error) => {
@@ -823,14 +986,16 @@ where
             max_actions,
             plan,
             decision_source,
+            None,
         ),
-        None => run_goal_turn_with_budget(
+        None => super::turn::run_goal_turn_with_budget_and_extensions(
             session,
             task_id,
             turn_id,
             goal,
             max_actions,
             decision_source,
+            None,
         ),
     }
     .map_err(CompletionCorrectionError::Execution)?;
@@ -892,6 +1057,7 @@ where
         remaining_actions,
         plan,
         decision_source,
+        None,
     ) {
         Ok(result) => result,
         Err(error) => {
@@ -944,6 +1110,45 @@ pub fn run_goal_turn_with_process_failure_correction<D, E, P, PE>(
     goal: &str,
     max_actions: usize,
     required_checks: &[RequiredCompletionCheck],
+    check_evidence: E,
+    correction_plan: P,
+    decision_source: &mut D,
+) -> Result<ProcessFailureCorrectionResult, ProcessFailureCorrectionError>
+where
+    D: BoundedDecisionSource + ?Sized,
+    E: FnMut(&TaskSession, &GoalTurnResult) -> Vec<CompletionCheckEvidence>,
+    P: FnMut(
+        &mut D,
+        &TaskSession,
+        &GoalTurnResult,
+        &ProcessResult,
+        &CompletionVerification,
+        &str,
+        usize,
+    ) -> Result<WorkspacePlan, PE>,
+    PE: fmt::Display,
+{
+    run_goal_turn_with_process_failure_correction_inner(
+        session,
+        task_id,
+        turn_id,
+        goal,
+        max_actions,
+        required_checks,
+        check_evidence,
+        correction_plan,
+        decision_source,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_goal_turn_with_process_failure_correction_inner<D, E, P, PE>(
+    session: &mut TaskSession,
+    task_id: Uuid,
+    turn_id: Uuid,
+    goal: &str,
+    max_actions: usize,
+    required_checks: &[RequiredCompletionCheck],
     mut check_evidence: E,
     mut correction_plan: P,
     decision_source: &mut D,
@@ -962,13 +1167,14 @@ where
     ) -> Result<WorkspacePlan, PE>,
     PE: fmt::Display,
 {
-    let initial_result = run_goal_turn_with_budget(
+    let initial_result = super::turn::run_goal_turn_with_budget_and_extensions(
         session,
         task_id,
         turn_id,
         goal,
         max_actions,
         decision_source,
+        None,
     )
     .map_err(ProcessFailureCorrectionError::Execution)?;
 
@@ -1033,6 +1239,7 @@ where
         remaining_actions,
         plan,
         decision_source,
+        None,
     ) {
         Ok(result) => result,
         Err(error) => {

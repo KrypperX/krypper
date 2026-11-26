@@ -34,9 +34,9 @@ pub(super) fn usage_error(
         Some("list") => "usage: krypper list [-h] [path]",
         Some("write") => "usage: krypper write [-h] [--stdin] path ...",
         Some("models") => "usage: krypper models [--provider NAME] [--id MODEL_ID] [--json] [--provenance] [--refresh]",
-        Some("setup") => "usage: krypper setup [--status [--json] | --reset | --routing-mode manual|automatic [--allow-cross-provider] [--fallback-budget-usd USD]]",
+        Some("setup") => "usage: krypper setup [--status [--json] | --reset | --routing-mode manual|automatic [--allow-cross-provider] [--fallback-budget-usd USD] | --permission-mode ask|risk-based]",
         Some("task") => {
-            "usage: krypper task [-h] [--goal GOAL] --max-actions N [--workspace PATH] [--model NAME] [--provider NAME] [--verified --verify-file PATH ...] [--no-config] [--checkpoint-out PATH] [--resume PATH] [--activity-jsonl] [--stream-events-jsonl] [--model-usage-jsonl] [--repository-context-json PATH]"
+            "usage: krypper task [-h] [--goal GOAL] --max-actions N [--workspace PATH] [--model NAME] [--provider NAME] [--permission-mode ask|risk-based] [--verified --verify-file PATH ...] [--no-config] [--checkpoint-out PATH] [--resume PATH] [--activity-jsonl] [--stream-events-jsonl] [--model-usage-jsonl] [--repository-context-json PATH]"
         }
         Some("context") => {
             "usage: krypper context [-h] --goal GOAL [--workspace PATH] [--repository-map]"
@@ -51,13 +51,13 @@ pub(super) fn usage_error(
 
 pub(super) fn write_root_help(output: &mut dyn Write) -> io::Result<()> {
     output.write_all(
-        b"usage: krypper [-h] {show,list,write,task,models,context,setup} ...\n\nLocal command-line entry point for Krypper.\n\npositional arguments:\n  {show,list,write,task,models,context,setup}\n    show        display a UTF-8 text file\n    list        list immediate directory entries\n    write       create a new UTF-8 text file\n    task        run a caller-directed bounded task\n    models      browse offline model catalog\n    context     show bounded offline repository context for a goal\n    setup       configure a provider and model for this user\n\noptions:\n  -h, --help    show this help message and exit\n",
+    b"usage: krypper [-h] {show,list,write,task,models,context,setup} ...\n\nLocal command-line entry point for Krypper.\n\npositional arguments:\n  {show,list,write,task,models,context,setup}\n    show        display a UTF-8 text file\n    list        list immediate directory entries\n    write       create a new UTF-8 text file\n    task        run a caller-directed bounded task\n    models      browse offline model catalog\n    context     show bounded offline repository context for a goal\n    setup       configure a provider, model, and permission mode for this user\n\noptions:\n  -h, --help    show this help message and exit\n",
     )
 }
 
 pub(super) fn write_setup_help(output: &mut dyn Write) -> io::Result<()> {
     output.write_all(
-        b"usage: krypper setup [--status [--json] | --reset | --routing-mode manual|automatic [--allow-cross-provider] [--fallback-budget-usd USD]]\n\nConfigure the default provider and model for this user.\n\noptions:\n  --status                    show saved model, routing, readiness, and catalog provenance\n  --json                      emit machine-readable status (only with --status)\n  --routing-mode MODE         save manual or automatic model routing\n  --allow-cross-provider      explicitly allow task data to move between providers\n  --fallback-budget-usd USD   opt in to bounded fallback with an aggregate estimate ceiling\n  --reset                     ask before removing saved settings and local provider evidence\n  -h, --help                  show this help message and exit\n\nRun `krypper setup` in an interactive terminal to choose a provider and search the offline model catalog.\nHosted provider credentials are entered without echo and stored in the user's local Krypper config directory. Unix permissions are restricted; other platforms inherit permissions from that per-user directory. The file is not encrypted.\nEnvironment credential variables override saved values. `KRYPPER_CONFIG` overrides the saved model defaults.\nA connection test sends one short prompt only after you explicitly agree; it may incur provider charges. Its bounded local evidence stores health, latency, typed failure, rate-limit, and available token-usage facts, but not prompts, responses, or credentials.\nAutomatic routing needs a fresh successful probe and known tool-call support. Fallback also needs known model pricing and context/output limits; unknown facts stop selection before a provider request.\n",
+        b"usage: krypper setup [--status [--json] | --reset | --routing-mode manual|automatic [--allow-cross-provider] [--fallback-budget-usd USD] | --permission-mode ask|risk-based]\n\nConfigure the default provider, model, and permission mode for this user.\n\noptions:\n  --status                    show saved model, permission mode, routing, readiness, and catalog provenance\n  --json                      emit machine-readable status (only with --status)\n  --routing-mode MODE         save manual or automatic model routing\n  --permission-mode MODE      save ask or risk-based for this user (default: ask)\n  --allow-cross-provider      explicitly allow task data to move between providers\n  --fallback-budget-usd USD   opt in to bounded fallback with an aggregate estimate ceiling\n  --reset                     ask before removing saved settings and local provider evidence\n  -h, --help                  show this help message and exit\n\nFull Access is unavailable until Krypper has a verified unrestricted host execution path. Selecting it is rejected; it is never mapped to another mode.\nRun `krypper setup` in an interactive terminal to choose a provider and search the offline model catalog.\nHosted provider credentials are entered without echo and stored in the user's local Krypper config directory. Unix permissions are restricted; other platforms inherit permissions from that per-user directory. The file is not encrypted.\nEnvironment credential variables override saved values. `KRYPPER_CONFIG` overrides saved model defaults, but never permission mode.\nA connection test sends one short prompt only after you explicitly agree; it may incur provider charges. Its bounded local evidence stores health, latency, typed failure, rate-limit, and available token-usage facts, but not prompts, responses, or credentials.\nAutomatic routing needs a fresh successful probe and known tool-call support. Fallback also needs known model pricing and context/output limits; unknown facts stop selection before a provider request.\n",
     )
 }
 
@@ -70,9 +70,10 @@ pub(super) fn write_context_help(output: &mut dyn Write) -> io::Result<()> {
 pub(super) fn write_task_help(output: &mut dyn Write) -> io::Result<()> {
     output.write_all(
         concat!(
-            "usage: krypper task [-h] [--goal GOAL] --max-actions N [--workspace PATH] [--model NAME] [--provider NAME] [--verified --verify-file PATH ...] [--no-config] [--checkpoint-out PATH] [--resume PATH] [--activity-jsonl] [--stream-events-jsonl] [--model-usage-jsonl] [--repository-context-json PATH] [--observation-context-budget-bytes N]\n\n",
+            "usage: krypper task [-h] [--goal GOAL] --max-actions N [--workspace PATH] [--model NAME] [--provider NAME] [--permission-mode ask|risk-based] [--verified --verify-file PATH ...] [--no-config] [--checkpoint-out PATH] [--resume PATH] [--activity-jsonl] [--stream-events-jsonl] [--model-usage-jsonl] [--repository-context-json PATH] [--observation-context-budget-bytes N]\n\n",
             "run a bounded task in the selected workspace or current directory\n\n",
             "options:\n  --goal GOAL          task goal (required unless --resume is used)\n",
+            "  --permission-mode MODE use ask or risk-based for this task; defaults to this user's saved mode\n",
             "  --max-actions N      required positive action limit for this invocation\n",
             "  --workspace PATH     use an existing directory as the captured task workspace\n",
             "  --model NAME         opt in to model-selected actions or plans (defaults to local Ollama)\n",
@@ -84,7 +85,7 @@ pub(super) fn write_task_help(output: &mut dyn Write) -> io::Result<()> {
         concat!(
             "  --verified           use a planned local Ollama task with independent file checks and one correction\n",
             "  --verify-file PATH   workspace-relative file required for success; repeat with --verified (up to 32)\n",
-            "  --no-config          ignore saved model defaults and credentials for this run\n",
+            "  --no-config          ignore saved model defaults, credentials, and permission mode for this run\n",
             "  --checkpoint-out PATH write only when a completed turn reaches continue; file must be new\n",
             "  --resume PATH        restore one running task and start a fresh turn\n",
             "  --activity-jsonl    write read-only task activity positions as JSONL to stderr after each turn\n",
@@ -95,6 +96,8 @@ pub(super) fn write_task_help(output: &mut dyn Write) -> io::Result<()> {
             "  -h, --help           show this help message and exit\n\n",
             "Without --workspace, task captures the current directory as its workspace.\n",
             "With --workspace, the selected directory is validated before task history starts;\n",
+            "Permission defaults are stored per user; --permission-mode overrides one task. Ask requires one-time host confirmation for process or external effects; the current CLI has no interactive prompt or such action. Risk-based permits the fixed offline process profile only when trusted host configuration is present. Unknown effects fail closed.\n",
+            "The current CLI has no configured host toolchain/registry for offline Cargo, no generic process/network tool, and no unrestricted Full Access path.\n",
             "the process current directory is not changed.\n",
             "Without --model or --provider, task remains caller-directed and makes no model requests,\n",
             "unless the user configuration file (see README) sets a default model; --no-config ignores saved defaults and credentials.\n",

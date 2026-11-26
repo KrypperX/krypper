@@ -416,6 +416,14 @@ impl GoalTurnResult {
 pub enum GoalTurnError {
     /// The fixed process profile did not produce verified success.
     Process(crate::ProcessOutcome),
+    /// The host denied this action under the selected permission mode.
+    PermissionDenied { action: &'static str },
+    /// This action requires a host capability the current runner does not provide.
+    PermissionUnavailable { action: &'static str },
+    /// The selected mode requires confirmation, but no trusted prompt channel is available.
+    PermissionPromptUnavailable { action: &'static str },
+    /// The trusted confirmation callback failed; the action was not dispatched.
+    PermissionPromptFailed { action: &'static str },
     /// The decision source requested an unsupported action.
     UnsupportedAction { action: String },
     /// The existing workspace safety policy rejected or could not perform a file read.
@@ -450,6 +458,24 @@ impl fmt::Display for GoalTurnError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Process(outcome) => write!(formatter, "offline Cargo profile: {outcome:?}"),
+            Self::PermissionDenied { action } => {
+                write!(formatter, "permission denied for action '{action}'")
+            }
+            Self::PermissionUnavailable { action } => {
+                write!(
+                    formatter,
+                    "required host capability is unavailable for action '{action}'"
+                )
+            }
+            Self::PermissionPromptUnavailable { action } => {
+                write!(
+                    formatter,
+                    "confirmation is required for action '{action}', but no prompt is available"
+                )
+            }
+            Self::PermissionPromptFailed { action } => {
+                write!(formatter, "confirmation failed for action '{action}'")
+            }
             Self::UnsupportedAction { action } => match self.decision_failure_code() {
                 Some(code) => match DecisionFailureCode::http_status_from_action_label(action) {
                     Some(status) => write!(
@@ -478,7 +504,12 @@ impl fmt::Display for GoalTurnError {
 impl std::error::Error for GoalTurnError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Process(_) | Self::UnsupportedAction { .. } => None,
+            Self::Process(_)
+            | Self::PermissionDenied { .. }
+            | Self::PermissionUnavailable { .. }
+            | Self::PermissionPromptUnavailable { .. }
+            | Self::PermissionPromptFailed { .. }
+            | Self::UnsupportedAction { .. } => None,
             Self::WorkspaceRead(error) => Some(error),
             Self::RootProjectGuidance(error) => Some(error),
             Self::WorkspaceList(error) => Some(error),

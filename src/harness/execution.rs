@@ -35,10 +35,15 @@ pub use self::planned::{
     CompletionCorrectionResult, ProcessFailureCorrectionError, ProcessFailureCorrectionResult,
     ProcessTestVerificationStatus,
 };
+pub(crate) use self::planned::{
+    run_goal_turn_with_impact_checked_completion_correction_and_permission_gate,
+    run_goal_turn_with_impact_checked_plan_and_permission_gate,
+};
 pub use self::turn::{run_goal_turn, run_goal_turn_with_budget};
 pub use self::turn::{
     run_goal_turn_with_budget_and_extensions, run_goal_turn_with_extensions, TurnExtensions,
 };
+pub(crate) use self::turn::{run_goal_turn_with_budget_and_permission_gate, ActionPermissionGate};
 pub use self::types::{
     BoundedDecisionSource, DecisionFailureCode, DecisionSource, GoalTurnError, GoalTurnResult,
     GoalTurnStopReason, WorkspaceAction, WorkspaceObservation,

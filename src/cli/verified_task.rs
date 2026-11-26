@@ -9,9 +9,10 @@ use crate::agent_loop::{
 use crate::brain::OllamaDecisionSource;
 use crate::harness::execution::{
     create_impact_checked_plan, process_test_verification, review_existing_impact_plan,
-    run_goal_turn_with_impact_checked_completion_correction,
-    run_goal_turn_with_impact_checked_plan, stop_reason_after_test_verification,
-    task_test_verification, ProcessTestVerificationStatus,
+    run_goal_turn_with_impact_checked_completion_correction_and_permission_gate,
+    run_goal_turn_with_impact_checked_plan_and_permission_gate,
+    stop_reason_after_test_verification, task_test_verification, ActionPermissionGate,
+    ProcessTestVerificationStatus,
 };
 use crate::harness::verification::{
     reconcile_task_state_with_checks, verify_completion_checks, CompletionCheckEvidence,
@@ -51,6 +52,7 @@ pub(super) fn run_verified_turn(
     pause_after_plan: bool,
     source: &mut OllamaDecisionSource,
     control: &mut VerifiedTaskControl<'_, '_>,
+    permission_gate: &mut ActionPermissionGate<'_>,
 ) -> io::Result<VerifiedTurnBatch> {
     let required_checks = verify_files
         .iter()
@@ -83,7 +85,7 @@ pub(super) fn run_verified_turn(
         stop_reason,
         test_verification,
     ) = if allow_correction {
-        let result = run_goal_turn_with_impact_checked_completion_correction(
+        let result = run_goal_turn_with_impact_checked_completion_correction_and_permission_gate(
             session,
             task_id,
             turn_id,
@@ -139,6 +141,7 @@ pub(super) fn run_verified_turn(
                 .map_err(crate::brain::BrainReflectionError::InvalidPlan)
             },
             control,
+            permission_gate,
         )
         .map_err(io::Error::other)?;
         let initial = result.initial_result();
@@ -184,7 +187,7 @@ pub(super) fn run_verified_turn(
             test_verification,
         )
     } else {
-        let initial_result = run_goal_turn_with_impact_checked_plan(
+        let initial_result = run_goal_turn_with_impact_checked_plan_and_permission_gate(
             session,
             task_id,
             turn_id,
@@ -192,6 +195,7 @@ pub(super) fn run_verified_turn(
             action_budget,
             initial_plan,
             control,
+            permission_gate,
         )
         .map_err(io::Error::other)?;
         let evidence = verification_evidence(verify_files, &initial_result);

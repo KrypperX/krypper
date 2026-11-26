@@ -5,8 +5,122 @@ use super::types::{
     workspace_mutation_target, ActionExecution, BoundedDecisionSource, DecisionSource,
     GoalTurnError, GoalTurnResult, GoalTurnStopReason, TurnCompletionData, WorkspaceObservation,
 };
+use crate::contracts::extensions::ExtensionEffect;
 use crate::task_lifecycle::{TaskSession, TurnActivitySummary, TurnOutcome};
+use crate::tools::permission_policy::{
+    classify_registered_operation, decide, EffectClass, PermissionDecision, PermissionMode,
+};
 use uuid::Uuid;
+
+/// Synchronous host confirmation for one exact task action. The action and both IDs are
+/// borrowed only for this dispatch attempt; a successful answer is never retained or reused.
+pub(crate) type PermissionPrompt<'a> =
+    dyn FnMut(Uuid, Uuid, &super::WorkspaceAction) -> Result<bool, ()> + 'a;
+
+/// Host-owned per-turn action gate. The fixed process capability flag describes only whether
+/// the embedding has provisioned the inputs needed to build the existing fixed offline profile;
+/// TaskSession's B4 grant remains the final process authorization.
+pub(crate) struct ActionPermissionGate<'a> {
+    mode: PermissionMode,
+    fixed_offline_process_available: bool,
+    prompt: Option<&'a mut PermissionPrompt<'a>>,
+}
+
+impl<'a> ActionPermissionGate<'a> {
+    pub(crate) fn new(
+        mode: PermissionMode,
+        fixed_offline_process_available: bool,
+        prompt: Option<&'a mut PermissionPrompt<'a>>,
+    ) -> Self {
+        Self {
+            mode,
+            fixed_offline_process_available,
+            prompt,
+        }
+    }
+
+    fn authorize(
+        &mut self,
+        task_id: Uuid,
+        turn_id: Uuid,
+        action: &super::WorkspaceAction,
+        extensions: Option<&TurnExtensions<'_>>,
+    ) -> Result<(), GoalTurnError> {
+        use super::WorkspaceAction;
+
+        // Unsupported actions are inert error reports handled by the dispatcher. Let them reach
+        // that path so malformed input and provider failures retain their normal turn outcome.
+        if matches!(action, WorkspaceAction::Unsupported { .. }) {
+            return Ok(());
+        }
+
+        let action_name = super::workspace_action_name(action);
+        let effect = match action {
+            WorkspaceAction::Complete { .. }
+            | WorkspaceAction::Continue
+            | WorkspaceAction::Cancel => EffectClass::TaskControl,
+            WorkspaceAction::Extension { name, .. } => {
+                let Some(entry) = extensions.and_then(|extensions| {
+                    extensions
+                        .registry
+                        .iter()
+                        .find(|entry| entry.tool.descriptor.qualified_name() == name.as_str())
+                }) else {
+                    return Err(GoalTurnError::PermissionDenied {
+                        action: action_name,
+                    });
+                };
+                // A registered effect is a risk hint only. Extensions execute host handlers
+                // outside TaskSession's bounded workspace calls, so every extension needs an
+                // exact prompt and still passes its existing capability/schema gate afterward.
+                match entry.tool.descriptor.effect {
+                    ExtensionEffect::ReadWorkspace
+                    | ExtensionEffect::MutateWorkspace
+                    | ExtensionEffect::ExecuteProcess
+                    | ExtensionEffect::Network
+                    | ExtensionEffect::ExternalService => EffectClass::ExternalOrUnclassified,
+                }
+            }
+            WorkspaceAction::Unsupported { .. } => EffectClass::Unsupported,
+            // The registry is the only source of effect classifications for executable tools.
+            // An action without registered metadata is treated as risky and prompts in Ask or
+            // fails closed when no trusted prompt channel exists.
+            _ => classify_registered_operation(action_name),
+        };
+
+        if effect == EffectClass::FixedOfflineProcess && !self.fixed_offline_process_available {
+            return Err(GoalTurnError::PermissionUnavailable {
+                action: action_name,
+            });
+        }
+
+        match decide(self.mode, effect) {
+            PermissionDecision::Allow => Ok(()),
+            PermissionDecision::Deny => Err(GoalTurnError::PermissionDenied {
+                action: action_name,
+            }),
+            PermissionDecision::Unavailable => Err(GoalTurnError::PermissionUnavailable {
+                action: action_name,
+            }),
+            PermissionDecision::Ask => {
+                let prompt = self.prompt.as_deref_mut().ok_or(
+                    GoalTurnError::PermissionPromptUnavailable {
+                        action: action_name,
+                    },
+                )?;
+                match prompt(task_id, turn_id, action) {
+                    Ok(true) => Ok(()),
+                    Ok(false) => Err(GoalTurnError::PermissionDenied {
+                        action: action_name,
+                    }),
+                    Err(()) => Err(GoalTurnError::PermissionPromptFailed {
+                        action: action_name,
+                    }),
+                }
+            }
+        }
+    }
+}
 
 /// Host-owned extension configuration for an existing goal-turn execution.
 ///
@@ -26,7 +140,11 @@ fn execute_with_extensions(
     action: &super::WorkspaceAction,
     extensions: Option<&TurnExtensions<'_>>,
     expected_revision: Option<&str>,
+    permission_gate: Option<&mut ActionPermissionGate<'_>>,
 ) -> Result<ActionExecution, GoalTurnError> {
+    if let Some(permission_gate) = permission_gate {
+        permission_gate.authorize(task_id, turn_id, action, extensions)?;
+    }
     if let (super::WorkspaceAction::Extension { name, arguments }, Some(extensions)) =
         (action, extensions)
     {
@@ -84,7 +202,7 @@ pub fn run_goal_turn_with_extensions<D: DecisionSource + ?Sized>(
         .map_err(GoalTurnError::WorkspaceRead)?;
 
     let action = decision_source.choose_action(goal);
-    match execute_with_extensions(session, task_id, turn_id, &action, extensions, None)? {
+    match execute_with_extensions(session, task_id, turn_id, &action, extensions, None, None)? {
         ActionExecution::Complete(result) => finish_turn(
             session,
             task_id,
@@ -227,6 +345,79 @@ pub fn run_goal_turn_with_budget_and_extensions<D: BoundedDecisionSource + ?Size
     decision_source: &mut D,
     extensions: Option<&TurnExtensions<'_>>,
 ) -> Result<GoalTurnResult, GoalTurnError> {
+    run_goal_turn_with_budget_and_gate(
+        session,
+        task_id,
+        turn_id,
+        goal,
+        max_actions,
+        decision_source,
+        extensions,
+        None,
+    )
+}
+
+/// Runs a bounded turn with a host-owned permission gate immediately before dispatch.
+///
+/// Existing turn APIs remain compatibility wrappers without a permission policy. Policy-aware
+/// callers must provide this gate for every planned, verified, or correction execution path.
+pub(crate) fn run_goal_turn_with_budget_and_permission_gate<D: BoundedDecisionSource + ?Sized>(
+    session: &mut TaskSession,
+    task_id: Uuid,
+    turn_id: Uuid,
+    goal: &str,
+    max_actions: usize,
+    decision_source: &mut D,
+    permission_gate: &mut ActionPermissionGate<'_>,
+) -> Result<GoalTurnResult, GoalTurnError> {
+    run_goal_turn_with_budget_and_gate(
+        session,
+        task_id,
+        turn_id,
+        goal,
+        max_actions,
+        decision_source,
+        None,
+        Some(permission_gate),
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // Preserves the execution API while adding host-owned extensions and permission.
+pub(crate) fn run_goal_turn_with_budget_and_extensions_and_gate<
+    D: BoundedDecisionSource + ?Sized,
+>(
+    session: &mut TaskSession,
+    task_id: Uuid,
+    turn_id: Uuid,
+    goal: &str,
+    max_actions: usize,
+    decision_source: &mut D,
+    extensions: Option<&TurnExtensions<'_>>,
+    permission_gate: Option<&mut ActionPermissionGate<'_>>,
+) -> Result<GoalTurnResult, GoalTurnError> {
+    run_goal_turn_with_budget_and_gate(
+        session,
+        task_id,
+        turn_id,
+        goal,
+        max_actions,
+        decision_source,
+        extensions,
+        permission_gate,
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // Keeps the shared execution inputs visible at the dispatch boundary.
+fn run_goal_turn_with_budget_and_gate<D: BoundedDecisionSource + ?Sized>(
+    session: &mut TaskSession,
+    task_id: Uuid,
+    turn_id: Uuid,
+    goal: &str,
+    max_actions: usize,
+    decision_source: &mut D,
+    extensions: Option<&TurnExtensions<'_>>,
+    mut permission_gate: Option<&mut ActionPermissionGate<'_>>,
+) -> Result<GoalTurnResult, GoalTurnError> {
     session
         .validate_running_turn(task_id, turn_id)
         .map_err(GoalTurnError::WorkspaceRead)?;
@@ -306,6 +497,7 @@ pub fn run_goal_turn_with_budget_and_extensions<D: BoundedDecisionSource + ?Size
             &action,
             extensions,
             expected_revision.as_deref(),
+            permission_gate.as_deref_mut(),
         )? {
             ActionExecution::Complete(result) => {
                 activity.push(TurnActivitySummary::Completed);
@@ -483,3 +675,7 @@ pub(super) fn finish_turn(
 #[cfg(test)]
 #[path = "turn/extension_tests.rs"]
 mod extension_tests;
+
+#[cfg(test)]
+#[path = "turn/permission_tests.rs"]
+mod permission_tests;

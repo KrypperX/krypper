@@ -12,7 +12,7 @@ use super::model_selection::{
     ProviderSelection,
 };
 use super::outcome::{write_observation, write_turn_outcome};
-use super::settings::user_settings_paths;
+use super::settings::{load_permission_mode, user_settings_paths};
 use super::task_args::parse_task_action;
 use super::task_routing_state::{
     enabled_fallback_policy, has_task_routing_state, remove_task_routing_state,
@@ -24,20 +24,22 @@ use self::verified_task::{
 };
 use super::MAX_FILE_SIZE;
 use crate::agent_loop::{
-    run_goal_turn_with_budget, BoundedDecisionSource, GoalTurnStopReason, WorkspaceAction,
-    WorkspaceObservation,
+    BoundedDecisionSource, GoalTurnStopReason, WorkspaceAction, WorkspaceObservation,
 };
 use crate::brain::ModelDecisionSource;
 use crate::brain::{ModelProvider, OLLAMA_ADDRESS};
 use crate::harness::context::{
     MAX_OBSERVATION_BYTES, MAX_REPOSITORY_CONTEXT_BYTES, MAX_REPOSITORY_CONTEXT_JSON_BYTES,
 };
-use crate::harness::execution::workspace_action_name;
+use crate::harness::execution::{
+    run_goal_turn_with_budget_and_permission_gate, workspace_action_name, ActionPermissionGate,
+};
 use crate::harness::recovery::{
     prepare_checkpoint_for_pause, prepare_resumed_session, ResumeError,
 };
 use crate::harness::verification::{reconcile_task_state, MAX_COMPLETION_CHECKS};
 use crate::task_lifecycle::{TaskSession, TaskState, TurnState};
+use crate::tools::permission_policy::PermissionMode;
 use serde_json::Value;
 use std::ffi::OsString;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -171,6 +173,7 @@ where
     let mut max_actions = None;
     let mut model = None;
     let mut provider = None::<ProviderSelection>;
+    let mut requested_permission_mode = None;
     let mut workspace = None;
     let mut checkpoint_out = None;
     let mut resume = None;
@@ -189,6 +192,27 @@ where
         };
         position += 1;
         match option {
+            "--permission-mode" => {
+                if requested_permission_mode.is_some() {
+                    return usage_error(
+                        error,
+                        Some("task"),
+                        "--permission-mode may be provided only once",
+                    );
+                }
+                let Some(value) = arguments.get(position).and_then(|value| value.to_str()) else {
+                    return usage_error(
+                        error,
+                        Some("task"),
+                        "--permission-mode needs ask or risk-based",
+                    );
+                };
+                requested_permission_mode = match PermissionMode::parse(value) {
+                    Ok(mode) => Some(mode),
+                    Err(message) => return usage_error(error, Some("task"), message),
+                };
+                position += 1;
+            }
             "--goal" => {
                 if goal.is_some() {
                     return usage_error(error, Some("task"), "--goal may be provided only once");
@@ -479,6 +503,19 @@ where
             }
         }
     }
+
+    let permission_mode = match requested_permission_mode {
+        Some(mode) => mode,
+        None if use_config && !no_config => match user_settings_paths()
+            .map_err(io::Error::other)?
+            .map(|paths| load_permission_mode(&paths.permission_mode))
+        {
+            Some(Ok(mode)) => mode,
+            Some(Err(message)) => return usage_error(error, Some("task"), &message),
+            None => PermissionMode::Ask,
+        },
+        None => PermissionMode::Ask,
+    };
 
     let Some(max_actions) = max_actions else {
         return usage_error(
@@ -886,6 +923,14 @@ where
     // The emitter's sequence is scoped to this CLI invocation, not TaskSession history.
     let mut stream_event_sequence = 1_u64;
     let mut last_stream_positions = Vec::new();
+    // This CLI currently has no trusted process toolchain/registry configuration or
+    // confirmation UI for effects outside the bounded workspace API.
+    let mut permission_gate = ActionPermissionGate::new(permission_mode, false, None);
+    writeln!(
+        output,
+        "Permission mode: {}",
+        permission_mode.display_name()
+    )?;
     let mut last_reported_selection = automatic_resolution
         .as_ref()
         .map(|resolution| resolution.selection.clone());
@@ -916,6 +961,7 @@ where
                 checkpoint_out.is_some(),
                 source,
                 &mut control,
+                &mut permission_gate,
             )?;
             correction_used |= batch.correction_attempted;
             let stop_reason = batch.stop_reason;
@@ -1094,13 +1140,14 @@ where
                         }
                     },
                 };
-                run_goal_turn_with_budget(
+                run_goal_turn_with_budget_and_permission_gate(
                     &mut session,
                     task_id,
                     turn_id,
                     &goal,
                     max_actions - actions_taken,
                     &mut decision_source,
+                    &mut permission_gate,
                 )
                 .map_err(io::Error::other)?
             };
