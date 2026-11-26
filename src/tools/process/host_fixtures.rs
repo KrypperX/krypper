@@ -24,6 +24,7 @@ use uuid::Uuid;
 mod cargo;
 mod environment;
 mod limits;
+mod syscalls;
 
 /// The explicit opt-in. Presence is not enough; only the exact value `1` opens the gate.
 pub(super) const REAL_SANDBOX_GATE: &str = "KRYPPER_REAL_SANDBOX";

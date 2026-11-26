@@ -42,12 +42,18 @@ jobs:
       - name: Lint Rust targets with Clippy
         if: runner.os != 'Windows'
         run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Lint Linux sandbox crate with Clippy
+        if: runner.os == 'Linux'
+        run: cargo clippy -p krypper-sandbox --all-targets --locked -- -D warnings
       - name: Build Rust targets
         if: runner.os != 'Windows'
         run: cargo build --all-targets --locked
       - name: Test Rust targets
         if: runner.os != 'Windows'
         run: cargo test --all-targets --locked
+      - name: Test Linux sandbox crate
+        if: runner.os == 'Linux'
+        run: cargo test -p krypper-sandbox --all-targets --locked
       - name: Test Rust documentation examples
         if: runner.os != 'Windows'
         run: cargo test --doc --locked

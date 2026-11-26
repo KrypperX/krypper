@@ -2,15 +2,29 @@
 
 use crate::DirectoryDescriptors;
 use std::fs::OpenOptions;
-use std::io::{self};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::io::{self, Write};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+const SECCOMP_FD: RawFd = 203;
+const FIRST_PINNED_FD: RawFd = 204;
+const MAX_BPF_INSTRUCTIONS: usize = 4096;
+const BPF_INSTRUCTION_BYTES: usize = 8;
+const MFD_CLOEXEC: libc::c_uint = 0x0001;
+const MFD_ALLOW_SEALING: libc::c_uint = 0x0002;
+
 // Reap on every error path too. A stuck kernel wait is never allowed to block the caller.
 
-pub(super) fn sandbox(directories: &DirectoryDescriptors, group: &Path) -> io::Result<Command> {
+pub(super) fn sandbox(
+    directories: &DirectoryDescriptors,
+    group: &Path,
+    filter: &[u8],
+) -> io::Result<Command> {
+    let filter_file = sealed_filter_fd(filter)?;
+    let pinned_filter = duplicate_fd_at_or_above(filter_file.as_raw_fd(), FIRST_PINNED_FD)?;
+    drop(filter_file);
     let roots: [OwnedFd; 3] = [
         directories.workspace.try_clone()?.into(),
         directories.toolchain.try_clone()?.into(),
@@ -19,15 +33,7 @@ pub(super) fn sandbox(directories: &DirectoryDescriptors, group: &Path) -> io::R
     // Keep sources above destinations so dup2 cannot overwrite a later source descriptor.
     let mut pinned = Vec::new();
     for fd in roots {
-        // SAFETY: `fd` owns a live descriptor for the whole call, and `F_DUPFD_CLOEXEC`
-        // with a plain integer minimum has no other memory or ownership requirements.
-        let duplicate = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 203) };
-        if duplicate < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: `duplicate` was checked to be nonnegative just above, so it is a fresh
-        // descriptor that nothing else owns; the `OwnedFd` takes sole ownership.
-        pinned.push(unsafe { OwnedFd::from_raw_fd(duplicate) });
+        pinned.push(duplicate_fd_at_or_above(fd.as_raw_fd(), FIRST_PINNED_FD)?);
     }
     let roots = pinned;
     let attach = OpenOptions::new()
@@ -45,6 +51,8 @@ pub(super) fn sandbox(directories: &DirectoryDescriptors, group: &Path) -> io::R
         "--assert-userns-disabled",
         "--die-with-parent",
         "--new-session",
+        "--seccomp",
+        "203",
         "--cap-drop",
         "ALL",
         "--ro-bind",
@@ -131,7 +139,8 @@ pub(super) fn sandbox(directories: &DirectoryDescriptors, group: &Path) -> io::R
     // `setrlimit` and `prctl`, all of which are async-signal-safe. It formats the pid into a
     // stack buffer, performs no heap allocation, takes no locks, and builds errors with
     // `io::Error::last_os_error`, which only reads `errno`. The descriptors it uses
-    // (`attach`, `roots`) are moved into the closure and stay open until exec.
+    // (`attach`, `roots`, and the compiled filter descriptor) are moved into the closure and stay
+    // open until exec.
     #[cfg(target_os = "linux")]
     unsafe {
         command.pre_exec(move || {
@@ -170,6 +179,9 @@ pub(super) fn sandbox(directories: &DirectoryDescriptors, group: &Path) -> io::R
                     return Err(io::Error::last_os_error());
                 }
             }
+            if libc::dup2(pinned_filter.as_raw_fd(), SECCOMP_FD) < 0 {
+                return Err(io::Error::last_os_error());
+            }
             for (resource, value) in [
                 (libc::RLIMIT_NOFILE, 256),
                 (libc::RLIMIT_FSIZE, 64 * 1024 * 1024),
@@ -191,4 +203,120 @@ pub(super) fn sandbox(directories: &DirectoryDescriptors, group: &Path) -> io::R
         });
     }
     Ok(command)
+}
+
+fn sealed_filter_fd(filter: &[u8]) -> io::Result<OwnedFd> {
+    if filter.is_empty()
+        || filter.len() % BPF_INSTRUCTION_BYTES != 0
+        || filter.len() / BPF_INSTRUCTION_BYTES > MAX_BPF_INSTRUCTIONS
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "compiled syscall filter has an invalid byte length",
+        ));
+    }
+
+    let name = b"krypper-offline-cargo-seccomp\0";
+    // SAFETY: `name` is NUL-terminated and lives through the syscall; the flags are fixed Linux
+    // memfd flags and no pointer arguments are retained by the kernel.
+    let raw_fd = unsafe {
+        libc::syscall(
+            libc::SYS_memfd_create,
+            name.as_ptr().cast::<libc::c_char>(),
+            MFD_CLOEXEC | MFD_ALLOW_SEALING,
+        )
+    };
+    if raw_fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: a nonnegative memfd descriptor was returned above and is not owned elsewhere.
+    let mut file = unsafe { std::fs::File::from_raw_fd(raw_fd as RawFd) };
+    file.write_all(filter)?;
+    if unsafe { libc::lseek(file.as_raw_fd(), 0, libc::SEEK_SET) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let seals = libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
+    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, seals) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(file.into())
+}
+
+fn duplicate_fd_at_or_above(fd: RawFd, minimum: RawFd) -> io::Result<OwnedFd> {
+    // SAFETY: `fd` remains owned by its caller for this operation; `F_DUPFD_CLOEXEC` only reads
+    // the descriptor and returns a fresh descriptor at or above the fixed minimum.
+    let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, minimum) };
+    if duplicate < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `duplicate` was checked to be nonnegative and is a fresh descriptor that nothing
+    // else owns; the returned `OwnedFd` takes sole ownership.
+    Ok(unsafe { OwnedFd::from_raw_fd(duplicate) })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{duplicate_fd_at_or_above, sandbox, sealed_filter_fd, FIRST_PINNED_FD, SECCOMP_FD};
+    use crate::DirectoryDescriptors;
+    use std::fs::{self, File};
+    use std::os::fd::AsRawFd;
+    use uuid::Uuid;
+
+    #[test]
+    fn filter_descriptor_is_sealed_pinned_and_ready_to_read() {
+        let filter = sealed_filter_fd(&[0x06, 0, 0, 0, 0, 0, 0, 0]).unwrap();
+        let current = unsafe { libc::lseek(filter.as_raw_fd(), 0, libc::SEEK_CUR) };
+        assert_eq!(
+            current, 0,
+            "Bubblewrap must read the filter from its first byte"
+        );
+        let seals = unsafe { libc::fcntl(filter.as_raw_fd(), libc::F_GET_SEALS) };
+        let expected =
+            libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
+        assert_eq!(seals & expected, expected);
+        let pinned = duplicate_fd_at_or_above(filter.as_raw_fd(), FIRST_PINNED_FD).unwrap();
+        assert!(pinned.as_raw_fd() >= FIRST_PINNED_FD);
+    }
+
+    #[test]
+    fn malformed_filter_bytes_fail_without_building_a_sandbox_command() {
+        assert!(sealed_filter_fd(&[]).is_err());
+        assert!(sealed_filter_fd(&[0; 7]).is_err());
+    }
+
+    #[test]
+    fn invalid_filter_source_descriptor_returns_an_error() {
+        let error = duplicate_fd_at_or_above(-1, FIRST_PINNED_FD).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::EBADF));
+    }
+
+    #[test]
+    fn bubblewrap_receives_the_filter_on_its_fixed_descriptor() {
+        let root = std::env::temp_dir().join(format!("krypper-sandbox-command-{}", Uuid::new_v4()));
+        fs::create_dir_all(root.join("workspace")).unwrap();
+        fs::create_dir_all(root.join("toolchain")).unwrap();
+        fs::create_dir_all(root.join("registry")).unwrap();
+        let group = root.join("cgroup");
+        fs::create_dir(&group).unwrap();
+        fs::write(group.join("cgroup.procs"), b"").unwrap();
+        let directories = DirectoryDescriptors::new(
+            File::open(root.join("workspace")).unwrap(),
+            File::open(root.join("toolchain")).unwrap(),
+            File::open(root.join("registry")).unwrap(),
+        );
+        let filter = [0x06, 0, 0, 0, 0, 0, 0, 0];
+        let command = sandbox(&directories, &group, &filter).unwrap();
+        let args = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let seccomp = args
+            .iter()
+            .position(|argument| argument == "--seccomp")
+            .unwrap();
+        assert_eq!(args.get(seccomp + 1).map(String::as_str), Some("203"));
+        assert_eq!(SECCOMP_FD, 203);
+        drop(command);
+        fs::remove_dir_all(root).unwrap();
+    }
 }
