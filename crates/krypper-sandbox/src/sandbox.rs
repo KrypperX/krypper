@@ -207,7 +207,7 @@ pub(super) fn sandbox(
 
 fn sealed_filter_fd(filter: &[u8]) -> io::Result<OwnedFd> {
     if filter.is_empty()
-        || filter.len() % BPF_INSTRUCTION_BYTES != 0
+        || !filter.len().is_multiple_of(BPF_INSTRUCTION_BYTES)
         || filter.len() / BPF_INSTRUCTION_BYTES > MAX_BPF_INSTRUCTIONS
     {
         return Err(io::Error::new(

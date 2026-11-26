@@ -36,7 +36,7 @@ fn compile_program() -> io::Result<BpfProgram> {
         libc::SYS_io_uring_enter,
         libc::SYS_io_uring_register,
     ] {
-        rules.insert(syscall as i64, Vec::new());
+        rules.insert(syscall, Vec::new());
     }
 
     // The syscall ABI treats the domain as an int. Comparing only its low 32 bits also
@@ -51,7 +51,7 @@ fn compile_program() -> io::Result<BpfProgram> {
     let vsock_rule = SeccompRule::new(vec![vsock_condition])
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
     for syscall in [libc::SYS_socket, libc::SYS_socketpair] {
-        rules.insert(syscall as i64, vec![vsock_rule.clone()]);
+        rules.insert(syscall, vec![vsock_rule.clone()]);
     }
 
     #[cfg(target_arch = "x86_64")]
