@@ -1079,11 +1079,11 @@ fn task_composes_actions_from_the_observed_search_location_interactively() {
 
     let mut output = Vec::new();
     let mut error = Vec::new();
-    read_task_cli_until_prompt(&receiver, &mut output, &mut error, 1, 0);
+    read_task_cli_until_prompt(&receiver, &mut output, &mut error, 1, 1);
     writeln!(stdin, "search-tree . {query}").unwrap();
     stdin.flush().unwrap();
 
-    read_task_cli_until_prompt(&receiver, &mut output, &mut error, 2, 2);
+    read_task_cli_until_prompt(&receiver, &mut output, &mut error, 2, 3);
     let search_observation = String::from_utf8(output.clone()).unwrap();
     assert_eq!(
         search_observation,
@@ -1106,7 +1106,7 @@ fn task_composes_actions_from_the_observed_search_location_interactively() {
     writeln!(stdin, "read-range {observed_path_token} {observed_line} 1").unwrap();
     stdin.flush().unwrap();
 
-    read_task_cli_until_prompt(&receiver, &mut output, &mut error, 3, 4);
+    read_task_cli_until_prompt(&receiver, &mut output, &mut error, 3, 5);
     let observed_output = String::from_utf8(output.clone()).unwrap();
     let range_header = format!(
         "Observation 2: read-range {observed_path} lines {observed_line}-{observed_line}\n"
@@ -1129,7 +1129,7 @@ fn task_composes_actions_from_the_observed_search_location_interactively() {
     .unwrap();
     stdin.flush().unwrap();
 
-    read_task_cli_until_prompt(&receiver, &mut output, &mut error, 4, 5);
+    read_task_cli_until_prompt(&receiver, &mut output, &mut error, 4, 6);
     assert!(String::from_utf8_lossy(&output).ends_with(&format!(
         "Observation 3: replaced text in {observed_path} ({} bytes)\n",
         final_contents.len()
@@ -1137,7 +1137,7 @@ fn task_composes_actions_from_the_observed_search_location_interactively() {
     writeln!(stdin, "mkdir derived").unwrap();
     stdin.flush().unwrap();
 
-    read_task_cli_until_prompt(&receiver, &mut output, &mut error, 5, 6);
+    read_task_cli_until_prompt(&receiver, &mut output, &mut error, 5, 7);
     assert!(
         String::from_utf8_lossy(&output).ends_with("Observation 4: created directory derived\n")
     );
@@ -1145,7 +1145,7 @@ fn task_composes_actions_from_the_observed_search_location_interactively() {
     writeln!(stdin, "create derived/summary.txt {derived_result}").unwrap();
     stdin.flush().unwrap();
 
-    read_task_cli_until_prompt(&receiver, &mut output, &mut error, 6, 7);
+    read_task_cli_until_prompt(&receiver, &mut output, &mut error, 6, 8);
     assert!(String::from_utf8_lossy(&output).ends_with(&format!(
         "Observation 5: created derived/summary.txt ({} bytes)\n",
         derived_result.len()
