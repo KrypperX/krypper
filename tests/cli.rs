@@ -156,6 +156,23 @@ fn read_task_cli_until_prompt(
     assert_eq!(String::from_utf8_lossy(stderr), expected_prompts);
 }
 
+fn read_task_cli_until_stdout_contains(
+    receiver: &Receiver<TaskCliOutput>,
+    stdout: &mut Vec<u8>,
+    stderr: &mut Vec<u8>,
+    expected: &str,
+) {
+    while !String::from_utf8_lossy(stdout).contains(expected) {
+        let message = receiver
+            .recv_timeout(Duration::from_secs(10))
+            .expect("receive expected CLI output");
+        match message {
+            TaskCliOutput::Stdout(bytes) => stdout.extend(bytes),
+            TaskCliOutput::Stderr(bytes) => stderr.extend(bytes),
+        }
+    }
+}
+
 fn spawn_task_cli_output_readers(
     child: &mut Child,
 ) -> (Receiver<TaskCliOutput>, Vec<thread::JoinHandle<()>>) {
@@ -2684,6 +2701,7 @@ fn task_resume_after_interrupted_file_creation_retries_from_the_original_checkpo
         FILE_CONTENTS.len()
     );
     read_task_cli_until_prompt(&receiver, &mut output, &mut error, 2, 1);
+    read_task_cli_until_stdout_contains(&receiver, &mut output, &mut error, &creation_observation);
     assert!(String::from_utf8_lossy(&output).ends_with(&creation_observation));
     assert_eq!(
         fs::read(workspace.join(FILE_NAME)).unwrap(),
@@ -2819,6 +2837,7 @@ fn task_resume_after_interrupted_directory_creation_retries_from_the_original_ch
 
     let creation_observation = format!("Observation 1: created directory {DIRECTORY_NAME}\n");
     read_task_cli_until_prompt(&receiver, &mut output, &mut error, 2, 1);
+    read_task_cli_until_stdout_contains(&receiver, &mut output, &mut error, &creation_observation);
     assert!(String::from_utf8_lossy(&output).ends_with(&creation_observation));
     assert!(directory.is_dir());
     assert!(fs::read_dir(&directory).unwrap().next().is_none());
@@ -2963,6 +2982,12 @@ fn task_resume_after_interrupted_text_replacement_retries_from_the_original_chec
 
     read_task_cli_until_prompt(&receiver, &mut output, &mut error, 2, 1);
     let replacement_observation = format!("Observation 1: replaced text in {FILE_NAME}");
+    read_task_cli_until_stdout_contains(
+        &receiver,
+        &mut output,
+        &mut error,
+        &replacement_observation,
+    );
     assert!(String::from_utf8_lossy(&output).contains(&replacement_observation));
     assert_eq!(fs::read(&file_path).unwrap(), replaced_bytes);
     assert_eq!(fs::read(&checkpoint).unwrap(), checkpoint_bytes);
