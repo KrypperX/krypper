@@ -3,10 +3,9 @@ use crate::brain::provider_bridge::ExtensionTool;
 use crate::brain::WorkspacePlan;
 use crate::brain::WorkspacePlanError;
 use crate::harness::execution::{
-    run_goal_turn_with_completion_correction_and_permission_gate,
     run_goal_turn_with_impact_checked_completion_correction_and_permission_gate,
-    run_goal_turn_with_plan_and_permission_gate, CompletionCorrectionError, GoalTurnError,
-    RegisteredExtensionWithArguments,
+    run_goal_turn_with_impact_checked_plan_and_permission_gate, CompletionCorrectionError,
+    GoalTurnError, RegisteredExtensionWithArguments,
 };
 use crate::task_lifecycle::{TaskSession, TaskState, TurnState};
 use crate::tools::capability_policy::{CapabilityContext, CapabilityGrant};
@@ -32,6 +31,22 @@ fn running_turn() -> (TaskSession, Uuid, Uuid) {
 
 fn extension_result(_: &Value) -> String {
     "extension-ran".to_owned()
+}
+
+fn checked_plan(
+    session: &TaskSession,
+    task_id: Uuid,
+    turn_id: Uuid,
+    plan: WorkspacePlan,
+) -> crate::harness::impact::ImpactCheckedPlan {
+    let (report, expected_revisions) =
+        crate::harness::impact::analyze_plan(session, task_id, turn_id, &plan)
+            .expect("impact analysis");
+    crate::harness::impact::ImpactCheckedPlan {
+        plan,
+        report,
+        expected_revisions,
+    }
 }
 
 fn extension_panics(_: &Value) -> String {
@@ -384,7 +399,7 @@ fn unconfigured_fixed_process_is_unavailable_before_prompt_or_b4_dispatch() {
 }
 
 #[test]
-fn full_access_is_unavailable_and_planned_actions_cannot_skip_the_gate() {
+fn full_access_is_unavailable_and_impact_checked_plans_cannot_skip_the_gate() {
     let (mut session, task_id, turn_id) = running_turn();
     let plan = WorkspacePlan::try_from_actions(
         vec![super::super::WorkspaceAction::ReadFile {
@@ -393,18 +408,19 @@ fn full_access_is_unavailable_and_planned_actions_cannot_skip_the_gate() {
         1,
     )
     .expect("registered plan operation");
+    let checked = checked_plan(&session, task_id, turn_id, plan);
     let mut control = |_: &str, _: &[WorkspaceObservation]| -> super::super::WorkspaceAction {
         panic!("plan with one action must not request task control")
     };
     let mut gate = ActionPermissionGate::new(PermissionMode::FullAccess, false, None);
 
-    let result = run_goal_turn_with_plan_and_permission_gate(
+    let result = run_goal_turn_with_impact_checked_plan_and_permission_gate(
         &mut session,
         task_id,
         turn_id,
         "goal",
         1,
-        Ok(plan),
+        Ok(checked),
         &mut control,
         &mut gate,
     );
@@ -418,76 +434,61 @@ fn full_access_is_unavailable_and_planned_actions_cannot_skip_the_gate() {
 }
 
 #[test]
-fn completion_correction_cannot_skip_the_same_permission_gate() {
+fn impact_checked_correction_cannot_skip_the_permission_gate() {
     let (mut session, task_id, turn_id) = running_turn();
     let plan = WorkspacePlan::try_from_actions(
         vec![super::super::WorkspaceAction::ReadFile {
-            path: "missing.txt".into(),
+            path: "Cargo.toml".into(),
         }],
         1,
     )
     .expect("registered plan operation");
-    let mut control = |_: &str, _: &[WorkspaceObservation]| -> super::super::WorkspaceAction {
-        panic!("plan with one action must not request task control")
-    };
-    let mut gate = ActionPermissionGate::new(PermissionMode::FullAccess, false, None);
-
-    let result = run_goal_turn_with_completion_correction_and_permission_gate(
-        &mut session,
+    let checked = checked_plan(&session, task_id, turn_id, plan);
+    let process_action = super::super::WorkspaceAction::OfflineCargoTest { test_filter: None };
+    let correction = checked_plan(
+        &session,
         task_id,
         turn_id,
-        "goal",
-        1,
-        Some(Ok(plan)),
-        &[],
-        |_, _| Vec::new(),
-        |_, _, _, _, _, _| Err::<WorkspacePlan, _>(WorkspacePlanError::InvalidResponse),
-        &mut control,
-        &mut gate,
+        WorkspacePlan::try_from_actions(vec![process_action.clone()], 1)
+            .expect("registered correction operation"),
     );
-
-    assert!(matches!(
-        result,
-        Err(CompletionCorrectionError::Execution(
-            GoalTurnError::PermissionUnavailable {
-                action: "read_file"
-            }
-        ))
-    ));
-}
-
-#[test]
-fn impact_checked_verified_correction_cannot_skip_the_permission_gate() {
-    let (mut session, task_id, turn_id) = running_turn();
-    let plan = WorkspacePlan::try_from_actions(
-        vec![super::super::WorkspaceAction::ReadFile {
-            path: "missing.txt".into(),
-        }],
-        1,
-    )
-    .expect("registered plan operation");
-    let checked = crate::harness::impact::ImpactCheckedPlan {
-        plan,
-        report: Default::default(),
-        expected_revisions: Default::default(),
-    };
     let mut control = |_: &str, _: &[WorkspaceObservation]| -> super::super::WorkspaceAction {
-        panic!("plan with one action must not request task control")
+        super::super::WorkspaceAction::Complete {
+            result: "initial plan completed".to_owned(),
+        }
     };
-    let mut gate = ActionPermissionGate::new(PermissionMode::FullAccess, false, None);
+    let required_checks = [crate::harness::verification::RequiredCompletionCheck {
+        id: "independent_check".to_owned(),
+        description: "the independent check passes".to_owned(),
+    }];
+    let mut prompt_calls = 0;
+    let mut prompt = |seen_task, seen_turn, seen_action: &super::super::WorkspaceAction| {
+        prompt_calls += 1;
+        assert_eq!(seen_task, task_id);
+        assert_ne!(seen_turn, turn_id);
+        assert_eq!(seen_action, &process_action);
+        Ok(false)
+    };
+    let mut gate = ActionPermissionGate::new(PermissionMode::Ask, true, Some(&mut prompt));
 
     let result = run_goal_turn_with_impact_checked_completion_correction_and_permission_gate(
         &mut session,
         task_id,
         turn_id,
         "goal",
-        1,
+        7,
         Some(Ok(checked)),
-        &[],
-        |_, _| Vec::new(),
-        |_, _, _, _, _, _, _, _, _| {
-            Err::<crate::harness::impact::ImpactCheckedPlan, _>(WorkspacePlanError::InvalidResponse)
+        &required_checks,
+        |_, _| {
+            vec![crate::harness::verification::CompletionCheckEvidence {
+                check_id: "independent_check".to_owned(),
+                status: crate::harness::verification::CompletionCheckEvidenceStatus::Failed,
+                source:
+                    crate::harness::verification::CompletionEvidenceSource::DeterministicLocalCheck,
+                summary: "the independent check failed".to_owned(),
+            }]
         },
+        |_, _, _, _, _, _, _, _, _| Ok::<_, WorkspacePlanError>(correction.clone()),
         &mut control,
         &mut gate,
     );
@@ -495,9 +496,12 @@ fn impact_checked_verified_correction_cannot_skip_the_permission_gate() {
     assert!(matches!(
         result,
         Err(CompletionCorrectionError::Execution(
-            GoalTurnError::PermissionUnavailable {
-                action: "read_file"
+            GoalTurnError::PermissionDenied {
+                action: "offline_cargo_test"
             }
         ))
     ));
+    drop(gate);
+    drop(prompt);
+    assert_eq!(prompt_calls, 1);
 }

@@ -118,7 +118,7 @@ impl OperationDefinition {
         self.description
     }
 
-    pub(crate) const fn effect_class(self) -> EffectClass {
+    pub(crate) const fn effect_class(&self) -> EffectClass {
         self.effect_class
     }
 
