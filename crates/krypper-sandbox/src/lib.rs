@@ -164,6 +164,7 @@ const FIXED_CARGO_ENVIRONMENT_NAMES: &[&str] = &[
     "CARGO_TARGET_DIR",
     "RUSTC",
     "LANG",
+    "PWD",
 ];
 /// The values actually installed by the fixed offline Cargo sandbox, in launch order.
 pub const OFFLINE_CARGO_TEST_ENVIRONMENT: &[(&str, &str)] = &[
@@ -178,6 +179,8 @@ pub const OFFLINE_CARGO_TEST_ENVIRONMENT: &[(&str, &str)] = &[
     ("CARGO_TARGET_DIR", "/tmp/target"),
     ("RUSTC", "/toolchain/bin/rustc"),
     ("LANG", "C"),
+    // Bubblewrap sets PWD after applying --chdir, even after --clearenv.
+    ("PWD", "/workspace"),
 ];
 const FIXED_CARGO_PROFILE_LIMITS: ProfileLimits = ProfileLimits {
     wall_secs: 180,
@@ -1474,7 +1477,7 @@ mod execution_contract_tests {
                 },
             ]
         );
-        assert_eq!(requirements.environment_names().len(), 11);
+        assert_eq!(requirements.environment_names().len(), 12);
         assert_eq!(requirements.network(), NetworkRequirement::DenyAll);
         assert_eq!(
             requirements.syscall(),

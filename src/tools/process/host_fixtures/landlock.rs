@@ -33,6 +33,22 @@ fn assert_denies_write(path: &str) {
     }
 }
 
+fn assert_denies_read_only_or_landlock_write(path: &str) {
+    match OpenOptions::new().write(true).create_new(true).open(path) {
+        Err(error) => {
+            assert!(
+                matches!(error.kind(), ErrorKind::PermissionDenied | ErrorKind::ReadOnlyFilesystem),
+                "{path}: {error}"
+            );
+        }
+        Ok(file) => {
+            drop(file);
+            let cleanup = std::fs::remove_file(path);
+            panic!("Sandbox allowed an unlisted write {path}; cleanup={cleanup:?}");
+        }
+    }
+}
+
 #[test]
 fn landlock_descendant_probe() {
     let Some(path) = std::env::var_os("KRYPPER_LANDLOCK_DESCENDANT_PATH") else {
@@ -93,7 +109,7 @@ fn landlock_allows_profile_scratch_and_denies_unlisted_tmp() {
         });
         std::fs::remove_file(probe).unwrap();
     }
-    assert_denies_write(&format!(
+    assert_denies_read_only_or_landlock_write(&format!(
         "/tmp/home/registry/krypper-landlock-registry-denied-{}",
         std::process::id()
     ));
@@ -123,7 +139,11 @@ fn landlock_allows_profile_scratch_and_denies_unlisted_tmp() {
         result.succeeded(),
         "Landlock Cargo fixture failed: {result:?}"
     );
-    assert_eq!(result.executed_tests, Some(1), "{result:?}");
+    assert_eq!(
+        result.executed_tests,
+        Some(2),
+        "the parent policy test and its exec descendant probe must both run: {result:?}"
+    );
     assert!(result.cleanup_confirmed, "{result:?}");
     assert!(!result.recovery_hold, "{result:?}");
     let status = result

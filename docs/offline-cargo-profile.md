@@ -252,7 +252,10 @@ There is no optional namespace flag or direct-spawn fallback.
 - Start from an empty payload environment: only fixed PATH, HOME, TMPDIR,
   CARGO_HOME, CARGO_BUILD_JOBS (one), CARGO_PROFILE_DEV_DEBUG (zero),
   CARGO_PROFILE_TEST_DEBUG (zero), CARGO_INCREMENTAL (zero), CARGO_TARGET_DIR,
-  RUSTC and LANG are set. Cargo incremental metadata and
+  RUSTC and LANG are set. Bubblewrap also sets the fixed `PWD=/workspace`
+  after applying the sandbox cwd, including after `--clearenv`; the runner
+  validates this deterministic value as part of the exact environment.
+  Cargo incremental metadata and
   debug symbols are disabled to keep build artifacts within the per-file limit.
   No provider, GitHub, SSH, proxy, user-manager environment or credential is
   forwarded.
