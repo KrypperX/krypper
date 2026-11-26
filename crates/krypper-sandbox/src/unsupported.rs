@@ -1,14 +1,22 @@
-use crate::{SandboxOutcome, SandboxRunRequest, SandboxRunResult};
+use crate::{
+    SandboxControl, SandboxIsolationEvidence, SandboxOutcome, SandboxRunRequest, SandboxRunResult,
+};
 
 pub(super) fn run(request: SandboxRunRequest) -> SandboxRunResult {
     let mut result = SandboxRunResult::empty(request.run_id, SandboxOutcome::SandboxUnavailable, 0);
     result.diagnostic = Some("process sandbox is unavailable on this platform".into());
+    let mut evidence = SandboxIsolationEvidence::new(None);
+    evidence.unavailable(SandboxControl::SandboxRuntime);
+    result.sandbox_evidence = Some(evidence);
     result
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{run_offline_cargo, RunLimits, SandboxOutcome, SandboxRunRequest};
+    use crate::{
+        run_offline_cargo, RunLimits, SandboxControl, SandboxEvidenceStatus, SandboxOutcome,
+        SandboxRunRequest,
+    };
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
     use uuid::Uuid;
@@ -25,5 +33,15 @@ mod tests {
         let result = run_offline_cargo(request);
         assert_eq!(result.outcome, SandboxOutcome::SandboxUnavailable);
         assert!(!result.test_evidence_available);
+        let evidence = result.sandbox_evidence.expect("unsupported evidence");
+        assert_eq!(evidence.backend(), None);
+        assert!(evidence.controls().iter().any(|record| {
+            record.control == SandboxControl::SandboxRuntime
+                && record.status == SandboxEvidenceStatus::Unavailable
+        }));
+        assert!(!evidence.controls().iter().any(|record| {
+            record.status == SandboxEvidenceStatus::Observed
+                || record.status == SandboxEvidenceStatus::Applied
+        }));
     }
 }

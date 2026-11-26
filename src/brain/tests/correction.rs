@@ -50,6 +50,7 @@ fn process_failure_correction_reflection_receives_the_typed_bounded_result() {
             output_limit: 0,
             resource_events: Vec::new(),
             recovery_hold: false,
+            sandbox_evidence: None,
         }],
     );
     let mut decisions = |_: &str, _: &[WorkspaceObservation]| WorkspaceAction::OfflineCargoTest {

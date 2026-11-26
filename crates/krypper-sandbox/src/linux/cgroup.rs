@@ -3,7 +3,7 @@
 use super::process::bounded_host;
 use super::recovery::mark_cleanup_uncertain;
 use crate::host::host_command;
-use crate::{RunLimits, SandboxResource};
+use crate::{RunLimits, SandboxControl, SandboxIsolationEvidence, SandboxResource};
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -45,7 +45,11 @@ pub(super) struct Supervisor {
     limits: RunLimits,
 }
 impl Supervisor {
-    pub(super) fn create(id: Uuid, limits: RunLimits) -> io::Result<Self> {
+    pub(super) fn create(
+        id: Uuid,
+        limits: RunLimits,
+        evidence: &mut SandboxIsolationEvidence,
+    ) -> io::Result<Self> {
         let unit = format!("krypper-test-{}.service", id.simple());
         let memory = format!("MemoryMax={}", limits.memory_bytes);
         let tasks = format!("TasksMax={}", limits.processes);
@@ -54,32 +58,16 @@ impl Supervisor {
         let keepalive = runtime_secs.to_string();
         // Only a trusted inert keeper starts here. No workspace code runs until verification.
         let mut command = host_command("/usr/bin/systemd-run");
-        command.args([
-            "--user",
-            "--quiet",
-            "--collect",
-            "--unit",
+        append_supervisor_args(
+            &mut command,
             &unit,
-            "-p",
-            "Delegate=yes",
-        ]);
-        command.args(["-p", memory.as_str(), "-p", "MemorySwapMax=0"]);
-        command.args(["-p", tasks.as_str()]);
-        let creation = bounded_host(command.args([
-            "-p",
-            "CPUQuota=100%",
-            "-p",
-            runtime.as_str(),
-            "-p",
-            "KillMode=control-group",
-            "-p",
-            "TimeoutStopSec=1",
-            "-p",
-            "SendSIGKILL=yes",
-            "--",
-            "/usr/bin/sleep",
-            keepalive.as_str(),
-        ]));
+            &memory,
+            &tasks,
+            &runtime,
+            &keepalive,
+            evidence,
+        );
+        let creation = bounded_host(&mut command);
         let mut supervisor = Self {
             unit,
             group: PathBuf::new(),
@@ -197,6 +185,49 @@ impl Supervisor {
     }
 }
 
+fn append_supervisor_args(
+    command: &mut std::process::Command,
+    unit: &str,
+    memory: &str,
+    tasks: &str,
+    runtime: &str,
+    keepalive: &str,
+    evidence: &mut SandboxIsolationEvidence,
+) {
+    command.args([
+        "--user",
+        "--quiet",
+        "--collect",
+        "--unit",
+        unit,
+        "-p",
+        "Delegate=yes",
+    ]);
+    command.args(["-p", memory]);
+    evidence.request(SandboxControl::MemoryLimit);
+    command.args(["-p", "MemorySwapMax=0"]);
+    evidence.request(SandboxControl::SwapLimit);
+    command.args(["-p", tasks]);
+    evidence.request(SandboxControl::ProcessLimit);
+    command.args(["-p", "CPUQuota=100%"]);
+    evidence.request(SandboxControl::CpuLimit);
+    command.args([
+        "-p",
+        runtime,
+        "-p",
+        "KillMode=control-group",
+        "-p",
+        "TimeoutStopSec=1",
+        "-p",
+        "SendSIGKILL=yes",
+        "--",
+        "/usr/bin/sleep",
+        keepalive,
+    ]);
+    evidence.request(SandboxControl::WallClockLimit);
+    evidence.request(SandboxControl::CgroupCleanup);
+}
+
 fn control_group_path(path: &Path) -> io::Result<PathBuf> {
     if !path.is_absolute()
         || path
@@ -243,10 +274,50 @@ mod path_invariant_tests {
 
 #[cfg(test)]
 mod readback_tests {
-    use super::Supervisor;
-    use crate::RunLimits;
+    use super::{append_supervisor_args, Supervisor};
+    use crate::{
+        RunLimits, SandboxBackend, SandboxControl, SandboxEvidenceStatus, SandboxIsolationEvidence,
+    };
     use std::mem::ManuallyDrop;
+    use std::process::Command;
     use uuid::Uuid;
+
+    #[test]
+    fn cgroup_configuration_arguments_have_matching_requested_evidence() {
+        let mut command = Command::new("systemd-run");
+        let mut evidence = SandboxIsolationEvidence::new(Some(SandboxBackend::Bubblewrap));
+        append_supervisor_args(
+            &mut command,
+            "krypper-test.fixture.service",
+            "MemoryMax=1024",
+            "TasksMax=4",
+            "RuntimeMaxSec=30",
+            "30",
+            &mut evidence,
+        );
+        let args = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        for (control, argument) in [
+            (SandboxControl::MemoryLimit, "MemoryMax=1024"),
+            (SandboxControl::SwapLimit, "MemorySwapMax=0"),
+            (SandboxControl::ProcessLimit, "TasksMax=4"),
+            (SandboxControl::CpuLimit, "CPUQuota=100%"),
+            (SandboxControl::WallClockLimit, "RuntimeMaxSec=30"),
+            (SandboxControl::CgroupCleanup, "KillMode=control-group"),
+        ] {
+            assert!(args.iter().any(|value| value == argument));
+            assert!(evidence.controls().iter().any(|record| {
+                record.control == control && record.status == SandboxEvidenceStatus::Requested
+            }));
+        }
+        assert!(!evidence
+            .controls()
+            .iter()
+            .any(|record| record.status == SandboxEvidenceStatus::Observed));
+    }
 
     #[test]
     fn cgroup_readback_rejects_missing_and_unlimited_controls() {

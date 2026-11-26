@@ -1,6 +1,7 @@
 //! Stable process-attempt result shared by supported and unavailable backends.
 
 use super::outcome::{ProcessOutcome, ProcessResource};
+use krypper_sandbox::SandboxIsolationEvidence;
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -29,6 +30,9 @@ pub struct ProcessResult {
     pub resource_events: Vec<ProcessResource>,
     /// True when an earlier run left cleanup unconfirmed and this run was held.
     pub recovery_hold: bool,
+    /// Optional typed sandbox setup evidence. Omitted for legacy and non-sandbox results.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sandbox_evidence: Option<SandboxIsolationEvidence>,
 }
 
 fn serialize_run_id<S: serde::Serializer>(id: &Uuid, serializer: S) -> Result<S::Ok, S::Error> {
@@ -67,6 +71,7 @@ impl ProcessResult {
             output_limit: 0,
             resource_events: Vec::new(),
             recovery_hold: false,
+            sandbox_evidence: None,
         }
     }
 

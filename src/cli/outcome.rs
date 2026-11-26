@@ -325,6 +325,7 @@ mod tests {
                         output_limit: 0,
                         resource_events: Vec::new(),
                         recovery_hold: false,
+                        sandbox_evidence: None,
                     },
                 },
                 "Observation 3: offline Cargo NoTestsMatched; filter=Some(\"absent_test\"); tests_ran=false executed_tests=Some(0); cleanup=true truncated=false\nstdout: \"\"\nstderr: \"\"\n",

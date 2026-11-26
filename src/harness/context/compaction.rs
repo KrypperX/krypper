@@ -427,6 +427,7 @@ mod tests {
             output_limit: 0,
             resource_events: Vec::new(),
             recovery_hold: false,
+            sandbox_evidence: None,
         };
         process.stdout = "older output ".repeat(1_000);
         process.truncated = true;

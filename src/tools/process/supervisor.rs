@@ -160,6 +160,7 @@ fn from_runner(raw: SandboxRunResult, test_filter: Option<&str>) -> ProcessResul
     result.output_limit = raw.output_limit;
     result.resource_events = raw.resource_events.into_iter().map(map_resource).collect();
     result.recovery_hold = raw.recovery_hold;
+    result.sandbox_evidence = raw.sandbox_evidence;
     if raw.test_evidence_available {
         record_test_evidence(&mut result);
     }
@@ -225,4 +226,66 @@ pub(super) fn record_raw_output(result: &mut ProcessResult, stdout: Vec<u8>, std
     result.output_bytes = stdout.len().saturating_add(stderr.len());
     result.stdout = String::from_utf8_lossy(&stdout).into_owned();
     result.stderr = String::from_utf8_lossy(&stderr).into_owned();
+}
+
+#[cfg(test)]
+mod isolation_evidence_tests {
+    use super::from_runner;
+    use crate::tools::process::outcome::{ProcessOutcome, ProcessResource};
+    use krypper_sandbox::{
+        SandboxBackend, SandboxIsolationEvidence, SandboxOutcome, SandboxResource, SandboxRunResult,
+    };
+    use uuid::Uuid;
+
+    fn runner_result(evidence: Option<SandboxIsolationEvidence>) -> SandboxRunResult {
+        SandboxRunResult {
+            run_id: Uuid::new_v4(),
+            outcome: SandboxOutcome::Exited(7),
+            stdout: b"stdout".to_vec(),
+            stderr: b"stderr".to_vec(),
+            truncated: true,
+            diagnostic: Some("cleanup diagnostic".to_owned()),
+            cleanup_confirmed: false,
+            elapsed_ms: 17,
+            output_bytes: 12,
+            output_limit: 256,
+            resource_events: vec![SandboxResource::Memory, SandboxResource::Cpu],
+            recovery_hold: true,
+            test_evidence_available: false,
+            sandbox_evidence: evidence,
+        }
+    }
+
+    #[test]
+    fn adapter_preserves_sandbox_evidence_and_existing_result_fields() {
+        let evidence = SandboxIsolationEvidence::new(Some(SandboxBackend::Bubblewrap));
+        let raw = runner_result(Some(evidence.clone()));
+        let run_id = raw.run_id;
+        let result = from_runner(raw, None);
+
+        assert_eq!(result.run_id, run_id);
+        assert_eq!(result.outcome, ProcessOutcome::Exited(7));
+        assert_eq!(result.stdout, "stdout");
+        assert_eq!(result.stderr, "stderr");
+        assert!(result.truncated);
+        assert_eq!(result.diagnostic.as_deref(), Some("cleanup diagnostic"));
+        assert!(!result.cleanup_confirmed);
+        assert_eq!(result.elapsed_ms, 17);
+        assert_eq!(result.output_bytes, 12);
+        assert_eq!(result.output_limit, 256);
+        assert_eq!(
+            result.resource_events,
+            [ProcessResource::Memory, ProcessResource::Cpu]
+        );
+        assert!(result.recovery_hold);
+        assert_eq!(result.sandbox_evidence, Some(evidence));
+    }
+
+    #[test]
+    fn absent_evidence_keeps_the_legacy_json_shape() {
+        let result = from_runner(runner_result(None), None);
+        let json = serde_json::to_value(result).expect("serialize process result");
+
+        assert!(json.get("sandbox_evidence").is_none());
+    }
 }
