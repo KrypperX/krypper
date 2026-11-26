@@ -14,6 +14,7 @@ use crate::tools::extension_contract::{
 };
 use crate::tools::permission_policy::PermissionMode;
 use serde_json::{json, Value};
+use std::cell::Cell;
 
 fn running_turn() -> (TaskSession, Uuid, Uuid) {
     let mut session = TaskSession::new();
@@ -106,6 +107,31 @@ fn risk_based_allows_task_control_without_a_prompt() {
 }
 
 #[test]
+fn unsupported_actions_keep_the_existing_failure_reporting_path() {
+    let (mut session, task_id, turn_id) = running_turn();
+    let action = super::super::WorkspaceAction::Unsupported {
+        action: "invalid task action".to_owned(),
+    };
+    let mut decide = |_: &str, _: &[WorkspaceObservation]| action.clone();
+    let mut gate = ActionPermissionGate::new(PermissionMode::Ask, false, None);
+
+    let result = run_goal_turn_with_budget_and_permission_gate(
+        &mut session,
+        task_id,
+        turn_id,
+        "goal",
+        1,
+        &mut decide,
+        &mut gate,
+    );
+
+    assert!(matches!(
+        result,
+        Err(GoalTurnError::UnsupportedAction { action }) if action == "invalid task action"
+    ));
+}
+
+#[test]
 fn ask_and_risk_based_allow_existing_bounded_workspace_actions_without_prompting() {
     let (_session, task_id, turn_id) = running_turn();
     let action = super::super::WorkspaceAction::ReadFile {
@@ -158,9 +184,9 @@ fn extension_approval_is_synchronous_action_bound_and_consumed_per_dispatch() {
             }
         }
     };
-    let mut approvals = 0;
+    let approvals = Cell::new(0);
     let mut prompt = |seen_task, seen_turn, seen_action: &super::super::WorkspaceAction| {
-        approvals += 1;
+        approvals.set(approvals.get() + 1);
         assert_eq!(seen_task, task_id);
         assert_eq!(seen_turn, turn_id);
         assert_eq!(seen_action, &extension_action);
@@ -180,9 +206,7 @@ fn extension_approval_is_synchronous_action_bound_and_consumed_per_dispatch() {
     )
     .expect("each explicit action has a matching one-shot approval");
 
-    drop(gate);
-    drop(prompt);
-    assert_eq!(approvals, 2);
+    assert_eq!(approvals.get(), 2);
     assert_eq!(
         result
             .observations()
@@ -336,9 +360,9 @@ fn unregistered_extension_is_denied_without_prompting_or_dispatching() {
         arguments: json!({}),
     };
     let mut decide = |_: &str, _: &[WorkspaceObservation]| action.clone();
-    let mut prompt_calls = 0;
+    let prompt_calls = Cell::new(0);
     let mut prompt = |_: Uuid, _: Uuid, _: &super::super::WorkspaceAction| {
-        prompt_calls += 1;
+        prompt_calls.set(prompt_calls.get() + 1);
         Ok(true)
     };
     let mut gate = ActionPermissionGate::new(PermissionMode::Ask, true, Some(&mut prompt));
@@ -360,9 +384,7 @@ fn unregistered_extension_is_denied_without_prompting_or_dispatching() {
             action: "extension"
         })
     ));
-    drop(gate);
-    drop(prompt);
-    assert_eq!(prompt_calls, 0);
+    assert_eq!(prompt_calls.get(), 0);
 }
 
 #[test]
@@ -370,9 +392,9 @@ fn unconfigured_fixed_process_is_unavailable_before_prompt_or_b4_dispatch() {
     let (mut session, task_id, turn_id) = running_turn();
     let action = super::super::WorkspaceAction::OfflineCargoTest { test_filter: None };
     let mut decide = |_: &str, _: &[WorkspaceObservation]| action.clone();
-    let mut prompt_calls = 0;
+    let prompt_calls = Cell::new(0);
     let mut prompt = |_: Uuid, _: Uuid, _: &super::super::WorkspaceAction| {
-        prompt_calls += 1;
+        prompt_calls.set(prompt_calls.get() + 1);
         Ok(true)
     };
     let mut gate = ActionPermissionGate::new(PermissionMode::RiskBased, false, Some(&mut prompt));
@@ -393,9 +415,7 @@ fn unconfigured_fixed_process_is_unavailable_before_prompt_or_b4_dispatch() {
             action: "offline_cargo_test"
         })
     ));
-    drop(gate);
-    drop(prompt);
-    assert_eq!(prompt_calls, 0);
+    assert_eq!(prompt_calls.get(), 0);
 }
 
 #[test]
@@ -461,9 +481,9 @@ fn impact_checked_correction_cannot_skip_the_permission_gate() {
         id: "independent_check".to_owned(),
         description: "the independent check passes".to_owned(),
     }];
-    let mut prompt_calls = 0;
+    let prompt_calls = Cell::new(0);
     let mut prompt = |seen_task, seen_turn, seen_action: &super::super::WorkspaceAction| {
-        prompt_calls += 1;
+        prompt_calls.set(prompt_calls.get() + 1);
         assert_eq!(seen_task, task_id);
         assert_ne!(seen_turn, turn_id);
         assert_eq!(seen_action, &process_action);
@@ -501,7 +521,5 @@ fn impact_checked_correction_cannot_skip_the_permission_gate() {
             }
         ))
     ));
-    drop(gate);
-    drop(prompt);
-    assert_eq!(prompt_calls, 1);
+    assert_eq!(prompt_calls.get(), 1);
 }

@@ -48,6 +48,12 @@ impl<'a> ActionPermissionGate<'a> {
     ) -> Result<(), GoalTurnError> {
         use super::WorkspaceAction;
 
+        // Unsupported actions are inert error reports handled by the dispatcher. Let them reach
+        // that path so malformed input and provider failures retain their normal turn outcome.
+        if matches!(action, WorkspaceAction::Unsupported { .. }) {
+            return Ok(());
+        }
+
         let action_name = super::workspace_action_name(action);
         let effect = match action {
             WorkspaceAction::Complete { .. }
@@ -376,6 +382,7 @@ pub(crate) fn run_goal_turn_with_budget_and_permission_gate<D: BoundedDecisionSo
     )
 }
 
+#[allow(clippy::too_many_arguments)] // Preserves the execution API while adding host-owned extensions and permission.
 pub(crate) fn run_goal_turn_with_budget_and_extensions_and_gate<
     D: BoundedDecisionSource + ?Sized,
 >(
@@ -400,6 +407,7 @@ pub(crate) fn run_goal_turn_with_budget_and_extensions_and_gate<
     )
 }
 
+#[allow(clippy::too_many_arguments)] // Keeps the shared execution inputs visible at the dispatch boundary.
 fn run_goal_turn_with_budget_and_gate<D: BoundedDecisionSource + ?Sized>(
     session: &mut TaskSession,
     task_id: Uuid,

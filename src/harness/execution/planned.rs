@@ -445,6 +445,7 @@ pub fn run_goal_turn_with_plan<D: BoundedDecisionSource + ?Sized>(
     )
 }
 
+#[allow(clippy::too_many_arguments)] // Keeps the existing plan execution inputs explicit.
 fn run_goal_turn_with_plan_result<D, E>(
     session: &mut TaskSession,
     task_id: Uuid,
@@ -495,6 +496,7 @@ pub fn run_goal_turn_with_impact_checked_plan<D: BoundedDecisionSource + ?Sized>
 }
 
 /// Runs an impact-checked plan through the same host permission gate as model-selected actions.
+#[allow(clippy::too_many_arguments)] // Mirrors the existing planned-turn API plus its host gate.
 pub(crate) fn run_goal_turn_with_impact_checked_plan_and_permission_gate<
     D: BoundedDecisionSource + ?Sized,
 >(
@@ -519,6 +521,7 @@ pub(crate) fn run_goal_turn_with_impact_checked_plan_and_permission_gate<
     )
 }
 
+#[allow(clippy::too_many_arguments)] // Keeps plan validation and host authorization in one path.
 fn run_goal_turn_with_impact_checked_plan_and_gate<D: BoundedDecisionSource + ?Sized>(
     session: &mut TaskSession,
     task_id: Uuid,
@@ -899,7 +902,7 @@ where
         remaining_actions,
         plan,
         decision_source,
-        permission_gate.as_deref_mut(),
+        permission_gate,
     ) {
         Ok(result) => result,
         Err(error) => {
