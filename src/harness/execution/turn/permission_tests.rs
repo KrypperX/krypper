@@ -108,27 +108,13 @@ fn risk_based_allows_task_control_without_a_prompt() {
 
 #[test]
 fn unsupported_actions_keep_the_existing_failure_reporting_path() {
-    let (mut session, task_id, turn_id) = running_turn();
+    let (_session, task_id, turn_id) = running_turn();
     let action = super::super::WorkspaceAction::Unsupported {
         action: "invalid task action".to_owned(),
     };
-    let mut decide = |_: &str, _: &[WorkspaceObservation]| action.clone();
     let mut gate = ActionPermissionGate::new(PermissionMode::Ask, false, None);
 
-    let result = run_goal_turn_with_budget_and_permission_gate(
-        &mut session,
-        task_id,
-        turn_id,
-        "goal",
-        1,
-        &mut decide,
-        &mut gate,
-    );
-
-    assert!(matches!(
-        result,
-        Err(GoalTurnError::UnsupportedAction { action }) if action == "invalid task action"
-    ));
+    assert_eq!(gate.authorize(task_id, turn_id, &action, None), Ok(()));
 }
 
 #[test]

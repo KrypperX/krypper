@@ -597,7 +597,10 @@ fn model_cli_stops_with_a_typed_guidance_error_before_dispatch() {
     assert!(
         matches!(listener.accept(), Err(ref cause) if cause.kind() == std::io::ErrorKind::WouldBlock)
     );
-    assert!(output.is_empty());
+    assert_eq!(
+        String::from_utf8(output).expect("task output is UTF-8"),
+        "Permission mode: Ask\n"
+    );
     assert_eq!(
         fs::read_to_string(outside).expect("read outside canary"),
         "outside canary"
