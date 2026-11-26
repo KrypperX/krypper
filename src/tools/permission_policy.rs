@@ -14,6 +14,8 @@ pub(crate) enum PermissionMode {
     FullAccess,
 }
 
+// The architecture guard does not inspect the enum's `#[default]` variant attribute.
+#[allow(clippy::derivable_impls)]
 impl Default for PermissionMode {
     fn default() -> Self {
         Self::Ask
