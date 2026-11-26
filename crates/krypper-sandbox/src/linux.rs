@@ -4,9 +4,10 @@ use crate::host::effective_uid;
 use crate::sandbox::sandbox;
 use crate::seccomp::compile_filter;
 use crate::{
-    validate_test_filter, RunLimits, SandboxBackend, SandboxExecutionBackend,
-    SandboxIsolationEvidence, SandboxOutcome, SandboxRunRequest, SandboxRunResult, SpawnGateError,
-    ValidatedExecutionRequirements,
+    runner_handshake::{RunnerHandshakePipes, RunnerStatus, ACK_FD, STATUS_FD},
+    validate_test_filter, LandlockRequirement, RunLimits, SandboxBackend, SandboxExecutionBackend,
+    SandboxIsolationEvidence, SandboxOutcome, SandboxRunRequest, SandboxRunResult,
+    SandboxRunnerPin, SpawnGateError, ValidatedExecutionRequirements,
 };
 use std::io;
 use std::process::Command;
@@ -18,6 +19,8 @@ mod outcome;
 mod process;
 mod recovery;
 mod supervision;
+
+const RUNNER_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[cfg(test)]
 use cgroup::record_event;
@@ -42,6 +45,7 @@ impl SandboxExecutionBackend for Backend {
 
     fn supports_control(&self, control: crate::SandboxControl) -> bool {
         match control {
+            crate::SandboxControl::LandlockFilesystemWrites => true,
             crate::SandboxControl::SeccompFilter => {
                 cfg!(all(
                     target_endian = "little",
@@ -70,12 +74,18 @@ fn run_with_containment(request: SandboxRunRequest, contained: bool) -> SandboxR
     let SandboxRunRequest {
         run_id,
         directories,
+        landlock_requirement,
         requirements,
         test_filter,
         limits,
         cancelled,
         mut spawn_gate,
     } = request;
+    let mut evidence = SandboxIsolationEvidence::new(Some(SandboxBackend::Bubblewrap));
+    evidence.request(crate::SandboxControl::LandlockFilesystemWrites);
+    if landlock_requirement == LandlockRequirement::Disabled {
+        evidence.unavailable(crate::SandboxControl::LandlockFilesystemWrites);
+    }
     let Some(limits) = RunLimits::new(
         limits.wall_millis,
         limits.cpu_budget_usec,
@@ -86,73 +96,88 @@ fn run_with_containment(request: SandboxRunRequest, contained: bool) -> SandboxR
     .ok() else {
         let mut result = SandboxRunResult::empty(run_id, SandboxOutcome::SandboxSetupFailed, 0);
         result.diagnostic = Some("invalid fixed offline Cargo limits".into());
-        return result;
+        return finish_before_launch(result, evidence);
     };
     let output = limits.output_bytes;
     let mut result = SandboxRunResult::empty(run_id, SandboxOutcome::SandboxUnavailable, 0);
-    let mut evidence = SandboxIsolationEvidence::new(Some(SandboxBackend::Bubblewrap));
     result.sandbox_evidence = Some(evidence.clone());
     if validate_test_filter(test_filter.as_deref()).is_err() {
         result.outcome = SandboxOutcome::InvalidTestFilter;
         result.diagnostic = Some("test_filter is invalid".into());
-        return result;
+        return finish_before_launch(result, evidence);
     }
     if !contained {
-        return result;
+        return finish_before_launch(result, evidence);
     }
+    let runner = match landlock_requirement {
+        LandlockRequirement::Disabled => None,
+        LandlockRequirement::Optional | LandlockRequirement::Required => {
+            match SandboxRunnerPin::resolve_sibling() {
+                Ok(runner) => Some(runner),
+                Err(error) => {
+                    evidence.unavailable(crate::SandboxControl::LandlockFilesystemWrites);
+                    result.outcome = SandboxOutcome::SandboxUnavailable;
+                    result.diagnostic = Some(format!(
+                        "fixed sandbox runner sibling is unavailable: {error}"
+                    ));
+                    return finish_before_launch(result, evidence);
+                }
+            }
+        }
+    };
     let Some(directories) = directories else {
         result.diagnostic = Some("captured sandbox directory descriptors unavailable".into());
-        return result;
+        return finish_before_launch(result, evidence);
     };
     if !directories.all_are_directories() {
         result.outcome = SandboxOutcome::SandboxSetupFailed;
         result.diagnostic = Some("captured sandbox descriptor is not a directory".into());
-        return result;
+        return finish_before_launch(result, evidence);
     }
     let filter = match compile_filter() {
         Ok(filter) => filter,
         Err(error) => {
             result.outcome = SandboxOutcome::SandboxSetupFailed;
             result.diagnostic = Some(format!("fixed syscall filter setup failed: {error}"));
-            return result;
+            return finish_before_launch(result, evidence);
         }
     };
     if is_cleanup_uncertain() {
         hold_for_recovery(&mut result, "previous process cleanup is unconfirmed");
-        return result;
+        return finish_before_launch(result, evidence);
     }
     let _guard = match try_active_lock() {
         Ok(guard) => guard,
         Err(ActiveLockError::Busy) => {
             result.outcome = SandboxOutcome::Denied;
-            return result;
+            return finish_before_launch(result, evidence);
         }
         Err(ActiveLockError::Poisoned) => {
             hold_for_recovery(
                 &mut result,
                 "process supervisor lock is poisoned; restart to recheck the persisted cleanup receipt",
             );
-            return result;
+            return finish_before_launch(result, evidence);
         }
     };
     if cancelled.load(Ordering::SeqCst) {
         result.outcome = SandboxOutcome::Cancelled;
-        return result;
+        return finish_before_launch(result, evidence);
     }
     let mut lease = match HostLease::acquire() {
         Ok(lease) => lease,
         Err(HostLeaseError::Unavailable(error)) => {
             result.diagnostic = Some(error.to_string());
-            return result;
+            return finish_before_launch(result, evidence);
         }
         Err(HostLeaseError::CleanupUnconfirmed(error)) => {
             hold_for_recovery(&mut result, error.to_string());
-            return result;
+            return finish_before_launch(result, evidence);
         }
     };
     let unit = format!("krypper-test-{}.service", result.run_id.simple());
     if lease.record(&format!("{unit}\n")).is_err() {
-        return result;
+        return finish_before_launch(result, evidence);
     }
     let mut supervisor = match Supervisor::create(result.run_id, limits, &mut evidence) {
         Ok(s) => s,
@@ -172,7 +197,6 @@ fn run_with_containment(request: SandboxRunRequest, contained: bool) -> SandboxR
     };
     result.output_limit = output;
     let mut launched = false;
-    let mut setup_confirmed = false;
     let started = Instant::now();
     let execution = (|| -> io::Result<()> {
         lease.record(&format!(
@@ -185,25 +209,40 @@ fn run_with_containment(request: SandboxRunRequest, contained: bool) -> SandboxR
             &requirements,
             supervisor.group(),
             &filter,
+            runner.as_ref(),
+            None,
             &mut evidence,
         )?;
         probe.args(["--", "/usr/bin/true"]);
         confirm_setup(&mut evidence, bounded_host(&mut probe), || {
             supervisor.verify()
         })?;
-        setup_confirmed = true;
         if cancelled.load(Ordering::SeqCst) {
             settle_before_launch(&mut result, &mut supervisor, StopReason::Cancelled);
             return Ok(());
         }
+        let mut handshake = runner
+            .as_ref()
+            .map(|_| RunnerHandshakePipes::new())
+            .transpose()?;
         let mut command = sandbox(
             &directories,
             &requirements,
             supervisor.group(),
             &filter,
+            runner.as_ref(),
+            handshake.as_ref(),
             &mut evidence,
         )?;
-        command.args(cargo_command_args(&requirements, test_filter.as_deref()));
+        if runner.is_some() {
+            command.args(landlock_runner_command_args(
+                landlock_requirement,
+                &requirements,
+                test_filter.as_deref(),
+            ));
+        } else {
+            command.args(cargo_command_args(&requirements, test_filter.as_deref()));
+        }
         result.outcome = SandboxOutcome::SpawnFailed;
         let Some(gate) = spawn_gate.take() else {
             result.outcome = SandboxOutcome::Denied;
@@ -220,6 +259,72 @@ fn run_with_containment(request: SandboxRunRequest, contained: bool) -> SandboxR
         };
         let mut child = ManagedChild::new(child);
         launched = true;
+        if let Some(handshake) = handshake.as_mut() {
+            handshake.close_child_ends();
+            let status = handshake.receive_status(&cancelled, RUNNER_HANDSHAKE_TIMEOUT);
+            match status {
+                Ok(RunnerStatus::Applied { .. }) => {
+                    evidence.landlock_applied();
+                    if let Err(error) = handshake.acknowledge() {
+                        result.outcome = SandboxOutcome::SandboxSetupFailed;
+                        result.diagnostic =
+                            Some(format!("fixed runner acknowledgement failed: {error}"));
+                        stop_after_runner_handshake_failure(
+                            &mut child,
+                            &mut supervisor,
+                            &mut result,
+                        )?;
+                        return Ok(());
+                    }
+                }
+                Ok(RunnerStatus::Unavailable { abi }) => {
+                    evidence.landlock_unavailable();
+                    if landlock_requirement == LandlockRequirement::Required {
+                        result.outcome = SandboxOutcome::SandboxUnavailable;
+                        result.diagnostic = Some(format!(
+                            "required Landlock filesystem-write control is unavailable (ABI {abi:?})"
+                        ));
+                        stop_after_runner_handshake_failure(
+                            &mut child,
+                            &mut supervisor,
+                            &mut result,
+                        )?;
+                        return Ok(());
+                    }
+                    if let Err(error) = handshake.acknowledge() {
+                        result.outcome = SandboxOutcome::SandboxSetupFailed;
+                        result.diagnostic =
+                            Some(format!("fixed runner acknowledgement failed: {error}"));
+                        stop_after_runner_handshake_failure(
+                            &mut child,
+                            &mut supervisor,
+                            &mut result,
+                        )?;
+                        return Ok(());
+                    }
+                }
+                Ok(RunnerStatus::Failed { errno }) => {
+                    evidence.landlock_failed();
+                    result.outcome = SandboxOutcome::SandboxSetupFailed;
+                    result.diagnostic = Some(format!(
+                        "Landlock setup failed before Cargo execution (errno {errno})"
+                    ));
+                    stop_after_runner_handshake_failure(&mut child, &mut supervisor, &mut result)?;
+                    return Ok(());
+                }
+                Err(error) => {
+                    if cancelled.load(Ordering::SeqCst) {
+                        result.outcome = SandboxOutcome::Cancelled;
+                    } else {
+                        evidence.landlock_failed();
+                        result.outcome = SandboxOutcome::SandboxSetupFailed;
+                    }
+                    result.diagnostic = Some(format!("fixed runner handshake failed: {error}"));
+                    stop_after_runner_handshake_failure(&mut child, &mut supervisor, &mut result)?;
+                    return Ok(());
+                }
+            }
+        }
         let (out, err) = {
             let child = child.child_mut()?;
             let out = child
@@ -255,9 +360,7 @@ fn run_with_containment(request: SandboxRunRequest, contained: bool) -> SandboxR
             result.outcome = SandboxOutcome::SandboxSetupFailed;
         }
     }
-    if !setup_confirmed {
-        evidence.mark_unknown();
-    }
+    evidence.mark_unknown();
     result.sandbox_evidence = Some(evidence);
     result.cleanup_confirmed &= supervisor.clean();
     result.elapsed_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
@@ -270,6 +373,26 @@ fn run_with_containment(request: SandboxRunRequest, contained: bool) -> SandboxR
         let _ = lease.clear_receipt();
     }
     result
+}
+
+fn finish_before_launch(
+    mut result: SandboxRunResult,
+    mut evidence: SandboxIsolationEvidence,
+) -> SandboxRunResult {
+    evidence.mark_unknown();
+    result.sandbox_evidence = Some(evidence);
+    result
+}
+
+fn stop_after_runner_handshake_failure(
+    child: &mut ManagedChild,
+    supervisor: &mut Supervisor,
+    result: &mut SandboxRunResult,
+) -> io::Result<()> {
+    let cgroup_clean = supervisor.clean();
+    let child_reaped = process::reap(child.child_mut()?);
+    result.cleanup_confirmed = cgroup_clean && child_reaped;
+    Ok(())
 }
 
 fn confirm_setup(
@@ -312,6 +435,29 @@ fn cargo_command_args(
         args.push("--".into());
         args.push(test_filter.into());
     }
+    args
+}
+
+fn landlock_runner_command_args(
+    requirement: LandlockRequirement,
+    requirements: &ValidatedExecutionRequirements,
+    test_filter: Option<&str>,
+) -> Vec<std::ffi::OsString> {
+    let mut args = vec![
+        "--".into(),
+        "/run/krypper-sandbox-runner".into(),
+        "--krypper-landlock-runner-v1".into(),
+        "--status-fd".into(),
+        STATUS_FD.to_string().into(),
+        "--ack-fd".into(),
+        ACK_FD.to_string().into(),
+        match requirement {
+            LandlockRequirement::Disabled => unreachable!("disabled mode has no runner"),
+            LandlockRequirement::Optional => "--optional".into(),
+            LandlockRequirement::Required => "--required".into(),
+        },
+    ];
+    args.extend(cargo_command_args(requirements, test_filter));
     args
 }
 
@@ -383,6 +529,29 @@ mod internal_outcome_tests {
         assert!(result.cleanup_confirmed);
         assert!(!marker.exists(), "no workspace code may launch");
         std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn requested_landlock_remains_unknown_when_containment_is_not_reached() {
+        let request = SandboxRunRequest::new(
+            Uuid::new_v4(),
+            None,
+            None,
+            RunLimits::offline_cargo_test(),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .with_landlock_requirement(crate::LandlockRequirement::Optional)
+        .with_spawn_gate(Box::new(|command, spawn| {
+            spawn(command).map_err(SpawnGateError::Spawn)
+        }));
+
+        let result = run_without_containment(request);
+        assert_eq!(result.outcome, SandboxOutcome::SandboxUnavailable);
+        let evidence = result.sandbox_evidence.expect("Landlock evidence");
+        assert!(evidence.controls().iter().any(|record| {
+            record.control == crate::SandboxControl::LandlockFilesystemWrites
+                && record.status == crate::SandboxEvidenceStatus::Unknown
+        }));
     }
 
     #[test]

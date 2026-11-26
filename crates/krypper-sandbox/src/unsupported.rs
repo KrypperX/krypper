@@ -29,6 +29,7 @@ fn run_unsupported(request: SandboxRunRequest) -> SandboxRunResult {
     result.diagnostic = Some("process sandbox is unavailable on this platform".into());
     let mut evidence = SandboxIsolationEvidence::new(None);
     evidence.unavailable(SandboxControl::SandboxRuntime);
+    evidence.unavailable(SandboxControl::LandlockFilesystemWrites);
     result.sandbox_evidence = Some(evidence);
     result
 }
@@ -62,6 +63,10 @@ mod tests {
         assert_eq!(evidence.backend(), None);
         assert!(evidence.controls().iter().any(|record| {
             record.control == SandboxControl::SandboxRuntime
+                && record.status == SandboxEvidenceStatus::Unavailable
+        }));
+        assert!(evidence.controls().iter().any(|record| {
+            record.control == SandboxControl::LandlockFilesystemWrites
                 && record.status == SandboxEvidenceStatus::Unavailable
         }));
         assert!(!evidence.controls().iter().any(|record| {

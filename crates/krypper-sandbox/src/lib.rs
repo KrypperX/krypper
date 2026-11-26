@@ -13,6 +13,128 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use uuid::Uuid;
 
+#[cfg(target_os = "linux")]
+mod landlock;
+#[cfg(target_os = "linux")]
+mod runner_handshake;
+
+/// Result of querying and applying the fixed filesystem-write restriction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LandlockSetupStatus {
+    /// The kernel accepted the fixed write allowlist.
+    Applied { abi: i32 },
+    /// The kernel does not provide a supported Landlock ABI for this policy.
+    Unavailable { abi: Option<i32> },
+}
+
+/// Apply the sandbox's fixed Landlock write policy from the dedicated in-sandbox runner.
+///
+/// A compatible ABI with any setup error is returned as `Err`; callers must not execute Cargo
+/// after such an error. On non-Linux platforms Landlock is unavailable.
+#[doc(hidden)]
+pub fn apply_landlock_write_policy() -> io::Result<LandlockSetupStatus> {
+    #[cfg(target_os = "linux")]
+    {
+        return landlock::apply_fixed_write_policy().map(|status| match status {
+            landlock::LandlockStatus::Applied { abi } => LandlockSetupStatus::Applied { abi },
+            landlock::LandlockStatus::Unavailable { abi } => {
+                LandlockSetupStatus::Unavailable { abi }
+            }
+        });
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(LandlockSetupStatus::Unavailable { abi: None })
+    }
+}
+
+/// A caller's choice about the optional filesystem-write restriction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LandlockRequirement {
+    /// Do not run the helper or request Landlock evidence.
+    Disabled,
+    /// Run the helper and continue if the host kernel reports Landlock unavailable.
+    Optional,
+    /// Run the helper and refuse to start Cargo unless Landlock is applied.
+    Required,
+}
+
+/// A descriptor pinned to the one canonical helper beside the host executable.
+///
+/// This is private to the sandbox crate so callers cannot substitute another executable.
+#[derive(Debug)]
+pub(crate) struct SandboxRunnerPin {
+    executable: File,
+}
+
+impl SandboxRunnerPin {
+    /// Open and pin `krypper-sandbox-runner` beside the current host executable. Cargo's test
+    /// layout may place the test executable in `deps/` and the runner in the parent build dir.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn resolve_sibling() -> io::Result<Self> {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let host = std::env::current_exe()?;
+        let parent = host
+            .parent()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "host executable directory"))?;
+        let open_candidate = |directory: &std::path::Path| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(directory.join("krypper-sandbox-runner"))
+        };
+        match open_candidate(parent) {
+            Ok(file) => Self::from_open_file(file),
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound
+                    && parent.file_name() == Some(std::ffi::OsStr::new("deps")) =>
+            {
+                let build_directory = parent.parent().ok_or(error)?;
+                open_candidate(build_directory).and_then(Self::from_open_file)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(crate) fn executable(&self) -> &File {
+        &self.executable
+    }
+
+    fn from_open_file(file: File) -> io::Result<Self> {
+        #[cfg(unix)]
+        {
+            use std::io::Read;
+            use std::os::unix::fs::PermissionsExt;
+            let metadata = file.metadata()?;
+            if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "sandbox runner sibling is not an executable file",
+                ));
+            }
+            let mut magic = [0u8; 4];
+            let mut check = file.try_clone()?;
+            check.read_exact(&mut magic)?;
+            if magic != *b"\x7fELF" {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "sandbox runner sibling is not an ELF executable",
+                ));
+            }
+            Ok(Self { executable: file })
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = file;
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "sandbox runner is unavailable on this platform",
+            ))
+        }
+    }
+}
+
 const MAX_WALL_MILLIS: u64 = 300_000;
 const MAX_CPU_USEC: u64 = 240_000_000;
 const MAX_MEMORY_BYTES: u64 = 3 * 1024 * 1024 * 1024;
@@ -42,7 +164,7 @@ const FIXED_CARGO_ENVIRONMENT_NAMES: &[&str] = &[
 pub const OFFLINE_CARGO_TEST_ENVIRONMENT: &[(&str, &str)] = &[
     ("PATH", "/toolchain/bin:/usr/bin:/bin"),
     ("HOME", "/tmp/home"),
-    ("TMPDIR", "/tmp"),
+    ("TMPDIR", "/tmp/tmp"),
     ("CARGO_HOME", "/cargo"),
     ("CARGO_BUILD_JOBS", "1"),
     ("CARGO_PROFILE_DEV_DEBUG", "0"),
@@ -527,6 +649,7 @@ impl DirectoryDescriptors {
 pub struct SandboxRunRequest {
     pub(crate) run_id: Uuid,
     pub(crate) directories: Option<DirectoryDescriptors>,
+    pub(crate) landlock_requirement: LandlockRequirement,
     pub(crate) requirements: ValidatedExecutionRequirements,
     pub(crate) test_filter: Option<String>,
     pub(crate) limits: RunLimits,
@@ -579,6 +702,7 @@ impl SandboxRunRequest {
         Self {
             run_id,
             directories,
+            landlock_requirement: LandlockRequirement::Disabled,
             requirements,
             test_filter,
             limits,
@@ -590,6 +714,15 @@ impl SandboxRunRequest {
     /// Attach the Product-owned authorization callback for the final payload start.
     pub fn with_spawn_gate(mut self, gate: SpawnAuthorizationGate) -> Self {
         self.spawn_gate = Some(gate);
+        self
+    }
+
+    /// Select whether the fixed sibling helper must apply filesystem-write confinement.
+    ///
+    /// This changes only the fixed offline Cargo profile. It accepts no executable, path, or
+    /// descriptor; the sandbox resolves and pins its canonical sibling itself.
+    pub fn with_landlock_requirement(mut self, requirement: LandlockRequirement) -> Self {
+        self.landlock_requirement = requirement;
         self
     }
 
@@ -674,6 +807,7 @@ pub enum SandboxControl {
     UtsNamespace,
     CgroupNamespace,
     SeccompFilter,
+    LandlockFilesystemWrites,
     CapabilityDrop,
     ReadOnlySystemMounts,
     ReadOnlyWorkspace,
@@ -747,6 +881,7 @@ pub enum SandboxEvidenceStatus {
     Applied,
     Observed,
     Unavailable,
+    Failed,
     Unknown,
 }
 
@@ -769,7 +904,7 @@ pub struct SandboxIsolationEvidence {
 }
 
 impl SandboxIsolationEvidence {
-    const MAX_CONTROL_RECORDS: usize = OFFLINE_CARGO_REQUIRED_CONTROLS.len();
+    const MAX_CONTROL_RECORDS: usize = OFFLINE_CARGO_REQUIRED_CONTROLS.len() + 1;
 
     /// Create an empty evidence value for serialization and result construction.
     pub fn new(backend: Option<SandboxBackend>) -> Self {
@@ -818,7 +953,50 @@ impl SandboxIsolationEvidence {
 
     #[cfg(target_os = "linux")]
     pub(crate) fn mark_applied(&mut self) {
-        self.transition_requested(SandboxEvidenceStatus::Applied);
+        for record in &mut self.controls {
+            if record.status == SandboxEvidenceStatus::Requested
+                && record.control != SandboxControl::LandlockFilesystemWrites
+            {
+                record.status = SandboxEvidenceStatus::Applied;
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn landlock_applied(&mut self) {
+        self.set_status(
+            SandboxControl::LandlockFilesystemWrites,
+            SandboxEvidenceStatus::Applied,
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn landlock_unavailable(&mut self) {
+        self.set_status(
+            SandboxControl::LandlockFilesystemWrites,
+            SandboxEvidenceStatus::Unavailable,
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn landlock_failed(&mut self) {
+        self.set_status(
+            SandboxControl::LandlockFilesystemWrites,
+            SandboxEvidenceStatus::Failed,
+        );
+    }
+
+    fn set_status(&mut self, control: SandboxControl, status: SandboxEvidenceStatus) {
+        if let Some(record) = self
+            .controls
+            .iter_mut()
+            .find(|record| record.control == control)
+        {
+            record.status = status;
+        } else if self.controls.len() < Self::MAX_CONTROL_RECORDS {
+            self.controls
+                .push(SandboxControlEvidence { control, status });
+        }
     }
 
     pub(crate) fn mark_unknown(&mut self) {
@@ -900,10 +1078,19 @@ fn run_offline_cargo_with_backend(
     } else {
         0
     };
+    let mut evidence = SandboxIsolationEvidence::new(backend.identity());
+    evidence.request(SandboxControl::LandlockFilesystemWrites);
+    if request.landlock_requirement == LandlockRequirement::Disabled
+        || !backend.supports_control(SandboxControl::LandlockFilesystemWrites)
+    {
+        evidence.unavailable(SandboxControl::LandlockFilesystemWrites);
+    }
     if let Err(error) = request.validate() {
         let mut result =
             SandboxRunResult::empty(request.run_id, SandboxOutcome::Denied, output_limit);
         result.diagnostic = Some(error.into());
+        evidence.mark_unknown();
+        result.sandbox_evidence = Some(evidence);
         return result;
     }
     if validate_test_filter(request.test_filter.as_deref()).is_err() {
@@ -913,6 +1100,8 @@ fn run_offline_cargo_with_backend(
             output_limit,
         );
         result.diagnostic = Some("test_filter is invalid".into());
+        evidence.mark_unknown();
+        result.sandbox_evidence = Some(evidence);
         return result;
     }
 
@@ -936,7 +1125,6 @@ fn run_offline_cargo_with_backend(
             .into(),
         );
 
-        let mut evidence = SandboxIsolationEvidence::new(backend.identity());
         for control in OFFLINE_CARGO_REQUIRED_CONTROLS {
             if missing.contains(&control) {
                 evidence.unavailable(control);
@@ -953,6 +1141,8 @@ fn run_offline_cargo_with_backend(
         let mut result =
             SandboxRunResult::empty(request.run_id, SandboxOutcome::Denied, output_limit);
         result.diagnostic = Some("product spawn authorization gate is missing".into());
+        evidence.mark_unknown();
+        result.sandbox_evidence = Some(evidence);
         return result;
     }
 
@@ -1187,7 +1377,7 @@ mod execution_contract_tests {
         assert_eq!(evidence.backend(), None);
         assert_eq!(
             evidence.controls().len(),
-            OFFLINE_CARGO_REQUIRED_CONTROLS.len()
+            OFFLINE_CARGO_REQUIRED_CONTROLS.len() + 1
         );
         assert!(evidence
             .controls()
@@ -1459,7 +1649,7 @@ mod execution_contract_tests {
         assert_eq!(result.outcome, SandboxOutcome::Denied);
         assert!(result.stdout.is_empty());
         assert!(result.stderr.is_empty());
-        assert!(result.sandbox_evidence.is_none());
+        assert_disabled_landlock_unavailable(&result);
     }
 
     #[cfg(unix)]
@@ -1493,7 +1683,7 @@ mod execution_contract_tests {
         assert_eq!(result.outcome, SandboxOutcome::Denied);
         assert!(result.stdout.is_empty());
         assert!(result.stderr.is_empty());
-        assert!(result.sandbox_evidence.is_none());
+        assert_disabled_landlock_unavailable(&result);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1564,7 +1754,18 @@ mod execution_contract_tests {
             assert_eq!(result.outcome, SandboxOutcome::Denied);
             assert!(result.stdout.is_empty());
             assert!(result.stderr.is_empty());
-            assert!(result.sandbox_evidence.is_none());
+            assert_disabled_landlock_unavailable(&result);
         }
+    }
+
+    fn assert_disabled_landlock_unavailable(result: &SandboxRunResult) {
+        let evidence = result
+            .sandbox_evidence
+            .as_ref()
+            .expect("Landlock status is reported for every run");
+        assert!(evidence.controls().iter().any(|record| {
+            record.control == SandboxControl::LandlockFilesystemWrites
+                && record.status == SandboxEvidenceStatus::Unavailable
+        }));
     }
 }

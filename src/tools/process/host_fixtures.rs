@@ -23,6 +23,7 @@ use uuid::Uuid;
 
 mod cargo;
 mod environment;
+mod landlock;
 mod limits;
 mod syscalls;
 

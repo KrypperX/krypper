@@ -476,7 +476,7 @@ def main() -> int:
     args = parser.parse_args()
 
     if not args.binary.is_file():
-        parser.error(f"Krypper binary not found: {args.binary}; build it with cargo build --bin krypper")
+        parser.error(f"Krypper binary not found: {args.binary}; build the packaged binaries with cargo build --bins")
     if args.repeats < 1 or args.action_budget < 1 or args.timeout_seconds < 1:
         parser.error("repeats, action budget and timeout must be positive")
     if args.output is not None and args.output.exists():

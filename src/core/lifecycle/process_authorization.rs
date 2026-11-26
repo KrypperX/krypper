@@ -315,14 +315,34 @@ impl ProcessIntent {
 /// Confirm the fixed payload tail and the payload cwd/environment encoded in the Sandbox command.
 /// The helper's other arguments remain owned by the closed Sandbox implementation.
 pub(super) fn launch_command_matches_intent(command: &Command, intent: &ProcessIntent) -> bool {
+    const RUNNER_PATH: &str = "/run/krypper-sandbox-runner";
+    const FIXED_FD_MOUNTS: [(&str, &str); 4] = [
+        ("200", "/workspace"),
+        ("201", "/toolchain"),
+        ("202", "/cargo/registry"),
+        ("206", RUNNER_PATH),
+    ];
     if command.get_program() != OsStr::new("/usr/bin/bwrap") || command.get_current_dir().is_some()
     {
         return false;
     }
     let args = command.get_args().collect::<Vec<_>>();
     let count_arg = |value: &OsStr| args.iter().filter(|arg| *arg == &value).count();
+    let fd_mounts = args
+        .windows(3)
+        .filter(|mount| mount[0] == OsStr::new("--ro-bind-fd"))
+        .collect::<Vec<_>>();
     if count_arg(OsStr::new("--clearenv")) != 1
-        || count_arg(OsStr::new("--")) != 1 + usize::from(intent.filter.is_some())
+        || count_arg(OsStr::new("--")) != 2 + usize::from(intent.filter.is_some())
+        || count_arg(OsStr::new("--ro-bind-fd")) != FIXED_FD_MOUNTS.len()
+        || fd_mounts.len() != FIXED_FD_MOUNTS.len()
+        || FIXED_FD_MOUNTS.iter().any(|(fd, path)| {
+            fd_mounts
+                .iter()
+                .filter(|mount| mount[1] == OsStr::new(fd) && mount[2] == OsStr::new(path))
+                .count()
+                != 1
+        })
         || args
             .windows(2)
             .filter(|pair| pair[0] == OsStr::new("--chdir"))
@@ -350,7 +370,18 @@ pub(super) fn launch_command_matches_intent(command: &Command, intent: &ProcessI
         return false;
     }
 
-    let mut expected_tail = vec!["--".to_owned(), intent.facts.executable.clone()];
+    let mut expected_tail = vec![
+        "--".to_owned(),
+        RUNNER_PATH.to_owned(),
+        "--krypper-landlock-runner-v1".to_owned(),
+        "--status-fd".to_owned(),
+        "204".to_owned(),
+        "--ack-fd".to_owned(),
+        "205".to_owned(),
+        "--optional".to_owned(),
+        "--".to_owned(),
+        intent.facts.executable.clone(),
+    ];
     expected_tail.extend(intent.facts.arguments.iter().cloned());
     if let Some(filter) = &intent.filter {
         expected_tail.extend(["--".to_owned(), filter.clone()]);

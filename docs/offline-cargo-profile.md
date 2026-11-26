@@ -58,6 +58,17 @@ launch. `SandboxIsolationEvidence` remains separate from backend capabilities:
 it records per-run setup status, while behavioral enforcement still requires
 fixtures on a provisioned host.
 
+The Product adapter requests optional Landlock filesystem-write confinement for
+this fixed Linux profile. The pinned in-sandbox runner applies the policy after
+Bubblewrap creates its filesystem view and before Cargo starts. Writes are
+allowed under `/tmp/home`, `/tmp/target`, `/tmp/tmp`, and Cargo's `/cargo`
+scratch area; `/cargo/registry` remains a read-only mount. The fixed `TMPDIR`
+is `/tmp/tmp`. If the kernel does not provide a supported Landlock ABI, the
+result reports `unavailable` and Cargo may continue only after the existing
+required controls pass. A setup error after ABI support is detected fails the
+run before Cargo starts. `applied` means the runner completed setup; only the
+gated host fixture can report behavioral evidence.
+
 `ProfileLimits` are hard profile ceilings: wall time is stored in seconds and
 CPU time in milliseconds. Each request carries separate effective `RunLimits`
 in milliseconds and microseconds. Conversion uses checked multiplication, and

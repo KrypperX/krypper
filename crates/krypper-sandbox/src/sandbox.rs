@@ -1,8 +1,9 @@
 //! The Linux sandbox command: host executable lookup and the contained child command.
 
+use crate::runner_handshake::{RunnerHandshakePipes, ACK_FD, STATUS_FD};
 use crate::{
     DirectoryDescriptors, PinnedResourceAccess, SandboxControl, SandboxIsolationEvidence,
-    ValidatedExecutionRequirements,
+    SandboxRunnerPin, ValidatedExecutionRequirements,
 };
 use std::fs::OpenOptions;
 use std::io::{self, Write};
@@ -12,7 +13,8 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 const SECCOMP_FD: RawFd = 203;
-const FIRST_PINNED_FD: RawFd = 204;
+const RUNNER_FD: RawFd = 206;
+const FIRST_PINNED_FD: RawFd = 208;
 const MAX_BPF_INSTRUCTIONS: usize = 4096;
 const BPF_INSTRUCTION_BYTES: usize = 8;
 const MFD_CLOEXEC: libc::c_uint = 0x0001;
@@ -25,8 +27,16 @@ pub(super) fn sandbox(
     requirements: &ValidatedExecutionRequirements,
     group: &Path,
     filter: &[u8],
+    runner: Option<&SandboxRunnerPin>,
+    handshake: Option<&RunnerHandshakePipes>,
     evidence: &mut SandboxIsolationEvidence,
 ) -> io::Result<Command> {
+    if handshake.is_some() && runner.is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "runner handshake requires the fixed sibling executable",
+        ));
+    }
     let filter_file = sealed_filter_fd(filter)?;
     let pinned_filter = duplicate_fd_at_or_above(filter_file.as_raw_fd(), FIRST_PINNED_FD)?;
     drop(filter_file);
@@ -58,6 +68,17 @@ pub(super) fn sandbox(
         pinned.push(duplicate_fd_at_or_above(fd.as_raw_fd(), FIRST_PINNED_FD)?);
     }
     let roots = pinned;
+    let pinned_runner = runner
+        .map(|runner| duplicate_fd_at_or_above(runner.executable().as_raw_fd(), FIRST_PINNED_FD))
+        .transpose()?;
+    let pinned_status_writer = handshake
+        .map(|pipes| duplicate_fd_at_or_above(pipes.status_writer()?.as_raw_fd(), FIRST_PINNED_FD))
+        .transpose()?;
+    let pinned_ack_reader = handshake
+        .map(|pipes| {
+            duplicate_fd_at_or_above(pipes.acknowledgement_reader()?.as_raw_fd(), FIRST_PINNED_FD)
+        })
+        .transpose()?;
     let attach = OpenOptions::new()
         .write(true)
         .open(group.join("cgroup.procs"))?;
@@ -185,7 +206,20 @@ pub(super) fn sandbox(
         SandboxControl::TemporaryFilesystems,
         &["--size", "1073741824", "--tmpfs", "/tmp"],
     );
-    command.args(["--dir", "/tmp/home", "--chdir", "/workspace"]);
+    command.args([
+        "--dir",
+        "/tmp/home",
+        "--dir",
+        "/tmp/target",
+        "--dir",
+        "/tmp/tmp",
+        "--chdir",
+        "/workspace",
+    ]);
+    if pinned_runner.is_some() {
+        command.args(["--ro-bind-fd", "206", "/run/krypper-sandbox-runner"]);
+        evidence.request(SandboxControl::LandlockFilesystemWrites);
+    }
     let mut environment_args = vec!["--clearenv"];
     for (name, value) in crate::OFFLINE_CARGO_TEST_ENVIRONMENT {
         environment_args.extend(["--setenv", name, value]);
@@ -203,15 +237,16 @@ pub(super) fn sandbox(
         &["--remount-ro", "/"],
     );
     // Pinned directory descriptors remove validation-to-mount pathname races; cgroup
-    // attachment precedes sandbox exec.
+    // attachment precedes sandbox exec. Sources stay at or above 208; fixed child descriptors
+    // 200-206 are populated only after close_range marks ambient descriptors close-on-exec.
     //
     // SAFETY: the closure runs between fork and exec, where only async-signal-safe calls are
     // allowed. It calls only `getpid`, `write`, `syscall(SYS_close_range)`, `dup2`,
     // `setrlimit` and `prctl`, all of which are async-signal-safe. It formats the pid into a
     // stack buffer, performs no heap allocation, takes no locks, and builds errors with
     // `io::Error::last_os_error`, which only reads `errno`. The descriptors it uses
-    // (`attach`, `roots`, and the compiled filter descriptor) are moved into the closure and stay
-    // open until exec.
+    // (`attach`, `roots`, the compiled filter, and optional runner/handshake descriptors) are
+    // moved into the closure and stay open until exec.
     #[cfg(target_os = "linux")]
     unsafe {
         command.pre_exec(move || {
@@ -252,6 +287,21 @@ pub(super) fn sandbox(
             }
             if libc::dup2(pinned_filter.as_raw_fd(), SECCOMP_FD) < 0 {
                 return Err(io::Error::last_os_error());
+            }
+            if let Some(runner) = &pinned_runner {
+                if libc::dup2(runner.as_raw_fd(), RUNNER_FD) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+            if let Some(status_writer) = &pinned_status_writer {
+                if libc::dup2(status_writer.as_raw_fd(), STATUS_FD) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+            if let Some(ack_reader) = &pinned_ack_reader {
+                if libc::dup2(ack_reader.as_raw_fd(), ACK_FD) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
             }
             for (resource, value) in [
                 (libc::RLIMIT_NOFILE, 256),
@@ -337,7 +387,9 @@ fn duplicate_fd_at_or_above(fd: RawFd, minimum: RawFd) -> io::Result<OwnedFd> {
 
 #[cfg(test)]
 mod tests {
-    use super::{duplicate_fd_at_or_above, sandbox, sealed_filter_fd, FIRST_PINNED_FD, SECCOMP_FD};
+    use super::{
+        duplicate_fd_at_or_above, sandbox, sealed_filter_fd, FIRST_PINNED_FD, RUNNER_FD, SECCOMP_FD,
+    };
     use crate::{
         DirectoryDescriptors, SandboxBackend, SandboxControl, SandboxEvidenceStatus,
         SandboxIsolationEvidence, ValidatedExecutionRequirements,
@@ -395,6 +447,8 @@ mod tests {
             &ValidatedExecutionRequirements::offline_cargo_test(),
             &group,
             &filter,
+            None,
+            None,
             &mut evidence,
         )
         .unwrap();
@@ -409,6 +463,8 @@ mod tests {
             .unwrap();
         assert_eq!(args.get(seccomp + 1).map(String::as_str), Some("203"));
         assert_eq!(SECCOMP_FD, 203);
+        assert_eq!(RUNNER_FD, 206);
+        assert_eq!(FIRST_PINNED_FD, 208);
         assert!(evidence.controls().iter().any(|record| {
             record.control == SandboxControl::SandboxRuntime
                 && record.status == SandboxEvidenceStatus::Requested

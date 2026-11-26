@@ -177,6 +177,7 @@ fn execute(
         policy.cancellation(),
         requirements,
     )
+    .with_landlock_requirement(krypper_sandbox::LandlockRequirement::Optional)
     .with_spawn_gate(spawn_gate);
     from_runner(run_offline_cargo(request), test_filter)
 }

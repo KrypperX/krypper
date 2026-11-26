@@ -1214,11 +1214,31 @@ mod process_grant_tests {
 
     fn command_for_intent(intent: &ProcessIntent) -> Command {
         let mut command = Command::new("/usr/bin/bwrap");
+        for (fd, path) in [
+            ("200", "/workspace"),
+            ("201", "/toolchain"),
+            ("202", "/cargo/registry"),
+            ("206", "/run/krypper-sandbox-runner"),
+        ] {
+            command.args(["--ro-bind-fd", fd, path]);
+        }
         command.arg("--clearenv");
         for (name, value) in krypper_sandbox::OFFLINE_CARGO_TEST_ENVIRONMENT {
             command.args(["--setenv", name, value]);
         }
-        command.args(["--chdir", "/workspace", "--"]);
+        command.args([
+            "--chdir",
+            "/workspace",
+            "--",
+            "/run/krypper-sandbox-runner",
+            "--krypper-landlock-runner-v1",
+            "--status-fd",
+            "204",
+            "--ack-fd",
+            "205",
+            "--optional",
+            "--",
+        ]);
         command.arg(&intent.facts.executable);
         command.args(&intent.facts.arguments);
         if let Some(filter) = &intent.filter {
@@ -1230,10 +1250,30 @@ mod process_grant_tests {
     fn command_with_extra_separator(intent: &ProcessIntent) -> Command {
         let mut command = Command::new("/usr/bin/bwrap");
         command.arg("--").arg("--clearenv");
+        for (fd, path) in [
+            ("200", "/workspace"),
+            ("201", "/toolchain"),
+            ("202", "/cargo/registry"),
+            ("206", "/run/krypper-sandbox-runner"),
+        ] {
+            command.args(["--ro-bind-fd", fd, path]);
+        }
         for (name, value) in krypper_sandbox::OFFLINE_CARGO_TEST_ENVIRONMENT {
             command.args(["--setenv", name, value]);
         }
-        command.args(["--chdir", "/workspace", "--"]);
+        command.args([
+            "--chdir",
+            "/workspace",
+            "--",
+            "/run/krypper-sandbox-runner",
+            "--krypper-landlock-runner-v1",
+            "--status-fd",
+            "204",
+            "--ack-fd",
+            "205",
+            "--optional",
+            "--",
+        ]);
         command.arg(&intent.facts.executable);
         command.args(&intent.facts.arguments);
         if let Some(filter) = &intent.filter {
