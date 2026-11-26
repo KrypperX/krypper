@@ -14,9 +14,12 @@ mod host_fixtures;
 #[cfg(all(test, target_os = "linux"))]
 mod tests;
 
+// Keep the historical module paths available to internal callers.
+#[allow(unused_imports)]
 pub use self::outcome::{ProcessOutcome, ProcessResource};
 pub use self::policy::OfflineCargoPolicy;
 pub(crate) use self::policy::{validate_test_filter, ProcessPolicyFacts, MAX_TEST_FILTER_BYTES};
+#[allow(unused_imports)]
 pub use self::result::ProcessResult;
 pub(crate) use self::supervisor::run;
 
