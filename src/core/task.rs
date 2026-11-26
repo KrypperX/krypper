@@ -689,6 +689,14 @@ impl WorkspaceRevisionFence {
         fence
     }
 
+    pub(super) fn is_registered_for_identity(fence: &Arc<Self>, identity: (u64, u64)) -> bool {
+        WORKSPACE_REVISION_FENCES
+            .get()
+            .and_then(|fences| fences.lock().ok())
+            .and_then(|fences| fences.get(&identity).and_then(Weak::upgrade))
+            .is_some_and(|registered| Arc::ptr_eq(&registered, fence))
+    }
+
     pub(super) fn begin_read(&self) -> Result<(RwLockReadGuard<'_, ()>, u64), ()> {
         #[cfg(test)]
         if let Some(hook) = self

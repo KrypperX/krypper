@@ -539,6 +539,13 @@ impl TaskSession {
         expiry: Option<GrantExpiry>,
     ) -> Result<(), &'static str> {
         let task = self.get_task(task_id).ok_or("task not found")?;
+        let root = task
+            .workspace_root
+            .as_ref()
+            .map_err(|_| "task workspace is unavailable")?;
+        if !workspace_revision_fence_is_registered_for_root(&task.workspace_revision, root) {
+            return Err("workspace revision state is unavailable");
+        }
         if matches!(scope, GrantScope::ExactFilter)
             && crate::tools::process::validate_test_filter(exact_filter.as_deref()).is_err()
         {
@@ -656,6 +663,9 @@ impl TaskSession {
             .map_err(|message| WorkspaceReadError::File {
                 message: message.clone(),
             })?;
+        if !workspace_revision_fence_is_registered_for_root(&task.workspace_revision, root) {
+            return Ok(crate::ProcessResult::denied(test_filter));
+        }
         let (revision_guard, revision) =
             task.workspace_revision
                 .begin_read()
@@ -1059,6 +1069,16 @@ fn process_intent(
     ))
 }
 
+fn workspace_revision_fence_is_registered_for_root(
+    revision: &Arc<WorkspaceRevisionFence>,
+    root: &WorkspaceRoot,
+) -> bool {
+    let Ok(identity) = root.identity() else {
+        return false;
+    };
+    WorkspaceRevisionFence::is_registered_for_identity(revision, (identity.volume, identity.file))
+}
+
 fn process_spawn_gate(
     state: Arc<Mutex<ProcessGrantState>>,
     expected: ProcessGrant,
@@ -1070,6 +1090,9 @@ fn process_spawn_gate(
     test_filter: Option<String>,
 ) -> SpawnAuthorizationGate {
     Box::new(move |command, spawn_action| {
+        if !workspace_revision_fence_is_registered_for_root(&revision, &root) {
+            return Err(SpawnGateError::Denied);
+        }
         let Ok(mut state) = state.lock() else {
             return Err(SpawnGateError::Denied);
         };
@@ -1617,6 +1640,81 @@ mod process_grant_tests {
     }
 
     #[test]
+    fn recovered_workspace_identity_cannot_authorize_with_a_private_fallback_fence() {
+        let workspace = TempDir::with_prefix("process-grant-fallback-fence-");
+        let mut authorized_session = TaskSession::new_in_workspace(workspace.path()).unwrap();
+        let mut writer_session = TaskSession::new_in_workspace(workspace.path()).unwrap();
+        let authorized_task_id = authorized_session.create_task("authorized task").id();
+        let writer_task_id = writer_session.create_task("writer task").id();
+
+        let shared_revision = Arc::clone(
+            &authorized_session
+                .get_task(authorized_task_id)
+                .unwrap()
+                .workspace_revision,
+        );
+        let writer_revision = Arc::clone(
+            &writer_session
+                .get_task(writer_task_id)
+                .unwrap()
+                .workspace_revision,
+        );
+        assert!(Arc::ptr_eq(&shared_revision, &writer_revision));
+
+        let (_runtime, policy) = policy_fixture();
+        authorized_session
+            .authorize_offline_cargo_tests(authorized_task_id, policy)
+            .unwrap();
+
+        // A private default fence models identity lookup failing at task creation and
+        // succeeding later. Such a task can still use workspace helpers, but process
+        // authorization must not treat its task-local revision as workspace-wide.
+        let fallback_revision = Arc::new(WorkspaceRevisionFence::default());
+        authorized_session
+            .get_task_mut(authorized_task_id)
+            .unwrap()
+            .workspace_revision = Arc::clone(&fallback_revision);
+        let root = authorized_session
+            .get_task(authorized_task_id)
+            .unwrap()
+            .workspace_root
+            .as_ref()
+            .unwrap();
+        assert!(!workspace_revision_fence_is_registered_for_root(
+            &fallback_revision,
+            root
+        ));
+
+        let (_runtime, policy) = policy_fixture();
+        assert!(authorized_session
+            .authorize_offline_cargo_test_once(
+                authorized_task_id,
+                policy,
+                Some("selected_case"),
+                Duration::from_secs(60),
+            )
+            .is_err());
+
+        let writer_turn = running_turn(&mut writer_session, writer_task_id);
+        writer_session
+            .create_workspace_file(
+                writer_task_id,
+                writer_turn,
+                Path::new("fallback-fence-write.txt"),
+                "managed mutation",
+            )
+            .unwrap();
+        assert_eq!(writer_revision.current_revision(), 1);
+        assert_eq!(fallback_revision.current_revision(), 0);
+
+        let authorized_turn = running_turn(&mut authorized_session, authorized_task_id);
+        let result = authorized_session
+            .run_offline_cargo_tests(authorized_task_id, authorized_turn, None)
+            .unwrap();
+        assert_eq!(result.outcome, crate::ProcessOutcome::Denied);
+    }
+
+    #[test]
     fn sibling_task_workspace_mutation_waits_for_process_read_lease() {
         let workspace = TempDir::with_prefix("process-grant-sibling-lease-");
         let mut session = TaskSession::new_in_workspace(workspace.path()).unwrap();
@@ -1658,7 +1756,8 @@ mod process_grant_tests {
     fn product_spawn_gate_consumes_one_shot_at_spawn_even_on_spawn_failure() {
         let workspace = TempDir::with_prefix("process-grant-gate-workspace-");
         let root = Arc::new(capture_workspace_root_at_with_error(workspace.path()).unwrap());
-        let revision = Arc::new(crate::core::task::WorkspaceRevisionFence::default());
+        let identity = root.identity().unwrap();
+        let revision = WorkspaceRevisionFence::for_identity((identity.volume, identity.file));
         let (_runtime, policy) = policy_fixture();
         let expiry = GrantExpiry::from_lifetime(Duration::from_secs(60)).unwrap();
         let mut grant = ProcessGrant {
