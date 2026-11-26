@@ -37,7 +37,7 @@ fn run_unsupported(request: SandboxRunRequest) -> SandboxRunResult {
 mod tests {
     use crate::{
         run_offline_cargo, RunLimits, SandboxControl, SandboxEvidenceStatus, SandboxOutcome,
-        SandboxRunRequest,
+        SandboxRunRequest, SpawnGateError,
     };
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
@@ -51,7 +51,10 @@ mod tests {
             Some("selected_test".into()),
             RunLimits::offline_cargo_test(),
             Arc::new(AtomicBool::new(false)),
-        );
+        )
+        .with_spawn_gate(Box::new(|command, spawn| {
+            spawn(command).map_err(SpawnGateError::Spawn)
+        }));
         let result = run_offline_cargo(request);
         assert_eq!(result.outcome, SandboxOutcome::SandboxUnavailable);
         assert!(!result.test_evidence_available);

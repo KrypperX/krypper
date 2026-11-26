@@ -1,6 +1,6 @@
 //! Secret, network and cleanup boundaries for the gated real-sandbox fixtures.
 
-use super::super::supervisor::run;
+use super::super::run_for_test as run;
 use super::{gate, policy, workspace};
 use crate::test_support::{lock_environment, RestoreEnvironmentVariable};
 use crate::tools::capture_workspace_root_at;

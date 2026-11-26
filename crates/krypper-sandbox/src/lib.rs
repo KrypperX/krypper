@@ -7,6 +7,8 @@
 
 use serde::Serialize;
 use std::fs::File;
+use std::io;
+use std::process::{Child, Command};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -35,6 +37,20 @@ const FIXED_CARGO_ENVIRONMENT_NAMES: &[&str] = &[
     "CARGO_TARGET_DIR",
     "RUSTC",
     "LANG",
+];
+/// The values actually installed by the fixed offline Cargo sandbox, in launch order.
+pub const OFFLINE_CARGO_TEST_ENVIRONMENT: &[(&str, &str)] = &[
+    ("PATH", "/toolchain/bin:/usr/bin:/bin"),
+    ("HOME", "/tmp/home"),
+    ("TMPDIR", "/tmp"),
+    ("CARGO_HOME", "/cargo"),
+    ("CARGO_BUILD_JOBS", "1"),
+    ("CARGO_PROFILE_DEV_DEBUG", "0"),
+    ("CARGO_PROFILE_TEST_DEBUG", "0"),
+    ("CARGO_INCREMENTAL", "0"),
+    ("CARGO_TARGET_DIR", "/tmp/target"),
+    ("RUSTC", "/toolchain/bin/rustc"),
+    ("LANG", "C"),
 ];
 const FIXED_CARGO_PROFILE_LIMITS: ProfileLimits = ProfileLimits {
     wall_secs: 180,
@@ -515,6 +531,20 @@ pub struct SandboxRunRequest {
     pub(crate) test_filter: Option<String>,
     pub(crate) limits: RunLimits,
     pub(crate) cancelled: Arc<AtomicBool>,
+    pub(crate) spawn_gate: Option<SpawnAuthorizationGate>,
+}
+
+/// The action supplied by Sandbox to start its already-constructed payload command.
+pub type SpawnAction = Box<dyn FnOnce(Command) -> io::Result<Child>>;
+
+/// Product-owned authority callback invoked at the final payload effect boundary.
+pub type SpawnAuthorizationGate =
+    Box<dyn FnOnce(Command, SpawnAction) -> Result<Child, SpawnGateError>>;
+
+/// Distinguishes an authorization denial from a host spawn failure.
+pub enum SpawnGateError {
+    Denied,
+    Spawn(io::Error),
 }
 
 impl SandboxRunRequest {
@@ -553,7 +583,14 @@ impl SandboxRunRequest {
             test_filter,
             limits,
             cancelled,
+            spawn_gate: None,
         }
+    }
+
+    /// Attach the Product-owned authorization callback for the final payload start.
+    pub fn with_spawn_gate(mut self, gate: SpawnAuthorizationGate) -> Self {
+        self.spawn_gate = Some(gate);
+        self
     }
 
     fn validate(&self) -> Result<(), &'static str> {
@@ -912,6 +949,13 @@ fn run_offline_cargo_with_backend(
         return result;
     }
 
+    if request.spawn_gate.is_none() {
+        let mut result =
+            SandboxRunResult::empty(request.run_id, SandboxOutcome::Denied, output_limit);
+        result.diagnostic = Some("product spawn authorization gate is missing".into());
+        return result;
+    }
+
     backend.run(request)
 }
 
@@ -1020,6 +1064,9 @@ mod execution_contract_tests {
             Arc::new(AtomicBool::new(false)),
             requirements,
         )
+        .with_spawn_gate(Box::new(|command, spawn| {
+            spawn(command).map_err(SpawnGateError::Spawn)
+        }))
     }
 
     #[derive(Clone, Copy)]
@@ -1149,6 +1196,32 @@ mod execution_contract_tests {
     }
 
     #[test]
+    fn missing_product_spawn_gate_denies_before_backend_or_payload_launch() {
+        let backend = TestBackend::new(
+            Some(SandboxBackend::Bubblewrap),
+            OFFLINE_CARGO_REQUIRED_CONTROLS.to_vec(),
+            TestBackendBehavior::LaunchPayload,
+        );
+        let request = SandboxRunRequest::new(
+            Uuid::new_v4(),
+            None,
+            None,
+            RunLimits::offline_cargo_test(),
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        let result = run_offline_cargo_with_backend(request, &backend);
+
+        assert_eq!(result.outcome, SandboxOutcome::Denied);
+        assert_eq!(
+            result.diagnostic.as_deref(),
+            Some("product spawn authorization gate is missing")
+        );
+        assert_eq!(backend.setup_attempts.load(Ordering::SeqCst), 0);
+        assert_eq!(backend.payload_launches.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
     fn backend_setup_failure_is_terminal_before_payload_launch() {
         let backend = TestBackend::new(
             Some(SandboxBackend::Bubblewrap),
@@ -1156,17 +1229,30 @@ mod execution_contract_tests {
             TestBackendBehavior::FailDuringSetup,
         );
 
-        let result = run_offline_cargo_with_backend(
-            request_with(
-                ValidatedExecutionRequirements::offline_cargo_test(),
-                RunLimits::offline_cargo_test(),
-            ),
-            &backend,
-        );
+        let gate_calls = Arc::new(AtomicUsize::new(0));
+        let simulated_one_shot_consumed = Arc::new(AtomicBool::new(false));
+        let gate_calls_for_gate = Arc::clone(&gate_calls);
+        let consumed_for_gate = Arc::clone(&simulated_one_shot_consumed);
+        let request = SandboxRunRequest::new(
+            Uuid::new_v4(),
+            None,
+            None,
+            RunLimits::offline_cargo_test(),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .with_spawn_gate(Box::new(move |command, spawn| {
+            gate_calls_for_gate.fetch_add(1, Ordering::SeqCst);
+            consumed_for_gate.store(true, Ordering::SeqCst);
+            spawn(command).map_err(SpawnGateError::Spawn)
+        }));
+
+        let result = run_offline_cargo_with_backend(request, &backend);
 
         assert_eq!(result.outcome, SandboxOutcome::SandboxSetupFailed);
         assert_eq!(backend.setup_attempts.load(Ordering::SeqCst), 1);
         assert_eq!(backend.payload_launches.load(Ordering::SeqCst), 0);
+        assert_eq!(gate_calls.load(Ordering::SeqCst), 0);
+        assert!(!simulated_one_shot_consumed.load(Ordering::SeqCst));
     }
 
     #[test]
@@ -1399,7 +1485,10 @@ mod execution_contract_tests {
             RunLimits::offline_cargo_test(),
             Arc::new(AtomicBool::new(false)),
             ValidatedExecutionRequirements::offline_cargo_test(),
-        );
+        )
+        .with_spawn_gate(Box::new(|command, spawn| {
+            spawn(command).map_err(SpawnGateError::Spawn)
+        }));
         let result = run_offline_cargo(request);
         assert_eq!(result.outcome, SandboxOutcome::Denied);
         assert!(result.stdout.is_empty());

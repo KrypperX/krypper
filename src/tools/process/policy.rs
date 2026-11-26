@@ -1,8 +1,10 @@
 //! The fixed offline Cargo policy: limits, test filters and the trusted toolchain profile.
 
 use crate::tools::process_profile::ProcessProfile;
+use crate::tools::FileIdentity;
 #[cfg(target_os = "linux")]
 use crate::tools::{capture_workspace_root_at, WorkspaceRoot};
+use krypper_sandbox::{ProfileLimits, RunLimits, ValidatedExecutionRequirements};
 #[cfg(all(test, target_os = "linux"))]
 use std::ffi::OsString;
 #[cfg(target_os = "linux")]
@@ -26,6 +28,23 @@ pub struct OfflineCargoPolicy {
     pub(super) registry: WorkspaceRoot,
     pub(super) cancelled: Arc<AtomicBool>,
     pub(super) profile: ProcessProfile<'static>,
+}
+
+/// Closed host-owned policy details used to bind one process request to its approval.
+#[derive(Clone, Debug)]
+pub(crate) struct ProcessPolicyFacts {
+    pub(crate) profile_version: u32,
+    pub(crate) profile_id: String,
+    pub(crate) executable: String,
+    pub(crate) arguments: Vec<String>,
+    pub(crate) working_directory: String,
+    pub(crate) environment_names: Vec<String>,
+    pub(crate) environment: Vec<(String, String)>,
+    pub(crate) profile_limits: ProfileLimits,
+    pub(crate) effective_limits: RunLimits,
+    pub(crate) requirements: ValidatedExecutionRequirements,
+    pub(crate) toolchain_identity: Option<FileIdentity>,
+    pub(crate) registry_identity: Option<FileIdentity>,
 }
 
 impl OfflineCargoPolicy {
@@ -68,6 +87,58 @@ impl OfflineCargoPolicy {
 
     pub(super) fn profile(&self) -> &ProcessProfile<'static> {
         &self.profile
+    }
+
+    pub(crate) fn authorization_facts(&self) -> Result<ProcessPolicyFacts, &'static str> {
+        let requirements = self
+            .profile
+            .execution_requirements()
+            .cloned()
+            .ok_or("process profile has no validated requirements")?;
+        let profile_limits = self.profile.limits();
+        let effective_limits = profile_limits
+            .to_run_limits()
+            .map_err(|_| "process profile limits are invalid")?;
+        #[cfg(target_os = "linux")]
+        let (toolchain_identity, registry_identity) = (
+            self.toolchain
+                .identity()
+                .map_err(|_| "toolchain identity is unavailable")
+                .map(Some)?,
+            self.registry
+                .identity()
+                .map_err(|_| "registry identity is unavailable")
+                .map(Some)?,
+        );
+        #[cfg(not(target_os = "linux"))]
+        let (toolchain_identity, registry_identity) = (None, None);
+        Ok(ProcessPolicyFacts {
+            profile_version: self.profile.version(),
+            profile_id: self.profile.id().to_owned(),
+            executable: self.profile.executable().to_owned(),
+            arguments: self
+                .profile
+                .arguments()
+                .iter()
+                .map(|argument| (*argument).to_owned())
+                .collect(),
+            working_directory: self.profile.cwd().to_owned(),
+            environment_names: self
+                .profile
+                .environment_allowlist()
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect(),
+            environment: krypper_sandbox::OFFLINE_CARGO_TEST_ENVIRONMENT
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                .collect(),
+            profile_limits,
+            effective_limits,
+            requirements,
+            toolchain_identity,
+            registry_identity,
+        })
     }
 }
 

@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 mod checkpoint;
 mod errors;
+mod process_authorization;
 mod session;
 
 pub use checkpoint::{TaskSessionCheckpointError, MAX_TASK_SESSION_CHECKPOINT_BYTES};

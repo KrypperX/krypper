@@ -2,6 +2,7 @@ use super::*;
 use crate::test_support::CurrentDirGuard;
 use proptest::prelude::*;
 use std::fs;
+use std::sync::Arc;
 
 struct TempWorkspace(crate::test_support::TempDir);
 
@@ -135,6 +136,27 @@ fn checkpoint_preserves_only_metadata_for_workspace_activity() {
         fs::read_to_string("source.txt").unwrap(),
         format!("{read_secret} {query_secret} {replacement_secret}")
     );
+}
+
+#[test]
+fn restored_tasks_share_workspace_revision_fence_by_identity() {
+    let workspace = TempWorkspace::new();
+    let session = TaskSession::new_in_workspace(workspace.0.path()).unwrap();
+    let mut session = session;
+    let first_task_id = session.create_task("first task").id();
+    let second_task_id = session.create_task("second task").id();
+
+    let checkpoint = session.export_checkpoint().unwrap();
+    let restored =
+        TaskSession::restore_checkpoint_in_workspace(&checkpoint, workspace.0.path()).unwrap();
+    let first_revision = Arc::clone(&restored.get_task(first_task_id).unwrap().workspace_revision);
+    let second_revision = Arc::clone(
+        &restored
+            .get_task(second_task_id)
+            .unwrap()
+            .workspace_revision,
+    );
+    assert!(Arc::ptr_eq(&first_revision, &second_revision));
 }
 
 fn checkpoint_description() -> impl Strategy<Value = String> {

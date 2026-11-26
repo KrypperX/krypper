@@ -11,7 +11,7 @@
 //! changes CLI defaults.
 
 use super::policy::OfflineCargoPolicy;
-use super::supervisor::run;
+use super::run_for_test as run;
 use super::*;
 use crate::task_lifecycle::TaskSession;
 use crate::test_support::TempDir;

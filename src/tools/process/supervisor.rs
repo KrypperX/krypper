@@ -6,7 +6,7 @@ use super::result::ProcessResult;
 use crate::tools::WorkspaceRoot;
 use krypper_sandbox::{
     run_offline_cargo, DirectoryDescriptors, RunLimits, SandboxOutcome, SandboxResource,
-    SandboxRunRequest, SandboxRunResult,
+    SandboxRunRequest, SandboxRunResult, SpawnAuthorizationGate,
 };
 #[cfg(target_os = "linux")]
 use std::path::Path;
@@ -20,6 +20,7 @@ pub(crate) fn run(
     root: &WorkspaceRoot,
     policy: &OfflineCargoPolicy,
     test_filter: Option<&str>,
+    spawn_gate: SpawnAuthorizationGate,
 ) -> ProcessResult {
     #[cfg(target_os = "linux")]
     {
@@ -35,6 +36,7 @@ pub(crate) fn run(
             Duration::from_secs(limits.wall_secs),
             limits.output_bytes,
             cpu_budget_usec,
+            spawn_gate,
         )
     }
     #[cfg(not(target_os = "linux"))]
@@ -44,7 +46,7 @@ pub(crate) fn run(
             Ok(limits) => limits,
             Err(_) => return ProcessResult::empty_with_filter(ProcessOutcome::Denied, test_filter),
         };
-        execute(policy, test_filter, limits, None)
+        execute(policy, test_filter, limits, None, spawn_gate)
     }
 }
 
@@ -57,6 +59,7 @@ pub(crate) fn run_with_bounds(
     wall: Duration,
     output: usize,
     cpu_budget_usec: u64,
+    spawn_gate: SpawnAuthorizationGate,
 ) -> ProcessResult {
     if validate_test_filter(test_filter).is_err() {
         return ProcessResult::invalid_test_filter();
@@ -130,7 +133,7 @@ pub(crate) fn run_with_bounds(
         Ok(directories) => Some(directories),
         Err(error) => return setup_failed(test_filter, error, output_limit),
     };
-    execute(policy, test_filter, limits, directories)
+    execute(policy, test_filter, limits, directories, spawn_gate)
 }
 
 #[cfg(target_os = "linux")]
@@ -157,6 +160,7 @@ fn execute(
     test_filter: Option<&str>,
     limits: RunLimits,
     directories: Option<DirectoryDescriptors>,
+    spawn_gate: SpawnAuthorizationGate,
 ) -> ProcessResult {
     if validate_test_filter(test_filter).is_err() {
         return ProcessResult::invalid_test_filter();
@@ -172,7 +176,8 @@ fn execute(
         limits,
         policy.cancellation(),
         requirements,
-    );
+    )
+    .with_spawn_gate(spawn_gate);
     from_runner(run_offline_cargo(request), test_filter)
 }
 

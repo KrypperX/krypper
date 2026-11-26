@@ -34,7 +34,9 @@ pub(crate) use replace::{
 };
 pub(crate) use search::{search_text_files_at, search_tree_text_files_at};
 pub(crate) use syscalls::encode_workspace_path;
-pub(crate) use types::{CliError, DirHandle, PatchEvidence, RootGuidanceReadError, WorkspaceRoot};
+pub(crate) use types::{
+    CliError, DirHandle, FileIdentity, PatchEvidence, RootGuidanceReadError, WorkspaceRoot,
+};
 
 use listing::{list_open_directory_with_limit, list_open_directory_with_limit_and_error};
 use paths::open_workspace_relative_with_resolved_path;
