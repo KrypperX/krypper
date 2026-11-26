@@ -2,6 +2,7 @@
 
 use crate::tools::process::{OfflineCargoPolicy, ProcessPolicyFacts};
 use crate::tools::FileIdentity;
+use krypper_sandbox::runner_contract::{RUNNER_MOUNT_FD, RUNNER_MOUNT_PATH};
 use krypper_sandbox::runner_protocol::{ACK_FD, STATUS_FD};
 use krypper_sandbox::{
     NetworkRequirement, PinnedResourceAccess, PinnedResourceId, ProcessTreeRequirement, RunLimits,
@@ -316,12 +317,11 @@ impl ProcessIntent {
 /// Confirm the fixed payload tail and the payload cwd/environment encoded in the Sandbox command.
 /// The helper's other arguments remain owned by the closed Sandbox implementation.
 pub(super) fn launch_command_matches_intent(command: &Command, intent: &ProcessIntent) -> bool {
-    const RUNNER_PATH: &str = "/run/krypper-sandbox-runner";
-    const FIXED_FD_MOUNTS: [(&str, &str); 4] = [
-        ("200", "/workspace"),
-        ("201", "/toolchain"),
-        ("202", "/cargo/registry"),
-        ("206", RUNNER_PATH),
+    const FIXED_FD_MOUNTS: [(i32, &str); 4] = [
+        (200, "/workspace"),
+        (201, "/toolchain"),
+        (202, "/cargo/registry"),
+        (RUNNER_MOUNT_FD, RUNNER_MOUNT_PATH),
     ];
     if command.get_program() != OsStr::new("/usr/bin/bwrap") || command.get_current_dir().is_some()
     {
@@ -338,9 +338,10 @@ pub(super) fn launch_command_matches_intent(command: &Command, intent: &ProcessI
         || count_arg(OsStr::new("--ro-bind-fd")) != FIXED_FD_MOUNTS.len()
         || fd_mounts.len() != FIXED_FD_MOUNTS.len()
         || FIXED_FD_MOUNTS.iter().any(|(fd, path)| {
+            let fd = fd.to_string();
             fd_mounts
                 .iter()
-                .filter(|mount| mount[1] == OsStr::new(fd) && mount[2] == OsStr::new(path))
+                .filter(|mount| mount[1] == OsStr::new(&fd) && mount[2] == OsStr::new(path))
                 .count()
                 != 1
         })
@@ -373,7 +374,7 @@ pub(super) fn launch_command_matches_intent(command: &Command, intent: &ProcessI
 
     let mut expected_tail = vec![
         "--".to_owned(),
-        RUNNER_PATH.to_owned(),
+        RUNNER_MOUNT_PATH.to_owned(),
         "--krypper-landlock-runner-v1".to_owned(),
         "--status-fd".to_owned(),
         STATUS_FD.to_string(),

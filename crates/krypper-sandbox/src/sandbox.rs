@@ -1,5 +1,6 @@
 //! The Linux sandbox command: host executable lookup and the contained child command.
 
+use crate::runner_contract::{RUNNER_MOUNT_FD, RUNNER_MOUNT_PATH};
 use crate::runner_handshake::RunnerHandshakePipes;
 use crate::runner_protocol::{ACK_FD, STATUS_FD};
 use crate::{
@@ -14,7 +15,6 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 const SECCOMP_FD: RawFd = 203;
-const RUNNER_FD: RawFd = 206;
 const FIRST_PINNED_FD: RawFd = 208;
 const MAX_BPF_INSTRUCTIONS: usize = 4096;
 const BPF_INSTRUCTION_BYTES: usize = 8;
@@ -223,7 +223,10 @@ pub(super) fn sandbox(
         "/workspace",
     ]);
     if pinned_runner.is_some() {
-        command.args(["--ro-bind-fd", "206", "/run/krypper-sandbox-runner"]);
+        command
+            .arg("--ro-bind-fd")
+            .arg(RUNNER_MOUNT_FD.to_string())
+            .arg(RUNNER_MOUNT_PATH);
         evidence.request(SandboxControl::LandlockFilesystemWrites);
     }
     let mut environment_args = vec!["--clearenv"];
@@ -295,7 +298,7 @@ pub(super) fn sandbox(
                 return Err(io::Error::last_os_error());
             }
             if let Some(runner) = &pinned_runner {
-                if libc::dup2(runner.as_raw_fd(), RUNNER_FD) < 0 {
+                if libc::dup2(runner.as_raw_fd(), RUNNER_MOUNT_FD) < 0 {
                     return Err(io::Error::last_os_error());
                 }
             }
@@ -394,7 +397,8 @@ fn duplicate_fd_at_or_above(fd: RawFd, minimum: RawFd) -> io::Result<OwnedFd> {
 #[cfg(test)]
 mod tests {
     use super::{
-        duplicate_fd_at_or_above, sandbox, sealed_filter_fd, FIRST_PINNED_FD, RUNNER_FD, SECCOMP_FD,
+        duplicate_fd_at_or_above, sandbox, sealed_filter_fd, FIRST_PINNED_FD, RUNNER_MOUNT_FD,
+        SECCOMP_FD,
     };
     use crate::{
         DirectoryDescriptors, SandboxBackend, SandboxControl, SandboxEvidenceStatus,
@@ -469,7 +473,7 @@ mod tests {
             .unwrap();
         assert_eq!(args.get(seccomp + 1).map(String::as_str), Some("203"));
         assert_eq!(SECCOMP_FD, 203);
-        assert_eq!(RUNNER_FD, 206);
+        assert_eq!(RUNNER_MOUNT_FD, 206);
         assert_eq!(FIRST_PINNED_FD, 208);
         assert!(evidence.controls().iter().any(|record| {
             record.control == SandboxControl::SandboxRuntime

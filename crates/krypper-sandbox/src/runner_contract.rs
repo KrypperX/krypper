@@ -2,6 +2,8 @@
 
 pub const FIXED_CARGO_ARGUMENTS: &[&str] = &["test", "--offline", "--locked", "--all-targets"];
 pub const MAX_TEST_FILTER_BYTES: usize = 256;
+pub const RUNNER_MOUNT_FD: i32 = 206;
+pub const RUNNER_MOUNT_PATH: &str = "/run/krypper-sandbox-runner";
 
 pub fn is_valid_test_filter(filter: &str) -> bool {
     !filter.is_empty()

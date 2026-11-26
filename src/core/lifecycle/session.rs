@@ -1218,10 +1218,13 @@ mod process_grant_tests {
             ("200", "/workspace"),
             ("201", "/toolchain"),
             ("202", "/cargo/registry"),
-            ("206", "/run/krypper-sandbox-runner"),
         ] {
             command.args(["--ro-bind-fd", fd, path]);
         }
+        command
+            .arg("--ro-bind-fd")
+            .arg(krypper_sandbox::runner_contract::RUNNER_MOUNT_FD.to_string())
+            .arg(krypper_sandbox::runner_contract::RUNNER_MOUNT_PATH);
         command.arg("--clearenv");
         for (name, value) in krypper_sandbox::OFFLINE_CARGO_TEST_ENVIRONMENT {
             command.args(["--setenv", name, value]);
@@ -1230,7 +1233,7 @@ mod process_grant_tests {
             "--chdir",
             "/workspace",
             "--",
-            "/run/krypper-sandbox-runner",
+            krypper_sandbox::runner_contract::RUNNER_MOUNT_PATH,
             "--krypper-landlock-runner-v1",
             "--status-fd",
         ]);
@@ -1254,10 +1257,13 @@ mod process_grant_tests {
             ("200", "/workspace"),
             ("201", "/toolchain"),
             ("202", "/cargo/registry"),
-            ("206", "/run/krypper-sandbox-runner"),
         ] {
             command.args(["--ro-bind-fd", fd, path]);
         }
+        command
+            .arg("--ro-bind-fd")
+            .arg(krypper_sandbox::runner_contract::RUNNER_MOUNT_FD.to_string())
+            .arg(krypper_sandbox::runner_contract::RUNNER_MOUNT_PATH);
         for (name, value) in krypper_sandbox::OFFLINE_CARGO_TEST_ENVIRONMENT {
             command.args(["--setenv", name, value]);
         }
@@ -1265,7 +1271,7 @@ mod process_grant_tests {
             "--chdir",
             "/workspace",
             "--",
-            "/run/krypper-sandbox-runner",
+            krypper_sandbox::runner_contract::RUNNER_MOUNT_PATH,
             "--krypper-landlock-runner-v1",
             "--status-fd",
         ]);
