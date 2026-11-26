@@ -1,6 +1,5 @@
 //! The fixed offline Cargo policy: limits, test filters and the trusted toolchain profile.
 
-#[cfg(target_os = "linux")]
 use crate::tools::process_profile::ProcessProfile;
 #[cfg(target_os = "linux")]
 use crate::tools::{capture_workspace_root_at, WorkspaceRoot};
@@ -26,7 +25,6 @@ pub struct OfflineCargoPolicy {
     #[cfg(target_os = "linux")]
     pub(super) registry: WorkspaceRoot,
     pub(super) cancelled: Arc<AtomicBool>,
-    #[cfg(target_os = "linux")]
     pub(super) profile: ProcessProfile<'static>,
 }
 
@@ -51,15 +49,15 @@ impl OfflineCargoPolicy {
                 }
             }
         }
+        let profile = ProcessProfile::offline_cargo_test()
+            .map_err(|error| format!("invalid fixed process profile: {error:?}"))?;
         Ok(Self {
             #[cfg(target_os = "linux")]
             toolchain,
             #[cfg(target_os = "linux")]
             registry,
             cancelled: Arc::new(AtomicBool::new(false)),
-            #[cfg(target_os = "linux")]
-            profile: ProcessProfile::offline_cargo_test()
-                .map_err(|error| format!("invalid fixed process profile: {error:?}"))?,
+            profile,
         })
     }
 
@@ -68,7 +66,6 @@ impl OfflineCargoPolicy {
         self.cancelled.clone()
     }
 
-    #[cfg(target_os = "linux")]
     pub(super) fn profile(&self) -> &ProcessProfile<'static> {
         &self.profile
     }

@@ -1,25 +1,24 @@
-//! Versioned, immutable contracts for host-owned process profiles.
+//! Versioned, immutable descriptions for host-owned process profiles.
 //!
 //! A profile descriptor is descriptive metadata only. It does not register a
 //! tool, grant an authority, select a sandbox backend or launch a process.
-//! The fixed offline Cargo policy validates the `offline_cargo_test` descriptor
-//! and uses its executable, argument prefix and limits. Runtime authorization stays with
-//! TaskSession and the existing Tools boundary. Construction validates the
-//! contract, so an unvalidated descriptor cannot exist.
+//! Version 1 descriptors remain metadata-only. The fixed offline Cargo profile uses a separate
+//! version 2 requirements contract that the sandbox runner validates before platform dispatch.
+//! Runtime authorization stays with TaskSession and the existing Tools boundary.
+
+pub use krypper_sandbox::ProfileLimits;
+use krypper_sandbox::ValidatedExecutionRequirements;
 
 /// The only profile contract format currently understood by Krypper.
 pub const PROFILE_CONTRACT_VERSION: u32 = 1;
+/// Version for the requirements-bearing host profile format.
+pub const PROFILE_REQUIREMENTS_VERSION: u32 = 2;
 
 const MAX_ID_BYTES: usize = 64;
 const MAX_EXECUTABLE_BYTES: usize = 4096;
 const MAX_ARG_BYTES: usize = 256;
 const MAX_ARGUMENTS: usize = 16;
 const MAX_CWD_BYTES: usize = 4096;
-const MAX_WALL_SECS: u64 = 300;
-const MAX_CPU_MS: u64 = 240_000;
-const MAX_MEMORY_BYTES: u64 = 3 * 1024 * 1024 * 1024;
-const MAX_OUTPUT_BYTES: usize = 256 * 1024;
-const MAX_PROCESSES: u64 = 128;
 const ALLOWED_EXECUTABLES: &[&str] = &["/toolchain/bin/cargo", "/toolchain/bin/rustc"];
 const ALLOWED_ENVIRONMENT_NAMES: &[&str] = &[
     "PATH",
@@ -46,16 +45,6 @@ const OFFLINE_CARGO_TEST_LIMITS: ProfileLimits = ProfileLimits {
     processes: 128,
 };
 
-/// Hard ceilings for one profile run. Values must be finite and non-zero.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ProfileLimits {
-    pub wall_secs: u64,
-    pub cpu_ms: u64,
-    pub memory_bytes: u64,
-    pub output_bytes: usize,
-    pub processes: u64,
-}
-
 /// A validated host-owned description of one bounded process profile.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessProfile<'a> {
@@ -67,6 +56,7 @@ pub struct ProcessProfile<'a> {
     environment_allowlist: &'a [&'a str],
     limits: ProfileLimits,
     extra_fields: &'a [(&'a str, &'a str)],
+    execution_requirements: Option<ValidatedExecutionRequirements>,
 }
 
 /// Rejection reasons for malformed or unsafe profile metadata.
@@ -80,14 +70,15 @@ pub enum ProfileContractError {
     InvalidEnvironmentAllowlist,
     InvalidLimits,
     UnknownField,
+    RequirementsMismatch,
 }
 
 impl ProcessProfile<'static> {
     /// The single approved offline Cargo test profile used by the host policy.
-    #[cfg(target_os = "linux")]
     pub fn offline_cargo_test() -> Result<Self, ProfileContractError> {
-        Self::new(
-            PROFILE_CONTRACT_VERSION,
+        let requirements = ValidatedExecutionRequirements::offline_cargo_test();
+        Self::new_with_requirements(
+            PROFILE_REQUIREMENTS_VERSION,
             OFFLINE_CARGO_TEST_ID,
             OFFLINE_CARGO_TEST_EXECUTABLE,
             OFFLINE_CARGO_TEST_ARGUMENTS,
@@ -95,13 +86,14 @@ impl ProcessProfile<'static> {
             ALLOWED_ENVIRONMENT_NAMES,
             OFFLINE_CARGO_TEST_LIMITS,
             &[],
+            requirements,
         )
     }
 }
 
 #[allow(dead_code)] // accessors for descriptor consumers that are not wired yet
 impl<'a> ProcessProfile<'a> {
-    /// Validate and construct a descriptor from typed host-owned fields.
+    /// Validate and construct a legacy version 1 metadata-only descriptor.
     ///
     /// The `offline_cargo_test` identifier is reserved for the exact profile
     /// returned by [`ProcessProfile::offline_cargo_test`]; mismatched fields for
@@ -128,8 +120,43 @@ impl<'a> ProcessProfile<'a> {
             environment_allowlist,
             limits,
             extra_fields,
+            execution_requirements: None,
         };
         profile.validate()?;
+        Ok(profile)
+    }
+
+    /// Construct the fixed version 2 profile with its validated execution requirements.
+    ///
+    /// The v1 constructor remains available for metadata compatibility, but a v1 descriptor has
+    /// no requirements value and cannot be carried into a runnable sandbox request.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_requirements(
+        version: u32,
+        id: &'a str,
+        executable: &'a str,
+        arguments: &'a [&'a str],
+        cwd: &'a str,
+        environment_allowlist: &'a [&'a str],
+        limits: ProfileLimits,
+        extra_fields: &'a [(&'a str, &'a str)],
+        execution_requirements: ValidatedExecutionRequirements,
+    ) -> Result<Self, ProfileContractError> {
+        if version != PROFILE_REQUIREMENTS_VERSION {
+            return Err(ProfileContractError::UnsupportedVersion);
+        }
+        let profile = Self {
+            version,
+            id,
+            executable,
+            arguments,
+            cwd,
+            environment_allowlist,
+            limits,
+            extra_fields,
+            execution_requirements: Some(execution_requirements),
+        };
+        profile.validate_with_requirements()?;
         Ok(profile)
     }
 
@@ -190,6 +217,25 @@ impl<'a> ProcessProfile<'a> {
         Ok(())
     }
 
+    fn validate_with_requirements(&self) -> Result<(), ProfileContractError> {
+        let requirements = self
+            .execution_requirements
+            .as_ref()
+            .ok_or(ProfileContractError::RequirementsMismatch)?;
+        if self.id != OFFLINE_CARGO_TEST_ID
+            || self.executable != OFFLINE_CARGO_TEST_EXECUTABLE
+            || self.arguments != OFFLINE_CARGO_TEST_ARGUMENTS
+            || self.cwd != OFFLINE_CARGO_TEST_CWD
+            || self.environment_allowlist != ALLOWED_ENVIRONMENT_NAMES
+            || self.limits != OFFLINE_CARGO_TEST_LIMITS
+            || !self.extra_fields.is_empty()
+            || requirements != &ValidatedExecutionRequirements::offline_cargo_test()
+        {
+            return Err(ProfileContractError::RequirementsMismatch);
+        }
+        Ok(())
+    }
+
     /// The contract version this descriptor was validated against.
     pub fn version(&self) -> u32 {
         self.version
@@ -229,6 +275,11 @@ impl<'a> ProcessProfile<'a> {
     pub fn extra_fields(&self) -> &'a [(&'a str, &'a str)] {
         self.extra_fields
     }
+
+    /// Validated v2 launch requirements, absent for legacy v1 metadata-only profiles.
+    pub fn execution_requirements(&self) -> Option<&ValidatedExecutionRequirements> {
+        self.execution_requirements.as_ref()
+    }
 }
 
 fn valid_identifier(value: &str) -> bool {
@@ -265,16 +316,7 @@ fn valid_cwd(value: &str) -> bool {
 }
 
 fn valid_limits(limits: &ProfileLimits) -> bool {
-    limits.wall_secs > 0
-        && limits.wall_secs <= MAX_WALL_SECS
-        && limits.cpu_ms > 0
-        && limits.cpu_ms <= MAX_CPU_MS
-        && limits.memory_bytes > 0
-        && limits.memory_bytes <= MAX_MEMORY_BYTES
-        && limits.output_bytes > 0
-        && limits.output_bytes <= MAX_OUTPUT_BYTES
-        && limits.processes > 0
-        && limits.processes <= MAX_PROCESSES
+    limits.to_run_limits().is_ok()
 }
 
 #[cfg(test)]
@@ -469,7 +511,7 @@ mod tests {
     #[test]
     fn rejects_raised_and_zero_limits() {
         let mut over = limits();
-        over.output_bytes = MAX_OUTPUT_BYTES + 1;
+        over.output_bytes = krypper_sandbox::RunLimits::offline_cargo_test().output_bytes + 1;
         assert_eq!(
             ProcessProfile::new(
                 PROFILE_CONTRACT_VERSION,
@@ -517,10 +559,9 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "linux")]
     fn fixed_offline_cargo_profile_has_the_live_command_shape() {
         let item = ProcessProfile::offline_cargo_test().unwrap();
-        assert_eq!(item.version(), PROFILE_CONTRACT_VERSION);
+        assert_eq!(item.version(), PROFILE_REQUIREMENTS_VERSION);
         assert_eq!(item.id(), "offline_cargo_test");
         assert_eq!(item.executable(), "/toolchain/bin/cargo");
         assert_eq!(
@@ -555,6 +596,87 @@ mod tests {
             }
         );
         assert!(item.extra_fields().is_empty());
+        let requirements = item
+            .execution_requirements()
+            .expect("version 2 profile has validated execution requirements");
+        assert_eq!(requirements.version(), PROFILE_REQUIREMENTS_VERSION);
+        assert_eq!(requirements.profile_id(), "offline_cargo_test");
+        assert_eq!(
+            requirements.executable(),
+            krypper_sandbox::SandboxExecutable::Cargo
+        );
+        assert_eq!(
+            requirements.arguments(),
+            &["test", "--offline", "--locked", "--all-targets"]
+        );
+        assert_eq!(requirements.working_directory(), ".");
+        assert_eq!(requirements.resources().len(), 3);
+        assert!(requirements.resources().iter().all(|resource| {
+            resource.access == krypper_sandbox::PinnedResourceAccess::ReadOnly
+        }));
+        assert_eq!(requirements.environment_names().len(), 11);
+        assert_eq!(
+            requirements.network(),
+            krypper_sandbox::NetworkRequirement::DenyAll
+        );
+        assert_eq!(
+            requirements.syscall(),
+            krypper_sandbox::SyscallRequirement::OfflineCargoTestV1
+        );
+        assert_eq!(
+            requirements.process_tree(),
+            krypper_sandbox::ProcessTreeRequirement::EphemeralTree
+        );
+    }
+
+    #[test]
+    fn legacy_v1_profile_is_metadata_only_and_cannot_supply_launch_requirements() {
+        let item = ProcessProfile::new(
+            PROFILE_CONTRACT_VERSION,
+            OFFLINE_CARGO_TEST_ID,
+            OFFLINE_CARGO_TEST_EXECUTABLE,
+            OFFLINE_CARGO_TEST_ARGUMENTS,
+            OFFLINE_CARGO_TEST_CWD,
+            ALLOWED_ENVIRONMENT_NAMES,
+            OFFLINE_CARGO_TEST_LIMITS,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(item.version(), PROFILE_CONTRACT_VERSION);
+        assert!(item.execution_requirements().is_none());
+    }
+
+    #[test]
+    fn v2_profile_rejects_mismatched_requirements() {
+        let original = ValidatedExecutionRequirements::offline_cargo_test();
+        let mismatched = ValidatedExecutionRequirements::new(
+            original.version(),
+            "other_profile",
+            original.executable(),
+            original.arguments().to_vec(),
+            original.working_directory(),
+            original.resources().to_vec(),
+            original.environment_names().to_vec(),
+            original.profile_limits(),
+            original.network(),
+            original.syscall(),
+            original.process_tree(),
+        )
+        .unwrap();
+        assert_eq!(
+            ProcessProfile::new_with_requirements(
+                PROFILE_REQUIREMENTS_VERSION,
+                OFFLINE_CARGO_TEST_ID,
+                OFFLINE_CARGO_TEST_EXECUTABLE,
+                OFFLINE_CARGO_TEST_ARGUMENTS,
+                OFFLINE_CARGO_TEST_CWD,
+                ALLOWED_ENVIRONMENT_NAMES,
+                OFFLINE_CARGO_TEST_LIMITS,
+                &[],
+                mismatched,
+            ),
+            Err(ProfileContractError::RequirementsMismatch)
+        );
     }
 
     #[test]

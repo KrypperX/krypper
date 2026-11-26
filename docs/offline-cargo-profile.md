@@ -30,6 +30,38 @@ Requests cannot supply an executable, other arguments, cwd, environment,
 sandbox options, or higher limits. This is an embedding API capability; no CLI
 syntax or default CLI permission has been added.
 
+The host profile carries a version 2 validated requirements contract. It records
+the fixed Cargo executable and argv prefix, workspace-relative cwd, read-only
+`Workspace`, `Toolchain`, and `CargoRegistry` resource roles, environment names,
+profile ceilings, deny-all network policy, the fixed `OfflineCargoTestV1`
+syscall-profile identifier, and an ephemeral process tree. The environment
+contract contains names only; the sandbox supplies its fixed values. Logical
+resource roles are mapped to the corresponding host-captured directory
+descriptors. No host path or environment value is accepted in the request.
+The optional test filter remains a separate, validated literal argument after
+Cargo's fixed `--` separator.
+
+Legacy version 1 `ProcessProfile` values remain metadata-only. Only the fixed
+version 2 profile has execution requirements and can be passed by the Tools
+adapter to `SandboxRunRequest`. That common runner boundary validates the exact
+contract, captured resource roles, and effective limits before platform
+dispatch or the readiness probe. On unsupported platforms, a valid request
+returns the existing unavailable outcome without attempting a process launch.
+
+`ProfileLimits` are hard profile ceilings: wall time is stored in seconds and
+CPU time in milliseconds. Each request carries separate effective `RunLimits`
+in milliseconds and microseconds. Conversion uses checked multiplication, and
+zero, overflow, runner-bound excess, or any effective value above its profile
+ceiling is denied before dispatch. The public profile always uses its fixed
+limits; only lower effective limits are allowed for private test fixtures.
+
+These requirements describe requested policy. They are not sandbox result
+evidence and do not show that a backend applied or behaviorally enforced a
+control. `SandboxIsolationEvidence` remains attached to the result as a
+separate record of setup status. A `requested` contract field cannot be read as
+`applied` or `observed`; host enforcement claims still require behavioral
+fixtures on a provisioned host.
+
 The bounded process observation records the selected filter, whether any tests
 ran, and the count of Rust test-harness per-test result lines. Aggregate summary
 lines do not establish that tests ran. A filtered run is successful only when
@@ -73,12 +105,14 @@ an ELF header alone is not an authenticity check. No installer or downloader
 runs through this API.
 
 The public Tools and `ProcessResult` imports remain in the Product crate. Its
-adapter passes captured directory handles and fixed limits to the private
+adapter passes the profile's validated requirements, captured directory
+handles, effective limits, test filter and cancellation state to the private
 `krypper-sandbox` workspace member, which owns Bubblewrap setup, cgroup
-supervision and cleanup. The crate does not accept a command, arbitrary
-arguments, environment, mount list or authorization grant. This boundary
-extraction does not change the profile's runtime behavior or establish a
-performance improvement.
+supervision and cleanup. The crate rejects any request that differs from the
+fixed profile; it does not accept arbitrary commands, environment values,
+mount paths or authorization grants. This contract does not change the
+TaskSession/Tools launch authority or establish behavioral enforcement by
+itself.
 
 Process grants are not checkpointed. A restored task requires a fresh host
 grant. `policy.cancellation()` returns a one-way cancellation handle for the

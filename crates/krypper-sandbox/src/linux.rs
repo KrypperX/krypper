@@ -4,8 +4,8 @@ use crate::host::effective_uid;
 use crate::sandbox::sandbox;
 use crate::seccomp::compile_filter;
 use crate::{
-    RunLimits, SandboxBackend, SandboxIsolationEvidence, SandboxOutcome, SandboxRunRequest,
-    SandboxRunResult,
+    validate_test_filter, RunLimits, SandboxBackend, SandboxIsolationEvidence, SandboxOutcome,
+    SandboxRunRequest, SandboxRunResult, ValidatedExecutionRequirements,
 };
 use std::io;
 use std::sync::atomic::Ordering;
@@ -39,6 +39,7 @@ fn run_with_containment(request: SandboxRunRequest, contained: bool) -> SandboxR
     let SandboxRunRequest {
         run_id,
         directories,
+        requirements,
         test_filter,
         limits,
         cancelled,
@@ -147,7 +148,13 @@ fn run_with_containment(request: SandboxRunRequest, contained: bool) -> SandboxR
             supervisor.unit(),
             supervisor.group().display()
         ))?;
-        let mut probe = sandbox(&directories, supervisor.group(), &filter, &mut evidence)?;
+        let mut probe = sandbox(
+            &directories,
+            &requirements,
+            supervisor.group(),
+            &filter,
+            &mut evidence,
+        )?;
         probe.args(["--", "/usr/bin/true"]);
         confirm_setup(&mut evidence, bounded_host(&mut probe), || {
             supervisor.verify()
@@ -157,8 +164,14 @@ fn run_with_containment(request: SandboxRunRequest, contained: bool) -> SandboxR
             settle_before_launch(&mut result, &mut supervisor, StopReason::Cancelled);
             return Ok(());
         }
-        let mut command = sandbox(&directories, supervisor.group(), &filter, &mut evidence)?;
-        command.args(cargo_command_args(test_filter.as_deref()));
+        let mut command = sandbox(
+            &directories,
+            &requirements,
+            supervisor.group(),
+            &filter,
+            &mut evidence,
+        )?;
+        command.args(cargo_command_args(&requirements, test_filter.as_deref()));
         result.outcome = SandboxOutcome::SpawnFailed;
         let mut child = ManagedChild::new(command.spawn()?);
         launched = true;
@@ -236,38 +249,25 @@ fn settle_before_launch(
     result.outcome = resolve_outcome(stop, &[], result.cleanup_confirmed);
 }
 
-fn cargo_command_args(test_filter: Option<&str>) -> Vec<std::ffi::OsString> {
-    let mut args = [
-        "--",
-        "/toolchain/bin/cargo",
-        "test",
-        "--offline",
-        "--locked",
-        "--all-targets",
-    ]
-    .into_iter()
-    .map(std::ffi::OsString::from)
-    .collect::<Vec<_>>();
+fn cargo_command_args(
+    requirements: &ValidatedExecutionRequirements,
+    test_filter: Option<&str>,
+) -> Vec<std::ffi::OsString> {
+    let mut args = vec![
+        std::ffi::OsString::from("--"),
+        requirements.executable().path().into(),
+    ];
+    args.extend(
+        requirements
+            .arguments()
+            .iter()
+            .map(std::ffi::OsString::from),
+    );
     if let Some(test_filter) = test_filter {
         args.push("--".into());
         args.push(test_filter.into());
     }
     args
-}
-
-fn validate_test_filter(test_filter: Option<&str>) -> Result<(), &'static str> {
-    const MAX_TEST_FILTER_BYTES: usize = 256;
-    let Some(test_filter) = test_filter else {
-        return Ok(());
-    };
-    if test_filter.is_empty()
-        || test_filter.len() > MAX_TEST_FILTER_BYTES
-        || test_filter.chars().any(char::is_control)
-        || test_filter.trim_start().starts_with('-')
-    {
-        return Err("test_filter is invalid");
-    }
-    Ok(())
 }
 
 #[cfg(test)]

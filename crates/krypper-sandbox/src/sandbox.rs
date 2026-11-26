@@ -1,6 +1,9 @@
 //! The Linux sandbox command: host executable lookup and the contained child command.
 
-use crate::{DirectoryDescriptors, SandboxControl, SandboxIsolationEvidence};
+use crate::{
+    DirectoryDescriptors, PinnedResourceAccess, SandboxControl, SandboxIsolationEvidence,
+    ValidatedExecutionRequirements,
+};
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -19,6 +22,7 @@ const MFD_ALLOW_SEALING: libc::c_uint = 0x0002;
 
 pub(super) fn sandbox(
     directories: &DirectoryDescriptors,
+    requirements: &ValidatedExecutionRequirements,
     group: &Path,
     filter: &[u8],
     evidence: &mut SandboxIsolationEvidence,
@@ -26,11 +30,28 @@ pub(super) fn sandbox(
     let filter_file = sealed_filter_fd(filter)?;
     let pinned_filter = duplicate_fd_at_or_above(filter_file.as_raw_fd(), FIRST_PINNED_FD)?;
     drop(filter_file);
-    let roots: [OwnedFd; 3] = [
-        directories.workspace.try_clone()?.into(),
-        directories.toolchain.try_clone()?.into(),
-        directories.registry.try_clone()?.into(),
-    ];
+    let roots = requirements
+        .resources()
+        .iter()
+        .map(|resource| {
+            if resource.access != PinnedResourceAccess::ReadOnly {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "sandbox resource access is unsupported",
+                ));
+            }
+            directories
+                .for_resource(resource.id)
+                .try_clone()
+                .map(Into::into)
+        })
+        .collect::<io::Result<Vec<OwnedFd>>>()?;
+    if roots.len() != 3 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "sandbox resource roles do not match the fixed profile",
+        ));
+    }
     // Keep sources above destinations so dup2 cannot overwrite a later source descriptor.
     let mut pinned = Vec::new();
     for fd in roots {
@@ -350,7 +371,7 @@ mod tests {
     use super::{duplicate_fd_at_or_above, sandbox, sealed_filter_fd, FIRST_PINNED_FD, SECCOMP_FD};
     use crate::{
         DirectoryDescriptors, SandboxBackend, SandboxControl, SandboxEvidenceStatus,
-        SandboxIsolationEvidence,
+        SandboxIsolationEvidence, ValidatedExecutionRequirements,
     };
     use std::fs::{self, File};
     use std::os::fd::AsRawFd;
@@ -400,7 +421,14 @@ mod tests {
         );
         let filter = [0x06, 0, 0, 0, 0, 0, 0, 0];
         let mut evidence = SandboxIsolationEvidence::new(Some(SandboxBackend::Bubblewrap));
-        let command = sandbox(&directories, &group, &filter, &mut evidence).unwrap();
+        let command = sandbox(
+            &directories,
+            &ValidatedExecutionRequirements::offline_cargo_test(),
+            &group,
+            &filter,
+            &mut evidence,
+        )
+        .unwrap();
         assert_eq!(command.get_program().to_string_lossy(), "/usr/bin/bwrap");
         let args = command
             .get_args()

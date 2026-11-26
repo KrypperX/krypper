@@ -24,19 +24,26 @@ pub(crate) fn run(
     #[cfg(target_os = "linux")]
     {
         let limits = policy.profile().limits();
+        let cpu_budget_usec = match limits.cpu_ms.checked_mul(1_000) {
+            Some(value) => value,
+            None => return ProcessResult::empty_with_filter(ProcessOutcome::Denied, test_filter),
+        };
         run_with_bounds(
             root,
             policy,
             test_filter,
             Duration::from_secs(limits.wall_secs),
             limits.output_bytes,
-            limits.cpu_ms.saturating_mul(1_000),
+            cpu_budget_usec,
         )
     }
     #[cfg(not(target_os = "linux"))]
     {
         let _ = root;
-        let limits = RunLimits::offline_cargo_test();
+        let limits = match policy.profile().limits().to_run_limits() {
+            Ok(limits) => limits,
+            Err(_) => return ProcessResult::empty_with_filter(ProcessOutcome::Denied, test_filter),
+        };
         execute(policy, test_filter, limits, None)
     }
 }
@@ -55,15 +62,51 @@ pub(crate) fn run_with_bounds(
         return ProcessResult::invalid_test_filter();
     }
     let profile = policy.profile().limits();
-    let wall_millis = wall
-        .min(Duration::from_secs(profile.wall_secs))
-        .as_millis()
-        .min(u64::MAX as u128) as u64;
+    let profile_wall_millis = match profile.wall_secs.checked_mul(1_000) {
+        Some(value) => value,
+        None => {
+            return setup_failed(
+                test_filter,
+                "profile wall-seconds conversion overflow",
+                profile.output_bytes,
+            )
+        }
+    };
+    let profile_cpu_usec = match profile.cpu_ms.checked_mul(1_000) {
+        Some(value) => value,
+        None => {
+            return setup_failed(
+                test_filter,
+                "profile CPU-milliseconds conversion overflow",
+                profile.output_bytes,
+            )
+        }
+    };
+    let wall_millis = match u64::try_from(wall.as_millis()) {
+        Ok(value) => value,
+        Err(_) => {
+            return setup_failed(
+                test_filter,
+                "effective wall limit conversion overflow",
+                profile.output_bytes,
+            )
+        }
+    };
+    if wall_millis > profile_wall_millis
+        || cpu_budget_usec > profile_cpu_usec
+        || output > profile.output_bytes
+    {
+        return setup_failed(
+            test_filter,
+            "effective limits exceed the profile ceiling",
+            profile.output_bytes,
+        );
+    }
     let limits = RunLimits::new(
         wall_millis,
-        cpu_budget_usec.min(profile.cpu_ms.saturating_mul(1_000)),
+        cpu_budget_usec,
         profile.memory_bytes,
-        output.min(profile.output_bytes),
+        output,
         profile.processes,
     );
     let limits = match limits {
@@ -82,7 +125,7 @@ pub(crate) fn run_with_bounds(
     {
         return ProcessResult::denied(test_filter);
     }
-    let output_limit = output.min(profile.output_bytes);
+    let output_limit = output;
     let directories = match directory_descriptors(root, policy) {
         Ok(directories) => Some(directories),
         Err(error) => return setup_failed(test_filter, error, output_limit),
@@ -119,12 +162,16 @@ fn execute(
         return ProcessResult::invalid_test_filter();
     }
     let run_id = Uuid::new_v4();
-    let request = SandboxRunRequest::new(
+    let Some(requirements) = policy.profile().execution_requirements().cloned() else {
+        return ProcessResult::empty_with_filter(ProcessOutcome::Denied, test_filter);
+    };
+    let request = SandboxRunRequest::new_with_requirements(
         run_id,
         directories,
         test_filter.map(str::to_owned),
         limits,
         policy.cancellation(),
+        requirements,
     );
     from_runner(run_offline_cargo(request), test_filter)
 }
