@@ -1,0 +1,207 @@
+//! Real Landlock write-confinement evidence through Cargo and an exec descendant.
+
+use super::{gate, policy, workspace};
+use crate::tools::capture_workspace_root_at;
+use crate::tools::process::run_without_landlock_for_test;
+use std::fs;
+
+fn landlock_status(
+    result: &crate::tools::process::ProcessResult,
+) -> Option<krypper_sandbox::SandboxEvidenceStatus> {
+    result
+        .sandbox_evidence
+        .as_ref()
+        .and_then(|evidence| {
+            evidence.controls().iter().find(|record| {
+                record.control == krypper_sandbox::SandboxControl::LandlockFilesystemWrites
+            })
+        })
+        .map(|record| record.status)
+}
+
+#[test]
+#[ignore = "opt-in real-sandbox evidence: set KRYPPER_REAL_SANDBOX=1 on a provisioned Linux host"]
+fn real_sandbox_landlock_limits_writes_and_reaches_descendants() {
+    let Some(host) = gate("real_sandbox_landlock_limits_writes_and_reaches_descendants") else {
+        return;
+    };
+
+    let path = workspace();
+    let shared_tmp_probe = format!("/tmp/krypper-landlock-unlisted-{}", std::process::id());
+    fs::write(
+        path.join("src/lib.rs"),
+        r#"
+use std::fs::OpenOptions;
+use std::io::ErrorKind;
+use std::os::unix::fs::MetadataExt;
+use std::process::Command;
+
+fn assert_denies_write(path: &str) {
+    match OpenOptions::new().write(true).create_new(true).open(path) {
+        Err(error) => {
+            assert_eq!(error.kind(), ErrorKind::PermissionDenied, "{path}: {error}");
+        }
+        Ok(file) => {
+            drop(file);
+            let cleanup = std::fs::remove_file(path);
+            panic!("Sandbox allowed an unlisted write {path}; cleanup={cleanup:?}");
+        }
+    }
+}
+
+fn assert_denies_read_only_or_landlock_write(path: &str) {
+    match OpenOptions::new().write(true).create_new(true).open(path) {
+        Err(error) => {
+            assert!(
+                matches!(error.kind(), ErrorKind::PermissionDenied | ErrorKind::ReadOnlyFilesystem),
+                "{path}: {error}"
+            );
+        }
+        Ok(file) => {
+            drop(file);
+            let cleanup = std::fs::remove_file(path);
+            panic!("Sandbox allowed an unlisted write {path}; cleanup={cleanup:?}");
+        }
+    }
+}
+
+#[test]
+fn bubblewrap_only_allows_unlisted_tmp_write() {
+    let path = "__KRYPPER_LANDLOCK_SHARED_TMP_PROBE__";
+    assert!(!std::path::Path::new(&path).exists(), "stale baseline probe: {path}");
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .unwrap_or_else(|error| panic!("Bubblewrap-only baseline denied {path}: {error}"));
+    drop(file);
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn landlock_descendant_probe() {
+    let Some(path) = std::env::var_os("KRYPPER_LANDLOCK_DESCENDANT_PATH") else {
+        return;
+    };
+    assert_denies_write(path.to_str().expect("UTF-8 probe path"));
+}
+
+#[test]
+fn landlock_allows_profile_scratch_and_denies_unlisted_tmp() {
+    assert_eq!(std::env::var("TMPDIR").as_deref(), Ok("/tmp/tmp"));
+    assert_eq!(std::env::var("CARGO_HOME").as_deref(), Ok("/tmp/home"));
+    assert_eq!(
+        std::fs::read_link("/tmp/home/registry").unwrap(),
+        std::path::Path::new("/cargo/registry")
+    );
+
+    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").unwrap();
+    let tmp_mount = mountinfo
+        .lines()
+        .find(|line| line.split_whitespace().nth(4) == Some("/tmp"))
+        .expect("Bubblewrap /tmp tmpfs mount");
+    let fields = tmp_mount.split_whitespace().collect::<Vec<_>>();
+    assert!(
+        fields[5].split(',').any(|option| option == "rw"),
+        "/tmp must be writable in Bubblewrap before Landlock"
+    );
+    let separator = fields.iter().position(|field| *field == "-").expect("mountinfo separator");
+    assert_eq!(fields.get(separator + 1), Some(&"tmpfs"), "/tmp must be Bubblewrap's tmpfs");
+    let registry_mount = mountinfo
+        .lines()
+        .find(|line| line.split_whitespace().nth(4) == Some("/cargo/registry"))
+        .expect("Bubblewrap read-only registry mount");
+    let registry_fields = registry_mount.split_whitespace().collect::<Vec<_>>();
+    assert!(
+        registry_fields[5].split(',').any(|option| option == "ro"),
+        "registry must be mounted read-only"
+    );
+    let effective_uid = std::fs::read_to_string("/proc/self/status")
+        .unwrap()
+        .lines()
+        .find_map(|line| line.strip_prefix("Uid:"))
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|uid| uid.parse::<u32>().ok())
+        .expect("effective uid in proc status");
+    let tmp_metadata = std::fs::metadata("/tmp").unwrap();
+    assert_eq!(tmp_metadata.uid(), effective_uid, "/tmp must be owned by the sandbox uid");
+    assert_ne!(
+        tmp_metadata.mode() & 0o200,
+        0,
+        "/tmp must grant its owner write access before Landlock"
+    );
+
+    for directory in ["/tmp/home", "/tmp/target", "/tmp/tmp"] {
+        let probe = format!("{directory}/landlock-allowed-{}", std::process::id());
+        std::fs::write(&probe, b"allowed scratch").unwrap_or_else(|error| {
+            panic!("Landlock denied required scratch write {probe}: {error}")
+        });
+        std::fs::remove_file(probe).unwrap();
+    }
+    assert_denies_read_only_or_landlock_write(&format!(
+        "/tmp/home/registry/krypper-landlock-registry-denied-{}",
+        std::process::id()
+    ));
+
+    assert_denies_write("__KRYPPER_LANDLOCK_SHARED_TMP_PROBE__");
+    let process_id = std::process::id();
+    let descendant_path = format!("/tmp/krypper-landlock-descendant-denied-{process_id}");
+    let child = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "landlock_descendant_probe"])
+        .env("KRYPPER_LANDLOCK_DESCENDANT_PATH", &descendant_path)
+        .status()
+        .unwrap();
+    assert!(child.success(), "Landlock restriction did not reach the exec descendant: {child}");
+}
+"#
+        .replace("__KRYPPER_LANDLOCK_SHARED_TMP_PROBE__", &shared_tmp_probe),
+    )
+    .unwrap();
+
+    let root = capture_workspace_root_at(&path).unwrap();
+    let policy = policy(&host);
+    let baseline = run_without_landlock_for_test(
+        &root,
+        &policy,
+        Some("bubblewrap_only_allows_unlisted_tmp_write"),
+    );
+    assert!(
+        baseline.succeeded(),
+        "Bubblewrap-only control must permit the unlisted /tmp write: {baseline:?}"
+    );
+    assert_eq!(
+        baseline.executed_tests,
+        Some(1),
+        "the Bubblewrap-only write control must execute: {baseline:?}"
+    );
+    assert!(baseline.cleanup_confirmed, "{baseline:?}");
+    let baseline_landlock_status = landlock_status(&baseline);
+    assert_eq!(
+        baseline_landlock_status,
+        Some(krypper_sandbox::SandboxEvidenceStatus::Unavailable),
+        "the baseline must explicitly run with Landlock disabled"
+    );
+
+    let result = crate::tools::process::run_for_test(
+        &root,
+        &policy,
+        Some("landlock_allows_profile_scratch_and_denies_unlisted_tmp"),
+    );
+    assert!(
+        result.succeeded(),
+        "Landlock Cargo fixture failed: {result:?}"
+    );
+    assert_eq!(
+        result.executed_tests,
+        Some(2),
+        "the parent policy test and its exec descendant probe must both run: {result:?}"
+    );
+    assert!(result.cleanup_confirmed, "{result:?}");
+    assert!(!result.recovery_hold, "{result:?}");
+    let status = landlock_status(&result);
+    assert_eq!(
+        status,
+        Some(krypper_sandbox::SandboxEvidenceStatus::Applied),
+        "the fixture must observe the Landlock runner handshake before attributing denials to Landlock"
+    );
+}

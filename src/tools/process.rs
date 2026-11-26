@@ -47,6 +47,21 @@ pub(crate) fn run_for_test(
 }
 
 #[cfg(all(test, target_os = "linux"))]
+pub(crate) fn run_without_landlock_for_test(
+    root: &crate::tools::WorkspaceRoot,
+    policy: &OfflineCargoPolicy,
+    test_filter: Option<&str>,
+) -> ProcessResult {
+    supervisor::run_with_landlock_requirement_for_test(
+        root,
+        policy,
+        test_filter,
+        krypper_sandbox::LandlockRequirement::Disabled,
+        allow_spawn_for_test(),
+    )
+}
+
+#[cfg(all(test, target_os = "linux"))]
 pub(crate) fn run_with_bounds_for_test(
     root: &crate::tools::WorkspaceRoot,
     policy: &OfflineCargoPolicy,

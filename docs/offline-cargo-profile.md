@@ -58,6 +58,21 @@ launch. `SandboxIsolationEvidence` remains separate from backend capabilities:
 it records per-run setup status, while behavioral enforcement still requires
 fixtures on a provisioned host.
 
+The Product adapter requests optional Landlock filesystem-write confinement for
+this fixed Linux profile. The pinned in-sandbox runner applies the policy after
+Bubblewrap creates its filesystem view and before Cargo starts. Writes are
+allowed only under `/tmp/home`, `/tmp/target`, and `/tmp/tmp`. `CARGO_HOME` is
+the `/tmp/home` scratch directory; its `registry` entry points to the separate
+read-only `/cargo/registry` mount, which is outside Landlock's write allowlist.
+The fixed `TMPDIR` is `/tmp/tmp`. If the kernel does not provide a supported Landlock ABI, the
+result reports `unavailable` and Cargo may continue only after the existing
+required controls pass. A setup error after ABI support is detected fails the
+run before Cargo starts. `applied` means the runner completed setup; only the
+gated host fixture can report behavioral evidence. That fixture first runs a
+Bubblewrap-only control that creates a file in an unlisted `/tmp` path, then
+requires Landlock to deny a write to that same path and confirms the denial
+reaches an exec descendant.
+
 `ProfileLimits` are hard profile ceilings: wall time is stored in seconds and
 CPU time in milliseconds. Each request carries separate effective `RunLimits`
 in milliseconds and microseconds. Conversion uses checked multiplication, and
@@ -199,9 +214,10 @@ command, including `--ro-bind-fd`. The implementation requires `cgroup.kill`,
 cgroup namespaces, and disabled nested user namespaces. A historical fixture
 run recorded Linux 6.8, systemd 255 and Bubblewrap 0.9.0; it predates the
 current seccomp command and is not runtime evidence for the current Product
-revision. A version string alone does not establish option compatibility. No
-current-revision host fixture result is recorded here; other deployments are
-unverified, and missing primitives or options fail closed.
+revision. The current C2 fixture has one local Linux host result; it is not a
+cross-host CI guarantee. A version string alone does not establish option
+compatibility. Other deployments are unverified, and missing primitives or
+options fail closed.
 
 The embedding process must be in the delegated user-manager cgroup subtree.
 A login session outside that subtree can create a user unit but cannot
@@ -233,13 +249,17 @@ There is no optional namespace flag or direct-spawn fallback.
   the verified cgroup before Bubblewrap exec. Ambient descriptors are marked
   close-on-exec; stdin is closed and the payload receives no TTY.
 - The root is read-only; `/tmp` is a private 1 GiB tmpfs and `/cargo` a private
-  16 MiB tmpfs with a read-only registry submount. The build target and HOME
-  live in `/tmp`. The minimal `/dev` is private. Writable tmpfs storage also
+  16 MiB tmpfs containing a read-only registry mount. `CARGO_HOME`, the build
+  target, HOME and temporary files live in fixed `/tmp` subdirectories. The
+  minimal `/dev` is private. Writable tmpfs storage also
   counts against the hard memory ceiling; no host output files are promoted.
 - Start from an empty payload environment: only fixed PATH, HOME, TMPDIR,
   CARGO_HOME, CARGO_BUILD_JOBS (one), CARGO_PROFILE_DEV_DEBUG (zero),
   CARGO_PROFILE_TEST_DEBUG (zero), CARGO_INCREMENTAL (zero), CARGO_TARGET_DIR,
-  RUSTC and LANG are set. Cargo incremental metadata and
+  RUSTC and LANG are set. Bubblewrap also sets the fixed `PWD=/workspace`
+  after applying the sandbox cwd, including after `--clearenv`; the runner
+  validates this deterministic value as part of the exact environment.
+  Cargo incremental metadata and
   debug symbols are disabled to keep build artifacts within the per-file limit.
   No provider, GitHub, SSH, proxy, user-manager environment or credential is
   forwarded.

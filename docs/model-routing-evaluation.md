@@ -13,7 +13,7 @@ a small initial sample, not a general benchmark of arbitrary projects.
 Build the CLI and run the default, offline mode:
 
 ```sh
-cargo build --locked --bin krypper
+cargo build --locked --bins
 python3 scripts/model_routing_evaluation.py
 ```
 

@@ -44,6 +44,13 @@ fields and are never forwarded into the sandbox.
 
 ## Running them
 
+Build both Product binaries first so the fixed sibling runner is available beside the main
+application binary:
+
+```bash
+cargo build --bins --locked
+```
+
 ```bash
 KRYPPER_REAL_SANDBOX=1 \
 KRYPPER_TEST_TOOLCHAIN=/opt/rust-toolchain \
@@ -58,12 +65,13 @@ invocations would contend for the same host resource.
 
 | Fixture | Boundary |
 | --- | --- |
-| `real_sandbox_host_reports_supported_prerequisites` | The host really provides all five primitives (printed per run). |
+| `real_sandbox_host_reports_supported_prerequisites` | The host really provides all five required host primitives (printed per run); Landlock support is optional and is reported per run. |
 | `real_sandbox_isolation_blocks_host_paths_and_namespaces` | A workspace symlink to an outside canary is unreadable and unwritable; `/home` and `/run/user` are absent; cwd is `/workspace`; `NSpid` has a single entry; host-side create-new canaries confirm all three mount sources are writable before launch; `/proc/self/fd` is inspected and writes through mount source descriptors 200–202 are denied. |
 | `real_sandbox_environment_and_network_carry_no_host_secrets` | Parent-provided `GITHUB_TOKEN` and a per-run secret canary are absent inside; a live host loopback listener is unreachable inside and still reachable outside. |
 | `real_sandbox_cleanup_releases_state_for_the_next_run` | Cleanup is confirmed, no recovery hold is raised, and an immediately following run is not degraded. |
 | `real_offline_cargo_behavior_is_preserved_through_the_harness` | The registered profile still runs through `WorkspacePlan` and Harness with a literal filter: the selected test executes, the unrelated test is filtered. |
 | `real_sandbox_syscall_filter_covers_cargo_payload_and_descendant` | After checking the host does not already return `EPERM` for the probes, Cargo and an exec'd test descendant can call `getpid` and use `AF_UNIX`; `io_uring_enter` and `AF_VSOCK` socket calls return `EPERM`; x86_64 also checks tagged x32 and reserved syscall handling. Cargo succeeds and the supervisor confirms cleanup. |
+| `real_sandbox_landlock_limits_writes_and_reaches_descendants` | Requires a supported Landlock ABI. Confirms the writable Bubblewrap `/tmp` tmpfs is Landlock-restricted, profile scratch directories remain writable, an unlisted `/tmp` path is denied, the exec descendant inherits the denial, and result evidence reports `applied`. |
 | `real_sandbox_limits_and_cancellation_stay_bounded` | Zero matches, nonzero exit, wall timeout, output ceiling, CPU/memory/process ceilings and cancellation all return their typed outcome with confirmed cleanup. |
 
 Nothing in this module grants authority, adds a profile, changes the CLI, or weakens the fixed
@@ -80,11 +88,13 @@ the legacy pair once the gated suite has been exercised on a provisioned host.
 ## What is still unproven
 
 Ordinary CI cannot establish: Bubblewrap flag semantics, in-payload namespace behaviour,
-`pre_exec` cgroup attachment, seccomp descriptor propagation and kernel enforcement, ambient
-descriptor hygiene beyond the explicit 200–202 write probes, delegated-subtree checks, crash-time
-lease recovery, or cross-process cleanup holds. Those remain source-review claims until a gated
-run on a provisioned host supplies evidence. macOS and Windows behaviour is unknown; Linux
-architectures outside the fixed profile fail before workspace code can launch.
+`pre_exec` cgroup attachment, seccomp descriptor propagation and kernel enforcement, Landlock
+write enforcement, ambient descriptor hygiene beyond the explicit mount-source probes,
+delegated-subtree checks, crash-time lease recovery, or cross-process cleanup holds. Those remain
+source-review claims until the corresponding gated fixtures run on a provisioned host. The
+Landlock fixture specifically requires a supported ABI; its absence does not make the optional
+control report `applied`. macOS and Windows behaviour is unknown; Linux architectures outside the
+fixed profile fail before workspace code can launch.
 
 The fixed syscall filter is defense in depth alongside the private namespaces, read-only mounts,
 offline network namespace and cgroup limits. It denies a small immutable set of sensitive calls

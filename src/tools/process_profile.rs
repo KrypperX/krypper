@@ -32,6 +32,7 @@ const ALLOWED_ENVIRONMENT_NAMES: &[&str] = &[
     "CARGO_TARGET_DIR",
     "RUSTC",
     "LANG",
+    "PWD",
 ];
 const OFFLINE_CARGO_TEST_ID: &str = "offline_cargo_test";
 const OFFLINE_CARGO_TEST_EXECUTABLE: &str = "/toolchain/bin/cargo";
@@ -582,7 +583,8 @@ mod tests {
                 "CARGO_INCREMENTAL",
                 "CARGO_TARGET_DIR",
                 "RUSTC",
-                "LANG"
+                "LANG",
+                "PWD"
             ]
         );
         assert_eq!(
@@ -614,7 +616,7 @@ mod tests {
         assert!(requirements.resources().iter().all(|resource| {
             resource.access == krypper_sandbox::PinnedResourceAccess::ReadOnly
         }));
-        assert_eq!(requirements.environment_names().len(), 11);
+        assert_eq!(requirements.environment_names().len(), 12);
         assert_eq!(
             requirements.network(),
             krypper_sandbox::NetworkRequirement::DenyAll

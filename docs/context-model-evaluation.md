@@ -7,7 +7,7 @@
 Build Krypper and inspect retrieval without contacting a model provider:
 
 ```sh
-cargo build --locked --bin krypper
+cargo build --locked --bins
 python3 scripts/context_model_evaluation.py
 ```
 

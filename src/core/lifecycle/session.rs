@@ -1214,11 +1214,26 @@ mod process_grant_tests {
 
     fn command_for_intent(intent: &ProcessIntent) -> Command {
         let mut command = Command::new("/usr/bin/bwrap");
+        for (fd, path) in krypper_sandbox::runner_contract::FIXED_FD_MOUNTS {
+            command.arg("--ro-bind-fd").arg(fd.to_string()).arg(path);
+        }
         command.arg("--clearenv");
         for (name, value) in krypper_sandbox::OFFLINE_CARGO_TEST_ENVIRONMENT {
             command.args(["--setenv", name, value]);
         }
-        command.args(["--chdir", "/workspace", "--"]);
+        command.args([
+            "--chdir",
+            krypper_sandbox::runner_contract::WORKSPACE_MOUNT.1,
+            "--",
+            krypper_sandbox::runner_contract::RUNNER_MOUNT_PATH,
+            "--krypper-landlock-runner-v1",
+            "--status-fd",
+        ]);
+        command
+            .arg(krypper_sandbox::runner_protocol::STATUS_FD.to_string())
+            .arg("--ack-fd")
+            .arg(krypper_sandbox::runner_protocol::ACK_FD.to_string())
+            .args(["--optional", "--"]);
         command.arg(&intent.facts.executable);
         command.args(&intent.facts.arguments);
         if let Some(filter) = &intent.filter {
@@ -1230,10 +1245,25 @@ mod process_grant_tests {
     fn command_with_extra_separator(intent: &ProcessIntent) -> Command {
         let mut command = Command::new("/usr/bin/bwrap");
         command.arg("--").arg("--clearenv");
+        for (fd, path) in krypper_sandbox::runner_contract::FIXED_FD_MOUNTS {
+            command.arg("--ro-bind-fd").arg(fd.to_string()).arg(path);
+        }
         for (name, value) in krypper_sandbox::OFFLINE_CARGO_TEST_ENVIRONMENT {
             command.args(["--setenv", name, value]);
         }
-        command.args(["--chdir", "/workspace", "--"]);
+        command.args([
+            "--chdir",
+            krypper_sandbox::runner_contract::WORKSPACE_MOUNT.1,
+            "--",
+            krypper_sandbox::runner_contract::RUNNER_MOUNT_PATH,
+            "--krypper-landlock-runner-v1",
+            "--status-fd",
+        ]);
+        command
+            .arg(krypper_sandbox::runner_protocol::STATUS_FD.to_string())
+            .arg("--ack-fd")
+            .arg(krypper_sandbox::runner_protocol::ACK_FD.to_string())
+            .args(["--optional", "--"]);
         command.arg(&intent.facts.executable);
         command.args(&intent.facts.arguments);
         if let Some(filter) = &intent.filter {

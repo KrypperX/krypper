@@ -2,6 +2,8 @@
 
 use crate::tools::process::{OfflineCargoPolicy, ProcessPolicyFacts};
 use crate::tools::FileIdentity;
+use krypper_sandbox::runner_contract::{FIXED_FD_MOUNTS, RUNNER_MOUNT_PATH, WORKSPACE_MOUNT};
+use krypper_sandbox::runner_protocol::{ACK_FD, STATUS_FD};
 use krypper_sandbox::{
     NetworkRequirement, PinnedResourceAccess, PinnedResourceId, ProcessTreeRequirement, RunLimits,
     SandboxExecutable, SyscallRequirement,
@@ -321,16 +323,30 @@ pub(super) fn launch_command_matches_intent(command: &Command, intent: &ProcessI
     }
     let args = command.get_args().collect::<Vec<_>>();
     let count_arg = |value: &OsStr| args.iter().filter(|arg| *arg == &value).count();
+    let fd_mounts = args
+        .windows(3)
+        .filter(|mount| mount[0] == OsStr::new("--ro-bind-fd"))
+        .collect::<Vec<_>>();
     if count_arg(OsStr::new("--clearenv")) != 1
-        || count_arg(OsStr::new("--")) != 1 + usize::from(intent.filter.is_some())
+        || count_arg(OsStr::new("--")) != 2 + usize::from(intent.filter.is_some())
+        || count_arg(OsStr::new("--ro-bind-fd")) != FIXED_FD_MOUNTS.len()
+        || fd_mounts.len() != FIXED_FD_MOUNTS.len()
+        || FIXED_FD_MOUNTS.iter().any(|(fd, path)| {
+            let fd = fd.to_string();
+            fd_mounts
+                .iter()
+                .filter(|mount| mount[1] == OsStr::new(&fd) && mount[2] == OsStr::new(path))
+                .count()
+                != 1
+        })
         || args
             .windows(2)
             .filter(|pair| pair[0] == OsStr::new("--chdir"))
             .count()
             != 1
-        || !args
-            .windows(2)
-            .any(|pair| pair[0] == OsStr::new("--chdir") && pair[1] == OsStr::new("/workspace"))
+        || !args.windows(2).any(|pair| {
+            pair[0] == OsStr::new("--chdir") && pair[1] == OsStr::new(WORKSPACE_MOUNT.1)
+        })
     {
         return false;
     }
@@ -350,7 +366,18 @@ pub(super) fn launch_command_matches_intent(command: &Command, intent: &ProcessI
         return false;
     }
 
-    let mut expected_tail = vec!["--".to_owned(), intent.facts.executable.clone()];
+    let mut expected_tail = vec![
+        "--".to_owned(),
+        RUNNER_MOUNT_PATH.to_owned(),
+        "--krypper-landlock-runner-v1".to_owned(),
+        "--status-fd".to_owned(),
+        STATUS_FD.to_string(),
+        "--ack-fd".to_owned(),
+        ACK_FD.to_string(),
+        "--optional".to_owned(),
+        "--".to_owned(),
+        intent.facts.executable.clone(),
+    ];
     expected_tail.extend(intent.facts.arguments.iter().cloned());
     if let Some(filter) = &intent.filter {
         expected_tail.extend(["--".to_owned(), filter.clone()]);

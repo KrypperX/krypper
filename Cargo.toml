@@ -2,6 +2,7 @@
 name = "krypper"
 version = "0.1.0"
 edition = "2021"
+default-run = "krypper"
 rust-version = "1.89"
 description = "Local-first CLI and agent task runtime with bounded workspace operations"
 repository = "https://github.com/KrypperX/krypper"
