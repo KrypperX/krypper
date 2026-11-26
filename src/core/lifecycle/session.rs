@@ -840,6 +840,11 @@ impl TaskSession {
                 message: format!("task workspace could not be resolved: {message}"),
             }
         })?;
+        if !workspace_revision_fence_is_registered_for_root(&task.workspace_revision, root) {
+            return Err(WorkspaceCreateDirectoryError::Directory {
+                message: "workspace revision state is unavailable".into(),
+            });
+        }
         let _mutation = task.workspace_revision.begin_mutation().map_err(|_| {
             WorkspaceCreateDirectoryError::Directory {
                 message: "workspace revision state is unavailable".into(),
@@ -933,6 +938,11 @@ impl TaskSession {
             .map_err(|message| WorkspaceWriteError::File {
                 message: format!("task workspace could not be resolved: {message}"),
             })?;
+        if !workspace_revision_fence_is_registered_for_root(&task.workspace_revision, root) {
+            return Err(WorkspaceWriteError::File {
+                message: "workspace revision state is unavailable".into(),
+            });
+        }
         let _mutation =
             task.workspace_revision
                 .begin_mutation()
@@ -989,6 +999,11 @@ impl TaskSession {
             .map_err(|message| WorkspaceReplaceError::File {
                 message: format!("task workspace could not be resolved: {message}"),
             })?;
+        if !workspace_revision_fence_is_registered_for_root(&task.workspace_revision, root) {
+            return Err(WorkspaceReplaceError::File {
+                message: "workspace revision state is unavailable".into(),
+            });
+        }
         let _mutation =
             task.workspace_revision
                 .begin_mutation()
@@ -1029,6 +1044,11 @@ impl TaskSession {
             .map_err(|message| WorkspaceReplaceError::File {
                 message: format!("task workspace could not be resolved: {message}"),
             })?;
+        if !workspace_revision_fence_is_registered_for_root(&task.workspace_revision, root) {
+            return Err(WorkspaceReplaceError::File {
+                message: "workspace revision state is unavailable".into(),
+            });
+        }
         let _mutation =
             task.workspace_revision
                 .begin_mutation()
@@ -1712,6 +1732,111 @@ mod process_grant_tests {
             .run_offline_cargo_tests(authorized_task_id, authorized_turn, None)
             .unwrap();
         assert_eq!(result.outcome, crate::ProcessOutcome::Denied);
+    }
+
+    #[test]
+    fn managed_workspace_mutations_fail_closed_with_a_private_fallback_fence() {
+        let workspace = TempDir::with_prefix("process-grant-fallback-writer-fence-");
+        fs::write(workspace.path().join("existing.txt"), "before\n").unwrap();
+        let mut authorized_session = TaskSession::new_in_workspace(workspace.path()).unwrap();
+        let mut writer_session = TaskSession::new_in_workspace(workspace.path()).unwrap();
+        let authorized_task_id = authorized_session.create_task("authorized task").id();
+        let writer_task_id = writer_session.create_task("writer task").id();
+
+        let shared_revision = Arc::clone(
+            &authorized_session
+                .get_task(authorized_task_id)
+                .unwrap()
+                .workspace_revision,
+        );
+        let registered_writer_revision = Arc::clone(
+            &writer_session
+                .get_task(writer_task_id)
+                .unwrap()
+                .workspace_revision,
+        );
+        assert!(Arc::ptr_eq(&shared_revision, &registered_writer_revision));
+
+        let (_runtime, policy) = policy_fixture();
+        authorized_session
+            .authorize_offline_cargo_test_once(
+                authorized_task_id,
+                policy,
+                Some("selected_case"),
+                Duration::from_secs(60),
+            )
+            .unwrap();
+        let grant_state = authorized_session
+            .process_grants
+            .lock()
+            .unwrap()
+            .get(&authorized_task_id)
+            .unwrap()
+            .clone();
+        let approved_digest = grant_state
+            .lock()
+            .unwrap()
+            .current
+            .as_ref()
+            .unwrap()
+            .approved_digest
+            .unwrap();
+
+        // Model a task created while identity lookup failed, then used after it recovers.
+        let fallback_revision = Arc::new(WorkspaceRevisionFence::default());
+        writer_session
+            .get_task_mut(writer_task_id)
+            .unwrap()
+            .workspace_revision = Arc::clone(&fallback_revision);
+        let writer_turn = running_turn(&mut writer_session, writer_task_id);
+
+        // An unregistered fence must not bypass a process read lease held on the shared fence.
+        let (read_lease, revision_at_approval) = shared_revision.begin_read().unwrap();
+        assert_eq!(revision_at_approval, 0);
+        assert!(writer_session
+            .create_workspace_directory(writer_task_id, writer_turn, Path::new("new-directory"),)
+            .is_err());
+        assert!(writer_session
+            .create_workspace_file(
+                writer_task_id,
+                writer_turn,
+                Path::new("new-file.txt"),
+                "new content",
+            )
+            .is_err());
+        assert!(writer_session
+            .replace_workspace_text_with_revision(
+                writer_task_id,
+                writer_turn,
+                Path::new("existing.txt"),
+                "before",
+                "replaced",
+                None,
+            )
+            .is_err());
+        assert!(writer_session
+            .apply_workspace_patch_with_revision(
+                writer_task_id,
+                writer_turn,
+                Path::new("existing.txt"),
+                "--- a/existing.txt\n+++ b/existing.txt\n@@ -1 +1 @@\n-before\n+patched\n",
+                None,
+            )
+            .is_err());
+        drop(read_lease);
+
+        assert!(!workspace.path().join("new-directory").exists());
+        assert!(!workspace.path().join("new-file.txt").exists());
+        assert_eq!(
+            fs::read_to_string(workspace.path().join("existing.txt")).unwrap(),
+            "before\n"
+        );
+        assert_eq!(shared_revision.current_revision(), 0);
+        assert_eq!(fallback_revision.current_revision(), 0);
+        let state = grant_state.lock().unwrap();
+        let grant = state.current.as_ref().unwrap();
+        assert_eq!(grant.approved_digest, Some(approved_digest));
+        assert!(!grant.consumed);
     }
 
     #[test]

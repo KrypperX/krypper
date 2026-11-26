@@ -168,9 +168,10 @@ using the same workspace. A process holds a read lease from intent preparation
 through completion; the four mutation methods take the matching write lease and
 advance the revision before attempting a change. This invalidates a one-shot
 approval after any TaskSession-managed mutation to that workspace, including a
-failed mutation attempt. Process authorization and execution also require the
-task to hold the registry-matched fence for its captured workspace identity; if
-that fence cannot be established or verified, process authority fails closed.
+failed mutation attempt. Process authorization, execution, and managed workspace
+mutations also require the task to hold the registry-matched fence for its
+captured workspace identity; if that fence cannot be established or verified,
+those operations fail closed.
 Direct host writes that bypass TaskSession are outside this fence and remain the
 trusted embedding's responsibility. The digest binds captured directory
 identities, not content snapshots; the host must keep the selected workspace,
