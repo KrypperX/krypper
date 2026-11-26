@@ -5,7 +5,6 @@ use crate::tools::capture_workspace_root_at;
 use std::fs;
 use std::io;
 use std::os::raw::c_long;
-use std::process::Command;
 
 const LIBC_LOCK: &str = "version = 4\n\n[[package]]\nname = \"real_sandbox_fixture\"\nversion = \"0.1.0\"\ndependencies = [\n \"libc\",\n]\n\n[[package]]\nname = \"libc\"\nversion = \"0.2.191\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a\"\n";
 
@@ -17,11 +16,11 @@ fn assert_not_host_denied(name: &str, result: c_long) {
 }
 
 fn host_syscall_baseline() {
-    assert!(
-        unsafe { libc::syscall(libc::SYS_getpid) } > 0,
-        "host getpid probe failed"
-    );
+    // SAFETY: getpid accepts no pointer arguments and has no memory preconditions.
+    let getpid = unsafe { libc::syscall(libc::SYS_getpid) };
+    assert!(getpid > 0, "host getpid probe failed");
 
+    // SAFETY: socket receives fixed scalar arguments and does not access Rust memory.
     let unix_socket = unsafe {
         libc::syscall(
             libc::SYS_socket,
@@ -31,9 +30,12 @@ fn host_syscall_baseline() {
         )
     };
     assert!(unix_socket >= 0, "host socket(AF_UNIX) probe failed");
-    assert_eq!(unsafe { libc::close(unix_socket as libc::c_int) }, 0);
+    // SAFETY: `unix_socket` is a valid descriptor returned by the successful call above.
+    let close_unix_socket = unsafe { libc::close(unix_socket as libc::c_int) };
+    assert_eq!(close_unix_socket, 0);
 
     let mut unix_pair = [-1; 2];
+    // SAFETY: the output pointer addresses two writable integers for the socket pair.
     let unix_socketpair = unsafe {
         libc::syscall(
             libc::SYS_socketpair,
@@ -44,11 +46,17 @@ fn host_syscall_baseline() {
         )
     };
     assert_eq!(unix_socketpair, 0, "host socketpair(AF_UNIX) probe failed");
-    assert_eq!(unsafe { libc::close(unix_pair[0]) }, 0);
-    assert_eq!(unsafe { libc::close(unix_pair[1]) }, 0);
+    // SAFETY: a successful socketpair call initialized both entries with open descriptors.
+    let close_unix_pair_0 = unsafe { libc::close(unix_pair[0]) };
+    // SAFETY: the second initialized socketpair descriptor is still open.
+    let close_unix_pair_1 = unsafe { libc::close(unix_pair[1]) };
+    assert_eq!(close_unix_pair_0, 0);
+    assert_eq!(close_unix_pair_1, 0);
 
+    // SAFETY: ptrace receives fixed scalar arguments and no userspace pointers.
     let ptrace = unsafe { libc::syscall(libc::SYS_ptrace, -1 as c_long, 0, 0, 0) };
     assert_not_host_denied("ptrace", ptrace);
+    // SAFETY: both iovec counts are zero, so the deliberately null iovec pointers are not read.
     let process_vm_readv = unsafe {
         libc::syscall(
             libc::SYS_process_vm_readv,
@@ -61,6 +69,7 @@ fn host_syscall_baseline() {
         )
     };
     assert_not_host_denied("process_vm_readv", process_vm_readv);
+    // SAFETY: both iovec counts are zero, so the deliberately null iovec pointers are not read.
     let process_vm_writev = unsafe {
         libc::syscall(
             libc::SYS_process_vm_writev,
@@ -73,6 +82,7 @@ fn host_syscall_baseline() {
         )
     };
     assert_not_host_denied("process_vm_writev", process_vm_writev);
+    // SAFETY: null strings deliberately exercise invalid syscall inputs; Rust memory is not accessed.
     let request_key = unsafe {
         libc::syscall(
             libc::SYS_request_key,
@@ -83,6 +93,7 @@ fn host_syscall_baseline() {
         )
     };
     assert_not_host_denied("request_key", request_key);
+    // SAFETY: the deliberately null params pointer is an invalid input checked by the kernel.
     let io_uring_setup = unsafe {
         libc::syscall(
             libc::SYS_io_uring_setup,
@@ -91,6 +102,7 @@ fn host_syscall_baseline() {
         )
     };
     assert_not_host_denied("io_uring_setup", io_uring_setup);
+    // SAFETY: fd -1 is invalid and the zero count means the null argument buffer is not read.
     let io_uring_register = unsafe {
         libc::syscall(
             libc::SYS_io_uring_register,
@@ -102,6 +114,7 @@ fn host_syscall_baseline() {
     };
     assert_not_host_denied("io_uring_register", io_uring_register);
 
+    // SAFETY: socket receives fixed scalar arguments and does not access Rust memory.
     let socket = unsafe {
         libc::syscall(
             libc::SYS_socket,
@@ -112,10 +125,13 @@ fn host_syscall_baseline() {
     };
     assert_not_host_denied("socket(AF_VSOCK)", socket);
     if socket >= 0 {
-        assert_eq!(unsafe { libc::close(socket as libc::c_int) }, 0);
+        // SAFETY: a successful socket call returned this open descriptor.
+        let close_socket = unsafe { libc::close(socket as libc::c_int) };
+        assert_eq!(close_socket, 0);
     }
 
     let mut pair = [-1; 2];
+    // SAFETY: the output pointer addresses two writable integers for the socket pair.
     let socketpair = unsafe {
         libc::syscall(
             libc::SYS_socketpair,
@@ -127,10 +143,15 @@ fn host_syscall_baseline() {
     };
     assert_not_host_denied("socketpair(AF_VSOCK)", socketpair);
     if socketpair == 0 {
-        assert_eq!(unsafe { libc::close(pair[0]) }, 0);
-        assert_eq!(unsafe { libc::close(pair[1]) }, 0);
+        // SAFETY: a successful socketpair call initialized both entries with open descriptors.
+        let close_pair_0 = unsafe { libc::close(pair[0]) };
+        // SAFETY: the second initialized socketpair descriptor is still open.
+        let close_pair_1 = unsafe { libc::close(pair[1]) };
+        assert_eq!(close_pair_0, 0);
+        assert_eq!(close_pair_1, 0);
     }
 
+    // SAFETY: fd -1 is invalid and the zero signal-set size means its null pointer is not read.
     let io_uring = unsafe {
         libc::syscall(
             libc::SYS_io_uring_enter,
@@ -146,9 +167,11 @@ fn host_syscall_baseline() {
 
     #[cfg(target_arch = "x86_64")]
     {
+        // SAFETY: syscall number is the x32-tagged getpid number and has no pointer arguments.
         let x32 = unsafe { libc::syscall(libc::SYS_getpid | 0x4000_0000) };
         assert_not_host_denied("x32-tagged getpid", x32);
-        let reserved = unsafe { libc::syscall(547 as libc::c_long) };
+        // SAFETY: syscall 547 is an x86_64 reserved syscall and takes no arguments.
+        let reserved = unsafe { libc::syscall(547) };
         assert_not_host_denied("reserved native syscall 547", reserved);
     }
 }
