@@ -212,16 +212,16 @@ pub(super) fn sandbox(
     );
     command.args([
         "--dir",
-        "/tmp/home",
+        crate::runner_contract::OFFLINE_CARGO_HOME,
         "--dir",
-        "/tmp/target",
+        crate::runner_contract::OFFLINE_CARGO_TARGET_DIR,
         "--dir",
-        "/tmp/tmp",
+        crate::runner_contract::OFFLINE_CARGO_TMPDIR,
     ]);
     command.args([
         "--symlink",
         REGISTRY_MOUNT.1,
-        "/tmp/home/registry",
+        crate::runner_contract::OFFLINE_CARGO_REGISTRY,
         "--chdir",
         WORKSPACE_MOUNT.1,
     ]);

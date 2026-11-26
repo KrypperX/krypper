@@ -4,6 +4,7 @@
 //! primary boundary; Landlock limits writes to prepared scratch and temporary work directories.
 
 use crate::runner_protocol::{MAX_LANDLOCK_ABI, MIN_LANDLOCK_ABI};
+use crate::LandlockSetupStatus;
 use std::fs::OpenOptions;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
@@ -51,25 +52,19 @@ struct PathBeneathAttr {
     parent_fd: i32,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum LandlockStatus {
-    Applied { abi: i32 },
-    Unavailable { abi: Option<i32> },
-}
-
 /// Query and apply the fixed write allowlist. Only a genuinely unavailable or too-old/unknown
 /// ABI returns `Unavailable`; any setup error after a compatible ABI was found is fatal.
-pub(crate) fn apply_fixed_write_policy() -> io::Result<LandlockStatus> {
+pub(crate) fn apply_fixed_write_policy() -> io::Result<LandlockSetupStatus> {
     let abi = match query_abi() {
         Ok(abi) => abi,
         Err(error) if abi_unavailable(&error) => {
-            return Ok(LandlockStatus::Unavailable { abi: None });
+            return Ok(LandlockSetupStatus::Unavailable { abi: None });
         }
         Err(error) => return Err(error),
     };
 
     if !(MIN_LANDLOCK_ABI..=MAX_LANDLOCK_ABI).contains(&abi) {
-        return Ok(LandlockStatus::Unavailable { abi: Some(abi) });
+        return Ok(LandlockSetupStatus::Unavailable { abi: Some(abi) });
     }
 
     // ABI 5 adds device ioctls, which can mutate state outside ordinary file writes. Keep that
@@ -100,7 +95,11 @@ pub(crate) fn apply_fixed_write_policy() -> io::Result<LandlockStatus> {
     // SAFETY: the successful syscall returned a fresh owned descriptor, transferred to File.
     let ruleset = unsafe { std::fs::File::from_raw_fd(ruleset_fd as RawFd) };
 
-    for scratch in ["/tmp/home", "/tmp/target", "/tmp/tmp"] {
+    for scratch in [
+        crate::runner_contract::OFFLINE_CARGO_HOME,
+        crate::runner_contract::OFFLINE_CARGO_TARGET_DIR,
+        crate::runner_contract::OFFLINE_CARGO_TMPDIR,
+    ] {
         add_write_rule(ruleset.as_raw_fd(), scratch, handled_access_fs)?;
     }
 
@@ -110,7 +109,7 @@ pub(crate) fn apply_fixed_write_policy() -> io::Result<LandlockStatus> {
         return Err(io::Error::last_os_error());
     }
 
-    Ok(LandlockStatus::Applied { abi })
+    Ok(LandlockSetupStatus::Applied { abi })
 }
 
 fn query_abi() -> io::Result<i32> {

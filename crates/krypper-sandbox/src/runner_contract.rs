@@ -8,6 +8,10 @@ pub const WORKSPACE_MOUNT: (i32, &str) = (200, "/workspace");
 pub const TOOLCHAIN_MOUNT: (i32, &str) = (201, "/toolchain");
 pub const REGISTRY_MOUNT: (i32, &str) = (202, "/cargo/registry");
 pub const RUNNER_MOUNT: (i32, &str) = (RUNNER_MOUNT_FD, RUNNER_MOUNT_PATH);
+pub const OFFLINE_CARGO_HOME: &str = "/tmp/home";
+pub const OFFLINE_CARGO_TARGET_DIR: &str = "/tmp/target";
+pub const OFFLINE_CARGO_TMPDIR: &str = "/tmp/tmp";
+pub const OFFLINE_CARGO_REGISTRY: &str = "/tmp/home/registry";
 pub const RESOURCE_FD_MOUNTS: [(i32, &str); 3] = [WORKSPACE_MOUNT, TOOLCHAIN_MOUNT, REGISTRY_MOUNT];
 pub const FIXED_FD_MOUNTS: [(i32, &str); 4] = [
     WORKSPACE_MOUNT,

@@ -267,17 +267,6 @@ fn run_with_containment(request: SandboxRunRequest, contained: bool) -> SandboxR
             match status {
                 Ok(RunnerStatus::Applied { .. }) => {
                     evidence.landlock_applied();
-                    if let Err(error) = handshake.acknowledge() {
-                        result.outcome = SandboxOutcome::SandboxSetupFailed;
-                        result.diagnostic =
-                            Some(format!("fixed runner acknowledgement failed: {error}"));
-                        stop_after_runner_handshake_failure(
-                            &mut child,
-                            &mut supervisor,
-                            &mut result,
-                        )?;
-                        return Ok(());
-                    }
                 }
                 Ok(RunnerStatus::Unavailable { abi }) => {
                     evidence.landlock_unavailable();
@@ -286,17 +275,6 @@ fn run_with_containment(request: SandboxRunRequest, contained: bool) -> SandboxR
                         result.diagnostic = Some(format!(
                             "required Landlock filesystem-write control is unavailable (ABI {abi:?})"
                         ));
-                        stop_after_runner_handshake_failure(
-                            &mut child,
-                            &mut supervisor,
-                            &mut result,
-                        )?;
-                        return Ok(());
-                    }
-                    if let Err(error) = handshake.acknowledge() {
-                        result.outcome = SandboxOutcome::SandboxSetupFailed;
-                        result.diagnostic =
-                            Some(format!("fixed runner acknowledgement failed: {error}"));
                         stop_after_runner_handshake_failure(
                             &mut child,
                             &mut supervisor,
@@ -325,6 +303,12 @@ fn run_with_containment(request: SandboxRunRequest, contained: bool) -> SandboxR
                     stop_after_runner_handshake_failure(&mut child, &mut supervisor, &mut result)?;
                     return Ok(());
                 }
+            }
+            if let Err(error) = handshake.acknowledge() {
+                result.outcome = SandboxOutcome::SandboxSetupFailed;
+                result.diagnostic = Some(format!("fixed runner acknowledgement failed: {error}"));
+                stop_after_runner_handshake_failure(&mut child, &mut supervisor, &mut result)?;
+                return Ok(());
             }
         }
         let (out, err) = {

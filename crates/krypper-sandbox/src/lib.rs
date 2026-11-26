@@ -39,12 +39,7 @@ pub enum LandlockSetupStatus {
 pub fn apply_landlock_write_policy() -> io::Result<LandlockSetupStatus> {
     #[cfg(target_os = "linux")]
     {
-        landlock::apply_fixed_write_policy().map(|status| match status {
-            landlock::LandlockStatus::Applied { abi } => LandlockSetupStatus::Applied { abi },
-            landlock::LandlockStatus::Unavailable { abi } => {
-                LandlockSetupStatus::Unavailable { abi }
-            }
-        })
+        landlock::apply_fixed_write_policy()
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -169,14 +164,17 @@ const FIXED_CARGO_ENVIRONMENT_NAMES: &[&str] = &[
 /// The values actually installed by the fixed offline Cargo sandbox, in launch order.
 pub const OFFLINE_CARGO_TEST_ENVIRONMENT: &[(&str, &str)] = &[
     ("PATH", "/toolchain/bin:/usr/bin:/bin"),
-    ("HOME", "/tmp/home"),
-    ("TMPDIR", "/tmp/tmp"),
-    ("CARGO_HOME", "/tmp/home"),
+    ("HOME", runner_contract::OFFLINE_CARGO_HOME),
+    ("TMPDIR", runner_contract::OFFLINE_CARGO_TMPDIR),
+    ("CARGO_HOME", runner_contract::OFFLINE_CARGO_HOME),
     ("CARGO_BUILD_JOBS", "1"),
     ("CARGO_PROFILE_DEV_DEBUG", "0"),
     ("CARGO_PROFILE_TEST_DEBUG", "0"),
     ("CARGO_INCREMENTAL", "0"),
-    ("CARGO_TARGET_DIR", "/tmp/target"),
+    (
+        "CARGO_TARGET_DIR",
+        runner_contract::OFFLINE_CARGO_TARGET_DIR,
+    ),
     ("RUSTC", "/toolchain/bin/rustc"),
     ("LANG", "C"),
     // Bubblewrap sets PWD after applying --chdir, even after --clearenv.

@@ -2,6 +2,7 @@
 
 use super::{gate, policy, workspace};
 use crate::tools::capture_workspace_root_at;
+use crate::tools::process::run_without_landlock_for_test;
 use std::fs;
 
 #[test]
@@ -12,6 +13,7 @@ fn real_sandbox_landlock_limits_writes_and_reaches_descendants() {
     };
 
     let path = workspace();
+    let shared_tmp_probe = format!("/tmp/krypper-landlock-unlisted-{}", std::process::id());
     fs::write(
         path.join("src/lib.rs"),
         r#"
@@ -47,6 +49,19 @@ fn assert_denies_read_only_or_landlock_write(path: &str) {
             panic!("Sandbox allowed an unlisted write {path}; cleanup={cleanup:?}");
         }
     }
+}
+
+#[test]
+fn bubblewrap_only_allows_unlisted_tmp_write() {
+    let path = "__KRYPPER_LANDLOCK_SHARED_TMP_PROBE__";
+    assert!(!std::path::Path::new(&path).exists(), "stale baseline probe: {path}");
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .unwrap_or_else(|error| panic!("Bubblewrap-only baseline denied {path}: {error}"));
+    drop(file);
+    std::fs::remove_file(&path).unwrap();
 }
 
 #[test]
@@ -114,9 +129,8 @@ fn landlock_allows_profile_scratch_and_denies_unlisted_tmp() {
         std::process::id()
     ));
 
+    assert_denies_write("__KRYPPER_LANDLOCK_SHARED_TMP_PROBE__");
     let process_id = std::process::id();
-    let denied_path = format!("/tmp/krypper-landlock-denied-{process_id}");
-    assert_denies_write(&denied_path);
     let descendant_path = format!("/tmp/krypper-landlock-descendant-denied-{process_id}");
     let child = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "landlock_descendant_probe"])
@@ -125,14 +139,46 @@ fn landlock_allows_profile_scratch_and_denies_unlisted_tmp() {
         .unwrap();
     assert!(child.success(), "Landlock restriction did not reach the exec descendant: {child}");
 }
-"#,
+"#
+        .replace("__KRYPPER_LANDLOCK_SHARED_TMP_PROBE__", &shared_tmp_probe),
     )
     .unwrap();
 
     let root = capture_workspace_root_at(&path).unwrap();
+    let policy = policy(&host);
+    let baseline = run_without_landlock_for_test(
+        &root,
+        &policy,
+        Some("bubblewrap_only_allows_unlisted_tmp_write"),
+    );
+    assert!(
+        baseline.succeeded(),
+        "Bubblewrap-only control must permit the unlisted /tmp write: {baseline:?}"
+    );
+    assert_eq!(
+        baseline.executed_tests,
+        Some(1),
+        "the Bubblewrap-only write control must execute: {baseline:?}"
+    );
+    assert!(baseline.cleanup_confirmed, "{baseline:?}");
+    let baseline_landlock_status = baseline
+        .sandbox_evidence
+        .as_ref()
+        .and_then(|evidence| {
+            evidence.controls().iter().find(|record| {
+                record.control == krypper_sandbox::SandboxControl::LandlockFilesystemWrites
+            })
+        })
+        .map(|record| record.status);
+    assert_eq!(
+        baseline_landlock_status,
+        Some(krypper_sandbox::SandboxEvidenceStatus::Unavailable),
+        "the baseline must explicitly run with Landlock disabled"
+    );
+
     let result = crate::tools::process::run_for_test(
         &root,
-        &policy(&host),
+        &policy,
         Some("landlock_allows_profile_scratch_and_denies_unlisted_tmp"),
     );
     assert!(

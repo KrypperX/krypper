@@ -5,8 +5,8 @@ use super::policy::{validate_test_filter, OfflineCargoPolicy};
 use super::result::ProcessResult;
 use crate::tools::WorkspaceRoot;
 use krypper_sandbox::{
-    run_offline_cargo, DirectoryDescriptors, RunLimits, SandboxOutcome, SandboxResource,
-    SandboxRunRequest, SandboxRunResult, SpawnAuthorizationGate,
+    run_offline_cargo, DirectoryDescriptors, LandlockRequirement, RunLimits, SandboxOutcome,
+    SandboxResource, SandboxRunRequest, SandboxRunResult, SpawnAuthorizationGate,
 };
 #[cfg(target_os = "linux")]
 use std::path::Path;
@@ -16,11 +16,35 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 use uuid::Uuid;
 
+#[cfg(target_os = "linux")]
+struct RunOptions {
+    wall: Duration,
+    output: usize,
+    cpu_budget_usec: u64,
+    landlock_requirement: LandlockRequirement,
+}
+
 pub(crate) fn run(
     root: &WorkspaceRoot,
     policy: &OfflineCargoPolicy,
     test_filter: Option<&str>,
     spawn_gate: SpawnAuthorizationGate,
+) -> ProcessResult {
+    run_with_landlock_requirement(
+        root,
+        policy,
+        test_filter,
+        spawn_gate,
+        LandlockRequirement::Optional,
+    )
+}
+
+fn run_with_landlock_requirement(
+    root: &WorkspaceRoot,
+    policy: &OfflineCargoPolicy,
+    test_filter: Option<&str>,
+    spawn_gate: SpawnAuthorizationGate,
+    landlock_requirement: LandlockRequirement,
 ) -> ProcessResult {
     #[cfg(target_os = "linux")]
     {
@@ -29,13 +53,16 @@ pub(crate) fn run(
             Some(value) => value,
             None => return ProcessResult::empty_with_filter(ProcessOutcome::Denied, test_filter),
         };
-        run_with_bounds(
+        run_with_bounds_and_options(
             root,
             policy,
             test_filter,
-            Duration::from_secs(limits.wall_secs),
-            limits.output_bytes,
-            cpu_budget_usec,
+            RunOptions {
+                wall: Duration::from_secs(limits.wall_secs),
+                output: limits.output_bytes,
+                cpu_budget_usec,
+                landlock_requirement,
+            },
             spawn_gate,
         )
     }
@@ -46,12 +73,30 @@ pub(crate) fn run(
             Ok(limits) => limits,
             Err(_) => return ProcessResult::empty_with_filter(ProcessOutcome::Denied, test_filter),
         };
-        execute(policy, test_filter, limits, None, spawn_gate)
+        execute(
+            policy,
+            test_filter,
+            limits,
+            None,
+            spawn_gate,
+            landlock_requirement,
+        )
     }
 }
 
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn run_with_landlock_requirement_for_test(
+    root: &WorkspaceRoot,
+    policy: &OfflineCargoPolicy,
+    test_filter: Option<&str>,
+    requirement: LandlockRequirement,
+    spawn_gate: SpawnAuthorizationGate,
+) -> ProcessResult {
+    run_with_landlock_requirement(root, policy, test_filter, spawn_gate, requirement)
+}
+
 /// Lower-only bounds let the Linux host fixtures exercise timeout and output paths quickly.
-#[cfg(target_os = "linux")]
+#[cfg(all(test, target_os = "linux"))]
 pub(crate) fn run_with_bounds(
     root: &WorkspaceRoot,
     policy: &OfflineCargoPolicy,
@@ -61,6 +106,34 @@ pub(crate) fn run_with_bounds(
     cpu_budget_usec: u64,
     spawn_gate: SpawnAuthorizationGate,
 ) -> ProcessResult {
+    run_with_bounds_and_options(
+        root,
+        policy,
+        test_filter,
+        RunOptions {
+            wall,
+            output,
+            cpu_budget_usec,
+            landlock_requirement: LandlockRequirement::Optional,
+        },
+        spawn_gate,
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn run_with_bounds_and_options(
+    root: &WorkspaceRoot,
+    policy: &OfflineCargoPolicy,
+    test_filter: Option<&str>,
+    options: RunOptions,
+    spawn_gate: SpawnAuthorizationGate,
+) -> ProcessResult {
+    let RunOptions {
+        wall,
+        output,
+        cpu_budget_usec,
+        landlock_requirement,
+    } = options;
     if validate_test_filter(test_filter).is_err() {
         return ProcessResult::invalid_test_filter();
     }
@@ -133,7 +206,14 @@ pub(crate) fn run_with_bounds(
         Ok(directories) => Some(directories),
         Err(error) => return setup_failed(test_filter, error, output_limit),
     };
-    execute(policy, test_filter, limits, directories, spawn_gate)
+    execute(
+        policy,
+        test_filter,
+        limits,
+        directories,
+        spawn_gate,
+        landlock_requirement,
+    )
 }
 
 #[cfg(target_os = "linux")]
@@ -161,6 +241,7 @@ fn execute(
     limits: RunLimits,
     directories: Option<DirectoryDescriptors>,
     spawn_gate: SpawnAuthorizationGate,
+    landlock_requirement: LandlockRequirement,
 ) -> ProcessResult {
     if validate_test_filter(test_filter).is_err() {
         return ProcessResult::invalid_test_filter();
@@ -177,7 +258,7 @@ fn execute(
         policy.cancellation(),
         requirements,
     )
-    .with_landlock_requirement(krypper_sandbox::LandlockRequirement::Optional)
+    .with_landlock_requirement(landlock_requirement)
     .with_spawn_gate(spawn_gate);
     from_runner(run_offline_cargo(request), test_filter)
 }

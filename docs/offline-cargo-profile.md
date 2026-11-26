@@ -68,7 +68,10 @@ The fixed `TMPDIR` is `/tmp/tmp`. If the kernel does not provide a supported Lan
 result reports `unavailable` and Cargo may continue only after the existing
 required controls pass. A setup error after ABI support is detected fails the
 run before Cargo starts. `applied` means the runner completed setup; only the
-gated host fixture can report behavioral evidence.
+gated host fixture can report behavioral evidence. That fixture first runs a
+Bubblewrap-only control that creates a file in an unlisted `/tmp` path, then
+requires Landlock to deny a write to that same path and confirms the denial
+reaches an exec descendant.
 
 `ProfileLimits` are hard profile ceilings: wall time is stored in seconds and
 CPU time in milliseconds. Each request carries separate effective `RunLimits`
@@ -211,9 +214,10 @@ command, including `--ro-bind-fd`. The implementation requires `cgroup.kill`,
 cgroup namespaces, and disabled nested user namespaces. A historical fixture
 run recorded Linux 6.8, systemd 255 and Bubblewrap 0.9.0; it predates the
 current seccomp command and is not runtime evidence for the current Product
-revision. A version string alone does not establish option compatibility. No
-current-revision host fixture result is recorded here; other deployments are
-unverified, and missing primitives or options fail closed.
+revision. The current C2 fixture has one local Linux host result; it is not a
+cross-host CI guarantee. A version string alone does not establish option
+compatibility. Other deployments are unverified, and missing primitives or
+options fail closed.
 
 The embedding process must be in the delegated user-manager cgroup subtree.
 A login session outside that subtree can create a user unit but cannot
