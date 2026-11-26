@@ -1,6 +1,8 @@
-use super::{ContextError, MAX_OBSERVATION_BYTES};
-use crate::agent_loop::WorkspaceObservation;
+use super::{ContextError, ModelObservation, MAX_OBSERVATION_BYTES};
 use ring::digest;
+
+#[cfg(test)]
+use crate::agent_loop::WorkspaceObservation;
 
 // Bound the temporary model-facing copy before it can duplicate an arbitrarily long task turn.
 const MAX_COMPACTION_SOURCE_BYTES: usize = 16 * 1024 * 1024;
@@ -56,18 +58,18 @@ pub(crate) struct ObservationCompactionReport {
 }
 
 /// A compacted, model-facing copy. The authoritative Harness observations are never changed.
-pub(crate) struct CompactedObservations {
-    pub(crate) observations: Vec<WorkspaceObservation>,
+pub(crate) struct CompactedObservations<T> {
+    pub(crate) observations: Vec<T>,
     pub(crate) report: ObservationCompactionReport,
 }
 
 /// Compact older observation text first, preserving structured event metadata and prioritizing
 /// newer evidence. Changed fields carry their original byte count and SHA-256 digest. Non-text
 /// structure is never dropped; if it cannot fit, the caller receives the existing context error.
-pub(crate) fn compact_observations_for_model(
-    observations: &[WorkspaceObservation],
+pub(crate) fn compact_observations_for_model<T: ModelObservation>(
+    observations: &[T],
     budget_bytes: usize,
-) -> Result<Option<CompactedObservations>, ContextError> {
+) -> Result<Option<CompactedObservations<T>>, ContextError> {
     if budget_bytes == 0 || budget_bytes > MAX_OBSERVATION_BYTES {
         return Err(ContextError::ObservationsTooLarge);
     }
@@ -90,12 +92,12 @@ pub(crate) fn compact_observations_for_model(
     let mut omitted_bytes = 0_usize;
     for observation in &mut compacted {
         let mut observation_bytes = serialized_observation_size(observation)?;
-        let mut observation_estimated_bytes = super::observation_size(observation);
-        for text_index in 0..compactable_text_count(observation) {
+        let mut observation_estimated_bytes = observation.estimated_size();
+        for text_index in 0..observation.compactable_text_count() {
             if fits(current_bytes, current_estimated_bytes, budget_bytes) {
                 break;
             }
-            let Some(original) = compactable_text_at(observation, text_index).cloned() else {
+            let Some(original) = observation.compactable_text_at(text_index).cloned() else {
                 continue;
             };
             if original.is_empty() {
@@ -111,7 +113,7 @@ pub(crate) fn compact_observations_for_model(
             }
             set_compactable_text(observation, text_index, minimum);
             let minimum_observation_bytes = serialized_observation_size(observation)?;
-            let minimum_observation_estimated_bytes = super::observation_size(observation);
+            let minimum_observation_estimated_bytes = observation.estimated_size();
             let minimum_size = current_bytes
                 .saturating_sub(observation_bytes)
                 .saturating_add(minimum_observation_bytes);
@@ -143,7 +145,7 @@ pub(crate) fn compact_observations_for_model(
                     compacted_text(&original, &character_boundaries, middle, &digest),
                 );
                 let candidate_observation_bytes = serialized_observation_size(observation)?;
-                let candidate_observation_estimated_bytes = super::observation_size(observation);
+                let candidate_observation_estimated_bytes = observation.estimated_size();
                 let candidate_size = current_bytes
                     .saturating_sub(observation_bytes)
                     .saturating_add(candidate_observation_bytes);
@@ -166,7 +168,7 @@ pub(crate) fn compact_observations_for_model(
                 compacted_text(&original, &character_boundaries, best, &digest),
             );
             let compacted_observation_bytes = serialized_observation_size(observation)?;
-            let compacted_observation_estimated_bytes = super::observation_size(observation);
+            let compacted_observation_estimated_bytes = observation.estimated_size();
             current_bytes = current_bytes
                 .saturating_sub(observation_bytes)
                 .saturating_add(compacted_observation_bytes);
@@ -204,8 +206,8 @@ fn fits(serialized_bytes: usize, estimated_bytes: usize, budget_bytes: usize) ->
     serialized_bytes <= budget_bytes && estimated_bytes <= MAX_OBSERVATION_BYTES
 }
 
-fn serialized_observation_bytes(
-    observations: &[WorkspaceObservation],
+fn serialized_observation_bytes<T: ModelObservation>(
+    observations: &[T],
 ) -> Result<usize, ContextError> {
     let mut total_bytes = 2_usize.saturating_add(observations.len().saturating_sub(1));
     for observation in observations {
@@ -214,9 +216,11 @@ fn serialized_observation_bytes(
     Ok(total_bytes)
 }
 
-fn serialized_observation_size(observation: &WorkspaceObservation) -> Result<usize, ContextError> {
+fn serialized_observation_size<T: ModelObservation>(
+    observation: &T,
+) -> Result<usize, ContextError> {
     let mut counter = ByteCounter::default();
-    serde_json::to_writer(&mut counter, &super::observation_value(observation))
+    serde_json::to_writer(&mut counter, &observation.to_model_value())
         .map_err(|_| ContextError::RequestEncoding)?;
     Ok(counter.0)
 }
@@ -235,63 +239,14 @@ impl std::io::Write for ByteCounter {
     }
 }
 
-fn estimated_observation_bytes(observations: &[WorkspaceObservation]) -> usize {
+fn estimated_observation_bytes<T: ModelObservation>(observations: &[T]) -> usize {
     observations.iter().fold(0_usize, |total, observation| {
-        total.saturating_add(super::observation_size(observation))
+        total.saturating_add(observation.estimated_size())
     })
 }
 
-fn compactable_text_count(observation: &WorkspaceObservation) -> usize {
-    match observation {
-        WorkspaceObservation::ProcessFinished { .. }
-        | WorkspaceObservation::PatchApplied { .. } => 2,
-        WorkspaceObservation::FileRead { .. }
-        | WorkspaceObservation::FileRangeRead { .. }
-        | WorkspaceObservation::ExtensionCompleted { .. } => 1,
-        WorkspaceObservation::DirectoryListed { .. }
-        | WorkspaceObservation::DirectoryCreated { .. }
-        | WorkspaceObservation::TextSearched { .. }
-        | WorkspaceObservation::TreeTextSearched { .. }
-        | WorkspaceObservation::FileCreated { .. }
-        | WorkspaceObservation::FileCreationFailed { .. }
-        | WorkspaceObservation::DirectoryCreationFailed { .. }
-        | WorkspaceObservation::TextReplaced { .. }
-        | WorkspaceObservation::TextReplacementFailed { .. }
-        | WorkspaceObservation::PatchFailed { .. }
-        | WorkspaceObservation::TextSearchFailed { .. }
-        | WorkspaceObservation::TreeTextSearchFailed { .. }
-        | WorkspaceObservation::ActionFailed { .. } => 0,
-    }
-}
-
-fn compactable_text_at(
-    observation: &mut WorkspaceObservation,
-    index: usize,
-) -> Option<&mut String> {
-    match observation {
-        WorkspaceObservation::ProcessFinished { result } => match index {
-            0 => Some(&mut result.stdout),
-            1 => Some(&mut result.stderr),
-            _ => None,
-        },
-        WorkspaceObservation::FileRead { contents, .. } if index == 0 => Some(contents),
-        WorkspaceObservation::FileRangeRead { excerpt, .. } if index == 0 => Some(excerpt),
-        WorkspaceObservation::PatchApplied {
-            before_diff,
-            after_diff,
-            ..
-        } => match index {
-            0 => Some(before_diff),
-            1 => Some(after_diff),
-            _ => None,
-        },
-        WorkspaceObservation::ExtensionCompleted { result, .. } if index == 0 => Some(result),
-        _ => None,
-    }
-}
-
-fn set_compactable_text(observation: &mut WorkspaceObservation, index: usize, value: String) {
-    let Some(slot) = compactable_text_at(observation, index) else {
+fn set_compactable_text<T: ModelObservation>(observation: &mut T, index: usize, value: String) {
+    let Some(slot) = observation.compactable_text_at(index) else {
         unreachable!("text field index is validated by compactable_text_count");
     };
     *slot = value;
@@ -384,7 +339,7 @@ mod tests {
             &compacted
                 .observations
                 .iter()
-                .map(super::super::observation_value)
+                .map(|observation| observation.to_model_value())
                 .collect::<Vec<_>>(),
         )
         .expect("render compacted evidence");

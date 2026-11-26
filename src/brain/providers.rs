@@ -1,3 +1,6 @@
+use super::context::{
+    compact_observations_for_model, ObservationCompactionReport, MAX_OBSERVATION_BYTES,
+};
 use super::limits::MAX_STREAMED_TOOL_ARGUMENT_BYTES;
 use super::{
     action_from_call, action_from_error, action_from_provider_call,
@@ -11,9 +14,6 @@ use super::{
     OllamaDecisionSource, SYSTEM_INSTRUCTIONS,
 };
 use crate::agent_loop::{BoundedDecisionSource, WorkspaceAction, WorkspaceObservation};
-use crate::harness::context::{
-    compact_observations_for_model, ObservationCompactionReport, MAX_OBSERVATION_BYTES,
-};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::net::SocketAddr;

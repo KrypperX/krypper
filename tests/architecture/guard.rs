@@ -409,6 +409,602 @@ pub(super) fn scan_source(source: &str, origin: &str) -> Vec<String> {
     scan_source_at_depth(source, origin, TOOLS_MODULE_DEPTH)
 }
 
+pub(super) fn scan_brain_harness_context_dependencies(root: &Path) -> Vec<String> {
+    let mut sources = Vec::new();
+    let mut violations = Vec::new();
+    let root_file = if root.is_dir() {
+        root.join("mod.rs")
+    } else {
+        root.to_path_buf()
+    };
+    let root_module_dir = module_directory(&root_file);
+    collect_brain_module_files(
+        &root_file,
+        &root_module_dir,
+        false,
+        Vec::new(),
+        &mut HashSet::new(),
+        &mut sources,
+        &mut violations,
+    );
+    sources.sort_by(|left, right| left.file_path.cmp(&right.file_path));
+    for source in sources {
+        violations.extend(scan_brain_context_file(
+            &source.file,
+            &source.file_path.display().to_string(),
+            source.alias_scopes,
+        ));
+    }
+    violations.sort();
+    violations
+}
+
+fn collect_brain_module_files(
+    file_path: &Path,
+    module_dir: &Path,
+    inside_inline_module: bool,
+    parent_alias_scopes: BrainAliasScopes,
+    visited: &mut HashSet<BrainModuleVisitKey>,
+    sources: &mut Vec<BrainSource>,
+    violations: &mut Vec<String>,
+) {
+    let normalized_file = file_path
+        .canonicalize()
+        .unwrap_or_else(|_| file_path.to_path_buf());
+    let normalized_module_dir = module_dir
+        .canonicalize()
+        .unwrap_or_else(|_| module_dir.to_path_buf());
+    let visit_key = BrainModuleVisitKey {
+        file_path: normalized_file.clone(),
+        module_dir: normalized_module_dir,
+        inside_inline_module,
+        parent_alias_scopes: brain_alias_scopes_key(&parent_alias_scopes),
+    };
+    if !visited.insert(visit_key) {
+        return;
+    }
+    let source = match fs::read_to_string(file_path) {
+        Ok(source) => source,
+        Err(error) => {
+            violations.push(format!(
+                "{}: unable to read production Brain source: {error}",
+                file_path.display()
+            ));
+            return;
+        }
+    };
+    let file = match syn::parse_file(&source) {
+        Ok(file) => file,
+        Err(_) => {
+            violations.push(format!(
+                "{}: unable to parse Brain Rust source",
+                file_path.display()
+            ));
+            return;
+        }
+    };
+    let mut alias_scopes = parent_alias_scopes;
+    alias_scopes.push(BrainAliasScope::module(brain_import_aliases(&file.items)));
+    sources.push(BrainSource {
+        file_path: file_path.to_path_buf(),
+        file: file.clone(),
+        alias_scopes: alias_scopes.clone(),
+    });
+    collect_brain_module_items(
+        &file.items,
+        &BrainModuleContext {
+            file_path,
+            module_dir,
+            inside_inline_module,
+        },
+        &alias_scopes,
+        visited,
+        sources,
+        violations,
+    );
+}
+
+fn collect_brain_module_items(
+    items: &[Item],
+    context: &BrainModuleContext<'_>,
+    alias_scopes: &BrainAliasScopes,
+    visited: &mut HashSet<BrainModuleVisitKey>,
+    sources: &mut Vec<BrainSource>,
+    violations: &mut Vec<String>,
+) {
+    for item in items {
+        if item_is_test_only(item_attrs(item)) {
+            continue;
+        }
+        let Item::Mod(module) = item else {
+            continue;
+        };
+        if let Some((_, nested)) = &module.content {
+            let nested_dir = context.module_dir.join(ident_name(&module.ident));
+            let mut nested_alias_scopes = alias_scopes.clone();
+            nested_alias_scopes.push(BrainAliasScope::module(brain_import_aliases(nested)));
+            collect_brain_module_items(
+                nested,
+                &BrainModuleContext {
+                    file_path: context.file_path,
+                    module_dir: &nested_dir,
+                    inside_inline_module: true,
+                },
+                &nested_alias_scopes,
+                visited,
+                sources,
+                violations,
+            );
+        } else if let Some(resolved) = resolve_module(
+            context.file_path,
+            context.module_dir,
+            module,
+            context.inside_inline_module,
+        ) {
+            collect_brain_module_files(
+                &resolved.file_path,
+                &resolved.module_dir,
+                false,
+                alias_scopes.clone(),
+                visited,
+                sources,
+                violations,
+            );
+        } else {
+            violations.push(format!(
+                "{}: unable to resolve production Brain module `{}`",
+                context.file_path.display(),
+                module.ident
+            ));
+        }
+    }
+}
+
+struct BrainModuleContext<'a> {
+    file_path: &'a Path,
+    module_dir: &'a Path,
+    inside_inline_module: bool,
+}
+
+type BrainImportAliases = std::collections::HashMap<String, Vec<Vec<String>>>;
+type BrainAliasScopes = Vec<BrainAliasScope>;
+
+#[derive(Clone)]
+struct BrainAliasScope {
+    aliases: BrainImportAliases,
+    is_module: bool,
+}
+
+impl BrainAliasScope {
+    fn module(aliases: BrainImportAliases) -> Self {
+        Self {
+            aliases,
+            is_module: true,
+        }
+    }
+
+    fn block(aliases: BrainImportAliases) -> Self {
+        Self {
+            aliases,
+            is_module: false,
+        }
+    }
+}
+
+#[derive(Hash, Eq, PartialEq)]
+struct BrainAliasScopeKey {
+    is_module: bool,
+    aliases: Vec<(String, Vec<Vec<String>>)>,
+}
+
+#[derive(Hash, Eq, PartialEq)]
+struct BrainModuleVisitKey {
+    file_path: PathBuf,
+    module_dir: PathBuf,
+    inside_inline_module: bool,
+    parent_alias_scopes: Vec<BrainAliasScopeKey>,
+}
+
+fn brain_alias_scopes_key(scopes: &BrainAliasScopes) -> Vec<BrainAliasScopeKey> {
+    scopes
+        .iter()
+        .map(|scope| {
+            let mut aliases = scope
+                .aliases
+                .iter()
+                .map(|(name, targets)| {
+                    let mut targets = targets.clone();
+                    targets.sort();
+                    (name.clone(), targets)
+                })
+                .collect::<Vec<_>>();
+            aliases.sort_by(|left, right| left.0.cmp(&right.0));
+            BrainAliasScopeKey {
+                is_module: scope.is_module,
+                aliases,
+            }
+        })
+        .collect()
+}
+
+struct BrainSource {
+    file_path: PathBuf,
+    file: syn::File,
+    alias_scopes: BrainAliasScopes,
+}
+
+pub(super) fn scan_brain_context_source(source: &str, origin: &str) -> Vec<String> {
+    let Ok(file) = syn::parse_file(source) else {
+        return vec![format!("{origin}: unable to parse Brain Rust source")];
+    };
+    let aliases = vec![BrainAliasScope::module(brain_import_aliases(&file.items))];
+    scan_brain_context_file(&file, origin, aliases)
+}
+
+fn scan_brain_context_file(
+    file: &syn::File,
+    origin: &str,
+    alias_scopes: BrainAliasScopes,
+) -> Vec<String> {
+    let mut visitor = BrainContextDependencyVisitor {
+        origin: origin.to_owned(),
+        alias_scopes,
+        violations: Vec::new(),
+    };
+    visitor.visit_file(file);
+    visitor.violations
+}
+
+struct BrainContextDependencyVisitor {
+    origin: String,
+    alias_scopes: BrainAliasScopes,
+    violations: Vec<String>,
+}
+
+impl Visit<'_> for BrainContextDependencyVisitor {
+    fn visit_item(&mut self, item: &Item) {
+        if item_is_test_only(item_attrs(item)) {
+            return;
+        }
+        syn::visit::visit_item(self, item);
+    }
+
+    fn visit_item_use(&mut self, item: &syn::ItemUse) {
+        inspect_brain_context_use_tree(
+            &item.tree,
+            &mut Vec::new(),
+            &self.origin,
+            &self.alias_scopes,
+            &mut self.violations,
+        );
+    }
+
+    fn visit_path(&mut self, path: &RustPath) {
+        let segments = path
+            .segments
+            .iter()
+            .map(|segment| ident_name(&segment.ident))
+            .collect::<Vec<_>>();
+        if path_resolves_to_harness_context(&segments, &self.alias_scopes) {
+            self.violations.push(format!(
+                "{}: production Brain path imports Harness context",
+                self.origin
+            ));
+        }
+        syn::visit::visit_path(self, path);
+    }
+
+    fn visit_macro(&mut self, mac: &syn::Macro) {
+        if path_is_ident(&mac.path, "include")
+            || token_stream_contains_ident(&mac.tokens, "harness")
+            || macro_references_harness_alias(&mac.tokens, &self.alias_scopes)
+        {
+            self.violations.push(format!(
+                "{}: production Brain macro hides a Harness context dependency",
+                self.origin
+            ));
+        }
+        syn::visit::visit_macro(self, mac);
+    }
+
+    fn visit_item_mod(&mut self, module: &syn::ItemMod) {
+        for attribute in &module.attrs {
+            self.visit_attribute(attribute);
+        }
+        if let Some((_, nested)) = &module.content {
+            self.alias_scopes
+                .push(BrainAliasScope::module(brain_import_aliases(nested)));
+            for item in nested {
+                self.visit_item(item);
+            }
+            self.alias_scopes.pop();
+        }
+    }
+
+    fn visit_block(&mut self, block: &syn::Block) {
+        self.alias_scopes
+            .push(BrainAliasScope::block(brain_block_import_aliases(
+                &block.stmts,
+            )));
+        syn::visit::visit_block(self, block);
+        self.alias_scopes.pop();
+    }
+}
+
+fn token_stream_contains_ident(tokens: &TokenStream, expected: &str) -> bool {
+    tokens.clone().into_iter().any(|token| match token {
+        TokenTree::Ident(ident) => ident_name(&ident) == expected,
+        TokenTree::Group(group) => token_stream_contains_ident(&group.stream(), expected),
+        TokenTree::Punct(_) | TokenTree::Literal(_) => false,
+    })
+}
+
+fn macro_references_harness_alias(tokens: &TokenStream, alias_scopes: &BrainAliasScopes) -> bool {
+    fn collect_paths(tokens: &TokenStream, paths: &mut Vec<(Vec<String>, bool)>) {
+        let tokens = tokens.clone().into_iter().collect::<Vec<_>>();
+        let mut index = 0;
+        while index < tokens.len() {
+            if let TokenTree::Group(group) = &tokens[index] {
+                collect_paths(&group.stream(), paths);
+            }
+            let TokenTree::Ident(ident) = &tokens[index] else {
+                index += 1;
+                continue;
+            };
+            let mut segments = vec![ident_name(ident)];
+            let mut cursor = index + 1;
+            while cursor + 2 < tokens.len()
+                && matches!(&tokens[cursor], TokenTree::Punct(punct) if punct.as_char() == ':')
+                && matches!(&tokens[cursor + 1], TokenTree::Punct(punct) if punct.as_char() == ':')
+            {
+                let TokenTree::Ident(next) = &tokens[cursor + 2] else {
+                    break;
+                };
+                segments.push(ident_name(next));
+                cursor += 3;
+            }
+            let is_glob = matches!(
+                (tokens.get(cursor), tokens.get(cursor + 1), tokens.get(cursor + 2)),
+                (
+                    Some(TokenTree::Punct(first_colon)),
+                    Some(TokenTree::Punct(second_colon)),
+                    Some(TokenTree::Punct(glob))
+                ) if first_colon.as_char() == ':'
+                    && second_colon.as_char() == ':'
+                    && glob.as_char() == '*'
+            );
+            if segments.len() > 1 || is_glob {
+                paths.push((segments, is_glob));
+            }
+            index += 1;
+        }
+    }
+
+    let mut paths = Vec::new();
+    collect_paths(tokens, &mut paths);
+    paths.into_iter().any(|(path, is_glob)| {
+        path_resolves_to_harness_context(&path, alias_scopes)
+            || (is_glob && path_resolves_to_harness_module(&path, alias_scopes))
+    })
+}
+
+fn inspect_brain_context_use_tree(
+    tree: &UseTree,
+    prefix: &mut Vec<String>,
+    origin: &str,
+    alias_scopes: &BrainAliasScopes,
+    violations: &mut Vec<String>,
+) {
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(ident_name(&path.ident));
+            inspect_brain_context_use_tree(&path.tree, prefix, origin, alias_scopes, violations);
+            prefix.pop();
+        }
+        UseTree::Name(name) => {
+            prefix.push(ident_name(&name.ident));
+            if path_resolves_to_harness_context(prefix, alias_scopes) {
+                violations.push(format!(
+                    "{origin}: production Brain import uses Harness context"
+                ));
+            }
+            prefix.pop();
+        }
+        UseTree::Rename(rename) => {
+            prefix.push(ident_name(&rename.ident));
+            if path_resolves_to_harness_context(prefix, alias_scopes) {
+                violations.push(format!(
+                    "{origin}: production Brain import uses Harness context"
+                ));
+            }
+            prefix.pop();
+        }
+        UseTree::Glob(_) => {
+            if path_resolves_to_harness_context(prefix, alias_scopes)
+                || path_resolves_to_harness_module(prefix, alias_scopes)
+            {
+                violations.push(format!(
+                    "{origin}: production Brain glob import uses Harness context"
+                ));
+            }
+        }
+        UseTree::Group(group) => {
+            for item in &group.items {
+                inspect_brain_context_use_tree(item, prefix, origin, alias_scopes, violations);
+            }
+        }
+    }
+}
+
+fn path_contains_harness_context(segments: &[String]) -> bool {
+    segments
+        .windows(2)
+        .any(|pair| pair[0] == "harness" && pair[1] == "context")
+}
+
+fn brain_import_aliases(items: &[Item]) -> BrainImportAliases {
+    let mut aliases = BrainImportAliases::default();
+    for item in items {
+        if item_is_test_only(item_attrs(item)) {
+            continue;
+        }
+        if let Item::Use(item_use) = item {
+            collect_brain_import_aliases(&item_use.tree, &mut Vec::new(), &mut aliases);
+        }
+    }
+    aliases
+}
+
+fn brain_block_import_aliases(statements: &[syn::Stmt]) -> BrainImportAliases {
+    let mut aliases = BrainImportAliases::default();
+    for statement in statements {
+        let syn::Stmt::Item(item) = statement else {
+            continue;
+        };
+        if item_is_test_only(item_attrs(item)) {
+            continue;
+        }
+        if let Item::Use(item_use) = item {
+            collect_brain_import_aliases(&item_use.tree, &mut Vec::new(), &mut aliases);
+        }
+    }
+    aliases
+}
+
+fn collect_brain_import_aliases(
+    tree: &UseTree,
+    prefix: &mut Vec<String>,
+    aliases: &mut BrainImportAliases,
+) {
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(ident_name(&path.ident));
+            collect_brain_import_aliases(&path.tree, prefix, aliases);
+            prefix.pop();
+        }
+        UseTree::Name(name) => {
+            let binding = ident_name(&name.ident);
+            let mut target = prefix.clone();
+            target.push(binding.clone());
+            aliases.entry(binding).or_default().push(target);
+        }
+        UseTree::Rename(rename) => {
+            let mut target = prefix.clone();
+            let imported = ident_name(&rename.ident);
+            if imported != "self" {
+                target.push(imported);
+            }
+            aliases
+                .entry(ident_name(&rename.rename))
+                .or_default()
+                .push(target);
+        }
+        UseTree::Glob(_) => {}
+        UseTree::Group(group) => {
+            for item in &group.items {
+                collect_brain_import_aliases(item, prefix, aliases);
+            }
+        }
+    }
+}
+
+fn path_resolves_to_harness_context(segments: &[String], alias_scopes: &BrainAliasScopes) -> bool {
+    fn resolve(
+        segments: &[String],
+        alias_scopes: &BrainAliasScopes,
+        seen: &mut HashSet<(usize, String)>,
+    ) -> bool {
+        if path_contains_harness_context(segments) {
+            return true;
+        }
+        let Some((alias_index, scope_index)) = alias_binding_location(segments, alias_scopes)
+        else {
+            return false;
+        };
+        let alias = &segments[alias_index];
+        let Some(targets) = alias_scopes[scope_index].aliases.get(alias) else {
+            return false;
+        };
+        let key = (scope_index, alias.clone());
+        if !seen.insert(key.clone()) {
+            return false;
+        }
+        let found = targets.iter().any(|target| {
+            let mut expanded = target.clone();
+            expanded.extend_from_slice(&segments[alias_index + 1..]);
+            resolve(&expanded, alias_scopes, &mut seen.clone())
+        });
+        seen.remove(&key);
+        found
+    }
+
+    resolve(segments, alias_scopes, &mut HashSet::new())
+}
+
+fn path_resolves_to_harness_module(segments: &[String], alias_scopes: &BrainAliasScopes) -> bool {
+    fn resolve(
+        segments: &[String],
+        alias_scopes: &BrainAliasScopes,
+        seen: &mut HashSet<(usize, String)>,
+    ) -> bool {
+        if segments.last().is_some_and(|segment| segment == "harness") {
+            return true;
+        }
+        let Some((alias_index, scope_index)) = alias_binding_location(segments, alias_scopes)
+        else {
+            return false;
+        };
+        let alias = &segments[alias_index];
+        let Some(targets) = alias_scopes[scope_index].aliases.get(alias) else {
+            return false;
+        };
+        let key = (scope_index, alias.clone());
+        if !seen.insert(key.clone()) {
+            return false;
+        }
+        let found = targets.iter().any(|target| {
+            let mut expanded = target.clone();
+            expanded.extend_from_slice(&segments[alias_index + 1..]);
+            resolve(&expanded, alias_scopes, &mut seen.clone())
+        });
+        seen.remove(&key);
+        found
+    }
+
+    resolve(segments, alias_scopes, &mut HashSet::new())
+}
+
+fn alias_binding_location(
+    segments: &[String],
+    alias_scopes: &BrainAliasScopes,
+) -> Option<(usize, usize)> {
+    let qualifier_count = segments
+        .iter()
+        .take_while(|segment| *segment == "self" || *segment == "super")
+        .count();
+    if qualifier_count > 0 {
+        let alias = segments.get(qualifier_count)?;
+        let mut scope_index = alias_scopes.iter().rposition(|scope| scope.is_module)?;
+        for qualifier in &segments[..qualifier_count] {
+            if qualifier == "super" {
+                scope_index = alias_scopes[..scope_index]
+                    .iter()
+                    .rposition(|scope| scope.is_module)?;
+            }
+        }
+        return alias_scopes[scope_index]
+            .aliases
+            .contains_key(alias)
+            .then_some((qualifier_count, scope_index));
+    }
+
+    let alias = segments.first()?;
+    let scope_index = alias_scopes
+        .iter()
+        .rposition(|scope| scope.aliases.contains_key(alias))?;
+    Some((0, scope_index))
+}
+
 pub(super) fn scan_source_at_depth(source: &str, origin: &str, module_depth: usize) -> Vec<String> {
     scan_source_with_root_exports(source, origin, module_depth, &HashSet::new())
 }

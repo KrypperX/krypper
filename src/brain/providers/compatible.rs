@@ -1,6 +1,6 @@
+use super::super::context::build_task_prompt_with_repository_context_json;
 use super::*;
 use crate::brain::AdvertisedToolNames;
-use crate::harness::context::build_task_prompt_with_repository_context_json;
 
 /// Token counts returned by a provider response. Missing fields stay unknown.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
