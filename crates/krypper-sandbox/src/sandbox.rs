@@ -411,8 +411,8 @@ fn duplicate_fd_at_or_above(fd: RawFd, minimum: RawFd) -> io::Result<OwnedFd> {
 #[cfg(test)]
 mod tests {
     use super::{
-        duplicate_fd_at_or_above, sandbox, sealed_filter_fd, FIRST_PINNED_FD, RUNNER_MOUNT_FD,
-        SECCOMP_FD,
+        duplicate_fd_at_or_above, sandbox, sealed_filter_fd, FIRST_PINNED_FD, REGISTRY_MOUNT,
+        RUNNER_MOUNT_FD, SECCOMP_FD, TOOLCHAIN_MOUNT, WORKSPACE_MOUNT,
     };
     use crate::{
         DirectoryDescriptors, SandboxBackend, SandboxControl, SandboxEvidenceStatus,
