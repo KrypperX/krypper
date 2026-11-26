@@ -265,6 +265,7 @@ impl SandboxIsolationEvidence {
         }
     }
 
+    #[cfg(not(target_os = "linux"))]
     pub(crate) fn unavailable(&mut self, control: SandboxControl) {
         if let Some(record) = self
             .controls
