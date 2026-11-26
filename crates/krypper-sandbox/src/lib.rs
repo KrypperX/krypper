@@ -614,14 +614,18 @@ pub enum SandboxResource {
     FileSize,
 }
 
-/// Runtime selected by the fixed host sandbox implementation.
+/// Identity of the runtime selected for one sandbox run.
+///
+/// Backend support is negotiated separately; this identity does not prove host setup succeeded.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SandboxBackend {
     Bubblewrap,
 }
 
-/// Fixed controls represented in sandbox setup evidence.
+/// Typed controls used for backend negotiation and per-run sandbox evidence.
+///
+/// Backend support is queried independently from the evidence records that describe one run.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SandboxControl {
@@ -650,6 +654,51 @@ pub enum SandboxControl {
     CpuLimit,
     WallClockLimit,
     CgroupCleanup,
+}
+
+// The only accepted execution contract is the fixed offline Cargo profile. Keep its required
+// controls separate from per-run evidence and backend support so a successful match cannot be
+// mistaken for controls that were applied on the current host.
+const OFFLINE_CARGO_REQUIRED_CONTROLS: [SandboxControl; 25] = [
+    SandboxControl::SandboxRuntime,
+    SandboxControl::UserNamespace,
+    SandboxControl::PidNamespace,
+    SandboxControl::NetworkNamespace,
+    SandboxControl::IpcNamespace,
+    SandboxControl::UtsNamespace,
+    SandboxControl::CgroupNamespace,
+    SandboxControl::SeccompFilter,
+    SandboxControl::CapabilityDrop,
+    SandboxControl::ReadOnlySystemMounts,
+    SandboxControl::ReadOnlyWorkspace,
+    SandboxControl::ReadOnlyToolchain,
+    SandboxControl::ReadOnlyRegistry,
+    SandboxControl::TemporaryFilesystems,
+    SandboxControl::DeviceMount,
+    SandboxControl::ProcMount,
+    SandboxControl::ReadOnlyRoot,
+    SandboxControl::ClearedEnvironment,
+    SandboxControl::ProcessLifecycle,
+    SandboxControl::MemoryLimit,
+    SandboxControl::SwapLimit,
+    SandboxControl::ProcessLimit,
+    SandboxControl::CpuLimit,
+    SandboxControl::WallClockLimit,
+    SandboxControl::CgroupCleanup,
+];
+
+/// A backend declares the controls it can establish for the fixed profile.
+///
+/// Capabilities describe backend support only. Host prerequisites, setup success and runtime
+/// enforcement remain separate checks performed by the selected backend and recorded as result
+/// evidence.
+pub(crate) trait SandboxExecutionBackend {
+    fn identity(&self) -> Option<SandboxBackend>;
+
+    /// Report implementation support only; this must not probe or change host state.
+    fn supports_control(&self, control: SandboxControl) -> bool;
+
+    fn run(&self, request: SandboxRunRequest) -> SandboxRunResult;
 }
 
 /// Evidence state for a requested control. `Observed` is reserved for a direct behavioral probe;
@@ -683,7 +732,7 @@ pub struct SandboxIsolationEvidence {
 }
 
 impl SandboxIsolationEvidence {
-    const MAX_CONTROL_RECORDS: usize = 25;
+    const MAX_CONTROL_RECORDS: usize = OFFLINE_CARGO_REQUIRED_CONTROLS.len();
 
     /// Create an empty evidence value for serialization and result construction.
     pub fn new(backend: Option<SandboxBackend>) -> Self {
@@ -703,7 +752,6 @@ impl SandboxIsolationEvidence {
         &self.controls
     }
 
-    #[cfg(target_os = "linux")]
     pub(crate) fn request(&mut self, control: SandboxControl) {
         if self.controls.iter().any(|record| record.control == control) {
             return;
@@ -716,7 +764,6 @@ impl SandboxIsolationEvidence {
         }
     }
 
-    #[cfg(not(target_os = "linux"))]
     pub(crate) fn unavailable(&mut self, control: SandboxControl) {
         if let Some(record) = self
             .controls
@@ -737,12 +784,10 @@ impl SandboxIsolationEvidence {
         self.transition_requested(SandboxEvidenceStatus::Applied);
     }
 
-    #[cfg(target_os = "linux")]
     pub(crate) fn mark_unknown(&mut self) {
         self.transition_requested(SandboxEvidenceStatus::Unknown);
     }
 
-    #[cfg(target_os = "linux")]
     fn transition_requested(&mut self, status: SandboxEvidenceStatus) {
         for record in &mut self.controls {
             if record.status == SandboxEvidenceStatus::Requested {
@@ -794,6 +839,25 @@ impl SandboxRunResult {
 
 /// Execute the fixed offline Cargo test profile with the host-enforced sandbox.
 pub fn run_offline_cargo(request: SandboxRunRequest) -> SandboxRunResult {
+    run_offline_cargo_with_backend(request, selected_backend())
+}
+
+fn selected_backend() -> &'static dyn SandboxExecutionBackend {
+    #[cfg(target_os = "linux")]
+    {
+        linux::backend()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        unsupported::backend()
+    }
+}
+
+// This is the only runner dispatch point: validate and negotiate once, then invoke one backend.
+fn run_offline_cargo_with_backend(
+    request: SandboxRunRequest,
+    backend: &dyn SandboxExecutionBackend,
+) -> SandboxRunResult {
     let output_limit = if request.limits.output_bytes <= MAX_OUTPUT_BYTES {
         request.limits.output_bytes
     } else {
@@ -814,14 +878,41 @@ pub fn run_offline_cargo(request: SandboxRunRequest) -> SandboxRunResult {
         result.diagnostic = Some("test_filter is invalid".into());
         return result;
     }
-    #[cfg(target_os = "linux")]
-    {
-        linux::run(request)
+
+    let missing = OFFLINE_CARGO_REQUIRED_CONTROLS
+        .iter()
+        .copied()
+        .filter(|control| !backend.supports_control(*control))
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        let mut result = SandboxRunResult::empty(
+            request.run_id,
+            SandboxOutcome::SandboxUnavailable,
+            output_limit,
+        );
+        result.diagnostic = Some(
+            if backend.identity().is_none() {
+                "process sandbox is unavailable on this platform"
+            } else {
+                "selected backend cannot provide required sandbox controls"
+            }
+            .into(),
+        );
+
+        let mut evidence = SandboxIsolationEvidence::new(backend.identity());
+        for control in OFFLINE_CARGO_REQUIRED_CONTROLS {
+            if missing.contains(&control) {
+                evidence.unavailable(control);
+            } else {
+                evidence.request(control);
+            }
+        }
+        evidence.mark_unknown();
+        result.sandbox_evidence = Some(evidence);
+        return result;
     }
-    #[cfg(not(target_os = "linux"))]
-    {
-        unsupported::run(request)
-    }
+
+    backend.run(request)
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -897,6 +988,7 @@ mod directory_descriptor_tests {
 mod execution_contract_tests {
     use super::*;
     use std::fs::{self, File};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn requirements_with_profile_id(profile_id: &str) -> ValidatedExecutionRequirements {
         let fixed = ValidatedExecutionRequirements::offline_cargo_test();
@@ -928,6 +1020,153 @@ mod execution_contract_tests {
             Arc::new(AtomicBool::new(false)),
             requirements,
         )
+    }
+
+    #[derive(Clone, Copy)]
+    enum TestBackendBehavior {
+        LaunchPayload,
+        FailDuringSetup,
+    }
+
+    struct TestBackend {
+        identity: Option<SandboxBackend>,
+        controls: Vec<SandboxControl>,
+        behavior: TestBackendBehavior,
+        setup_attempts: AtomicUsize,
+        payload_launches: AtomicUsize,
+    }
+
+    impl TestBackend {
+        fn new(
+            identity: Option<SandboxBackend>,
+            controls: Vec<SandboxControl>,
+            behavior: TestBackendBehavior,
+        ) -> Self {
+            Self {
+                identity,
+                controls,
+                behavior,
+                setup_attempts: AtomicUsize::new(0),
+                payload_launches: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl SandboxExecutionBackend for TestBackend {
+        fn identity(&self) -> Option<SandboxBackend> {
+            self.identity
+        }
+
+        fn supports_control(&self, control: SandboxControl) -> bool {
+            self.controls.contains(&control)
+        }
+
+        fn run(&self, request: SandboxRunRequest) -> SandboxRunResult {
+            self.setup_attempts.fetch_add(1, Ordering::SeqCst);
+            if matches!(self.behavior, TestBackendBehavior::FailDuringSetup) {
+                let mut result = SandboxRunResult::empty(
+                    request.run_id,
+                    SandboxOutcome::SandboxSetupFailed,
+                    request.limits.output_bytes,
+                );
+                result.diagnostic = Some("injected backend setup failure".into());
+                return result;
+            }
+
+            self.payload_launches.fetch_add(1, Ordering::SeqCst);
+            SandboxRunResult::empty(
+                request.run_id,
+                SandboxOutcome::Exited(0),
+                request.limits.output_bytes,
+            )
+        }
+    }
+
+    #[test]
+    fn missing_backend_control_denies_before_backend_or_payload_launch() {
+        let missing = SandboxControl::MemoryLimit;
+        let controls = OFFLINE_CARGO_REQUIRED_CONTROLS
+            .iter()
+            .copied()
+            .filter(|control| *control != missing)
+            .collect();
+        let backend = TestBackend::new(
+            Some(SandboxBackend::Bubblewrap),
+            controls,
+            TestBackendBehavior::LaunchPayload,
+        );
+
+        let result = run_offline_cargo_with_backend(
+            request_with(
+                ValidatedExecutionRequirements::offline_cargo_test(),
+                RunLimits::offline_cargo_test(),
+            ),
+            &backend,
+        );
+
+        assert_eq!(result.outcome, SandboxOutcome::SandboxUnavailable);
+        assert_eq!(backend.setup_attempts.load(Ordering::SeqCst), 0);
+        assert_eq!(backend.payload_launches.load(Ordering::SeqCst), 0);
+        let evidence = result.sandbox_evidence.expect("negotiation evidence");
+        assert_eq!(evidence.backend(), Some(SandboxBackend::Bubblewrap));
+        assert!(evidence.controls().iter().any(|record| {
+            record.control == missing && record.status == SandboxEvidenceStatus::Unavailable
+        }));
+        assert!(evidence.controls().iter().any(|record| {
+            record.control != missing && record.status == SandboxEvidenceStatus::Unknown
+        }));
+    }
+
+    #[test]
+    fn unsupported_backend_denies_before_backend_or_payload_launch() {
+        let backend = TestBackend::new(None, Vec::new(), TestBackendBehavior::LaunchPayload);
+
+        let result = run_offline_cargo_with_backend(
+            request_with(
+                ValidatedExecutionRequirements::offline_cargo_test(),
+                RunLimits::offline_cargo_test(),
+            ),
+            &backend,
+        );
+
+        assert_eq!(result.outcome, SandboxOutcome::SandboxUnavailable);
+        assert_eq!(
+            result.diagnostic.as_deref(),
+            Some("process sandbox is unavailable on this platform")
+        );
+        assert_eq!(backend.setup_attempts.load(Ordering::SeqCst), 0);
+        assert_eq!(backend.payload_launches.load(Ordering::SeqCst), 0);
+        let evidence = result.sandbox_evidence.expect("unsupported evidence");
+        assert_eq!(evidence.backend(), None);
+        assert_eq!(
+            evidence.controls().len(),
+            OFFLINE_CARGO_REQUIRED_CONTROLS.len()
+        );
+        assert!(evidence
+            .controls()
+            .iter()
+            .all(|record| record.status == SandboxEvidenceStatus::Unavailable));
+    }
+
+    #[test]
+    fn backend_setup_failure_is_terminal_before_payload_launch() {
+        let backend = TestBackend::new(
+            Some(SandboxBackend::Bubblewrap),
+            OFFLINE_CARGO_REQUIRED_CONTROLS.to_vec(),
+            TestBackendBehavior::FailDuringSetup,
+        );
+
+        let result = run_offline_cargo_with_backend(
+            request_with(
+                ValidatedExecutionRequirements::offline_cargo_test(),
+                RunLimits::offline_cargo_test(),
+            ),
+            &backend,
+        );
+
+        assert_eq!(result.outcome, SandboxOutcome::SandboxSetupFailed);
+        assert_eq!(backend.setup_attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(backend.payload_launches.load(Ordering::SeqCst), 0);
     }
 
     #[test]
