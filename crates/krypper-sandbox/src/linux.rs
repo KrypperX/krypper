@@ -2,6 +2,7 @@
 
 use crate::host::effective_uid;
 use crate::sandbox::sandbox;
+use crate::seccomp::compile_filter;
 use crate::{RunLimits, SandboxOutcome, SandboxRunRequest, SandboxRunResult};
 use std::io;
 use std::sync::atomic::Ordering;
@@ -70,6 +71,14 @@ fn run_with_containment(request: SandboxRunRequest, contained: bool) -> SandboxR
         result.diagnostic = Some("captured sandbox descriptor is not a directory".into());
         return result;
     }
+    let filter = match compile_filter() {
+        Ok(filter) => filter,
+        Err(error) => {
+            result.outcome = SandboxOutcome::SandboxSetupFailed;
+            result.diagnostic = Some(format!("fixed syscall filter setup failed: {error}"));
+            return result;
+        }
+    };
     if is_cleanup_uncertain() {
         hold_for_recovery(&mut result, "previous process cleanup is unconfirmed");
         return result;
@@ -129,7 +138,7 @@ fn run_with_containment(request: SandboxRunRequest, contained: bool) -> SandboxR
             supervisor.unit(),
             supervisor.group().display()
         ))?;
-        let mut probe = sandbox(&directories, supervisor.group())?;
+        let mut probe = sandbox(&directories, supervisor.group(), &filter)?;
         probe.args(["--", "/usr/bin/true"]);
         if !bounded_host(&mut probe)?.is_empty() {
             return Err(io::Error::other("unexpected sandbox output"));
@@ -139,7 +148,7 @@ fn run_with_containment(request: SandboxRunRequest, contained: bool) -> SandboxR
             settle_before_launch(&mut result, &mut supervisor, StopReason::Cancelled);
             return Ok(());
         }
-        let mut command = sandbox(&directories, supervisor.group())?;
+        let mut command = sandbox(&directories, supervisor.group(), &filter)?;
         command.args(cargo_command_args(test_filter.as_deref()));
         result.outcome = SandboxOutcome::SpawnFailed;
         let mut child = ManagedChild::new(command.spawn()?);

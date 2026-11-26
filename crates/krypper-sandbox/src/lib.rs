@@ -21,6 +21,8 @@ mod host;
 mod linux;
 #[cfg(target_os = "linux")]
 mod sandbox;
+#[cfg(target_os = "linux")]
+mod seccomp;
 #[cfg(not(target_os = "linux"))]
 mod unsupported;
 

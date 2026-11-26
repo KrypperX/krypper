@@ -32,5 +32,7 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-cargo-msrv-${{ steps.msrv.outputs.version }}-${{ hashFiles('Cargo.toml', 'Cargo.lock') }}
       - name: Test all targets with the minimum supported Rust version
         run: cargo test --all-targets --locked
+      - name: Test Linux sandbox crate with the minimum supported Rust version
+        run: cargo test -p krypper-sandbox --all-targets --locked
       - name: Test documentation examples with the minimum supported Rust version
         run: cargo test --doc --locked

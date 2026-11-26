@@ -58,6 +58,7 @@ invocations would contend for the same host resource.
 | `real_sandbox_environment_and_network_carry_no_host_secrets` | Parent-provided `GITHUB_TOKEN` and a per-run secret canary are absent inside; a live host loopback listener is unreachable inside and still reachable outside. |
 | `real_sandbox_cleanup_releases_state_for_the_next_run` | Cleanup is confirmed, no recovery hold is raised, and an immediately following run is not degraded. |
 | `real_offline_cargo_behavior_is_preserved_through_the_harness` | The registered profile still runs through `WorkspacePlan` and Harness with a literal filter: the selected test executes, the unrelated test is filtered. |
+| `real_sandbox_syscall_filter_covers_cargo_payload_and_descendant` | After checking the host does not already return `EPERM` for the probes, Cargo and an exec'd test descendant can call `getpid` and use `AF_UNIX`; `io_uring_enter` and `AF_VSOCK` socket calls return `EPERM`; x86_64 also checks tagged x32 and reserved syscall handling. Cargo succeeds and the supervisor confirms cleanup. |
 | `real_sandbox_limits_and_cancellation_stay_bounded` | Zero matches, nonzero exit, wall timeout, output ceiling, CPU/memory/process ceilings and cancellation all return their typed outcome with confirmed cleanup. |
 
 Nothing in this module grants authority, adds a profile, changes the CLI, or weakens the fixed
@@ -74,10 +75,14 @@ the legacy pair once the gated suite has been exercised on a provisioned host.
 ## What is still unproven
 
 Ordinary CI cannot establish: Bubblewrap flag semantics, in-payload namespace behaviour,
-`pre_exec` cgroup attachment, ambient descriptor hygiene beyond the explicit 200–202 write probes,
-delegated-subtree checks, crash-time lease recovery, or cross-process cleanup holds. Those remain
-source-review claims until a gated run on a provisioned host supplies evidence. macOS and Windows
-behaviour is unknown.
+`pre_exec` cgroup attachment, seccomp descriptor propagation and kernel enforcement, ambient
+descriptor hygiene beyond the explicit 200–202 write probes, delegated-subtree checks, crash-time
+lease recovery, or cross-process cleanup holds. Those remain source-review claims until a gated
+run on a provisioned host supplies evidence. macOS and Windows behaviour is unknown; Linux
+architectures outside the fixed profile fail before workspace code can launch.
 
-This fixture does not evaluate syscall filtering. The fixed Bubblewrap command installs no seccomp
-profile, so passing its mount-source probes provides no seccomp evidence.
+The fixed syscall filter is defense in depth alongside the private namespaces, read-only mounts,
+offline network namespace and cgroup limits. It denies a small immutable set of sensitive calls
+and the vsock domain; it does not replace filesystem confinement or make arbitrary syscalls safe.
+Ordinary CI evaluates the generated BPF policy and Bubblewrap command construction, but cannot establish
+that the host Bubblewrap version accepts the descriptor or that the kernel enforces the filter.
