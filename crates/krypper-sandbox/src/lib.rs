@@ -732,7 +732,7 @@ pub struct SandboxIsolationEvidence {
 }
 
 impl SandboxIsolationEvidence {
-    const MAX_CONTROL_RECORDS: usize = 25;
+    const MAX_CONTROL_RECORDS: usize = OFFLINE_CARGO_REQUIRED_CONTROLS.len();
 
     /// Create an empty evidence value for serialization and result construction.
     pub fn new(backend: Option<SandboxBackend>) -> Self {
@@ -788,7 +788,6 @@ impl SandboxIsolationEvidence {
         self.transition_requested(SandboxEvidenceStatus::Unknown);
     }
 
-    #[cfg(target_os = "linux")]
     fn transition_requested(&mut self, status: SandboxEvidenceStatus) {
         for record in &mut self.controls {
             if record.status == SandboxEvidenceStatus::Requested {
