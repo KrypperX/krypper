@@ -2,29 +2,26 @@
 
 use crate::host::effective_uid;
 use crate::sandbox::sandbox;
-use crate::{RunLimits, SandboxOutcome, SandboxResource, SandboxRunRequest, SandboxRunResult};
+use crate::{RunLimits, SandboxOutcome, SandboxRunRequest, SandboxRunResult};
 use std::io;
-use std::os::unix::process::ExitStatusExt;
 use std::sync::atomic::Ordering;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 mod cgroup;
 mod outcome;
 mod process;
 mod recovery;
+mod supervision;
 
-use cgroup::{cpu_usage_usec, record_cgroup_limit_events, record_event, Supervisor};
+#[cfg(test)]
+use cgroup::record_event;
+use cgroup::Supervisor;
 use outcome::{resolve_outcome, StopReason};
-use process::{
-    bounded_host, drain, drain_after_child_exit, nonblocking, reap, ManagedChild, PostExitDrain,
-};
+use process::{bounded_host, ManagedChild};
 use recovery::{
     hold_for_recovery, is_cleanup_uncertain, mark_cleanup_uncertain, try_active_lock,
     ActiveLockError, HostLease, HostLeaseError,
 };
-const POST_EXIT_PIPE_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
-
 pub(super) fn run(request: SandboxRunRequest) -> SandboxRunResult {
     run_with_containment(request, effective_uid() != 0)
 }
@@ -125,7 +122,6 @@ fn run_with_containment(request: SandboxRunRequest, contained: bool) -> SandboxR
     };
     result.output_limit = output;
     let mut launched = false;
-    let mut stop = StopReason::Unknown;
     let started = Instant::now();
     let execution = (|| -> io::Result<()> {
         lease.record(&format!(
@@ -148,7 +144,7 @@ fn run_with_containment(request: SandboxRunRequest, contained: bool) -> SandboxR
         result.outcome = SandboxOutcome::SpawnFailed;
         let mut child = ManagedChild::new(command.spawn()?);
         launched = true;
-        let (mut out, mut err) = {
+        let (out, err) = {
             let child = child.child_mut()?;
             let out = child
                 .stdout
@@ -160,103 +156,19 @@ fn run_with_containment(request: SandboxRunRequest, contained: bool) -> SandboxR
                 .ok_or_else(|| io::Error::other("missing stderr"))?;
             (out, err)
         };
-        nonblocking(&out)?;
-        nonblocking(&err)?;
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let mut out_eof = false;
-        let mut err_eof = false;
-        let mut events = Vec::new();
-        let mut cgroup_events_recorded = false;
-        let mut output_drain_confirmed = true;
-        let wall = Duration::from_millis(limits.wall_millis);
-        let cpu_budget = limits.cpu_budget_usec;
-        loop {
-            let remaining = output.saturating_sub(stdout.len() + stderr.len());
-            out_eof |= drain(&mut out, &mut stdout, remaining)?;
-            let remaining = output.saturating_sub(stdout.len() + stderr.len());
-            err_eof |= drain(&mut err, &mut stderr, remaining)?;
-            if stdout.len() + stderr.len() >= output {
-                result.truncated = true;
-                stop = StopReason::OutputLimit;
-                break;
-            }
-            if cancelled.load(Ordering::SeqCst) {
-                stop = StopReason::Cancelled;
-                break;
-            }
-            if let Some(exit) = child.child_mut()?.try_wait()? {
-                let cpu_budget_exceeded = cpu_usage_usec(supervisor.group())? >= cpu_budget;
-                record_cgroup_limit_events(supervisor.group(), &mut events);
-                cgroup_events_recorded = true;
-                let _ = supervisor.clean();
-                let post_exit_drain = if out_eof && err_eof {
-                    PostExitDrain::Complete
-                } else {
-                    drain_after_child_exit(
-                        &mut out,
-                        &mut err,
-                        &mut stdout,
-                        &mut stderr,
-                        output,
-                        POST_EXIT_PIPE_DRAIN_TIMEOUT,
-                        || cancelled.load(Ordering::SeqCst),
-                    )?
-                };
-                stop = match post_exit_drain {
-                    PostExitDrain::Complete => {
-                        if cpu_budget_exceeded {
-                            StopReason::CpuBudget
-                        } else if let Some(code) = exit.code() {
-                            StopReason::Exited(code)
-                        } else {
-                            StopReason::Signaled(exit.signal().unwrap_or(0))
-                        }
-                    }
-                    PostExitDrain::OutputLimit => {
-                        result.truncated = true;
-                        StopReason::OutputLimit
-                    }
-                    PostExitDrain::Cancelled => StopReason::Cancelled,
-                    PostExitDrain::DeadlineExpired => {
-                        result.truncated = true;
-                        output_drain_confirmed = false;
-                        result.diagnostic =
-                            Some("output pipes remained open after bounded cgroup cleanup".into());
-                        StopReason::Unknown
-                    }
-                };
-                break;
-            }
-            if started.elapsed() >= wall {
-                stop = StopReason::WallTimeout;
-                break;
-            }
-            if cpu_usage_usec(supervisor.group())? >= cpu_budget {
-                stop = StopReason::CpuBudget;
-                break;
-            }
-            thread::sleep(Duration::from_millis(5));
-        }
-        if !cgroup_events_recorded {
-            record_cgroup_limit_events(supervisor.group(), &mut events);
-        }
-        if matches!(stop, StopReason::Signaled(libc::SIGXCPU)) {
-            record_event(&mut events, SandboxResource::Cpu);
-        }
-        if matches!(stop, StopReason::Signaled(libc::SIGXFSZ)) {
-            record_event(&mut events, SandboxResource::FileSize);
-        }
-        result.cleanup_confirmed = supervisor.clean() && output_drain_confirmed;
-        if !reap(child.child_mut()?) {
-            result.cleanup_confirmed = false;
-        }
-        result.outcome = resolve_outcome(stop, &events, result.cleanup_confirmed);
-        result.output_bytes = stdout.len().saturating_add(stderr.len());
-        result.stdout = stdout;
-        result.stderr = stderr;
-        result.test_evidence_available = true;
-        result.resource_events = events;
+        supervision::supervise(
+            supervision::PayloadInputs {
+                child: &mut child,
+                supervisor: &mut supervisor,
+                limits,
+                output_limit: output,
+                cancelled: &cancelled,
+                started,
+            },
+            out,
+            err,
+        )?
+        .apply_to(&mut result);
         Ok(())
     })();
     if let Err(e) = execution {
