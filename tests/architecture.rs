@@ -60,8 +60,8 @@ fn tools_core_guard_detects_direct_alias_facade_and_parent_paths() {
         r#"
             pub mod core { pub trait Codec {} }
             pub(crate) mod tools {
-                #[serde(bound = "T: crate::core::Codec")]
-                struct Model<T>(T);
+                #[serde(bound = "T: crate::core::Codec, U: Clone")]
+                struct Model<T, U>(T, U);
             }
         "#,
         r#"

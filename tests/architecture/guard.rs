@@ -1572,7 +1572,7 @@ fn scan_crate_root_core_aliases(root: &Path, violations: &mut Vec<String>) -> Ha
         Item::Mod(module)
             if ident_name(&module.ident) == "core" && !item_is_test_only(&module.attrs) =>
         {
-            Some(core_module_glob_exports(
+            Some(module_public_glob_exports(
                 module,
                 root,
                 &module_directory(root),
@@ -1587,7 +1587,7 @@ fn scan_crate_root_core_aliases(root: &Path, violations: &mut Vec<String>) -> Ha
         .filter_map(|item| match item {
             Item::Mod(module) if !item_is_test_only(&module.attrs) => Some((
                 ident_name(&module.ident),
-                core_module_glob_exports(module, root, &module_directory(root), false),
+                module_public_glob_exports(module, root, &module_directory(root), false),
             )),
             _ => None,
         })
@@ -2031,7 +2031,7 @@ fn root_path_root_module_name(segments: &[String], exports: &HashSet<String>) ->
     (segments.len() == start + 1).then(|| segments[start].clone())
 }
 
-fn core_module_glob_exports(
+fn module_public_glob_exports(
     module: &syn::ItemMod,
     source_file: &Path,
     module_dir: &Path,
@@ -3120,15 +3120,19 @@ fn serde_string_contains_core_path(
         }
     }
 
-    if let Ok(predicate) = syn::parse_str::<syn::WherePredicate>(value) {
-        let mut probe = CoreDependencyProbe {
-            module_depth,
-            crate_root_core_exports,
-            inspected_macro_imports: &HashSet::new(),
-            found: false,
-        };
-        probe.visit_where_predicate(&predicate);
-        return probe.found;
+    let parser =
+        syn::punctuated::Punctuated::<syn::WherePredicate, syn::Token![,]>::parse_terminated;
+    if let Ok(predicates) = syn::parse::Parser::parse_str(parser, value) {
+        return predicates.iter().any(|predicate| {
+            let mut probe = CoreDependencyProbe {
+                module_depth,
+                crate_root_core_exports,
+                inspected_macro_imports: &HashSet::new(),
+                found: false,
+            };
+            probe.visit_where_predicate(predicate);
+            probe.found
+        });
     }
     false
 }
