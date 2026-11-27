@@ -397,9 +397,7 @@ impl CredentialResolver {
             Ok(value) => Ok(Some(value)),
             Err(std::env::VarError::NotUnicode(_)) => Err(invalid_environment_message),
             Err(std::env::VarError::NotPresent) if self.use_saved => {
-                if self.load().is_err() {
-                    return Ok(None);
-                }
+                self.load()?;
                 Ok(self
                     .store
                     .as_ref()
@@ -444,7 +442,8 @@ impl CredentialResolver {
 
 #[cfg(test)]
 mod credential_precedence_tests {
-    use super::configured_value_from_sources;
+    use super::{configured_value_from_sources, CredentialResolver};
+    use crate::test_support::{lock_environment, RestoreEnvironmentVariable, TempDir};
     use std::env::VarError;
     use std::ffi::OsString;
 
@@ -489,6 +488,27 @@ mod credential_precedence_tests {
         assert_eq!(
             configured_value_from_sources(Ok(String::new()), Some("saved-token"), "missing key"),
             Ok(String::new())
+        );
+    }
+
+    #[test]
+    fn optional_saved_credential_errors_are_not_treated_as_missing() {
+        let _environment_lock = lock_environment();
+        let directory = TempDir::new();
+        let _config_home = RestoreEnvironmentVariable::set("XDG_CONFIG_HOME", directory.path());
+        let _gateway_id = RestoreEnvironmentVariable::remove("CLOUDFLARE_AI_GATEWAY_ID");
+        let path = directory.path().join("krypper/credentials.json");
+        let legacy = serde_json::to_vec(&std::collections::BTreeMap::from([(
+            "CLOUDFLARE_AI_GATEWAY_ID",
+            "legacy-gateway-id",
+        )]))
+        .unwrap();
+        super::super::settings::write_private_file(&path, &legacy, "credential store").unwrap();
+
+        let mut resolver = CredentialResolver::new(true);
+        assert_eq!(
+            resolver.optional("CLOUDFLARE_AI_GATEWAY_ID", "gateway ID must be valid UTF-8"),
+            Err("cannot read saved credentials; run `krypper setup --status` to inspect")
         );
     }
 }

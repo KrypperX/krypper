@@ -13,9 +13,11 @@ krypper task --goal "Review this change" --max-actions 8 \
 ```
 
 Existing `config.toml` files with `provider` and `model` continue to use manual
-routing when `routing_mode` is absent. Saved credentials remain in the existing
-per-user credential store; credential precedence and provider selectors are
-unchanged.
+routing when `routing_mode` is absent. Saved credentials remain in the same
+per-user credential store, now encrypted with a key held in the system
+credential vault. Environment precedence and provider selectors are unchanged.
+Existing plaintext credential files require explicit approval in `krypper
+setup` before migration.
 
 ## Enable automatic routing
 

@@ -634,6 +634,11 @@ for its local chat tool-call format.
 Run `krypper setup` from any directory to choose a provider, search the offline
 model catalog, enter credentials, review the selection, and save a default
 model without a TUI.
+The provider list accepts its displayed name or number and marks the saved
+choice. Press Enter to keep the saved provider and model; catalog matches show
+both the model name and ID. When a credential already exists, keeping it is
+the default; replace it only when needed. Environment values still take
+precedence over the encrypted saved value.
 Cloudflare Workers AI direct and Cloudflare AI Gateway are separate choices.
 The catalog is informational and offline; a model ID can also be entered
 manually.
@@ -691,12 +696,16 @@ the routing snapshot to match exactly. `setup --reset` removes those task
 routing records and the model catalog cache.
 
 Credential prompts do not echo the value. Krypper stores credentials separately
-from `config.toml`, in `credentials.json` in the user's Krypper configuration
-directory. On Unix, the directory is restricted to the current user (`0700`)
-and the file to the current user (`0600`). On other platforms the file inherits
-permissions from the per-user configuration directory. The file is local plain
-text, not encrypted. Credentials are never written to the project workspace,
-printed, or logged.
+from `config.toml`, in an authenticated encrypted envelope in `credentials.json`
+in the user's Krypper configuration directory. The encryption key is held in
+the current user's system credential vault: Secret Service on Linux, Keychain
+on macOS, or Windows Credential Manager. The file and its parent directory keep
+their private-permission checks. If the system vault is locked, missing, or
+unavailable, saved credentials fail closed without a plaintext fallback. A
+legacy plaintext file is migrated only after the user explicitly approves the
+prompt in `krypper setup`; replacement is atomic, while old backups and
+filesystem snapshots are outside Krypper's control. Credentials are never
+written to the project workspace, printed, or logged.
 
 Environment variables override each matching saved credential. A set but
 invalid environment value does not fall back to the saved value. `--no-config`

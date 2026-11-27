@@ -251,7 +251,7 @@ pub(super) fn remove_profile(
         .map_err(|error| error.to_string())?
         .unwrap_or_else(CredentialStore::empty);
     credentials.remove(&credential_name(id));
-    save_credentials(credential_path, &credentials)?;
+    save_credentials(credential_path, &mut credentials)?;
     profiles.remove(index);
     save_provider_profiles(profile_path, &profiles)
 }
@@ -439,7 +439,7 @@ mod tests {
 
         let mut credentials = CredentialStore::empty();
         credentials.insert(&credential_name("mock"), "test-api-key".to_owned());
-        save_credentials(&credential_path, &credentials).unwrap();
+        save_credentials(&credential_path, &mut credentials).unwrap();
         remove_profile(&profile_path, &credential_path, "mock").unwrap();
         assert!(load_provider_profiles(&profile_path).unwrap().is_empty());
         assert!(!credential_path.exists());
