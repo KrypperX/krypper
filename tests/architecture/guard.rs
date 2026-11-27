@@ -9,6 +9,7 @@ const TOOLS_MODULE_DEPTH: usize = 1;
 const INSPECTED_CRATE_ROOTS: &[&str] = &["serde", "serde_derive", "serde_json"];
 const CORE_ROOT_SELF_ALIAS_PREFIX: &str = "<core-root-self-alias:";
 const CORE_ROOT_MODULE_ALIAS_PREFIX: &str = "<core-root-module-alias:";
+const CORE_ROOT_MODULE_PATH_PREFIX: &str = "<core-root-module-path:";
 // Keep facade module provenance item-specific so neutral siblings stay neutral.
 const CORE_ROOT_FACADE_MODULE_PREFIX: &str = "<core-root-facade-module:";
 const CORE_ROOT_FACADE_UNKNOWN_PREFIX: &str = "<core-root-facade-unknown:";
@@ -1588,6 +1589,25 @@ fn scan_crate_root_core_aliases(root: &Path, violations: &mut Vec<String>) -> Ha
     }) {
         exports.insert("core".to_owned());
     }
+    if let Some(paths) = file.items.iter().find_map(|item| match item {
+        Item::Mod(module)
+            if ident_name(&module.ident) == "core" && !item_is_test_only(&module.attrs) =>
+        {
+            Some(core_module_path_exports(
+                module,
+                root,
+                &module_directory(root),
+                false,
+            ))
+        }
+        _ => None,
+    }) {
+        exports.extend(
+            paths
+                .into_iter()
+                .map(|path| core_root_module_path_key(&path)),
+        );
+    }
     let core_glob_exports = file.items.iter().find_map(|item| match item {
         Item::Mod(module)
             if ident_name(&module.ident) == "core" && !item_is_test_only(&module.attrs) =>
@@ -2055,6 +2075,27 @@ fn collect_core_aliases(
                             }
                         }
                     }
+                } else if let Some((module_name, nested_path)) =
+                    root_path_root_module_and_suffix(prefix, exports, context.root_module_aliases)
+                {
+                    let core_exports = context
+                        .root_module_glob_exports
+                        .get(&module_name)
+                        .and_then(|module| module.facade_paths.as_ref())
+                        .map(|paths| core_facade_glob_exports(paths, &nested_path));
+                    match core_exports {
+                        Some(names) => exports.extend(names),
+                        None => {
+                            if !context.violations.iter().any(|violation| {
+                                violation.contains("Core facade glob exports are not inspectable")
+                            }) {
+                                context.violations.push(format!(
+                                    "{}: Core facade glob exports are not inspectable",
+                                    context.origin
+                                ));
+                            }
+                        }
+                    }
                 } else {
                     if !context.violations.iter().any(|violation| {
                         violation.contains("Core facade glob exports are not inspectable")
@@ -2088,10 +2129,14 @@ fn root_path_is_core_module(segments: &[String], exports: &HashSet<String>) -> b
     {
         start += 1;
     }
-    segments.len() == start + 1
-        && segments.get(start).is_some_and(|segment| {
-            segment == "core" || exports.contains(&core_root_module_alias_key(segment))
-        })
+    let Some(root_module) = segments.get(start) else {
+        return false;
+    };
+    if root_module != "core" && !exports.contains(&core_root_module_alias_key(root_module)) {
+        return false;
+    }
+    let nested_path = segments.get(start + 1..).unwrap_or_default();
+    nested_path.is_empty() || exports.contains(&core_root_module_path_key(&nested_path.join("::")))
 }
 
 fn root_path_root_module_name(
@@ -2099,6 +2144,15 @@ fn root_path_root_module_name(
     exports: &HashSet<String>,
     aliases: &HashMap<String, String>,
 ) -> Option<String> {
+    let (module_name, nested_path) = root_path_root_module_and_suffix(segments, exports, aliases)?;
+    nested_path.is_empty().then_some(module_name)
+}
+
+fn root_path_root_module_and_suffix(
+    segments: &[String],
+    exports: &HashSet<String>,
+    aliases: &HashMap<String, String>,
+) -> Option<(String, Vec<String>)> {
     let mut start = match segments.first().map(String::as_str) {
         Some("crate" | "$crate" | "self") => 1,
         Some(segment) if exports.contains(&core_root_self_alias_key(segment)) => 1,
@@ -2115,7 +2169,7 @@ fn root_path_root_module_name(
     {
         start += 1;
     }
-    if segments.len() != start + 1 {
+    if segments.len() <= start {
         return None;
     }
     let mut module_name = segments[start].clone();
@@ -2129,7 +2183,128 @@ fn root_path_root_module_name(
         }
         module_name = source.clone();
     }
-    Some(module_name)
+    Some((
+        module_name,
+        segments.get(start + 1..).unwrap_or_default().to_vec(),
+    ))
+}
+
+fn core_facade_glob_exports(
+    facade_paths: &HashSet<String>,
+    nested_path: &[String],
+) -> HashSet<String> {
+    let mut exports = HashSet::new();
+    let prefix = format!("{}::", nested_path.join("::"));
+    for path in facade_paths {
+        if let Some(remainder) = path.strip_prefix(&prefix) {
+            if let Some(name) = remainder.split("::").next().filter(|name| *name != "*") {
+                exports.insert(name.to_owned());
+            }
+        }
+    }
+    exports
+}
+
+fn core_module_path_exports(
+    module: &syn::ItemMod,
+    source_file: &Path,
+    module_dir: &Path,
+    inside_inline_module: bool,
+) -> HashSet<String> {
+    let mut paths = HashSet::new();
+    let mut visited = HashSet::new();
+    if let Some((_, items)) = &module.content {
+        collect_core_submodule_paths(
+            items,
+            source_file,
+            &module_dir.join(ident_name(&module.ident)),
+            true,
+            &mut Vec::new(),
+            &mut paths,
+            &mut visited,
+        );
+    } else if let Some(resolved) =
+        resolve_module(source_file, module_dir, module, inside_inline_module)
+    {
+        let normalized = resolved
+            .file_path
+            .canonicalize()
+            .unwrap_or_else(|_| resolved.file_path.clone());
+        if visited.insert(normalized.clone()) {
+            if let Ok(source) = fs::read_to_string(&resolved.file_path) {
+                if let Ok(file) = syn::parse_file(&source) {
+                    collect_core_submodule_paths(
+                        &file.items,
+                        &resolved.file_path,
+                        &resolved.module_dir,
+                        false,
+                        &mut Vec::new(),
+                        &mut paths,
+                        &mut visited,
+                    );
+                }
+            }
+            visited.remove(&normalized);
+        }
+    }
+    paths
+}
+
+fn collect_core_submodule_paths(
+    items: &[Item],
+    source_file: &Path,
+    module_dir: &Path,
+    inside_inline_module: bool,
+    prefix: &mut Vec<String>,
+    paths: &mut HashSet<String>,
+    visited: &mut HashSet<PathBuf>,
+) {
+    for item in items {
+        let Item::Mod(module) = item else {
+            continue;
+        };
+        if item_is_test_only(&module.attrs) || !visibility_reaches_core_parent(&module.vis) {
+            continue;
+        }
+        let name = ident_name(&module.ident);
+        prefix.push(name.clone());
+        paths.insert(prefix.join("::"));
+        if let Some((_, nested)) = &module.content {
+            collect_core_submodule_paths(
+                nested,
+                source_file,
+                &module_dir.join(&name),
+                true,
+                prefix,
+                paths,
+                visited,
+            );
+        } else if let Some(resolved) =
+            resolve_module(source_file, module_dir, module, inside_inline_module)
+        {
+            let normalized = resolved
+                .file_path
+                .canonicalize()
+                .unwrap_or_else(|_| resolved.file_path.clone());
+            if visited.insert(normalized.clone()) {
+                if let Ok(source) = fs::read_to_string(&resolved.file_path) {
+                    if let Ok(file) = syn::parse_file(&source) {
+                        collect_core_submodule_paths(
+                            &file.items,
+                            &resolved.file_path,
+                            &resolved.module_dir,
+                            false,
+                            prefix,
+                            paths,
+                            visited,
+                        );
+                    }
+                }
+                visited.remove(&normalized);
+            }
+        }
+        prefix.pop();
+    }
 }
 
 fn module_public_glob_exports(
@@ -2769,6 +2944,10 @@ fn core_root_facade_path_is_core(
 
 fn core_root_self_alias_key(alias: &str) -> String {
     format!("{CORE_ROOT_SELF_ALIAS_PREFIX}{alias}>")
+}
+
+fn core_root_module_path_key(path: &str) -> String {
+    format!("{CORE_ROOT_MODULE_PATH_PREFIX}{path}>")
 }
 
 fn core_root_module_alias_key(alias: &str) -> String {
