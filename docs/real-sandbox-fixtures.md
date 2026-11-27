@@ -69,6 +69,8 @@ invocations would contend for the same host resource.
 | `real_sandbox_isolation_blocks_host_paths_and_namespaces` | A workspace symlink to an outside canary is unreadable and unwritable; `/home` and `/run/user` are absent; cwd is `/workspace`; `NSpid` has a single entry; host-side create-new canaries confirm all three mount sources are writable before launch; `/proc/self/fd` is inspected and writes through mount source descriptors 200–202 are denied. |
 | `real_sandbox_environment_and_network_carry_no_host_secrets` | Parent-provided `GITHUB_TOKEN` and a per-run secret canary are absent inside; a live host loopback listener is unreachable inside and still reachable outside. |
 | `real_sandbox_cleanup_releases_state_for_the_next_run` | Cleanup is confirmed, no recovery hold is raised, and an immediately following run is not degraded. |
+| `real_sandbox_captured_workspace_path_swap_uses_pinned_root_or_fails_closed` | Replaces the captured workspace pathname with a symlink to a distinct canary root before launch; execution uses the captured directory or fails before tests, and the outside canary remains unchanged. |
+| `real_sandbox_caller_crash_retains_and_recovers_execution_lease` | Kills the Product test caller after its selected payload starts; observes that the selected payload exits while the transient systemd service remains active and its cgroup remains populated; verifies the durable receipt and service/cgroup identity; a new call reports unknown with cleanup unconfirmed and a recovery hold without stopping that service; then a fresh call succeeds after the fixture-owned service is stopped and its cgroup is empty. |
 | `real_offline_cargo_behavior_is_preserved_through_the_harness` | The registered profile still runs through `WorkspacePlan` and Harness with a literal filter: the selected test executes, the unrelated test is filtered. |
 | `real_sandbox_syscall_filter_covers_cargo_payload_and_descendant` | After checking the host does not already return `EPERM` for the probes, Cargo and an exec'd test descendant can call `getpid` and use `AF_UNIX`; `io_uring_enter` and `AF_VSOCK` socket calls return `EPERM`; x86_64 also checks tagged x32 and reserved syscall handling. Cargo succeeds and the supervisor confirms cleanup. |
 | `real_sandbox_landlock_limits_writes_and_reaches_descendants` | Requires a supported Landlock ABI. Confirms the writable Bubblewrap `/tmp` tmpfs is Landlock-restricted, profile scratch directories remain writable, an unlisted `/tmp` path is denied, descendants inherit the denial, subprocesses can redirect output to the private `/dev/null`, and result evidence reports `applied`. |
@@ -93,6 +95,13 @@ Ordinary CI checks the typed request, authorization, generated command and failu
 does not run payload-controlled code or prove host namespace, seccomp, descriptor or filesystem
 enforcement. No C4 umbrella completion is claimed by these C3 fixtures.
 
+The caller-crash fixture requires an isolated run with no pre-existing cleanup receipt and no
+concurrent Krypper sandbox execution. The retained cleanup state is the durable receipt plus the
+active transient systemd unit and cgroup; that state lets a later caller detect uncertain cleanup
+after the original caller dies. The fixture validates the receipt's UUID, systemd unit and cgroup
+against systemd before stopping only that fixture-owned unit. It leaves the receipt for Product's
+normal recovery path to reconcile.
+
 Nothing in this module grants authority, adds a profile, changes the CLI, or weakens the fixed
 policy. A failing fixture is a host or product regression, never something to skip.
 
@@ -108,9 +117,10 @@ the legacy pair once the gated suite has been exercised on a provisioned host.
 
 Ordinary CI cannot establish: Bubblewrap flag semantics, in-payload namespace behaviour,
 `pre_exec` cgroup attachment, seccomp descriptor propagation and kernel enforcement, Landlock
-write enforcement, ambient descriptor hygiene beyond the explicit mount-source probes,
-delegated-subtree checks, crash-time lease recovery, or cross-process cleanup holds. Those remain
-source-review claims until the corresponding gated fixtures run on a provisioned host. The
+write enforcement, ambient descriptor hygiene beyond the explicit mount-source probes, or
+delegated-subtree checks. The caller-crash fixture covers payload termination and receipt-based
+recovery holds for its tested caller/service path on the host where it ran; other crash points
+and host configurations remain unproven. The
 Landlock fixture specifically requires a supported ABI; its absence does not make the optional
 control report `applied`. macOS and Windows behaviour is unknown; Linux architectures outside the
 fixed profile fail before workspace code can launch.

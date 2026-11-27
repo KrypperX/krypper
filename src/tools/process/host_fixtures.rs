@@ -6,9 +6,9 @@
 //! gate is unset the fixture prints one `SKIP` line and returns without asserting anything.
 //!
 //! Each fixture covers one boundary so host evidence is attributable: supported host, isolation,
-//! secrets/network, cleanup, preserved offline Cargo behavior and limits/cancellation. Failed
-//! runs never become success; nothing here weakens the fixed profile, grants authority or
-//! changes CLI defaults.
+//! secrets/network, cleanup and recovery, preserved offline Cargo behavior, path replacement and
+//! limits/cancellation. Failed runs never become success; nothing here weakens the fixed profile,
+//! grants authority or changes CLI defaults.
 
 use super::policy::OfflineCargoPolicy;
 use super::run_for_test as run;
@@ -26,6 +26,7 @@ mod environment;
 mod landlock;
 mod limits;
 mod read_only_exec;
+mod recovery;
 mod syscalls;
 
 /// The explicit opt-in. Presence is not enough; only the exact value `1` opens the gate.
