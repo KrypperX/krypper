@@ -1,5 +1,5 @@
 use proc_macro2::{Ident, TokenStream, TokenTree};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use syn::visit::Visit;
@@ -7,8 +7,8 @@ use syn::{Attribute, Item, Meta, Path as RustPath, UseTree};
 
 const TOOLS_MODULE_DEPTH: usize = 1;
 const INSPECTED_CRATE_ROOTS: &[&str] = &["serde", "serde_derive", "serde_json"];
-const CORE_ROOT_GLOB_EXPORT: &str = "<core-root-glob>";
 const CORE_ROOT_SELF_ALIAS_PREFIX: &str = "<core-root-self-alias:";
+const CORE_ROOT_MODULE_ALIAS_PREFIX: &str = "<core-root-module-alias:";
 
 #[derive(Hash, Eq, PartialEq)]
 struct ModuleVisitKey {
@@ -1581,6 +1581,17 @@ fn scan_crate_root_core_aliases(root: &Path, violations: &mut Vec<String>) -> Ha
         }
         _ => None,
     });
+    let root_module_glob_exports = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Mod(module) if !item_is_test_only(&module.attrs) => Some((
+                ident_name(&module.ident),
+                core_module_glob_exports(module, root, &module_directory(root), false),
+            )),
+            _ => None,
+        })
+        .collect::<HashMap<_, _>>();
     let mut ignored_macro_import_violations = Vec::new();
     let root_inspected_macros =
         inspected_macro_imports(&file.items, root, &mut ignored_macro_import_violations);
@@ -1597,6 +1608,7 @@ fn scan_crate_root_core_aliases(root: &Path, violations: &mut Vec<String>) -> Ha
                     &mut Vec::new(),
                     &mut exports,
                     core_glob_exports.as_ref().and_then(Option::as_ref),
+                    &root_module_glob_exports,
                     &root.display().to_string(),
                     violations,
                 ),
@@ -1895,6 +1907,7 @@ fn collect_core_aliases(
     prefix: &mut Vec<String>,
     exports: &mut HashSet<String>,
     core_glob_exports: Option<&HashSet<String>>,
+    root_module_glob_exports: &HashMap<String, Option<HashSet<String>>>,
     origin: &str,
     violations: &mut Vec<String>,
 ) {
@@ -1906,6 +1919,7 @@ fn collect_core_aliases(
                 prefix,
                 exports,
                 core_glob_exports,
+                root_module_glob_exports,
                 origin,
                 violations,
             );
@@ -1922,6 +1936,9 @@ fn collect_core_aliases(
             prefix.push(ident_name(&rename.ident));
             if root_path_starts_with_core_or_export(prefix, exports) {
                 exports.insert(ident_name(&rename.rename));
+                if root_path_is_core_module(prefix, exports) {
+                    exports.insert(core_root_module_alias_key(&ident_name(&rename.rename)));
+                }
             } else if path_resolves_to_crate_root(prefix, 0) {
                 exports.insert(core_root_self_alias_key(&ident_name(&rename.rename)));
             }
@@ -1939,14 +1956,41 @@ fn collect_core_aliases(
                             "{origin}: Core glob export names are not inspectable"
                         ));
                     }
+                } else if let Some(module_name) = root_path_root_module_name(prefix, exports) {
+                    match root_module_glob_exports.get(&module_name) {
+                        Some(Some(names)) => exports.extend(names.iter().cloned()),
+                        Some(None) | None => {
+                            if !violations.iter().any(|violation| {
+                                violation.contains("Core facade glob exports are not inspectable")
+                            }) {
+                                violations.push(format!(
+                                    "{origin}: Core facade glob exports are not inspectable"
+                                ));
+                            }
+                        }
+                    }
                 } else {
-                    exports.insert(CORE_ROOT_GLOB_EXPORT.to_owned());
+                    if !violations.iter().any(|violation| {
+                        violation.contains("Core facade glob exports are not inspectable")
+                    }) {
+                        violations.push(format!(
+                            "{origin}: Core facade glob exports are not inspectable"
+                        ));
+                    }
                 }
             }
         }
         UseTree::Group(group) => {
             for item in &group.items {
-                collect_core_aliases(item, prefix, exports, core_glob_exports, origin, violations);
+                collect_core_aliases(
+                    item,
+                    prefix,
+                    exports,
+                    core_glob_exports,
+                    root_module_glob_exports,
+                    origin,
+                    violations,
+                );
             }
         }
     }
@@ -1966,9 +2010,25 @@ fn root_path_is_core_module(segments: &[String], exports: &HashSet<String>) -> b
         start += 1;
     }
     segments.len() == start + 1
-        && segments
-            .get(start)
-            .is_some_and(|segment| segment == "core" || exports.contains(segment))
+        && segments.get(start).is_some_and(|segment| {
+            segment == "core" || exports.contains(&core_root_module_alias_key(segment))
+        })
+}
+
+fn root_path_root_module_name(segments: &[String], exports: &HashSet<String>) -> Option<String> {
+    let mut start = match segments.first().map(String::as_str) {
+        Some("crate" | "$crate" | "self") => 1,
+        Some(segment) if exports.contains(&core_root_self_alias_key(segment)) => 1,
+        Some(segment) if exports.contains(segment) => 0,
+        _ => return None,
+    };
+    if segments
+        .get(start)
+        .is_some_and(|segment| exports.contains(&core_root_self_alias_key(segment)))
+    {
+        start += 1;
+    }
+    (segments.len() == start + 1).then(|| segments[start].clone())
 }
 
 fn core_module_glob_exports(
@@ -2098,9 +2158,6 @@ fn collect_use_tree_exports(
 }
 
 fn root_path_starts_with_core_or_export(segments: &[String], exports: &HashSet<String>) -> bool {
-    if root_glob_name_path(segments, 0) && exports.contains(CORE_ROOT_GLOB_EXPORT) {
-        return true;
-    }
     let mut start = match segments.first().map(String::as_str) {
         Some("crate" | "$crate" | "self") => 1,
         Some("super") => return false,
@@ -2194,6 +2251,10 @@ fn core_root_self_alias_key(alias: &str) -> String {
     format!("{CORE_ROOT_SELF_ALIAS_PREFIX}{alias}>")
 }
 
+fn core_root_module_alias_key(alias: &str) -> String {
+    format!("{CORE_ROOT_MODULE_ALIAS_PREFIX}{alias}>")
+}
+
 fn use_tree_starts_with_core_export(
     segments: &[String],
     module_depth: usize,
@@ -2204,26 +2265,6 @@ fn use_tree_starts_with_core_export(
             && segments
                 .first()
                 .is_some_and(|segment| exports.contains(segment))
-        || root_glob_name_path(segments, module_depth) && exports.contains(CORE_ROOT_GLOB_EXPORT)
-}
-
-fn root_glob_name_path(segments: &[String], module_depth: usize) -> bool {
-    let start = match segments.first().map(String::as_str) {
-        Some("crate" | "$crate") => 1,
-        Some("self") if module_depth == 0 => 1,
-        Some("super") => {
-            let super_count = segments
-                .iter()
-                .take_while(|segment| segment.as_str() == "super")
-                .count();
-            if super_count != module_depth {
-                return false;
-            }
-            super_count
-        }
-        _ => return false,
-    };
-    segments.len() == start + 1
 }
 
 fn inspect_core_use_tree(
@@ -3066,17 +3107,30 @@ fn serde_string_contains_core_path(
         }
     }
 
-    let Ok(ty) = syn::parse_str::<syn::Type>(value) else {
-        return false;
-    };
-    let mut probe = CoreDependencyProbe {
-        module_depth,
-        crate_root_core_exports,
-        inspected_macro_imports: &HashSet::new(),
-        found: false,
-    };
-    probe.visit_type(&ty);
-    probe.found
+    if let Ok(ty) = syn::parse_str::<syn::Type>(value) {
+        let mut probe = CoreDependencyProbe {
+            module_depth,
+            crate_root_core_exports,
+            inspected_macro_imports: &HashSet::new(),
+            found: false,
+        };
+        probe.visit_type(&ty);
+        if probe.found {
+            return true;
+        }
+    }
+
+    if let Ok(predicate) = syn::parse_str::<syn::WherePredicate>(value) {
+        let mut probe = CoreDependencyProbe {
+            module_depth,
+            crate_root_core_exports,
+            inspected_macro_imports: &HashSet::new(),
+            found: false,
+        };
+        probe.visit_where_predicate(&predicate);
+        return probe.found;
+    }
+    false
 }
 
 fn serde_meta_contains_brain_path(

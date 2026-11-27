@@ -58,6 +58,13 @@ fn tools_core_guard_detects_direct_alias_facade_and_parent_paths() {
             }
         "#,
         r#"
+            pub mod core { pub trait Codec {} }
+            pub(crate) mod tools {
+                #[serde(bound = "T: crate::core::Codec")]
+                struct Model<T>(T);
+            }
+        "#,
+        r#"
             pub mod core { pub mod task { pub struct Task; } }
             pub(crate) mod tools { use super::core::task::Task; }
         "#,
@@ -175,6 +182,24 @@ fn tools_core_guard_detects_glob_include_and_external_transitive_facades() {
             .iter()
             .all(|violation| !violation.contains("Core")),
         "unrelated crate-root module was classified as a Core glob export: {violations:?}"
+    );
+
+    fs::write(
+        &root,
+        r#"
+            pub mod core { pub struct Task; }
+            pub mod compatibility { pub use crate::core::Task as CompatibilityTask; }
+            pub use crate::compatibility::*;
+            pub(crate) mod tools { use crate::CompatibilityTask; }
+        "#,
+    )
+    .unwrap();
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("Core")),
+        "Core re-export through a facade glob was not detected: {violations:?}"
     );
 
     fs::write(
