@@ -87,9 +87,9 @@ pub(super) fn quote_json(codepoints: &[u32]) -> String {
             0x0d => quoted.push_str("\\r"),
             0x00..=0x1f => quoted.push_str(&format!("\\u{codepoint:04x}")),
             0x20..=0x7e if *codepoint != u32::from(b'"') && *codepoint != u32::from(b'\\') => {
-                quoted.push(
-                    char::from_u32(*codepoint).expect("invariant: ASCII is a Unicode scalar"),
-                );
+                if let Some(scalar) = char::from_u32(*codepoint) {
+                    quoted.push(scalar);
+                }
             }
             0x22 => quoted.push_str("\\\""),
             0x5c => quoted.push_str("\\\\"),

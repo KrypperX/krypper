@@ -1,6 +1,9 @@
 //! Creation of files and directories inside a verified workspace parent.
 
-use super::paths::{open_workspace_parent, validate_workspace_mutation_path};
+use super::paths::{
+    current_directory, move_to_parent_directory, open_workspace_parent,
+    validate_workspace_mutation_path,
+};
 use super::syscalls::{
     close_file, contains_nul, duplicate_directory, fstat_file, is_already_exists, is_directory,
     is_interrupted, is_not_found, is_relative_workspace_path, is_symlink, mkdir_at, open_at,
@@ -75,10 +78,7 @@ where
         let name = match component {
             PathComponent::Current => continue,
             PathComponent::Parent => {
-                if directories.len() == 1 {
-                    return Err(CliError::new("path must stay inside the current directory"));
-                }
-                directories.pop();
+                move_to_parent_directory(&mut directories)?;
                 continue;
             }
             PathComponent::Normal(name) => name,
@@ -87,9 +87,7 @@ where
             }
         };
 
-        let parent = directories
-            .last()
-            .expect("invariant: the root handle remains on the stack");
+        let parent = current_directory(&directories)?;
         let status = stat_at(parent, &name).map_err(|error| {
             if is_not_found(&error) {
                 CliError::new("parent directory not found")
@@ -115,9 +113,7 @@ where
         directories.push(opened);
     }
 
-    let parent = directories
-        .last()
-        .expect("invariant: the root handle remains on the stack");
+    let parent = current_directory(&directories)?;
     let file = open_at(
         parent,
         &name,
