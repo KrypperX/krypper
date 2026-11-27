@@ -119,7 +119,9 @@ fn resolve_automatic_route(
     create_revision_key: bool,
 ) -> Result<RouteResolution, String> {
     let catalog = load_catalog(Some(&cache_path_for_user_settings(&paths.model)))?;
-    let credentials = load_credentials(&paths.credentials)?.unwrap_or_else(CredentialStore::empty);
+    let credentials = load_credentials(&paths.credentials)
+        .map_err(|error| error.to_string())?
+        .unwrap_or_else(CredentialStore::empty);
     let evidence_records = records(&paths.model_evidence)?;
     let request = AutomaticRoutingRequest {
         required_capabilities: vec![CapabilityName::DecisionRequest, CapabilityName::ToolCalling],
@@ -160,7 +162,9 @@ fn provider_readiness_for_default(
     defaults: &ModelDefaults,
 ) -> Result<Option<crate::routing::ProviderReadiness>, String> {
     let provider = defaults.provider.as_deref().unwrap_or("ollama");
-    let credentials = load_credentials(&paths.credentials)?.unwrap_or_else(CredentialStore::empty);
+    let credentials = load_credentials(&paths.credentials)
+        .map_err(|error| error.to_string())?
+        .unwrap_or_else(CredentialStore::empty);
     let Some(descriptor) = crate::brain::provider_descriptor_by_selector(provider) else {
         let profiles = load_provider_profiles(&paths.provider_profiles)?;
         let Some(profile) = profiles.iter().find(|profile| profile.id == provider) else {

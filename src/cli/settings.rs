@@ -6,6 +6,7 @@ use super::config::{
 use crate::brain::{is_provider_credential_name, validate_model_name_for_provider, ModelProvider};
 use crate::tools::permission_policy::PermissionMode;
 use std::collections::BTreeMap;
+use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -23,6 +24,77 @@ static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 pub(super) struct CredentialStore {
     values: BTreeMap<String, String>,
 }
+
+#[derive(Debug)]
+pub(super) enum CredentialStoreError {
+    Io {
+        action: CredentialStoreIoAction,
+        path: PathBuf,
+        kind: io::ErrorKind,
+    },
+    Permissions(String),
+    NotRegularFile(PathBuf),
+    TooLarge(PathBuf),
+    InvalidJson(PathBuf),
+    InvalidValue(PathBuf),
+}
+
+#[derive(Debug)]
+pub(super) enum CredentialStoreIoAction {
+    Inspect,
+    Read,
+}
+
+impl CredentialStoreError {
+    fn io(action: CredentialStoreIoAction, path: &Path, cause: io::Error) -> Self {
+        Self::Io {
+            action,
+            path: path.to_owned(),
+            kind: cause.kind(),
+        }
+    }
+}
+
+impl fmt::Display for CredentialStoreError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io { action, path, kind } => {
+                let action = match action {
+                    CredentialStoreIoAction::Inspect => "cannot inspect",
+                    CredentialStoreIoAction::Read => "cannot read",
+                };
+                write!(
+                    formatter,
+                    "{action} credential store '{}': {kind}",
+                    path.display()
+                )
+            }
+            Self::Permissions(message) => formatter.write_str(message),
+            Self::NotRegularFile(path) => write!(
+                formatter,
+                "credential store '{}' is not a regular file",
+                path.display()
+            ),
+            Self::TooLarge(path) => write!(
+                formatter,
+                "credential store '{}' is larger than {MAX_CREDENTIAL_BYTES} bytes",
+                path.display()
+            ),
+            Self::InvalidJson(path) => write!(
+                formatter,
+                "credential store '{}' is invalid JSON; run `krypper setup` to replace it",
+                path.display()
+            ),
+            Self::InvalidValue(path) => write!(
+                formatter,
+                "credential store '{}' contains an unsupported or invalid value",
+                path.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for CredentialStoreError {}
 
 /// Credential resolution without a `Debug` implementation so values stay redacted.
 pub(super) enum EffectiveCredentialValue {
@@ -172,61 +244,54 @@ pub(super) fn save_permission_mode(path: &Path, mode: PermissionMode) -> Result<
     write_private_file(path, contents.as_bytes(), "permission settings")
 }
 
-pub(super) fn load_credentials(path: &Path) -> Result<Option<CredentialStore>, String> {
+pub(super) fn load_credentials(
+    path: &Path,
+) -> Result<Option<CredentialStore>, CredentialStoreError> {
     load_credentials_with_open_file(path, open_private_file)
 }
 
 fn load_credentials_with_open_file(
     path: &Path,
     open_file: impl FnOnce(&Path) -> io::Result<File>,
-) -> Result<Option<CredentialStore>, String> {
+) -> Result<Option<CredentialStore>, CredentialStoreError> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(cause) if cause.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(cause) => return Err(file_error("cannot inspect credential store", path, cause)),
+        Err(cause) => {
+            return Err(CredentialStoreError::io(
+                CredentialStoreIoAction::Inspect,
+                path,
+                cause,
+            ))
+        }
     };
     if !metadata.file_type().is_file() {
-        return Err(format!(
-            "credential store '{}' is not a regular file",
-            path.display()
-        ));
+        return Err(CredentialStoreError::NotRegularFile(path.to_owned()));
     }
-    let file =
-        open_file(path).map_err(|cause| file_error("cannot read credential store", path, cause))?;
+    let file = open_file(path)
+        .map_err(|cause| CredentialStoreError::io(CredentialStoreIoAction::Read, path, cause))?;
     let opened_metadata = file
         .metadata()
-        .map_err(|cause| file_error("cannot inspect credential store", path, cause))?;
+        .map_err(|cause| CredentialStoreError::io(CredentialStoreIoAction::Inspect, path, cause))?;
     if !opened_metadata.is_file() {
-        return Err(format!(
-            "credential store '{}' is not a regular file",
-            path.display()
-        ));
+        return Err(CredentialStoreError::NotRegularFile(path.to_owned()));
     }
-    ensure_private_permissions(path, &opened_metadata, "credential store")?;
+    ensure_private_permissions(path, &opened_metadata, "credential store")
+        .map_err(CredentialStoreError::Permissions)?;
     let mut bytes = Vec::new();
     file.take(MAX_CREDENTIAL_BYTES + 1)
         .read_to_end(&mut bytes)
-        .map_err(|cause| file_error("cannot read credential store", path, cause))?;
+        .map_err(|cause| CredentialStoreError::io(CredentialStoreIoAction::Read, path, cause))?;
     if bytes.len() as u64 > MAX_CREDENTIAL_BYTES {
-        return Err(format!(
-            "credential store '{}' is larger than {MAX_CREDENTIAL_BYTES} bytes",
-            path.display()
-        ));
+        return Err(CredentialStoreError::TooLarge(path.to_owned()));
     }
-    let values: BTreeMap<String, String> = serde_json::from_slice(&bytes).map_err(|_| {
-        format!(
-            "credential store '{}' is invalid JSON; run `krypper setup` to replace it",
-            path.display()
-        )
-    })?;
+    let values: BTreeMap<String, String> = serde_json::from_slice(&bytes)
+        .map_err(|_| CredentialStoreError::InvalidJson(path.to_owned()))?;
     if values
         .iter()
         .any(|(name, value)| !is_provider_credential_name(name) || !valid_credential(value))
     {
-        return Err(format!(
-            "credential store '{}' contains an unsupported or invalid value",
-            path.display()
-        ));
+        return Err(CredentialStoreError::InvalidValue(path.to_owned()));
     }
     Ok(Some(CredentialStore { values }))
 }
@@ -640,7 +705,15 @@ mod tests {
             Err(error) => error,
             Ok(_) => panic!("invalid credentials must fail to load"),
         };
-        assert!(!error.contains(secret));
+        assert!(matches!(error, CredentialStoreError::InvalidJson(_)));
+        assert!(!error.to_string().contains(secret));
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "credential store '{}' is invalid JSON; run `krypper setup` to replace it",
+                path.display()
+            )
+        );
     }
 
     #[cfg(unix)]
@@ -775,7 +848,7 @@ mod tests {
             Err(error) => error,
             Ok(_) => panic!("opened credential file with unsafe permissions must be rejected"),
         };
-        assert!(error.contains("accessible by other users"));
+        assert!(error.to_string().contains("accessible by other users"));
     }
 
     #[test]
