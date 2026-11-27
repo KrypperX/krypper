@@ -311,12 +311,8 @@ impl ProviderEvidenceStore {
         if self.version != 1 {
             return Err("unsupported provider evidence version");
         }
+        let latest = record.clone();
         self.records.push(record);
-        let latest = self
-            .records
-            .last()
-            .expect("record was just appended")
-            .clone();
         let matching = self
             .records
             .iter()

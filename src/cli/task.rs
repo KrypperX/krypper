@@ -636,13 +636,10 @@ where
         None
     };
     let mut automatic_resolution = None;
-    if !explicitly_selected
-        && !verified
-        && configured_defaults
-            .as_ref()
-            .is_some_and(|defaults| defaults.routing_mode == RoutingMode::Automatic)
-    {
-        let defaults = configured_defaults.as_ref().expect("checked above");
+    let automatic_defaults = configured_defaults.as_ref().filter(|defaults| {
+        !explicitly_selected && !verified && defaults.routing_mode == RoutingMode::Automatic
+    });
+    if let Some(defaults) = automatic_defaults {
         let Some(model_routing) =
             ModelRoutingService::for_current_user().map_err(io::Error::other)?
         else {
