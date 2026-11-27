@@ -10,7 +10,7 @@ pub(crate) enum PermissionMode {
     Ask,
     /// Automatically allow bounded workspace effects and the fixed offline process profile.
     RiskBased,
-    /// Unrestricted host execution is not supported by the current runner.
+    /// Direct host process execution after explicit, task-level user confirmation.
     FullAccess,
 }
 
@@ -39,16 +39,14 @@ impl PermissionMode {
         }
     }
 
-    /// Parse a user-visible permission name. Full Access is recognized so an
-    /// unavailable selection can be reported explicitly, but cannot be selected.
+    /// Parse a user-visible permission name. Full Access is a saved preference only;
+    /// each task must obtain its own trusted confirmation before provider startup.
     pub(crate) fn parse(value: &str) -> Result<Self, &'static str> {
         match value {
             "ask" => Ok(Self::Ask),
             "risk-based" => Ok(Self::RiskBased),
-            "full-access" => {
-                Err("Full Access is unavailable: Krypper has no unrestricted host execution path")
-            }
-            _ => Err("permission mode must be ask or risk-based"),
+            "full-access" => Ok(Self::FullAccess),
+            _ => Err("permission mode must be ask, risk-based, or full-access"),
         }
     }
 }
@@ -58,6 +56,7 @@ impl PermissionMode {
 pub(crate) enum EffectClass {
     Workspace,
     FixedOfflineProcess,
+    FullAccessHostProcess,
     ExternalOrUnclassified,
     TaskControl,
     Unsupported,
@@ -82,18 +81,22 @@ pub(crate) fn classify_registered_operation(name: &str) -> EffectClass {
         }
         Some(RegisteredEffect::FixedSandboxedOfflineCargoTest) => EffectClass::FixedOfflineProcess,
         Some(RegisteredEffect::SandboxedOfflineReadOnlyExec) => EffectClass::ExternalOrUnclassified,
+        Some(RegisteredEffect::FullAccessHostProcess) => EffectClass::FullAccessHostProcess,
         None => EffectClass::ExternalOrUnclassified,
     }
 }
 
 /// Decide whether the trusted host can dispatch an action under the selected mode.
 pub(crate) fn decide(mode: PermissionMode, effect: EffectClass) -> PermissionDecision {
-    if mode == PermissionMode::FullAccess {
-        return PermissionDecision::Unavailable;
-    }
-
     match effect {
         EffectClass::Workspace | EffectClass::TaskControl => PermissionDecision::Allow,
+        EffectClass::FullAccessHostProcess if mode == PermissionMode::FullAccess => {
+            PermissionDecision::Allow
+        }
+        EffectClass::FullAccessHostProcess => PermissionDecision::Unavailable,
+        EffectClass::ExternalOrUnclassified if mode == PermissionMode::FullAccess => {
+            PermissionDecision::Unavailable
+        }
         EffectClass::FixedOfflineProcess if mode == PermissionMode::RiskBased => {
             PermissionDecision::Allow
         }
@@ -160,19 +163,37 @@ mod tests {
     }
 
     #[test]
-    fn full_access_is_unavailable_for_every_effect_and_unknown_effects_fail_closed() {
-        for effect in [
-            EffectClass::Workspace,
-            EffectClass::FixedOfflineProcess,
-            EffectClass::ExternalOrUnclassified,
-            EffectClass::TaskControl,
-            EffectClass::Unsupported,
-        ] {
-            assert_eq!(
-                decide(PermissionMode::FullAccess, effect),
-                PermissionDecision::Unavailable
-            );
-        }
+    fn full_access_allows_registered_workspace_and_host_effects_but_keeps_unknowns_closed() {
+        assert_eq!(
+            decide(PermissionMode::FullAccess, EffectClass::Workspace),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            decide(PermissionMode::FullAccess, EffectClass::TaskControl),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            decide(
+                PermissionMode::FullAccess,
+                EffectClass::FullAccessHostProcess
+            ),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            decide(PermissionMode::FullAccess, EffectClass::FixedOfflineProcess),
+            PermissionDecision::Ask
+        );
+        assert_eq!(
+            decide(
+                PermissionMode::FullAccess,
+                EffectClass::ExternalOrUnclassified
+            ),
+            PermissionDecision::Unavailable
+        );
+        assert_eq!(
+            decide(PermissionMode::FullAccess, EffectClass::Unsupported),
+            PermissionDecision::Deny
+        );
         assert_eq!(
             decide(PermissionMode::RiskBased, EffectClass::Unsupported),
             PermissionDecision::Deny
@@ -180,10 +201,10 @@ mod tests {
     }
 
     #[test]
-    fn full_access_cannot_be_selected_or_loaded_from_a_preference() {
+    fn full_access_preference_does_not_replace_task_confirmation() {
         assert_eq!(
             PermissionMode::parse("full-access"),
-            Err("Full Access is unavailable: Krypper has no unrestricted host execution path")
+            Ok(PermissionMode::FullAccess)
         );
         assert_eq!(PermissionMode::parse("ask"), Ok(PermissionMode::Ask));
         assert_eq!(
@@ -209,6 +230,33 @@ mod tests {
         assert_eq!(
             classify_registered_operation("unknown_effect"),
             EffectClass::ExternalOrUnclassified
+        );
+        assert_eq!(
+            classify_registered_operation("full_access_host_process"),
+            EffectClass::FullAccessHostProcess
+        );
+    }
+
+    #[test]
+    fn full_access_does_not_change_existing_offline_process_authorization() {
+        assert_eq!(
+            classify_registered_operation("offline_cargo_test"),
+            EffectClass::FixedOfflineProcess
+        );
+        assert_eq!(
+            decide(PermissionMode::FullAccess, EffectClass::FixedOfflineProcess),
+            PermissionDecision::Ask
+        );
+        assert_eq!(
+            classify_registered_operation("offline_read_only_exec"),
+            EffectClass::ExternalOrUnclassified
+        );
+        assert_eq!(
+            decide(
+                PermissionMode::FullAccess,
+                classify_registered_operation("offline_read_only_exec")
+            ),
+            PermissionDecision::Unavailable
         );
     }
 }

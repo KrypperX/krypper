@@ -26,6 +26,7 @@ use crate::tools::{
 use krypper_sandbox::{SpawnAuthorizationGate, SpawnGateError};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLockWriteGuard};
 use std::time::Duration;
 use uuid::Uuid;
@@ -38,6 +39,9 @@ pub struct TaskSession {
     pub(super) tasks: Vec<Task>,
     pub(super) process_grants:
         Mutex<std::collections::HashMap<Uuid, Arc<Mutex<ProcessGrantState>>>>,
+    /// Ephemeral host-selected mode snapshots. They are never checkpointed or restored.
+    pub(super) permission_modes:
+        Arc<Mutex<std::collections::HashMap<Uuid, TaskPermissionSnapshot>>>,
     #[cfg(test)]
     pub(super) test_process_results: std::cell::RefCell<
         std::collections::HashMap<Uuid, std::collections::VecDeque<crate::ProcessResult>>,
@@ -45,6 +49,16 @@ pub struct TaskSession {
     #[cfg(test)]
     pub(super) test_process_filters:
         std::cell::RefCell<std::collections::HashMap<Uuid, Vec<Option<String>>>>,
+}
+
+#[derive(Debug)]
+pub(super) struct TaskPermissionSnapshot {
+    mode: crate::tools::permission_policy::PermissionMode,
+    full_access_confirmed: bool,
+    generation: u64,
+    task_cancellation: Arc<AtomicBool>,
+    active_host_cancellation: Option<Arc<AtomicBool>>,
+    host_process_recovery_hold: bool,
 }
 
 struct ProcessGrantSpec {
@@ -145,6 +159,7 @@ impl TaskSession {
             workspace_root: None,
             tasks: Vec::new(),
             process_grants: Default::default(),
+            permission_modes: Arc::new(Mutex::default()),
             #[cfg(test)]
             test_process_results: Default::default(),
             #[cfg(test)]
@@ -188,6 +203,7 @@ impl TaskSession {
             workspace_root: Some(Arc::new(workspace_root)),
             tasks: Vec::new(),
             process_grants: Default::default(),
+            permission_modes: Arc::new(Mutex::default()),
             #[cfg(test)]
             test_process_results: Default::default(),
             #[cfg(test)]
@@ -198,6 +214,87 @@ impl TaskSession {
     /// Returns the stable session identifier.
     pub fn id(&self) -> Uuid {
         self.id
+    }
+
+    /// Installs the host-selected, task-local permission snapshot.
+    ///
+    /// The Full Access confirmation is intentionally ephemeral and must be supplied by a
+    /// trusted host interaction for this task. Restored checkpoints have no snapshot and must
+    /// be configured again by the host.
+    pub(crate) fn set_task_permission_mode(
+        &self,
+        task_id: Uuid,
+        mode: crate::tools::permission_policy::PermissionMode,
+        full_access_confirmed: bool,
+    ) -> Result<(), &'static str> {
+        if self.get_task(task_id).is_none() {
+            return Err("task not found");
+        }
+        if (mode == crate::tools::permission_policy::PermissionMode::FullAccess)
+            != full_access_confirmed
+        {
+            return Err("Full Access requires a trusted per-task confirmation");
+        }
+        let mut snapshots = self
+            .permission_modes
+            .lock()
+            .map_err(|_| "task permission state is unavailable")?;
+        let changed = snapshots.get(&task_id).is_none_or(|snapshot| {
+            snapshot.mode != mode || snapshot.full_access_confirmed != full_access_confirmed
+        });
+        if changed {
+            if let Some(snapshot) = snapshots.get_mut(&task_id) {
+                snapshot.task_cancellation.store(true, Ordering::SeqCst);
+                if let Some(cancellation) = snapshot.active_host_cancellation.as_ref() {
+                    cancellation.store(true, Ordering::SeqCst);
+                }
+                snapshot.generation = snapshot.generation.wrapping_add(1).max(1);
+                snapshot.mode = mode;
+                snapshot.full_access_confirmed = full_access_confirmed;
+                snapshot.task_cancellation = Arc::new(AtomicBool::new(false));
+            } else {
+                snapshots.insert(
+                    task_id,
+                    TaskPermissionSnapshot {
+                        mode,
+                        full_access_confirmed,
+                        generation: 1,
+                        task_cancellation: Arc::new(AtomicBool::new(false)),
+                        active_host_cancellation: None,
+                        host_process_recovery_hold: false,
+                    },
+                );
+            }
+        }
+        drop(snapshots);
+        if changed {
+            self.revoke_offline_cargo_tests(task_id)?;
+        }
+        Ok(())
+    }
+
+    /// Returns the task-scoped cancellation flag used by the CLI signal handler and host runner.
+    pub(crate) fn task_cancellation_flag(&self, task_id: Uuid) -> Option<Arc<AtomicBool>> {
+        self.permission_modes
+            .lock()
+            .ok()?
+            .get(&task_id)
+            .map(|snapshot| Arc::clone(&snapshot.task_cancellation))
+    }
+
+    /// Reports whether the host has requested cancellation for this task.
+    pub(crate) fn task_cancellation_requested(&self, task_id: Uuid) -> bool {
+        self.task_cancellation_flag(task_id)
+            .is_some_and(|cancellation| cancellation.load(Ordering::SeqCst))
+    }
+
+    pub(crate) fn task_has_confirmed_full_access(&self, task_id: Uuid) -> bool {
+        self.permission_modes.lock().ok().is_some_and(|snapshots| {
+            snapshots.get(&task_id).is_some_and(|snapshot| {
+                snapshot.mode == crate::tools::permission_policy::PermissionMode::FullAccess
+                    && snapshot.full_access_confirmed
+            })
+        })
     }
 
     /// Returns an immutable, on-demand view of the session's current task and turn state.
@@ -404,6 +501,14 @@ impl TaskSession {
         }
 
         let task = &mut self.tasks[task_index];
+        if let Ok(snapshots) = self.permission_modes.lock() {
+            if let Some(snapshot) = snapshots.get(&task_id) {
+                snapshot.task_cancellation.store(true, Ordering::SeqCst);
+                if let Some(cancellation) = snapshot.active_host_cancellation.as_ref() {
+                    cancellation.store(true, Ordering::SeqCst);
+                }
+            }
+        }
         task.record_activity(turn_index, activity);
         task.cancel().map_err(TurnCompletionError::TaskTransition)
     }
@@ -1047,6 +1152,59 @@ impl TaskSession {
         ))
     }
 
+    /// Runs one direct-argv host process under the task's explicitly confirmed Full Access mode.
+    /// The task permission snapshot is checked before the runner and again at the spawn boundary.
+    pub fn run_full_access_host_process(
+        &self,
+        task_id: Uuid,
+        turn_id: Uuid,
+        request: &crate::tools::process::HostProcessRequest,
+    ) -> Result<crate::ProcessResult, WorkspaceReadError> {
+        self.running_workspace_task(task_id, turn_id)?;
+        let (generation, cancellation) = {
+            let Ok(mut snapshots) = self.permission_modes.lock() else {
+                return Ok(crate::ProcessResult::denied_host_process());
+            };
+            let Some(snapshot) = snapshots.get_mut(&task_id) else {
+                return Ok(crate::ProcessResult::denied_host_process());
+            };
+            if snapshot.host_process_recovery_hold {
+                return Ok(crate::ProcessResult::host_process_recovery_hold());
+            }
+            if !full_access_host_start_available(snapshot) {
+                return Ok(crate::ProcessResult::denied_host_process());
+            }
+            let cancellation = Arc::clone(&snapshot.task_cancellation);
+            snapshot.active_host_cancellation = Some(Arc::clone(&cancellation));
+            (snapshot.generation, cancellation)
+        };
+
+        let spawn_gate = full_access_host_spawn_gate(
+            Arc::clone(&self.permission_modes),
+            task_id,
+            generation,
+            Arc::clone(&cancellation),
+        );
+
+        let result =
+            crate::tools::process::run_host_process(request, Arc::clone(&cancellation), spawn_gate);
+        if let Ok(mut snapshots) = self.permission_modes.lock() {
+            if let Some(snapshot) = snapshots.get_mut(&task_id) {
+                if snapshot
+                    .active_host_cancellation
+                    .as_ref()
+                    .is_some_and(|active| Arc::ptr_eq(active, &cancellation))
+                {
+                    snapshot.active_host_cancellation = None;
+                }
+                if result.recovery_hold {
+                    snapshot.host_process_recovery_hold = true;
+                }
+            }
+        }
+        Ok(result)
+    }
+
     #[cfg(test)]
     pub(crate) fn queue_offline_cargo_results_for_test(
         &mut self,
@@ -1519,6 +1677,42 @@ fn process_spawn_gate(context: ProcessSpawnGateContext) -> SpawnAuthorizationGat
             Err(ProcessStartError::Spawn(error)) => Err(SpawnGateError::Spawn(error)),
         }
     })
+}
+
+fn full_access_host_spawn_gate(
+    permission_modes: Arc<Mutex<std::collections::HashMap<Uuid, TaskPermissionSnapshot>>>,
+    task_id: Uuid,
+    generation: u64,
+    cancellation: Arc<AtomicBool>,
+) -> SpawnAuthorizationGate {
+    Box::new(move |command, spawn_action| {
+        let Ok(snapshots) = permission_modes.lock() else {
+            return Err(SpawnGateError::Denied);
+        };
+        let authorized = snapshots.get(&task_id).is_some_and(|snapshot| {
+            snapshot.generation == generation
+                && snapshot.mode == crate::tools::permission_policy::PermissionMode::FullAccess
+                && snapshot.full_access_confirmed
+                && snapshot
+                    .active_host_cancellation
+                    .as_ref()
+                    .is_some_and(|active| Arc::ptr_eq(active, &cancellation))
+                && !cancellation.load(Ordering::SeqCst)
+        });
+        if !authorized {
+            return Err(SpawnGateError::Denied);
+        }
+        // Keep the snapshot lock through spawn so a mode change cannot race between the
+        // generation check and process creation. A later change signals the runner token.
+        spawn_action(command).map_err(SpawnGateError::Spawn)
+    })
+}
+
+fn full_access_host_start_available(snapshot: &TaskPermissionSnapshot) -> bool {
+    snapshot.mode == crate::tools::permission_policy::PermissionMode::FullAccess
+        && snapshot.full_access_confirmed
+        && !snapshot.host_process_recovery_hold
+        && snapshot.active_host_cancellation.is_none()
 }
 
 impl Default for TaskSession {
@@ -2567,5 +2761,191 @@ mod process_grant_tests {
         assert!(matches!(result, Err(SpawnGateError::Spawn(_))));
         assert_eq!(spawn_calls.load(Ordering::SeqCst), 1);
         assert!(state.lock().unwrap().current.as_ref().unwrap().consumed);
+    }
+}
+
+#[cfg(test)]
+mod full_access_host_authorization_tests {
+    use super::{
+        full_access_host_spawn_gate, full_access_host_start_available, TaskPermissionSnapshot,
+        TaskState, TurnState,
+    };
+    use crate::tools::permission_policy::PermissionMode;
+    use krypper_sandbox::{SpawnAction, SpawnGateError};
+    use std::process::Command;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use uuid::Uuid;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn session_dispatch_runs_direct_argv_in_an_unfenced_host_directory() {
+        let workspace = tempfile::tempdir().expect("workspace fixture");
+        let host_directory = tempfile::tempdir().expect("outside host directory");
+        let mut session =
+            super::TaskSession::new_in_workspace(workspace.path()).expect("workspace session");
+        let task_id = session.create_task("host process outside workspace").id();
+        let turn_id = {
+            let task = session.get_task_mut(task_id).expect("task");
+            task.transition(TaskState::Running).expect("running task");
+            let turn_id = task.create_turn().expect("turn");
+            task.transition_turn(turn_id, TurnState::Running)
+                .expect("running turn");
+            turn_id
+        };
+        session
+            .set_task_permission_mode(task_id, PermissionMode::FullAccess, true)
+            .expect("confirmed Full Access mode");
+        let request = crate::tools::process::HostProcessRequest::new(
+            "/bin/pwd".into(),
+            Vec::new(),
+            host_directory.path().to_string_lossy().into_owned(),
+        )
+        .expect("direct host request");
+
+        let result = session
+            .run_full_access_host_process(task_id, turn_id, &request)
+            .expect("host process dispatch");
+
+        assert_eq!(result.outcome, crate::ProcessOutcome::Exited(0));
+        assert_eq!(
+            result.profile,
+            crate::ProcessExecutionProfile::FullAccessHostProcessV1
+        );
+        assert_eq!(
+            result.stdout.trim(),
+            host_directory.path().to_string_lossy()
+        );
+        assert!(result.cleanup_confirmed);
+        assert!(result.sandbox_evidence.is_none());
+    }
+
+    #[test]
+    fn start_gate_rejects_overlap_even_after_cancellation_until_runner_cleanup_returns() {
+        let mut snapshot = TaskPermissionSnapshot {
+            mode: PermissionMode::FullAccess,
+            full_access_confirmed: true,
+            generation: 1,
+            task_cancellation: Arc::new(AtomicBool::new(false)),
+            active_host_cancellation: None,
+            host_process_recovery_hold: false,
+        };
+        assert!(full_access_host_start_available(&snapshot));
+
+        let cancellation = Arc::new(AtomicBool::new(false));
+        snapshot.active_host_cancellation = Some(Arc::clone(&cancellation));
+        assert!(!full_access_host_start_available(&snapshot));
+        cancellation.store(true, Ordering::SeqCst);
+        assert!(!full_access_host_start_available(&snapshot));
+
+        snapshot.active_host_cancellation = None;
+        snapshot.host_process_recovery_hold = true;
+        assert!(!full_access_host_start_available(&snapshot));
+    }
+
+    #[test]
+    fn changing_task_mode_cancels_and_invalidates_the_active_host_authorization() {
+        let mut session = super::TaskSession::new();
+        let task_id = session.create_task("mode change").id();
+        session
+            .set_task_permission_mode(task_id, PermissionMode::FullAccess, true)
+            .unwrap();
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let initial_generation = {
+            let mut snapshots = session.permission_modes.lock().unwrap();
+            let snapshot = snapshots.get_mut(&task_id).unwrap();
+            snapshot.active_host_cancellation = Some(Arc::clone(&cancellation));
+            snapshot.generation
+        };
+
+        session
+            .set_task_permission_mode(task_id, PermissionMode::Ask, false)
+            .unwrap();
+
+        let snapshots = session.permission_modes.lock().unwrap();
+        let snapshot = snapshots.get(&task_id).unwrap();
+        assert!(cancellation.load(Ordering::SeqCst));
+        assert_eq!(snapshot.mode, PermissionMode::Ask);
+        assert!(!snapshot.full_access_confirmed);
+        assert_eq!(snapshot.generation, initial_generation + 1);
+        assert!(snapshot
+            .active_host_cancellation
+            .as_ref()
+            .is_some_and(|active| Arc::ptr_eq(active, &cancellation)));
+    }
+
+    #[test]
+    fn spawn_gate_rechecks_the_task_mode_generation_and_confirmation_before_spawn() {
+        let task_id = Uuid::new_v4();
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let permission_modes = Arc::new(Mutex::new(std::collections::HashMap::from([(
+            task_id,
+            TaskPermissionSnapshot {
+                mode: PermissionMode::FullAccess,
+                full_access_confirmed: true,
+                generation: 4,
+                task_cancellation: Arc::clone(&cancellation),
+                active_host_cancellation: Some(Arc::clone(&cancellation)),
+                host_process_recovery_hold: false,
+            },
+        )])));
+        let gate = full_access_host_spawn_gate(
+            Arc::clone(&permission_modes),
+            task_id,
+            4,
+            Arc::clone(&cancellation),
+        );
+
+        // The task changes mode after the runner is created but before the spawn boundary.
+        {
+            let mut snapshots = permission_modes.lock().unwrap();
+            let snapshot = snapshots.get_mut(&task_id).unwrap();
+            snapshot.mode = PermissionMode::Ask;
+            snapshot.full_access_confirmed = false;
+            snapshot.generation += 1;
+            cancellation.store(true, Ordering::SeqCst);
+        }
+
+        let spawn_calls = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&spawn_calls);
+        let spawn: SpawnAction = Box::new(move |_command| {
+            count.fetch_add(1, Ordering::SeqCst);
+            Err(std::io::Error::other("spawn must remain unreachable"))
+        });
+        let result = gate(Command::new("must-not-run"), spawn);
+
+        assert!(matches!(result, Err(SpawnGateError::Denied)));
+        assert_eq!(spawn_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn spawn_gate_rejects_a_different_task_id() {
+        let task_id = Uuid::new_v4();
+        let other_task_id = Uuid::new_v4();
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let permission_modes = Arc::new(Mutex::new(std::collections::HashMap::from([(
+            task_id,
+            TaskPermissionSnapshot {
+                mode: PermissionMode::FullAccess,
+                full_access_confirmed: true,
+                generation: 1,
+                task_cancellation: Arc::clone(&cancellation),
+                active_host_cancellation: Some(Arc::clone(&cancellation)),
+                host_process_recovery_hold: false,
+            },
+        )])));
+        let gate = full_access_host_spawn_gate(permission_modes, other_task_id, 1, cancellation);
+        let spawn_calls = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&spawn_calls);
+        let spawn: SpawnAction = Box::new(move |_command| {
+            count.fetch_add(1, Ordering::SeqCst);
+            Err(std::io::Error::other("spawn must remain unreachable"))
+        });
+
+        assert!(matches!(
+            gate(Command::new("must-not-run"), spawn),
+            Err(SpawnGateError::Denied)
+        ));
+        assert_eq!(spawn_calls.load(Ordering::SeqCst), 0);
     }
 }

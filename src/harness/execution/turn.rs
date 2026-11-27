@@ -24,6 +24,9 @@ fn process_result_summary(result: &crate::ProcessResult) -> String {
         crate::contracts::process_execution::ProcessExecutionProfile::OfflineReadOnlyExecV1 => {
             format!("offline read-only process {:?}", result.outcome)
         }
+        crate::contracts::process_execution::ProcessExecutionProfile::FullAccessHostProcessV1 => {
+            format!("Full Access host process {:?}", result.outcome)
+        }
     }
 }
 
@@ -73,6 +76,16 @@ impl<'a> ActionPermissionGate<'a> {
         action: &super::WorkspaceAction,
         extensions: Option<&TurnExtensions<'_>>,
     ) -> Result<(), GoalTurnError> {
+        if let super::WorkspaceAction::FullAccessHostProcess { .. } = action {
+            if self.mode != PermissionMode::FullAccess
+                || !session.task_has_confirmed_full_access(task_id)
+            {
+                return Err(GoalTurnError::PermissionUnavailable {
+                    action: "full_access_host_process",
+                });
+            }
+            return self.authorize(task_id, turn_id, action, extensions);
+        }
         if !matches!(action, super::WorkspaceAction::OfflineReadOnlyExec { .. }) {
             return self.authorize(task_id, turn_id, action, extensions);
         }
@@ -319,7 +332,13 @@ fn run_goal_turn_with_extensions_and_approval<D: DecisionSource + ?Sized>(
         .validate_running_turn(task_id, turn_id)
         .map_err(GoalTurnError::WorkspaceRead)?;
 
+    if session.task_cancellation_requested(task_id) {
+        return cancel_turn(session, task_id, turn_id, Vec::new(), Vec::new(), 0);
+    }
     let action = decision_source.choose_action(goal);
+    if session.task_cancellation_requested(task_id) {
+        return cancel_turn(session, task_id, turn_id, Vec::new(), Vec::new(), 1);
+    }
     match execute_with_extensions(
         session,
         task_id,
@@ -360,6 +379,9 @@ fn run_goal_turn_with_extensions_and_approval<D: DecisionSource + ?Sized>(
             cancel_turn(session, task_id, turn_id, Vec::new(), Vec::new(), 1)
         }
         ActionExecution::Observation(observation) => {
+            if session.task_cancellation_requested(task_id) {
+                return cancel_turn(session, task_id, turn_id, vec![observation], Vec::new(), 1);
+            }
             let result = match &observation {
                 WorkspaceObservation::ProcessFinished { result } => process_result_summary(result),
                 WorkspaceObservation::FileRead { contents, .. } => contents.clone(),
@@ -407,6 +429,10 @@ fn run_goal_turn_with_extensions_and_approval<D: DecisionSource + ?Sized>(
             )
         }
         ActionExecution::Failed { observation, error } => {
+            if session.task_cancellation_requested(task_id) {
+                let activity = summarize_observation_activity(&observation);
+                return cancel_turn(session, task_id, turn_id, vec![observation], activity, 1);
+            }
             let detail = error.to_string();
             let activity = summarize_observation_activity(&observation);
             let returns_failed_result = matches!(
@@ -588,6 +614,16 @@ fn run_goal_turn_with_budget_and_gate<D: BoundedDecisionSource + ?Sized>(
         None
     };
     while actions_taken < max_actions {
+        if session.task_cancellation_requested(task_id) {
+            return cancel_turn(
+                session,
+                task_id,
+                turn_id,
+                observations,
+                activity,
+                actions_taken,
+            );
+        }
         let mut decision_guidance = root_project_guidance.clone();
         let action = loop {
             let action = if needs_root_project_guidance {
@@ -643,6 +679,16 @@ fn run_goal_turn_with_budget_and_gate<D: BoundedDecisionSource + ?Sized>(
             }
             break action;
         };
+        if session.task_cancellation_requested(task_id) {
+            return cancel_turn(
+                session,
+                task_id,
+                turn_id,
+                observations,
+                activity,
+                actions_taken,
+            );
+        }
         let expected_revision = decision_source.expected_file_revision(&action);
         match execute_with_extensions(
             session,
@@ -720,11 +766,31 @@ fn run_goal_turn_with_budget_and_gate<D: BoundedDecisionSource + ?Sized>(
             ActionExecution::Observation(observation) => {
                 activity.extend(summarize_observation_activity(&observation));
                 observations.push(observation);
+                if session.task_cancellation_requested(task_id) {
+                    return cancel_turn(
+                        session,
+                        task_id,
+                        turn_id,
+                        observations,
+                        activity,
+                        actions_taken,
+                    );
+                }
             }
             ActionExecution::Failed { observation, error } => {
                 let detail = error.to_string();
                 activity.extend(summarize_observation_activity(&observation));
                 observations.push(observation);
+                if session.task_cancellation_requested(task_id) {
+                    return cancel_turn(
+                        session,
+                        task_id,
+                        turn_id,
+                        observations,
+                        activity,
+                        actions_taken,
+                    );
+                }
                 return finish_turn(
                     session,
                     task_id,

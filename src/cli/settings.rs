@@ -387,12 +387,6 @@ pub(super) fn load_permission_mode(path: &Path) -> Result<PermissionMode, String
 }
 
 pub(super) fn save_permission_mode(path: &Path, mode: PermissionMode) -> Result<(), String> {
-    if mode == PermissionMode::FullAccess {
-        return Err(
-            "Full Access is unavailable: Krypper has no unrestricted host execution path"
-                .to_owned(),
-        );
-    }
     let contents = format!("{}\n", mode.as_str());
     write_private_file(path, contents.as_bytes(), "permission settings")
 }
@@ -1505,9 +1499,11 @@ mod tests {
             PermissionMode::RiskBased
         );
 
-        write_private_file(&path, b"full-access\n", "permission settings").unwrap();
-        let error = load_permission_mode(&path).unwrap_err();
-        assert!(error.contains("Full Access is unavailable"));
+        save_permission_mode(&path, PermissionMode::FullAccess).unwrap();
+        assert_eq!(
+            load_permission_mode(&path).unwrap(),
+            PermissionMode::FullAccess
+        );
     }
 
     #[test]

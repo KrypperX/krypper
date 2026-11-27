@@ -3,6 +3,7 @@
 //! Product-owned authorization and result types stay here; the `supervisor` module adapts them
 //! to the fixed offline Cargo sandbox crate while preserving existing imports.
 
+mod host;
 mod outcome;
 mod policy;
 mod result;
@@ -15,6 +16,11 @@ mod host_fixtures;
 mod tests;
 
 // Keep the historical module paths available to internal callers.
+pub(crate) use self::host::run as run_host_process;
+pub use self::host::HostProcessRequest;
+pub(crate) use self::host::{
+    MAX_HOST_EXEC_ARGUMENTS, MAX_HOST_EXEC_ARGUMENT_BYTES, MAX_HOST_EXEC_TEXT_BYTES,
+};
 #[allow(unused_imports)]
 pub use self::outcome::{ProcessOutcome, ProcessResource};
 pub(crate) use self::policy::{validate_test_filter, ProcessPolicyFacts, MAX_TEST_FILTER_BYTES};

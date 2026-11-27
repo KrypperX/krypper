@@ -15,6 +15,9 @@ pub(super) fn execute_action_with_revision(
     action: &WorkspaceAction,
     expected_revision: Option<&str>,
 ) -> Result<ActionExecution, GoalTurnError> {
+    if session.task_cancellation_requested(task_id) {
+        return Ok(ActionExecution::Cancel);
+    }
     match action {
         WorkspaceAction::OfflineCargoTest { test_filter } => {
             let result = session
@@ -23,7 +26,12 @@ pub(super) fn execute_action_with_revision(
             let error = GoalTurnError::Process(result.outcome);
             let succeeded = result.succeeded();
             let observation = WorkspaceObservation::ProcessFinished { result };
-            Ok(if succeeded {
+            let cancelled = matches!(
+                &observation,
+                WorkspaceObservation::ProcessFinished { result }
+                    if result.outcome == crate::ProcessOutcome::Cancelled
+            ) && session.task_cancellation_requested(task_id);
+            Ok(if cancelled || succeeded {
                 ActionExecution::Observation(observation)
             } else {
                 ActionExecution::Failed { observation, error }
@@ -37,6 +45,24 @@ pub(super) fn execute_action_with_revision(
             let succeeded = result.succeeded();
             let observation = WorkspaceObservation::ProcessFinished { result };
             Ok(if succeeded {
+                ActionExecution::Observation(observation)
+            } else {
+                ActionExecution::Failed { observation, error }
+            })
+        }
+        WorkspaceAction::FullAccessHostProcess { request } => {
+            let result = session
+                .run_full_access_host_process(task_id, turn_id, request)
+                .map_err(GoalTurnError::WorkspaceRead)?;
+            let error = GoalTurnError::Process(result.outcome);
+            let succeeded = result.succeeded();
+            let observation = WorkspaceObservation::ProcessFinished { result };
+            let cancelled = matches!(
+                &observation,
+                WorkspaceObservation::ProcessFinished { result }
+                    if result.outcome == crate::ProcessOutcome::Cancelled
+            ) && session.task_cancellation_requested(task_id);
+            Ok(if cancelled || succeeded {
                 ActionExecution::Observation(observation)
             } else {
                 ActionExecution::Failed { observation, error }

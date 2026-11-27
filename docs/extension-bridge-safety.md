@@ -17,8 +17,8 @@ The approved extension APIs always request exact approval for every effect.
 They do not accept a permission mode or let a reusable grant skip that prompt.
 This matches the current Ask and Risk-based policy, where external or
 unclassified effects require approval; only the fixed offline process profile
-is automatically available in Risk-based mode. Full Access is unavailable and
-cannot bypass extension approval.
+is automatically available in Risk-based mode. The Full Access host-process
+mode does not authorize extensions or bypass their exact approval.
 
 ## Threat model
 

@@ -94,11 +94,21 @@ pub(super) fn write_observation(
                     result.cleanup_confirmed,
                     result.truncated
                 )?;
-            } else {
+            } else if result.profile == crate::ProcessExecutionProfile::OfflineReadOnlyExecV1 {
                 writeln!(
                     output,
                     "Observation {number}: offline read-only exec {:?}; cleanup={} truncated={}",
                     result.outcome, result.cleanup_confirmed, result.truncated
+                )?;
+            } else {
+                writeln!(
+                    output,
+                    "Observation {number}: Full Access host process {:?}; process_group_cleanup={} recovery_hold={} truncated={}; diagnostic={:?}",
+                    result.outcome,
+                    result.cleanup_confirmed,
+                    result.recovery_hold,
+                    result.truncated,
+                    result.diagnostic
                 )?;
             }
             writeln!(

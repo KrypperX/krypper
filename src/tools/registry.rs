@@ -5,6 +5,7 @@ use serde_json::{json, Map, Value};
 enum WorkspaceOperation {
     OfflineCargoTest,
     OfflineReadOnlyExec,
+    FullAccessHostProcess,
     ReadFile,
     ReadRange,
     ListDirectory,
@@ -21,6 +22,7 @@ impl WorkspaceOperation {
         match self {
             Self::OfflineCargoTest => "offline_cargo_test",
             Self::OfflineReadOnlyExec => "offline_read_only_exec",
+            Self::FullAccessHostProcess => "full_access_host_process",
             Self::ReadFile => "read_file",
             Self::ReadRange => "read_range",
             Self::ListDirectory => "list_directory",
@@ -40,6 +42,7 @@ pub(crate) enum EffectClass {
     WorkspaceMutation,
     FixedSandboxedOfflineCargoTest,
     SandboxedOfflineReadOnlyExec,
+    FullAccessHostProcess,
 }
 
 impl EffectClass {
@@ -50,6 +53,9 @@ impl EffectClass {
             Self::FixedSandboxedOfflineCargoTest => "fixed sandboxed offline Cargo test",
             Self::SandboxedOfflineReadOnlyExec => {
                 "bounded sandboxed offline read-only direct-argv execution"
+            }
+            Self::FullAccessHostProcess => {
+                "direct-argv host process with current-user filesystem and network access"
             }
         }
     }
@@ -85,6 +91,7 @@ enum ArgumentSchema {
     BoundedStringArray {
         min_items: usize,
         max_items: usize,
+        min_item_length: usize,
         max_item_length: usize,
     },
     PositiveInteger,
@@ -107,13 +114,20 @@ impl ArgumentSchema {
             Self::BoundedStringArray {
                 min_items,
                 max_items,
+                min_item_length,
                 max_item_length,
-            } => json!({
-                "type":"array",
-                "minItems":min_items,
-                "maxItems":max_items,
-                "items":{"type":"string","minLength":1,"maxLength":max_item_length}
-            }),
+            } => {
+                let mut item = json!({"type":"string","maxLength":max_item_length});
+                if min_item_length > 0 {
+                    item["minLength"] = json!(min_item_length);
+                }
+                json!({
+                    "type":"array",
+                    "minItems":min_items,
+                    "maxItems":max_items,
+                    "items":item
+                })
+            }
             Self::PositiveInteger => json!({"type":"integer","minimum":1}),
             Self::BoundedPositiveInteger { maximum } => {
                 json!({"type":"integer","minimum":1,"maximum":maximum})
@@ -229,6 +243,25 @@ const fn bounded_string_array(
         schema: ArgumentSchema::BoundedStringArray {
             min_items,
             max_items,
+            min_item_length: 1,
+            max_item_length,
+        },
+        required: true,
+    }
+}
+
+const fn bounded_string_array_allow_empty_items(
+    name: &'static str,
+    min_items: usize,
+    max_items: usize,
+    max_item_length: usize,
+) -> ArgumentDefinition {
+    ArgumentDefinition {
+        name,
+        schema: ArgumentSchema::BoundedStringArray {
+            min_items,
+            max_items,
+            min_item_length: 0,
             max_item_length,
         },
         required: true,
@@ -259,7 +292,7 @@ const fn bounded_positive_integer(name: &'static str, maximum: usize) -> Argumen
     }
 }
 
-const WORKSPACE_OPERATIONS: [OperationDefinition; 11] = [
+const WORKSPACE_OPERATIONS: [OperationDefinition; 12] = [
     OperationDefinition {
         operation: WorkspaceOperation::ReadFile,
         description: "Read one safe UTF-8 workspace file.",
@@ -361,6 +394,22 @@ const WORKSPACE_OPERATIONS: [OperationDefinition; 11] = [
             bounded_string("working_directory", 4_096),
         ],
     },
+    OperationDefinition {
+        operation: WorkspaceOperation::FullAccessHostProcess,
+        description: "Run one bounded direct-argv host process as the current OS user, from the requested host working directory, with inherited environment, filesystem and network access. This has no Krypper sandbox, workspace fence, or egress restriction; use only in a task explicitly confirmed for Full Access.",
+        effect_class: EffectClass::FullAccessHostProcess,
+        authorization_prerequisite: AuthorizationPrerequisite::ExistingTaskAuthorization,
+        arguments: &[
+            bounded_string("executable", crate::tools::process::MAX_HOST_EXEC_TEXT_BYTES),
+            bounded_string_array_allow_empty_items(
+                "argv",
+                0,
+                crate::tools::process::MAX_HOST_EXEC_ARGUMENTS,
+                crate::tools::process::MAX_HOST_EXEC_ARGUMENT_BYTES,
+            ),
+            bounded_string("working_directory", crate::tools::process::MAX_HOST_EXEC_TEXT_BYTES),
+        ],
+    },
 ];
 
 pub(crate) fn workspace_operations() -> &'static [OperationDefinition] {
@@ -449,6 +498,11 @@ mod tests {
                     EffectClass::SandboxedOfflineReadOnlyExec,
                     AuthorizationPrerequisite::ExistingTaskAuthorizationHostAuthorizationAndVerifiedConfinement,
                 ),
+                (
+                    "full_access_host_process",
+                    EffectClass::FullAccessHostProcess,
+                    AuthorizationPrerequisite::ExistingTaskAuthorization,
+                ),
             ]
         );
     }
@@ -499,5 +553,32 @@ mod tests {
                 .contains("runtime authorization checks remain authoritative and fail closed"));
             assert!(description.contains("this metadata does not grant access"));
         }
+    }
+
+    #[test]
+    fn full_access_host_process_schema_has_only_direct_argv_fields() {
+        let operation = workspace_operations()
+            .iter()
+            .find(|operation| operation.name() == "full_access_host_process")
+            .expect("host process is registered");
+
+        assert_eq!(
+            operation.parameters(),
+            serde_json::json!({
+                "type":"object",
+                "properties":{
+                    "executable":{"type":"string", "minLength":1, "maxLength":crate::tools::process::MAX_HOST_EXEC_TEXT_BYTES},
+                    "argv":{
+                        "type":"array",
+                        "minItems":0,
+                        "maxItems":crate::tools::process::MAX_HOST_EXEC_ARGUMENTS,
+                        "items":{"type":"string", "maxLength":crate::tools::process::MAX_HOST_EXEC_ARGUMENT_BYTES}
+                    },
+                    "working_directory":{"type":"string", "minLength":1, "maxLength":crate::tools::process::MAX_HOST_EXEC_TEXT_BYTES}
+                },
+                "required":["argv", "executable", "working_directory"],
+                "additionalProperties":false
+            })
+        );
     }
 }

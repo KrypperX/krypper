@@ -67,6 +67,7 @@ for one task:
 ```sh
 krypper setup --permission-mode ask
 krypper setup --permission-mode risk-based
+krypper setup --permission-mode full-access
 krypper task --goal "Review this workspace" --max-actions 5 --permission-mode ask
 ```
 
@@ -80,16 +81,31 @@ invocation; a checkpoint does not restore an older mode.
 Both Ask and Risk-based keep the existing workspace boundary for file actions.
 The host policy asks before process or external effects in Ask mode. Risk-based
 automatically permits bounded workspace actions and the fixed offline Cargo
-profile only when its trusted host configuration is present. Unknown effects
-need approval or fail closed. The current CLI has no trusted host
-toolchain/registry setting for offline Cargo, no interactive approval channel
-for external effects, and no generic process, external-file, or network action;
-those effects therefore remain unavailable. `krypper setup --status` reports
-the selected mode and states that Full Access is unavailable. Selecting
-`full-access` fails with an error; it is never treated as Ask or Risk-based.
-The currently executable task actions stay within the workspace, so Ask and
-Risk-based have the same effect today. Choosing Risk-based does not add process,
-external-file, or network tools.
+profile only when its trusted host configuration is present. Ask requires a
+trusted exact-action prompt where an effect supports one; unknown Full Access
+effects remain unavailable. The current CLI has no trusted host
+toolchain/registry setting for offline Cargo and no generic external-file or
+network tool. `krypper setup --status` reports the selected mode and whether
+the Linux host-process path is available.
+
+Full Access is Linux-only and applies to the registered direct-argv host
+process action. Before provider startup, the CLI displays the risk and requires
+the user to type `yes` in the controlling terminal for that task. A saved
+preference or `--permission-mode full-access` alone is not authorization. If
+the terminal is unavailable or the user declines, the task stops before the
+provider starts. The action runs as the current OS user with inherited
+environment, filesystem and network access; Krypper provides no process
+sandbox, workspace boundary, or egress restriction for it. Outer OS/container
+policy still applies, and Full Access does not grant root. Checkpoint restore
+does not restore this confirmation; resume prompts again.
+The reported `process_group_cleanup` value checks only the original process
+group and captured output pipes; detached descendants can escape that check.
+
+Offline Cargo keeps its existing separate host authorization. The Full Access
+selection does not widen it or the bounded offline read-only profile.
+Captured host-process output may be sent to the selected AI provider in the
+next request, so commands that read local secrets can expose them to that
+provider or over the process's unrestricted network access.
 
 ### Verified planning and correction
 

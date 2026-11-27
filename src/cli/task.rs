@@ -42,9 +42,12 @@ use crate::task_lifecycle::{TaskSession, TaskState, TurnState};
 use crate::tools::permission_policy::PermissionMode;
 use serde_json::Value;
 use std::ffi::OsString;
+use std::fs::OpenOptions;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 // Leave room for the action command and path beside a maximum-size file body.
@@ -204,7 +207,7 @@ where
                     return usage_error(
                         error,
                         Some("task"),
-                        "--permission-mode needs ask or risk-based",
+                        "--permission-mode needs ask, risk-based, or full-access",
                     );
                 };
                 requested_permission_mode = match PermissionMode::parse(value) {
@@ -683,6 +686,37 @@ where
         automatic_resolution = Some(resolution);
     }
 
+    let full_access_confirmed = if permission_mode == PermissionMode::FullAccess {
+        if !cfg!(target_os = "linux") {
+            return usage_error(
+                error,
+                Some("task"),
+                "Full Access host execution is currently available only on Linux; no task was started",
+            );
+        }
+        match confirm_full_access_for_task() {
+            Ok(true) => true,
+            Ok(false) => {
+                return usage_error(
+                    error,
+                    Some("task"),
+                    "Full Access was not confirmed; no task was started",
+                )
+            }
+            Err(cause) => {
+                return usage_error(
+                    error,
+                    Some("task"),
+                    &format!(
+                        "Full Access needs a trusted controlling-terminal confirmation ({cause}); no task was started"
+                    ),
+                )
+            }
+        }
+    } else {
+        false
+    };
+
     let mut model_source = match prepare_model_source_for_selection(
         model,
         provider,
@@ -827,6 +861,31 @@ where
         };
         (session, task_id, turn_id, goal)
     };
+    session
+        .set_task_permission_mode(task_id, permission_mode, full_access_confirmed)
+        .map_err(io::Error::other)?;
+    let task_cancellation = session.task_cancellation_flag(task_id);
+    let _task_cancellation_signal = if full_access_confirmed {
+        let Some(cancellation) = task_cancellation.as_ref().cloned() else {
+            return Err(io::Error::other(
+                "Full Access task cancellation state was unavailable",
+            ));
+        };
+        match TaskCancellationSignal::register(cancellation) {
+            Ok(registration) => Some(registration),
+            Err(cause) => {
+                return usage_error(
+                    error,
+                    Some("task"),
+                    &format!(
+                        "cannot register Full Access cancellation handling ({cause}); no model request was made"
+                    ),
+                );
+            }
+        }
+    } else {
+        None
+    };
     if resume.is_some() {
         if let Some(paths) = user_settings_paths().map_err(io::Error::other)? {
             let has_fallback_state =
@@ -928,6 +987,12 @@ where
         "Permission mode: {}",
         permission_mode.display_name()
     )?;
+    if full_access_confirmed {
+        writeln!(
+            output,
+            "Full Access: confirmed for this task; direct host processes run without Krypper sandbox, workspace boundary, or egress restriction"
+        )?;
+    }
     let mut last_reported_selection = automatic_resolution
         .as_ref()
         .map(|resolution| resolution.selection.clone());
@@ -1016,6 +1081,13 @@ where
                             };
                         }
 
+                        if task_cancellation
+                            .as_ref()
+                            .is_some_and(|cancellation| cancellation.load(Ordering::SeqCst))
+                        {
+                            return WorkspaceAction::Cancel;
+                        }
+
                         decisions += 1;
                         if let Some(decision_source) = task_decision_source.as_mut() {
                             if let Err(cause) =
@@ -1033,6 +1105,12 @@ where
                                 observations,
                                 project_guidance,
                             );
+                            if task_cancellation
+                                .as_ref()
+                                .is_some_and(|cancellation| cancellation.load(Ordering::SeqCst))
+                            {
+                                return WorkspaceAction::Cancel;
+                            }
                             if let Some(report) = decision_source.take_observation_compaction() {
                                 let event = serde_json::json!({
                                     "type": "observation_context_compacted",
@@ -1155,10 +1233,12 @@ where
         actions_taken += iteration_actions;
 
         if reconcile_after_run {
-            if let Some(decision_source) = task_decision_source.as_mut() {
-                decision_source
-                    .reconcile_completed_turn(result.observations())
-                    .map_err(io::Error::other)?;
+            if stop_reason != GoalTurnStopReason::Cancelled {
+                if let Some(decision_source) = task_decision_source.as_mut() {
+                    decision_source
+                        .reconcile_completed_turn(result.observations())
+                        .map_err(io::Error::other)?;
+                }
             }
             reconcile_task_state(&mut session, task_id, stop_reason)?;
         }
@@ -1351,6 +1431,116 @@ where
     } else {
         1
     })
+}
+
+trait ReadWrite: Read + Write {}
+
+impl<T: Read + Write> ReadWrite for T {}
+
+struct TaskCancellationSignal {
+    registration: signal_hook::SigId,
+}
+
+impl TaskCancellationSignal {
+    fn register(cancellation: Arc<AtomicBool>) -> io::Result<Self> {
+        Self::register_for(signal_hook::consts::SIGINT, cancellation)
+    }
+
+    fn register_for(signal: i32, cancellation: Arc<AtomicBool>) -> io::Result<Self> {
+        signal_hook::flag::register(signal, cancellation).map(|registration| Self { registration })
+    }
+}
+
+impl Drop for TaskCancellationSignal {
+    fn drop(&mut self) {
+        signal_hook::low_level::unregister(self.registration);
+    }
+}
+
+fn confirm_full_access_with_terminal(terminal: Option<&mut dyn ReadWrite>) -> io::Result<bool> {
+    let Some(terminal) = terminal else {
+        return Err(io::Error::new(
+            io::ErrorKind::NotConnected,
+            "no controlling terminal is available",
+        ));
+    };
+    writeln!(
+        terminal,
+        "Full Access can run direct-argv programs as your current OS user, read and change files you can access, inherit your environment, and use your network. Process output may be sent to the selected AI provider as part of the next request. Krypper applies no process sandbox, workspace boundary, or network egress restriction. Your outer OS/container rules still apply; this does not grant root."
+    )?;
+    write!(
+        terminal,
+        "Confirm Full Access for this task only? Type yes to continue: "
+    )?;
+    terminal.flush()?;
+    let mut answer = Vec::with_capacity(4);
+    let mut byte = [0_u8; 1];
+    while answer.len() < 16 {
+        match terminal.read(&mut byte)? {
+            0 => break,
+            _ if byte[0] == b'\n' => break,
+            _ if byte[0] == b'\r' => continue,
+            _ => answer.push(byte[0]),
+        }
+    }
+    Ok(answer.eq_ignore_ascii_case(b"yes"))
+}
+
+fn confirm_full_access_for_task() -> io::Result<bool> {
+    let mut terminal = OpenOptions::new().read(true).write(true).open("/dev/tty")?;
+    confirm_full_access_with_terminal(Some(&mut terminal))
+}
+
+#[cfg(test)]
+mod full_access_confirmation_tests {
+    use super::confirm_full_access_with_terminal;
+    use std::io::{self, Cursor, Read, Write};
+
+    struct ScriptedTerminal {
+        input: Cursor<Vec<u8>>,
+        output: Vec<u8>,
+    }
+
+    impl Read for ScriptedTerminal {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            self.input.read(buffer)
+        }
+    }
+
+    impl Write for ScriptedTerminal {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.output.extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn unavailable_terminal_fails_closed_and_decline_is_not_authorization() {
+        assert!(confirm_full_access_with_terminal(None).is_err());
+
+        let mut terminal = ScriptedTerminal {
+            input: Cursor::new(b"no\n".to_vec()),
+            output: Vec::new(),
+        };
+        assert!(!confirm_full_access_with_terminal(Some(&mut terminal)).unwrap());
+        assert!(String::from_utf8_lossy(&terminal.output).contains("no process sandbox"));
+    }
+
+    #[test]
+    fn exact_yes_confirms_only_after_the_full_risk_text_is_written() {
+        let mut terminal = ScriptedTerminal {
+            input: Cursor::new(b"yes\n".to_vec()),
+            output: Vec::new(),
+        };
+        assert!(confirm_full_access_with_terminal(Some(&mut terminal)).unwrap());
+        let warning = String::from_utf8_lossy(&terminal.output);
+        assert!(warning.contains("network egress restriction"));
+        assert!(warning.contains("may be sent to the selected AI provider"));
+    }
 }
 
 struct CliDecisionSource<F> {

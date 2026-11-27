@@ -110,6 +110,7 @@ fn gemini_generate_content_uses_native_schema_api_key_and_one_bounded_action() {
             "apply_patch",
             "offline_cargo_test",
             "offline_read_only_exec",
+            "full_access_host_process",
             "complete_task"
         ]
     );

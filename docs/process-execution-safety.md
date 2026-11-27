@@ -2,7 +2,7 @@
 
 > **Historical design proposal (#176).** The observations below describe the inspected base revision, not current capabilities. Issues #178 and #78 implement the [fixed offline Cargo profile and bounded direct-argv profile](offline-cargo-profile.md); that document describes their actual authorization, host requirements, confinement, limits and verification. The broader contracts here remain a requirements reference, not a claim that every proposed feature is implemented.
 >
-> See [the historical Cargo implementation snapshot](#current-state-at-dcd22b53b176668ae4b5f134d98b21b84ce55f40) and the [C3 direct-argv update](#c3-direct-argv-update) for implemented behavior. The remaining sections are retained as the original requirements and threat model.
+> See [the historical Cargo implementation snapshot](#current-state-at-dcd22b53b176668ae4b5f134d98b21b84ce55f40), the [C3 direct-argv update](#c3-direct-argv-update), and the [Linux Full Access host-process update](#linux-full-access-host-process-update) for implemented behavior. The remaining sections are retained as the original requirements and threat model.
 
 ## Current state at dcd22b53b176668ae4b5f134d98b21b84ce55f40
 
@@ -161,6 +161,10 @@ flowchart LR
 
 ## Proposed request and authorization contract
 
+The profile constraints in this section apply to sandboxed process profiles. The
+explicit Linux Full Access exception is documented later: it permits a
+user-confirmed direct-argv host process without Krypper sandboxing.
+
 Do not add an unrestricted `shell(command: string)` interface. A future registered Tool should accept a closed, versioned schema with a policy-owned **profile ID**, a bounded list of validated argument values, and a workspace-relative cwd. For example, a profile may define a fixed executable and permitted argument grammar while the request supplies only a test selection. Unknown fields, arbitrary executable paths, shell fragments, environment edits, sandbox flags, resource-limit increases, host paths, and user-selected output destinations are rejected.
 
 The launcher passes an argv vector directly; it never constructs a shell string. Profiles reject shell/interpreter entry points and options that change the executable, load plugins/configuration from outside the workspace, launch a daemon, or weaken profile limits. Because an executable can itself interpret arguments, profile validation is command-specific; “no shell parsing” alone is not authorization. A profile must document whether it intentionally runs project-controlled build scripts or tests and constrain them with the same sandbox.
@@ -264,6 +268,30 @@ Open questions to resolve before implementation:
 Compatibility with other coding agents is a measurement question, not evidence of safety. If compatibility is requested, compare exact workflows, isolation, approval, and failure semantics against this contract in a future evaluation; do not copy another product’s defaults as proof.
 
 Revisit this note before implementation if the supported OS set changes, a new command profile needs network or credentials, the sandbox backend cannot meet a contract, process output becomes a structured tool protocol, or observed development workloads require changing limits. Any contract relaxation requires a new threat review and explicit policy decision.
+
+## Linux Full Access host-process update
+
+The CLI supports a separate Linux-only `full_access_host_process` action when the
+task has Full Access mode and the user confirms that mode through the controlling
+terminal before provider startup. A saved preference or `--permission-mode`
+selection does not authorize a task. Missing terminal access and declined
+confirmation stop before the provider request.
+
+The action accepts one executable, a bounded argv array, and a host working
+directory. It does not parse shell text or accept model-selected environment,
+sandbox, or resource settings. It executes with the current OS user's inherited
+environment, filesystem, and network access. It has no Krypper process sandbox,
+workspace fence, or egress restriction; outer OS/container policy still applies.
+This mode does not grant root or authorize unknown actions, extension tools, the
+fixed offline Cargo profile, or the bounded offline read-only profile.
+
+The Linux runner uses a dedicated process group, a five-minute wall limit, a
+one-MiB combined output cap, and bounded cleanup polling. Cancellation, timeout,
+output overflow, or unconfirmed process-group/pipe cleanup cannot be reported as
+successful. The cleanup flag covers only the launched process group and captured
+pipe EOF; a child that calls `setsid` or otherwise escapes the group can survive
+undetected, so the flag is not a tree-wide cleanup guarantee. Mode snapshots and
+confirmation are task-local and absent after checkpoint restore.
 
 ## Primary platform references
 
