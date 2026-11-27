@@ -11,14 +11,708 @@ use guard::{
 };
 
 #[test]
-fn production_tools_modules_do_not_import_brain() {
+fn production_tools_modules_do_not_import_brain_or_core() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs");
     let violations = scan_tools_module_from_crate_root(&root);
 
     assert!(
         violations.is_empty(),
-        "production Tools modules must not depend on Brain:\n{}",
+        "production Tools modules must not depend on Brain or Core:\n{}",
         violations.join("\n")
+    );
+}
+
+#[test]
+fn tools_core_guard_detects_direct_alias_facade_and_parent_paths() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("lib.rs");
+    let sources = [
+        r#"
+            pub mod core { pub mod task { pub struct Task; } }
+            pub(crate) mod tools {
+                use crate::core::task::Task;
+                fn reference() { let _: Task; let _: crate::core::task::Task; }
+            }
+        "#,
+        r#"
+            use crate::core as runtime;
+            pub mod core { pub mod task { pub struct Task; } }
+            pub(crate) mod tools { use crate::runtime::task::Task; }
+        "#,
+        r#"
+            pub mod core { pub mod task { pub struct Task; } }
+            pub mod task_lifecycle { pub use crate::core::task::Task; }
+            pub(crate) mod tools { use crate::task_lifecycle::Task; }
+        "#,
+        r#"
+            pub mod core { pub mod task { pub struct Task; } }
+            pub mod compatibility { pub use crate::core::task as task_api; }
+            pub(crate) mod tools { use crate::compatibility::task_api::Task; }
+        "#,
+        r#"
+            pub mod core { pub mod task { pub struct Task; } }
+            pub(crate) mod tools {
+                mod nested { use super::super::core::task::Task; }
+            }
+        "#,
+        r#"
+            pub mod core { pub mod codec {} }
+            pub(crate) mod tools {
+                #[serde(with = "crate::core::codec")]
+                struct Model;
+            }
+        "#,
+        r#"
+            pub mod core { pub trait Codec {} }
+            pub(crate) mod tools {
+                #[serde(bound = "T: crate::core::Codec, U: Clone")]
+                struct Model<T, U>(T, U);
+            }
+        "#,
+        r#"
+            pub mod core { pub mod task { pub struct Task; } }
+            pub(crate) mod tools { use super::core::task::Task; }
+        "#,
+        r#"
+            pub mod core { pub mod task { pub struct Task; } }
+            pub mod task_lifecycle { pub use crate::core::task::Task; }
+            pub(crate) mod tools { use super::task_lifecycle::Task; }
+        "#,
+        r#"
+            use crate as application;
+            pub mod core { pub mod task { pub struct Task; } }
+            pub(crate) mod tools { use crate::application::core::task::Task; }
+        "#,
+        r#"
+            extern crate self as application;
+            pub mod core { pub mod task { pub struct Task; } }
+            pub(crate) mod tools { use application::core::task::Task; }
+        "#,
+        r#"
+            pub mod core { pub mod task { pub struct Task; } }
+            pub mod compatibility { pub use crate::core::task::Task; }
+            pub(crate) mod tools { use crate::compatibility::Task; }
+        "#,
+        r#"
+            pub mod core { pub mod task { pub struct Task; } }
+            #[opaque::facade]
+            pub mod compatibility {}
+            pub(crate) mod tools { use crate::compatibility::Task; }
+        "#,
+        r#"
+            pub mod core { pub mod task { pub struct Task; } }
+            pub mod compatibility { define_core_facade!(); }
+            pub(crate) mod tools { use crate::compatibility::Task; }
+        "#,
+        r#"
+            pub mod core { pub mod task { pub struct Task; } }
+            pub mod engine_facade { pub use crate::core as runtime; }
+            pub mod compatibility {
+                pub use crate::engine_facade::runtime::task::Task;
+            }
+            pub(crate) mod tools { use crate::compatibility::Task; }
+        "#,
+    ];
+
+    for source in sources {
+        fs::write(&root, source).unwrap();
+        let violations = scan_tools_module_from_crate_root(&root);
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.contains("Core")),
+            "Core dependency was not detected in {source}: {violations:?}"
+        );
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("lib.rs");
+    fs::write(
+        &root,
+        r#"
+            pub mod core { pub mod task { pub struct Task; } }
+            pub mod compatibility;
+            pub(crate) mod tools { use crate::compatibility::Task; }
+        "#,
+    )
+    .unwrap();
+    fs::write(
+        directory.path().join("compatibility.rs"),
+        "pub use crate::core::task::Task;",
+    )
+    .unwrap();
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("Core")),
+        "external Core facade was not detected: {violations:?}"
+    );
+
+    fs::create_dir(directory.path().join("core")).unwrap();
+    fs::write(
+        &root,
+        r#"
+            pub mod core;
+            pub mod compatibility { pub use crate::core::task as task_api; }
+            pub(crate) mod tools { use crate::compatibility::task_api::Task; }
+        "#,
+    )
+    .unwrap();
+    fs::write(directory.path().join("core/mod.rs"), "pub mod task;").unwrap();
+    fs::write(directory.path().join("core/task.rs"), "pub struct Task;").unwrap();
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("Core")),
+        "external Core submodule alias was not detected: {violations:?}"
+    );
+}
+
+#[test]
+fn tools_core_guard_detects_glob_include_and_external_transitive_facades() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("lib.rs");
+    fs::write(
+        &root,
+        r#"
+            pub mod core { pub mod task { pub struct Task; } }
+            pub use crate::core::*;
+            pub(crate) mod tools { use crate::task::Task; }
+        "#,
+    )
+    .unwrap();
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("Core")),
+        "Core glob re-export was not detected: {violations:?}"
+    );
+
+    fs::write(
+        &root,
+        r#"
+            pub mod core { pub mod task { pub struct Task; } }
+            pub use crate::core::*;
+            pub mod contracts { pub struct ProcessOutcome; }
+            pub(crate) mod tools { use crate::contracts::ProcessOutcome; }
+        "#,
+    )
+    .unwrap();
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations
+            .iter()
+            .all(|violation| !violation.contains("Core")),
+        "unrelated crate-root module was classified as a Core glob export: {violations:?}"
+    );
+
+    fs::write(
+        &root,
+        r#"
+            pub mod core { pub struct Task; }
+            pub mod compatibility {
+                pub use crate::core::Task as CompatibilityTask;
+                pub struct ProcessOutcome;
+            }
+            pub use crate::compatibility::*;
+            pub(crate) mod tools { use crate::ProcessOutcome; }
+        "#,
+    )
+    .unwrap();
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations
+            .iter()
+            .all(|violation| !violation.contains("Core")),
+        "neutral facade export was classified as Core: {violations:?}"
+    );
+
+    fs::write(
+        &root,
+        r#"
+            pub mod core { pub struct Task; }
+            pub mod compatibility {
+                pub use crate::core::Task as CompatibilityTask;
+                pub struct ProcessOutcome;
+            }
+            pub(crate) mod tools {
+                use crate::compatibility::ProcessOutcome;
+            }
+        "#,
+    )
+    .unwrap();
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations
+            .iter()
+            .all(|violation| !violation.contains("Core")),
+        "qualified neutral facade item was classified as Core: {violations:?}"
+    );
+
+    fs::write(
+        &root,
+        r#"
+            pub mod core { pub struct Task; }
+            pub mod compatibility {
+                pub use crate::core::Task as CompatibilityTask;
+                pub struct ProcessOutcome;
+            }
+            pub use crate::compatibility::ProcessOutcome;
+            pub(crate) mod tools { use crate::ProcessOutcome; }
+        "#,
+    )
+    .unwrap();
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations
+            .iter()
+            .all(|violation| !violation.contains("Core")),
+        "named neutral facade re-export was classified as Core: {violations:?}"
+    );
+
+    fs::write(
+        &root,
+        r#"
+            pub mod core { pub struct Task; }
+            pub mod compatibility {
+                pub use crate::core::Task as CompatibilityTask;
+                pub struct ProcessOutcome;
+            }
+            pub(crate) mod tools {
+                use crate::compatibility::CompatibilityTask;
+            }
+        "#,
+    )
+    .unwrap();
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("Core")),
+        "qualified Core facade item was not detected: {violations:?}"
+    );
+
+    fs::write(
+        &root,
+        r#"
+            pub mod core { pub struct Task; }
+            pub mod compatibility {
+                pub mod nested {
+                    pub use crate::core::Task as CompatibilityTask;
+                    pub struct ProcessOutcome;
+                }
+            }
+            pub(crate) mod tools {
+                use crate::compatibility::nested::ProcessOutcome;
+            }
+        "#,
+    )
+    .unwrap();
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations
+            .iter()
+            .all(|violation| !violation.contains("Core")),
+        "qualified neutral nested facade item was classified as Core: {violations:?}"
+    );
+
+    fs::write(
+        &root,
+        r#"
+            pub mod core { pub struct Task; }
+            pub mod compatibility {
+                pub mod nested {
+                    pub use crate::core::Task as CompatibilityTask;
+                    pub struct ProcessOutcome;
+                }
+            }
+            pub use crate::compatibility::nested::*;
+            pub(crate) mod tools { use crate::ProcessOutcome; }
+        "#,
+    )
+    .unwrap();
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations
+            .iter()
+            .all(|violation| !violation.contains("Core")),
+        "neutral nested glob export was classified as Core: {violations:?}"
+    );
+
+    fs::write(
+        &root,
+        r#"
+            pub mod core { pub struct Task; }
+            pub mod compatibility {
+                pub mod nested {
+                    pub use crate::core::Task as CompatibilityTask;
+                    pub struct ProcessOutcome;
+                }
+            }
+            pub use crate::compatibility::nested::*;
+            pub(crate) mod tools { use crate::CompatibilityTask; }
+        "#,
+    )
+    .unwrap();
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("Core")),
+        "Core nested glob export was not detected: {violations:?}"
+    );
+
+    fs::write(
+        &root,
+        r#"
+            pub mod core { pub struct Task; }
+            pub mod compatibility {
+                pub mod nested {
+                    pub use crate::core::Task as CompatibilityTask;
+                    pub struct ProcessOutcome;
+                }
+            }
+            pub use crate::compatibility as compat;
+            pub(crate) mod tools {
+                use crate::compat::nested::ProcessOutcome;
+            }
+        "#,
+    )
+    .unwrap();
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations
+            .iter()
+            .all(|violation| !violation.contains("Core")),
+        "qualified neutral nested item through a facade alias was classified as Core: {violations:?}"
+    );
+
+    fs::write(
+        &root,
+        r#"
+            pub mod core { pub struct Task; }
+            pub mod compatibility {
+                pub mod nested {
+                    pub use crate::core::Task as CompatibilityTask;
+                    pub struct ProcessOutcome;
+                }
+            }
+            pub(crate) mod tools {
+                use crate::compatibility::nested::CompatibilityTask;
+            }
+        "#,
+    )
+    .unwrap();
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("Core")),
+        "qualified Core nested facade item was not detected: {violations:?}"
+    );
+
+    fs::write(
+        &root,
+        r#"
+            pub mod core { pub struct Task; }
+            pub mod compatibility {
+                pub use crate::core::Task as CompatibilityTask;
+                pub struct ProcessOutcome;
+            }
+            pub(crate) mod tools {
+                use crate::compatibility::{self as compat};
+                fn reference(_: compat::CompatibilityTask) {}
+            }
+        "#,
+    )
+    .unwrap();
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("Core")),
+        "self-as alias to a Core facade was not detected: {violations:?}"
+    );
+
+    fs::write(
+        &root,
+        r#"
+            pub mod core { pub struct Task; }
+            pub mod compatibility {
+                pub use crate::core::Task as CompatibilityTask;
+                pub struct ProcessOutcome;
+            }
+            pub use crate::compatibility::*;
+            pub(crate) mod tools { use crate::CompatibilityTask; }
+        "#,
+    )
+    .unwrap();
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("Core")),
+        "Core re-export through a facade glob was not detected: {violations:?}"
+    );
+
+    fs::write(
+        &root,
+        r#"
+            pub mod core { pub struct Task; }
+            pub mod compatibility {
+                pub use crate::core::Task as CompatibilityTask;
+                pub struct ProcessOutcome;
+            }
+            pub use crate::compatibility as compat;
+            pub use crate::compat::*;
+            pub(crate) mod tools { use crate::ProcessOutcome; }
+        "#,
+    )
+    .unwrap();
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations
+            .iter()
+            .all(|violation| !violation.contains("Core")),
+        "neutral export through an aliased facade glob was classified as Core: {violations:?}"
+    );
+
+    fs::write(
+        &root,
+        r#"
+            pub mod core { pub struct Task; }
+            pub mod compatibility {
+                pub use crate::core::Task as CompatibilityTask;
+                pub struct ProcessOutcome;
+            }
+            pub use crate::compatibility as compat;
+            pub(crate) mod tools { use crate::compat::ProcessOutcome; }
+        "#,
+    )
+    .unwrap();
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations
+            .iter()
+            .all(|violation| !violation.contains("Core")),
+        "neutral export through a named aliased facade was classified as Core: {violations:?}"
+    );
+
+    fs::write(
+        &root,
+        r#"
+            pub mod core { pub struct Task; }
+            pub mod compatibility {
+                pub use crate::core::Task as CompatibilityTask;
+                pub struct ProcessOutcome;
+            }
+            pub use crate::compatibility as compat;
+            pub(crate) mod tools { use crate::compat::CompatibilityTask; }
+        "#,
+    )
+    .unwrap();
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("Core")),
+        "Core export through a named aliased facade was not detected: {violations:?}"
+    );
+
+    fs::write(
+        &root,
+        r#"
+            pub mod core { pub mod task { pub struct Task; } }
+            pub mod compatibility { include!("compatibility.rs"); }
+            pub(crate) mod tools { use crate::compatibility::Task; }
+        "#,
+    )
+    .unwrap();
+    fs::write(
+        directory.path().join("compatibility.rs"),
+        "pub use crate::core::task::Task;",
+    )
+    .unwrap();
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("Core")),
+        "included Core facade was not detected: {violations:?}"
+    );
+
+    fs::write(&root, "pub mod core { pub struct Task; }\npub mod facade_a;\npub mod facade_b;\npub(crate) mod tools { use crate::facade_a::Task; }").unwrap();
+    fs::write(
+        directory.path().join("facade_a.rs"),
+        "pub use crate::facade_b::Task;",
+    )
+    .unwrap();
+    fs::write(
+        directory.path().join("facade_b.rs"),
+        "pub use crate::core::Task;",
+    )
+    .unwrap();
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("Core")),
+        "multi-hop external Core facade was not detected: {violations:?}"
+    );
+}
+
+#[test]
+fn tools_core_guard_detects_root_type_aliases_to_core() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("lib.rs");
+    fs::write(
+        &root,
+        r#"
+            pub mod core { pub mod task { pub struct Task; } }
+            pub type TaskAlias = crate::core::task::Task;
+            pub(crate) mod tools { use crate::TaskAlias; }
+        "#,
+    )
+    .unwrap();
+
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("Core")),
+        "Tools import through a root Core type alias was not rejected: {violations:?}"
+    );
+}
+
+#[test]
+fn tools_core_guard_handles_self_aliases_without_treating_the_crate_as_core() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("lib.rs");
+    fs::write(
+        &root,
+        r#"
+            extern crate self as application;
+            pub mod contracts { pub struct ProcessOutcome; }
+            pub mod core { pub struct Task; }
+            pub(crate) mod tools { use application::contracts::ProcessOutcome; }
+        "#,
+    )
+    .unwrap();
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations
+            .iter()
+            .all(|violation| !violation.contains("Core")),
+        "neutral contracts through a self alias were classified as Core: {violations:?}"
+    );
+
+    fs::write(
+        &root,
+        r#"
+            extern crate self as application;
+            pub mod core { pub struct Task; }
+            pub(crate) mod tools { use application::core::Task; }
+        "#,
+    )
+    .unwrap();
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("Core")),
+        "Core path through a self alias was not detected: {violations:?}"
+    );
+
+    fs::write(
+        &root,
+        r#"
+            use crate as application;
+            pub mod contracts { pub struct ProcessOutcome; }
+            pub mod core { pub struct Task; }
+            pub(crate) mod tools { use application::contracts::ProcessOutcome; }
+        "#,
+    )
+    .unwrap();
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations
+            .iter()
+            .all(|violation| !violation.contains("Core")),
+        "neutral contracts through a `use crate as` alias were classified as Core: {violations:?}"
+    );
+}
+
+#[test]
+fn tools_core_guard_ignores_test_only_statements() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("lib.rs");
+    fs::write(
+        &root,
+        r#"
+            pub mod core { pub mod task { pub struct Task; } }
+            pub(crate) mod tools {
+                fn production_helper() {
+                    #[cfg(test)]
+                    let _: crate::core::task::Task;
+
+                    #[cfg(test)]
+                    { let _: crate::core::task::Task; }
+                }
+            }
+        "#,
+    )
+    .unwrap();
+
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations.is_empty(),
+        "test-only statement was classified as a production Core dependency: {violations:?}"
+    );
+}
+
+#[test]
+fn tools_core_guard_ignores_test_only_dependencies() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("lib.rs");
+    fs::write(
+        &root,
+        r#"
+            pub mod core { pub mod task { pub struct Task; } }
+            pub(crate) mod tools {
+                #[cfg(test)]
+                use crate::core::task::Task;
+            }
+        "#,
+    )
+    .unwrap();
+
+    assert!(scan_tools_module_from_crate_root(&root).is_empty());
+
+    fs::write(
+        &root,
+        r#"
+            pub mod core { pub struct Task; }
+            pub mod compatibility {
+                pub struct Neutral;
+                #[cfg(test)]
+                pub use crate::core::Task;
+                pub fn production_helper() {
+                    #[cfg(test)]
+                    { let _: crate::core::Task; }
+                }
+            }
+            pub(crate) mod tools { use crate::compatibility::Neutral; }
+        "#,
+    )
+    .unwrap();
+
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations.is_empty(),
+        "test-only Core dependencies in a neutral facade were classified as production exports: {violations:?}"
     );
 }
 
