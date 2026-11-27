@@ -12,6 +12,7 @@
 //! scoped public-action migration for downstream exhaustive matches.
 
 mod action;
+mod brain_corrections;
 mod dispatch;
 mod planned;
 mod turn;
@@ -21,7 +22,6 @@ mod types;
 #[path = "execution/extension_tests.rs"]
 mod extension_tests;
 
-pub(crate) use self::action::summarize_observation_activity;
 pub(crate) use self::planned::process_test_verification;
 pub(crate) use self::planned::review_existing_impact_plan;
 pub(crate) use self::planned::stop_reason_after_test_verification;
@@ -44,7 +44,8 @@ pub use self::turn::{
     run_goal_turn_with_budget_and_extensions, run_goal_turn_with_extensions, TurnExtensions,
 };
 pub(crate) use self::turn::{run_goal_turn_with_budget_and_permission_gate, ActionPermissionGate};
-pub use self::types::{
+pub(crate) use crate::contracts::goal_turn::summarize_observation_activity;
+pub use crate::contracts::goal_turn::{
     BoundedDecisionSource, DecisionFailureCode, DecisionSource, GoalTurnError, GoalTurnResult,
     GoalTurnStopReason, WorkspaceAction, WorkspaceObservation,
 };
@@ -53,4 +54,4 @@ pub use self::dispatch::{
     dispatch_registered_extension_with_arguments_for_turn, ExtensionDispatchError,
     RegisteredExtensionWithArguments,
 };
-pub(crate) use self::types::{workspace_action_name, workspace_mutation_target};
+pub(crate) use crate::contracts::goal_turn::{workspace_action_name, workspace_mutation_target};

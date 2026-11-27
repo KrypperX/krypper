@@ -13,7 +13,7 @@ use super::{
     validate_model_name, validate_model_name_for_provider, AdvertisedToolNames, ModelError,
     OllamaDecisionSource, SYSTEM_INSTRUCTIONS,
 };
-use crate::agent_loop::{BoundedDecisionSource, WorkspaceAction, WorkspaceObservation};
+use crate::contracts::goal_turn::{BoundedDecisionSource, WorkspaceAction, WorkspaceObservation};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::net::SocketAddr;

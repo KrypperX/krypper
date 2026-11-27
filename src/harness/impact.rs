@@ -1,10 +1,13 @@
 //! Bounded, advisory impact evidence for workspace plans.
 
 use crate::brain::WorkspacePlan;
-use crate::harness::execution::{workspace_mutation_target, WorkspaceAction};
+use crate::contracts::goal_turn::{workspace_mutation_target, WorkspaceAction};
+pub use crate::contracts::impact::{
+    ImpactCoverage, ImpactEvidenceConfidence, ImpactFile, ImpactReference, ImpactReferenceKind,
+    ImpactReport, PublicApiStatus,
+};
 use crate::task_lifecycle::TaskSession;
 use crate::tools::{preview_replace_text, preview_workspace_patch, text_revision};
-use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -13,84 +16,6 @@ use uuid::Uuid;
 const MAX_IMPACT_FILES: usize = 16;
 const MAX_SYMBOL_QUERIES: usize = 4;
 const MAX_IMPACT_REFERENCES: usize = 64;
-
-/// Whether bounded lexical search completed within its configured limits and search scope.
-///
-/// Complete means no configured limit or search error was encountered. The workspace search
-/// scope still follows `.gitignore` rules and excludes `.git` metadata directories.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ImpactCoverage {
-    Complete,
-    Partial,
-    Unknown,
-}
-
-/// Source range of a reference found by bounded literal search.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct ImpactReference {
-    pub symbol: String,
-    pub path: String,
-    pub line: usize,
-    pub start_column: usize,
-    pub end_column: usize,
-    pub kind: ImpactReferenceKind,
-    /// Literal search confirms this source range; semantic linkage is not parsed.
-    pub confidence: ImpactEvidenceConfidence,
-    /// The reference remains or may remain after the proposed plan is applied.
-    pub may_remain_after_plan: bool,
-}
-
-/// Classification inferred from the reference path and source line.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ImpactReferenceKind {
-    PublicApiReference,
-    TestReference,
-    SymbolReference,
-}
-
-/// Confidence attached to analyzer evidence.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ImpactEvidenceConfidence {
-    ExactSourceRange,
-    LexicalHeuristic,
-}
-
-/// One bounded source file affected by a proposed workspace plan.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct ImpactFile {
-    pub path: String,
-    pub before_revision: Option<String>,
-    pub after_revision: Option<String>,
-    pub changed_start_line: Option<usize>,
-    pub changed_end_line: Option<usize>,
-    pub public_api_status: PublicApiStatus,
-    pub public_api_symbols: Vec<String>,
-}
-
-/// Result of the source-level public API heuristic.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PublicApiStatus {
-    Changed,
-    NoChangeDetected,
-    Unknown,
-    NotApplicable,
-}
-
-/// Bounded impact evidence shown to the planner before a checked plan can execute.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
-pub struct ImpactReport {
-    pub coverage: Option<ImpactCoverage>,
-    pub mutation_targets: Vec<String>,
-    pub files: Vec<ImpactFile>,
-    pub references: Vec<ImpactReference>,
-    pub unknowns: Vec<String>,
-    pub limitations: Vec<String>,
-    pub truncated: bool,
-}
 
 /// A reviewed plan paired with the evidence and full revisions used for its final analysis.
 #[derive(Clone, Debug, Eq, PartialEq)]

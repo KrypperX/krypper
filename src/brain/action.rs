@@ -1,6 +1,6 @@
 //! Translation of provider tool calls into workspace actions.
 
-use crate::agent_loop::{DecisionFailureCode, WorkspaceAction};
+use crate::contracts::goal_turn::{DecisionFailureCode, WorkspaceAction};
 use crate::tools::MAX_PATCH_BYTES;
 use serde_json::{Map, Value};
 use std::path::PathBuf;

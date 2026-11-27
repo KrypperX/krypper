@@ -171,6 +171,68 @@ fn tools_core_guard_detects_direct_alias_facade_and_parent_paths() {
 }
 
 #[test]
+fn tools_core_guard_tracks_core_bearing_contract_items_without_tainting_siblings() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("lib.rs");
+    let imports = [
+        ("use crate::contracts::goal_turn::GoalTurnError;", true),
+        (
+            "use crate::contracts::goal_turn::WorkspaceObservation;",
+            true,
+        ),
+        ("use crate::contracts::goal_turn::GoalTurnResult;", true),
+        (
+            "use crate::contracts::goal_turn::BoundedDecisionSource;",
+            true,
+        ),
+        ("use crate::contracts::goal_turn::WorkspaceAction;", false),
+        (
+            "use crate::contracts::process_execution::ProcessResult;",
+            false,
+        ),
+    ];
+
+    for (import, should_reject) in imports {
+        fs::write(
+            &root,
+            format!(
+                r#"
+                    pub mod task_lifecycle {{
+                        pub struct WorkspaceReadError;
+                        pub struct TurnOutcome;
+                    }}
+                    pub mod contracts {{
+                        pub mod goal_turn {{
+                            use crate::task_lifecycle::{{TurnOutcome, WorkspaceReadError}};
+                            pub enum GoalTurnError {{ Read(WorkspaceReadError) }}
+                            pub struct WorkspaceObservation {{ pub error: GoalTurnError }}
+                            pub struct GoalTurnResult {{
+                                pub outcome: TurnOutcome,
+                                pub observation: WorkspaceObservation,
+                            }}
+                            pub trait BoundedDecisionSource {{
+                                fn choose(&self) -> WorkspaceObservation;
+                            }}
+                            pub enum WorkspaceAction {{ Continue }}
+                        }}
+                        pub mod process_execution {{ pub struct ProcessResult; }}
+                    }}
+                    pub(crate) mod tools {{ {import} }}
+                "#
+            ),
+        )
+        .unwrap();
+
+        let violations = scan_tools_module_from_crate_root(&root);
+        assert_eq!(
+            !violations.is_empty(),
+            should_reject,
+            "unexpected Core direction result for `{import}`: {violations:?}"
+        );
+    }
+}
+
+#[test]
 fn tools_core_guard_detects_glob_include_and_external_transitive_facades() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("lib.rs");
@@ -717,15 +779,56 @@ fn tools_core_guard_ignores_test_only_dependencies() {
 }
 
 #[test]
-fn production_brain_modules_do_not_import_harness_context() {
+fn production_brain_modules_do_not_import_harness_or_agent_loop() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/brain");
     let violations = scan_brain_harness_context_dependencies(&root);
 
     assert!(
         violations.is_empty(),
-        "production Brain modules must use the shared context contract instead of Harness context:\n{}",
+        "production Brain modules must use shared contracts instead of Harness or agent_loop:\n{}",
         violations.join("\n")
     );
+}
+
+#[test]
+fn brain_guard_rejects_agent_loop_imports_across_paths_aliases_globs_reexports_and_macros() {
+    let source = r#"
+        use crate::{agent_loop::{WorkspaceAction, WorkspaceObservation}};
+        pub use crate::agent_loop as turn_api;
+        use turn_api::GoalTurnResult;
+        mod nested {
+            fn qualified() { let _: crate::agent_loop::GoalTurnStopReason; }
+        }
+        macro_rules! hidden_dependency {
+            () => { use crate::agent_loop::*; };
+        }
+        #[cfg(test)]
+        mod tests {
+            use crate::agent_loop::WorkspaceAction;
+        }
+    "#;
+
+    let violations = scan_brain_context_source(source, "brain_agent_loop_fixture.rs");
+
+    assert!(violations.len() >= 5, "{violations:?}");
+}
+
+#[test]
+fn brain_guard_ignores_agent_loop_dependencies_under_cfg_test() {
+    let source = r#"
+        #[cfg(test)]
+        mod tests {
+            use crate::agent_loop::{self, WorkspaceAction};
+            fn qualified() { let _: crate::agent_loop::GoalTurnStopReason; }
+            macro_rules! test_only_dependency {
+                () => { use crate::agent_loop::*; };
+            }
+        }
+    "#;
+
+    let violations = scan_brain_context_source(source, "brain_test_only_agent_loop_fixture.rs");
+
+    assert!(violations.is_empty(), "{violations:?}");
 }
 
 #[test]
@@ -762,7 +865,23 @@ fn brain_context_guard_detects_harness_alias_imports() {
 
     let violations = scan_brain_context_source(source, "brain_alias_fixture.rs");
 
-    assert_eq!(violations.len(), 2, "{violations:?}");
+    assert_eq!(violations.len(), 3, "{violations:?}");
+}
+
+#[test]
+fn brain_context_guard_does_not_block_harness_named_aliases_to_brain() {
+    let source = r#"
+        use crate::brain as harness;
+        use harness::WorkspacePlan;
+        mod nested {
+            use crate::brain as agent_loop;
+            fn safe_alias() { let _: agent_loop::WorkspacePlan; }
+        }
+    "#;
+
+    let violations = scan_brain_context_source(source, "brain_shadowed_dependency_alias.rs");
+
+    assert!(violations.is_empty(), "{violations:?}");
 }
 
 #[test]
@@ -776,7 +895,7 @@ fn brain_context_guard_resolves_parent_aliases_after_super() {
 
     let violations = scan_brain_context_source(source, "brain_super_alias_fixture.rs");
 
-    assert_eq!(violations.len(), 1, "{violations:?}");
+    assert_eq!(violations.len(), 2, "{violations:?}");
 }
 
 #[test]
@@ -793,20 +912,20 @@ fn brain_context_guard_super_skips_block_import_scopes() {
 
     let violations = scan_brain_context_source(source, "brain_block_super_alias_fixture.rs");
 
-    assert_eq!(violations.len(), 1, "{violations:?}");
+    assert_eq!(violations.len(), 2, "{violations:?}");
 }
 
 #[test]
 fn brain_context_guard_respects_alias_shadowing_between_modules() {
     let inline_source = r#"
-        use crate::harness as h;
+        use crate::brain as harness;
         mod nested {
-            use crate::brain as h;
-            use h::context::RepositoryContext;
+            use crate::brain as harness;
+            use harness::WorkspacePlan;
         }
         mod sibling {
-            use crate::brain as h;
-            use h::context::RepositoryContext;
+            use crate::brain as harness;
+            use harness::WorkspacePlan;
         }
     "#;
     let inline_violations =
@@ -818,12 +937,12 @@ fn brain_context_guard_respects_alias_shadowing_between_modules() {
     fs::create_dir_all(&brain_directory).unwrap();
     fs::write(
         brain_directory.join("mod.rs"),
-        "use crate::harness as h; mod nested;",
+        "use crate::brain as harness; mod nested;",
     )
     .unwrap();
     fs::write(
         brain_directory.join("nested.rs"),
-        "use crate::brain as h; use h::context::RepositoryContext;",
+        "use crate::brain as harness; use harness::WorkspacePlan;",
     )
     .unwrap();
     let external_violations = scan_brain_harness_context_dependencies(&brain_directory);
@@ -858,7 +977,7 @@ fn brain_context_guard_revisits_shared_path_files_for_each_alias_context() {
 
     let violations = scan_brain_harness_context_dependencies(&brain_directory);
 
-    assert_eq!(violations.len(), 1, "{violations:?}");
+    assert_eq!(violations.len(), 2, "{violations:?}");
 }
 
 #[test]
@@ -870,7 +989,7 @@ fn brain_context_guard_detects_self_alias_imports() {
 
     let violations = scan_brain_context_source(source, "brain_self_alias_fixture.rs");
 
-    assert_eq!(violations.len(), 1, "{violations:?}");
+    assert_eq!(violations.len(), 2, "{violations:?}");
 }
 
 #[test]
@@ -889,7 +1008,7 @@ fn brain_context_guard_rejects_harness_globs() {
     let alias_violations = scan_brain_context_source(alias_glob, "brain_alias_glob_fixture.rs");
 
     assert_eq!(direct_violations.len(), 1, "{direct_violations:?}");
-    assert_eq!(alias_violations.len(), 1, "{alias_violations:?}");
+    assert_eq!(alias_violations.len(), 2, "{alias_violations:?}");
 }
 
 #[test]
@@ -925,7 +1044,7 @@ fn brain_context_guard_resolves_outer_harness_aliases_in_macros() {
 
     let violations = scan_brain_context_source(source, "brain_outer_alias_macro_fixture.rs");
 
-    assert_eq!(violations.len(), 2, "{violations:?}");
+    assert_eq!(violations.len(), 3, "{violations:?}");
 }
 
 #[test]
@@ -946,7 +1065,7 @@ fn brain_context_guard_carries_parent_aliases_into_external_modules() {
 
     let violations = scan_brain_harness_context_dependencies(&brain_directory);
 
-    assert_eq!(violations.len(), 1, "{violations:?}");
+    assert_eq!(violations.len(), 2, "{violations:?}");
 }
 
 #[test]
@@ -1596,6 +1715,280 @@ fn crate_root_brain_reexports_and_globs_are_rejected() {
 }
 
 #[test]
+fn crate_root_brain_facades_preserve_neutral_contract_siblings() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("lib.rs");
+    fs::write(
+        &root,
+        r#"
+            pub mod contracts {
+                pub mod extensions {
+                    pub struct ExtensionContractError;
+                    pub use crate::brain::ModelError;
+                }
+                pub mod process_execution {
+                    pub struct ProcessResult;
+                }
+            }
+            pub use contracts::process_execution::ProcessResult;
+            pub use crate::brain::ModelError as PublicModelError;
+        "#,
+    )
+    .unwrap();
+    let mut violations = Vec::new();
+
+    let brain_exports = scan_crate_root_aliases(&root, &mut violations);
+
+    assert!(
+        brain_exports.contains("PublicModelError"),
+        "{brain_exports:?}"
+    );
+    assert!(
+        !brain_exports.contains("ProcessResult"),
+        "neutral process result was marked Brain-backed: {brain_exports:?}"
+    );
+    for source in [
+        "use crate::ProcessResult;",
+        "use crate::contracts::process_execution::ProcessResult;",
+        "use crate::contracts::extensions::ExtensionContractError;",
+    ] {
+        let source_violations =
+            scan_source_with_root_exports(source, "neutral_contract.rs", 1, &brain_exports);
+        assert!(
+            source_violations.is_empty(),
+            "neutral contract import `{source}` was rejected: {source_violations:?}"
+        );
+    }
+
+    for source in [
+        "use crate::contracts::extensions::ModelError;",
+        "use crate::PublicModelError;",
+    ] {
+        let source_violations =
+            scan_source_with_root_exports(source, "brain_contract.rs", 1, &brain_exports);
+        assert!(
+            !source_violations.is_empty(),
+            "Brain-backed import `{source}` was accepted"
+        );
+    }
+}
+
+#[test]
+fn crate_root_nested_brain_glob_facade_rejects_individual_exports() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("lib.rs");
+    let scenarios = [
+        (
+            r#"
+                pub mod brain { pub struct ModelError; }
+                pub mod compatibility { pub use crate::brain::*; }
+            "#,
+            None,
+        ),
+        (
+            r#"
+                pub mod brain { pub struct ModelError; }
+                pub mod contracts {
+                    pub mod extensions {
+                        pub struct ExtensionContractError;
+                        pub use crate::brain::ModelError;
+                    }
+                }
+                pub mod compatibility { pub use crate::contracts::extensions::*; }
+            "#,
+            Some("ExtensionContractError"),
+        ),
+        (
+            r#"
+                pub mod brain { pub struct ModelError; }
+                pub mod compatibility {
+                    pub mod nested {
+                        pub struct ExtensionContractError;
+                        pub use crate::brain::ModelError;
+                    }
+                    pub use self::nested::*;
+                }
+            "#,
+            Some("ExtensionContractError"),
+        ),
+        (
+            r#"
+                pub mod brain { pub struct ModelError; }
+                pub mod compatibility {
+                    pub use self::nested::*;
+                    pub mod nested {
+                        pub struct ExtensionContractError;
+                        pub use crate::brain::ModelError;
+                    }
+                }
+            "#,
+            Some("ExtensionContractError"),
+        ),
+    ];
+
+    for (facade_source, neutral_sibling) in scenarios {
+        fs::write(&root, facade_source).unwrap();
+        let mut violations = Vec::new();
+        let brain_exports = scan_crate_root_aliases(&root, &mut violations);
+
+        let tool_violations = scan_source_with_root_exports(
+            "use crate::compatibility::ModelError;",
+            "tools_nested_glob_facade.rs",
+            1,
+            &brain_exports,
+        );
+        assert!(
+            !tool_violations.is_empty(),
+            "an individual Brain item imported through this nested glob facade was accepted: {facade_source}"
+        );
+
+        if let Some(neutral_sibling) = neutral_sibling {
+            let neutral_source = format!("use crate::compatibility::{neutral_sibling};");
+            let neutral_violations = scan_source_with_root_exports(
+                &neutral_source,
+                "tools_neutral_nested_glob_sibling.rs",
+                1,
+                &brain_exports,
+            );
+            assert!(
+                neutral_violations.is_empty(),
+                "neutral sibling through the nested glob facade was rejected for `{facade_source}`: {neutral_violations:?}; exports: {brain_exports:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn crate_root_brain_glob_facade_with_derive_fails_closed() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("lib.rs");
+    fs::write(
+        &root,
+        r#"
+            pub mod brain { pub struct ModelError; }
+            pub mod extensions { pub use crate::brain::ModelError; }
+            pub mod compatibility {
+                pub use crate::extensions::*;
+                #[derive(Clone)]
+                pub struct NeutralType;
+            }
+        "#,
+    )
+    .unwrap();
+
+    let mut violations = Vec::new();
+    let brain_exports = scan_crate_root_aliases(&root, &mut violations);
+    let tool_violations = scan_source_with_root_exports(
+        "use crate::compatibility::NeutralType;",
+        "tools_derive_shadowed_by_glob.rs",
+        1,
+        &brain_exports,
+    );
+
+    assert!(
+        !tool_violations.is_empty(),
+        "a facade glob that could shadow a built-in derive must fail closed"
+    );
+}
+
+#[test]
+fn crate_root_brain_glob_facade_with_nested_derive_fails_closed() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("lib.rs");
+    fs::write(
+        &root,
+        r#"
+            pub mod brain { pub struct ModelError; }
+            pub mod extensions { pub use crate::brain::ModelError; }
+            pub mod compatibility {
+                pub use crate::extensions::*;
+                pub fn local_type() {
+                    #[derive(Clone)]
+                    struct LocalType;
+                }
+            }
+        "#,
+    )
+    .unwrap();
+
+    let mut violations = Vec::new();
+    let brain_exports = scan_crate_root_aliases(&root, &mut violations);
+    let tool_violations = scan_source_with_root_exports(
+        "use crate::compatibility::ModelError;",
+        "tools_nested_derive_shadowed_by_glob.rs",
+        1,
+        &brain_exports,
+    );
+
+    assert!(
+        !tool_violations.is_empty(),
+        "a nested derive under a facade glob must fail closed"
+    );
+}
+
+#[test]
+fn crate_root_brain_glob_facade_with_serde_attribute_fails_closed() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("lib.rs");
+    fs::write(
+        &root,
+        r#"
+            pub mod brain { pub struct ModelError; }
+            pub mod extensions { pub use crate::brain::ModelError; }
+            pub mod compatibility {
+                pub use crate::extensions::*;
+                #[serde]
+                pub struct NeutralType;
+            }
+        "#,
+    )
+    .unwrap();
+
+    let mut violations = Vec::new();
+    let brain_exports = scan_crate_root_aliases(&root, &mut violations);
+    let tool_violations = scan_source_with_root_exports(
+        "use crate::compatibility::ModelError;",
+        "tools_serde_attribute_shadowed_by_glob.rs",
+        1,
+        &brain_exports,
+    );
+
+    assert!(
+        !tool_violations.is_empty(),
+        "a serde attribute under a facade glob must fail closed"
+    );
+}
+
+#[test]
+fn crate_root_facade_rejects_globs_of_the_crate_root() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("lib.rs");
+    fs::write(
+        &root,
+        r#"
+            pub mod brain { pub struct ModelError; }
+            pub use crate::brain::ModelError as PublicModelError;
+            pub mod compatibility { pub use crate::*; }
+        "#,
+    )
+    .unwrap();
+
+    let mut violations = Vec::new();
+    let brain_exports = scan_crate_root_aliases(&root, &mut violations);
+    let tool_violations = scan_source_with_root_exports(
+        "use crate::compatibility::PublicModelError;",
+        "tools_crate_root_glob_facade.rs",
+        1,
+        &brain_exports,
+    );
+
+    assert!(
+        !tool_violations.is_empty(),
+        "a crate-root glob facade must fail closed when it can expose Brain aliases"
+    );
+}
+
+#[test]
 fn crate_root_inline_facades_and_transitive_reexports_are_rejected() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("lib.rs");
@@ -1626,10 +2019,6 @@ fn crate_root_inline_facades_and_transitive_reexports_are_rejected() {
         ("extensions", "provider::PublicModelError"),
         ("type_aliases", "DecisionAlias"),
     ] {
-        assert!(
-            brain_exports.contains(facade),
-            "facade `{facade}` was not recorded: {brain_exports:?}"
-        );
         let tool_source = format!("use crate::{facade}::{item};");
         let tool_violations =
             scan_source_with_root_exports(&tool_source, "tools_facade.rs", 1, &brain_exports);
@@ -1665,10 +2054,6 @@ fn crate_root_external_facades_that_reexport_brain_are_rejected() {
 
     let brain_exports = scan_crate_root_aliases(&root, &mut violations);
 
-    assert!(
-        brain_exports.contains("facade"),
-        "external Brain facade was not recorded: {brain_exports:?}"
-    );
     let tool_violations = scan_source_with_root_exports(
         "use crate::facade::ModelError;",
         "tools_external_facade.rs",

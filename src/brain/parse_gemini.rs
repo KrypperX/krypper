@@ -1,6 +1,6 @@
 //! Parsing of Gemini generateContent payloads.
 
-use crate::agent_loop::WorkspaceAction;
+use crate::contracts::goal_turn::WorkspaceAction;
 use serde_json::Value;
 
 use super::action::*;

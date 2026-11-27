@@ -15,6 +15,8 @@ const CORE_ROOT_FACADE_MODULE_PREFIX: &str = "<core-root-facade-module:";
 const CORE_ROOT_FACADE_UNKNOWN_PREFIX: &str = "<core-root-facade-unknown:";
 const CORE_ROOT_FACADE_ITEM_PREFIX: &str = "<core-root-facade-item:";
 const CORE_ROOT_FACADE_ALIAS_PREFIX: &str = "<core-root-facade-alias:";
+const BRAIN_ROOT_FACADE_ITEM_PREFIX: &str = "<brain-root-facade-item:";
+const BRAIN_ROOT_FACADE_UNKNOWN_PREFIX: &str = "<brain-root-facade-unknown:";
 
 #[derive(Hash, Eq, PartialEq)]
 struct ModuleVisitKey {
@@ -67,6 +69,11 @@ struct ModuleScanContext<'a> {
 struct CoreModuleExports {
     glob: Option<HashSet<String>>,
     facade_paths: Option<HashSet<String>>,
+}
+
+struct BrainFacadeScanState<'a> {
+    crate_root_brain_exports: &'a HashSet<String>,
+    visited: &'a mut HashSet<PathBuf>,
 }
 
 struct CoreExportPathContext<'a> {
@@ -459,7 +466,7 @@ pub(super) fn scan_brain_harness_context_dependencies(root: &Path) -> Vec<String
     );
     sources.sort_by(|left, right| left.file_path.cmp(&right.file_path));
     for source in sources {
-        violations.extend(scan_brain_context_file(
+        violations.extend(scan_brain_dependency_file(
             &source.file,
             &source.file_path.display().to_string(),
             source.alias_scopes,
@@ -668,15 +675,15 @@ pub(super) fn scan_brain_context_source(source: &str, origin: &str) -> Vec<Strin
         return vec![format!("{origin}: unable to parse Brain Rust source")];
     };
     let aliases = vec![BrainAliasScope::module(brain_import_aliases(&file.items))];
-    scan_brain_context_file(&file, origin, aliases)
+    scan_brain_dependency_file(&file, origin, aliases)
 }
 
-fn scan_brain_context_file(
+fn scan_brain_dependency_file(
     file: &syn::File,
     origin: &str,
     alias_scopes: BrainAliasScopes,
 ) -> Vec<String> {
-    let mut visitor = BrainContextDependencyVisitor {
+    let mut visitor = BrainDependencyVisitor {
         origin: origin.to_owned(),
         alias_scopes,
         violations: Vec::new(),
@@ -685,13 +692,13 @@ fn scan_brain_context_file(
     visitor.violations
 }
 
-struct BrainContextDependencyVisitor {
+struct BrainDependencyVisitor {
     origin: String,
     alias_scopes: BrainAliasScopes,
     violations: Vec<String>,
 }
 
-impl Visit<'_> for BrainContextDependencyVisitor {
+impl Visit<'_> for BrainDependencyVisitor {
     fn visit_item(&mut self, item: &Item) {
         if item_is_test_only(item_attrs(item)) {
             return;
@@ -700,7 +707,7 @@ impl Visit<'_> for BrainContextDependencyVisitor {
     }
 
     fn visit_item_use(&mut self, item: &syn::ItemUse) {
-        inspect_brain_context_use_tree(
+        inspect_brain_use_tree(
             &item.tree,
             &mut Vec::new(),
             &self.origin,
@@ -715,9 +722,9 @@ impl Visit<'_> for BrainContextDependencyVisitor {
             .iter()
             .map(|segment| ident_name(&segment.ident))
             .collect::<Vec<_>>();
-        if path_resolves_to_harness_context(&segments, &self.alias_scopes) {
+        if path_resolves_to_forbidden_brain_dependency(&segments, &self.alias_scopes) {
             self.violations.push(format!(
-                "{}: production Brain path imports Harness context",
+                "{}: production Brain path imports Harness or agent_loop",
                 self.origin
             ));
         }
@@ -726,11 +733,10 @@ impl Visit<'_> for BrainContextDependencyVisitor {
 
     fn visit_macro(&mut self, mac: &syn::Macro) {
         if path_is_ident(&mac.path, "include")
-            || token_stream_contains_ident(&mac.tokens, "harness")
-            || macro_references_harness_alias(&mac.tokens, &self.alias_scopes)
+            || macro_references_forbidden_brain_alias(&mac.tokens, &self.alias_scopes)
         {
             self.violations.push(format!(
-                "{}: production Brain macro hides a Harness context dependency",
+                "{}: production Brain macro hides a Harness or agent_loop dependency",
                 self.origin
             ));
         }
@@ -761,15 +767,10 @@ impl Visit<'_> for BrainContextDependencyVisitor {
     }
 }
 
-fn token_stream_contains_ident(tokens: &TokenStream, expected: &str) -> bool {
-    tokens.clone().into_iter().any(|token| match token {
-        TokenTree::Ident(ident) => ident_name(&ident) == expected,
-        TokenTree::Group(group) => token_stream_contains_ident(&group.stream(), expected),
-        TokenTree::Punct(_) | TokenTree::Literal(_) => false,
-    })
-}
-
-fn macro_references_harness_alias(tokens: &TokenStream, alias_scopes: &BrainAliasScopes) -> bool {
+fn macro_references_forbidden_brain_alias(
+    tokens: &TokenStream,
+    alias_scopes: &BrainAliasScopes,
+) -> bool {
     fn collect_paths(tokens: &TokenStream, paths: &mut Vec<(Vec<String>, bool)>) {
         let tokens = tokens.clone().into_iter().collect::<Vec<_>>();
         let mut index = 0;
@@ -813,12 +814,12 @@ fn macro_references_harness_alias(tokens: &TokenStream, alias_scopes: &BrainAlia
     let mut paths = Vec::new();
     collect_paths(tokens, &mut paths);
     paths.into_iter().any(|(path, is_glob)| {
-        path_resolves_to_harness_context(&path, alias_scopes)
-            || (is_glob && path_resolves_to_harness_module(&path, alias_scopes))
+        path_resolves_to_forbidden_brain_dependency(&path, alias_scopes)
+            || (is_glob && path_resolves_to_forbidden_brain_module(&path, alias_scopes))
     })
 }
 
-fn inspect_brain_context_use_tree(
+fn inspect_brain_use_tree(
     tree: &UseTree,
     prefix: &mut Vec<String>,
     origin: &str,
@@ -828,48 +829,76 @@ fn inspect_brain_context_use_tree(
     match tree {
         UseTree::Path(path) => {
             prefix.push(ident_name(&path.ident));
-            inspect_brain_context_use_tree(&path.tree, prefix, origin, alias_scopes, violations);
+            inspect_brain_use_tree(&path.tree, prefix, origin, alias_scopes, violations);
             prefix.pop();
         }
         UseTree::Name(name) => {
             prefix.push(ident_name(&name.ident));
-            if path_resolves_to_harness_context(prefix, alias_scopes) {
+            if path_resolves_to_forbidden_brain_dependency(prefix, alias_scopes) {
                 violations.push(format!(
-                    "{origin}: production Brain import uses Harness context"
+                    "{origin}: production Brain import uses Harness or agent_loop"
                 ));
             }
             prefix.pop();
         }
         UseTree::Rename(rename) => {
             prefix.push(ident_name(&rename.ident));
-            if path_resolves_to_harness_context(prefix, alias_scopes) {
+            if path_resolves_to_forbidden_brain_dependency(prefix, alias_scopes) {
                 violations.push(format!(
-                    "{origin}: production Brain import uses Harness context"
+                    "{origin}: production Brain import uses Harness or agent_loop"
                 ));
             }
             prefix.pop();
         }
         UseTree::Glob(_) => {
-            if path_resolves_to_harness_context(prefix, alias_scopes)
-                || path_resolves_to_harness_module(prefix, alias_scopes)
+            if path_resolves_to_forbidden_brain_dependency(prefix, alias_scopes)
+                || path_resolves_to_forbidden_brain_module(prefix, alias_scopes)
             {
                 violations.push(format!(
-                    "{origin}: production Brain glob import uses Harness context"
+                    "{origin}: production Brain glob import uses Harness or agent_loop"
                 ));
             }
         }
         UseTree::Group(group) => {
             for item in &group.items {
-                inspect_brain_context_use_tree(item, prefix, origin, alias_scopes, violations);
+                inspect_brain_use_tree(item, prefix, origin, alias_scopes, violations);
             }
         }
     }
 }
 
-fn path_contains_harness_context(segments: &[String]) -> bool {
-    segments
-        .windows(2)
-        .any(|pair| pair[0] == "harness" && pair[1] == "context")
+fn path_contains_forbidden_brain_dependency(
+    segments: &[String],
+    alias_scopes: &BrainAliasScopes,
+) -> bool {
+    if matches!(
+        segments.first().map(String::as_str),
+        Some("crate" | "$crate")
+    ) {
+        return segments
+            .get(1)
+            .is_some_and(|segment| segment == "harness" || segment == "agent_loop");
+    }
+    let mut module_depth = alias_scopes.iter().filter(|scope| scope.is_module).count();
+    let mut index = match segments.first().map(String::as_str) {
+        Some("super") => 0,
+        Some("self") => 1,
+        _ => return false,
+    };
+    while segments
+        .get(index)
+        .is_some_and(|segment| segment == "super")
+    {
+        if module_depth == 0 {
+            return false;
+        }
+        module_depth -= 1;
+        index += 1;
+    }
+    module_depth == 0
+        && segments
+            .get(index)
+            .is_some_and(|segment| segment == "harness" || segment == "agent_loop")
 }
 
 fn brain_import_aliases(items: &[Item]) -> BrainImportAliases {
@@ -938,13 +967,16 @@ fn collect_brain_import_aliases(
     }
 }
 
-fn path_resolves_to_harness_context(segments: &[String], alias_scopes: &BrainAliasScopes) -> bool {
+fn path_resolves_to_forbidden_brain_dependency(
+    segments: &[String],
+    alias_scopes: &BrainAliasScopes,
+) -> bool {
     fn resolve(
         segments: &[String],
         alias_scopes: &BrainAliasScopes,
         seen: &mut HashSet<(usize, String)>,
     ) -> bool {
-        if path_contains_harness_context(segments) {
+        if path_contains_forbidden_brain_dependency(segments, alias_scopes) {
             return true;
         }
         let Some((alias_index, scope_index)) = alias_binding_location(segments, alias_scopes)
@@ -971,13 +1003,16 @@ fn path_resolves_to_harness_context(segments: &[String], alias_scopes: &BrainAli
     resolve(segments, alias_scopes, &mut HashSet::new())
 }
 
-fn path_resolves_to_harness_module(segments: &[String], alias_scopes: &BrainAliasScopes) -> bool {
+fn path_resolves_to_forbidden_brain_module(
+    segments: &[String],
+    alias_scopes: &BrainAliasScopes,
+) -> bool {
     fn resolve(
         segments: &[String],
         alias_scopes: &BrainAliasScopes,
         seen: &mut HashSet<(usize, String)>,
     ) -> bool {
-        if segments.last().is_some_and(|segment| segment == "harness") {
+        if path_contains_forbidden_brain_dependency(segments, alias_scopes) {
             return true;
         }
         let Some((alias_index, scope_index)) = alias_binding_location(segments, alias_scopes)
@@ -1519,9 +1554,36 @@ fn path_starts_with_brain_export(
     if segments.get(start).is_some_and(|segment| segment == "self") {
         start += 1;
     }
-    segments
-        .get(start)
-        .is_some_and(|segment| crate_root_brain_exports.contains(segment))
+    brain_root_facade_path_is_brain(
+        segments.get(start..).unwrap_or_default(),
+        crate_root_brain_exports,
+    )
+}
+
+fn brain_root_facade_path_is_brain(segments: &[String], exports: &HashSet<String>) -> bool {
+    let Some(module) = segments.first() else {
+        return false;
+    };
+    if exports.contains(module) || exports.contains(&brain_root_facade_unknown_key(module)) {
+        return true;
+    }
+    let suffix = segments.get(1..).unwrap_or_default().join("::");
+    if suffix.is_empty() {
+        return exports.iter().any(|entry| {
+            entry
+                .strip_prefix(BRAIN_ROOT_FACADE_ITEM_PREFIX)
+                .and_then(|entry| entry.strip_suffix('>'))
+                .is_some_and(|path| path.starts_with(&format!("{module}::")))
+        });
+    }
+    let path = format!("{module}::{suffix}");
+    if exports.contains(&brain_root_facade_item_key(&path)) {
+        return true;
+    }
+    (1..segments.len()).any(|end| {
+        let prefix = segments[..end].join("::");
+        exports.contains(&brain_root_facade_item_key(&format!("{prefix}::*")))
+    })
 }
 
 fn path_starts_with_brain(segments: &[String], module_depth: usize) -> bool {
@@ -2563,6 +2625,50 @@ fn core_items_core_glob_exports(
         return None;
     }
 
+    let local_core_imports = core_local_import_aliases(
+        items,
+        module_depth,
+        crate_root_core_exports,
+        &inspected_macros,
+    )?;
+    let mut local_core_items = HashSet::new();
+    loop {
+        let mut added_item = false;
+        for item in items {
+            if item_is_test_only(item_attrs(item))
+                || matches!(item, Item::Use(_) | Item::Mod(_))
+                || !item_visibility(item).is_some_and(visibility_reaches_core_parent)
+            {
+                continue;
+            }
+
+            let mut probe = CoreDependencyProbe {
+                module_depth,
+                crate_root_core_exports,
+                inspected_macro_imports: &inspected_macros,
+                found: false,
+            };
+            probe.visit_item(item);
+            if probe.found
+                || item_references_local_core_names(
+                    item,
+                    module_depth,
+                    crate_root_core_exports,
+                    &inspected_macros,
+                    &local_core_imports,
+                    &local_core_items,
+                )
+            {
+                if let Some(name) = root_item_name(item) {
+                    added_item |= local_core_items.insert(ident_name(name));
+                }
+            }
+        }
+        if !added_item {
+            break;
+        }
+    }
+
     let mut exports = HashSet::new();
     for item in items {
         if item_is_test_only(item_attrs(item)) {
@@ -2615,23 +2721,169 @@ fn core_items_core_glob_exports(
             )
             .then(|| ident_name(&module.ident))
         } else {
-            let mut probe = CoreDependencyProbe {
-                module_depth,
-                crate_root_core_exports,
-                inspected_macro_imports: &inspected_macros,
-                found: false,
-            };
-            probe.visit_item(item);
-            probe
-                .found
-                .then(|| root_item_name(item).map(ident_name))
-                .flatten()
+            root_item_name(item)
+                .map(ident_name)
+                .filter(|name| local_core_items.contains(name))
         };
         if let Some(name) = name {
             exports.insert(name);
         }
     }
     Some(exports)
+}
+
+fn core_local_import_aliases(
+    items: &[Item],
+    module_depth: usize,
+    crate_root_core_exports: &HashSet<String>,
+    inspected_macros: &HashSet<String>,
+) -> Option<HashSet<String>> {
+    let mut aliases = HashSet::new();
+    for item in items {
+        let Item::Use(item_use) = item else {
+            continue;
+        };
+        if item_is_test_only(&item_use.attrs)
+            || item_use.attrs.iter().any(|attribute| {
+                !attribute_is_inspected(attribute, inspected_macros, module_depth, &HashSet::new())
+            })
+        {
+            return None;
+        }
+        collect_core_local_import_aliases(
+            &item_use.tree,
+            &mut Vec::new(),
+            module_depth,
+            crate_root_core_exports,
+            &mut aliases,
+        )?;
+    }
+    Some(aliases)
+}
+
+fn collect_core_local_import_aliases(
+    tree: &UseTree,
+    prefix: &mut Vec<String>,
+    module_depth: usize,
+    crate_root_core_exports: &HashSet<String>,
+    aliases: &mut HashSet<String>,
+) -> Option<()> {
+    let path_is_core = |path: &[String]| {
+        path_starts_with_core(path, module_depth)
+            || path_starts_with_core_export(path, module_depth, crate_root_core_exports)
+    };
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(ident_name(&path.ident));
+            collect_core_local_import_aliases(
+                &path.tree,
+                prefix,
+                module_depth,
+                crate_root_core_exports,
+                aliases,
+            )?;
+            prefix.pop();
+        }
+        UseTree::Name(name) => {
+            if ident_name(&name.ident) == "self" {
+                if path_is_core(prefix) {
+                    if let Some(alias) = prefix.last() {
+                        aliases.insert(alias.clone());
+                    }
+                }
+            } else {
+                prefix.push(ident_name(&name.ident));
+                if path_is_core(prefix) {
+                    if let Some(alias) = prefix.last() {
+                        aliases.insert(alias.clone());
+                    }
+                }
+                prefix.pop();
+            }
+        }
+        UseTree::Rename(rename) => {
+            prefix.push(ident_name(&rename.ident));
+            if path_is_core(prefix) {
+                aliases.insert(ident_name(&rename.rename));
+            }
+            prefix.pop();
+        }
+        UseTree::Glob(_) => {
+            if path_is_core(prefix) {
+                return None;
+            }
+        }
+        UseTree::Group(group) => {
+            for item in &group.items {
+                collect_core_local_import_aliases(
+                    item,
+                    prefix,
+                    module_depth,
+                    crate_root_core_exports,
+                    aliases,
+                )?;
+            }
+        }
+    }
+    Some(())
+}
+
+fn item_references_local_core_names(
+    item: &Item,
+    module_depth: usize,
+    crate_root_core_exports: &HashSet<String>,
+    inspected_macros: &HashSet<String>,
+    local_core_imports: &HashSet<String>,
+    local_core_items: &HashSet<String>,
+) -> bool {
+    struct LocalCoreNameProbe<'a> {
+        module_depth: usize,
+        crate_root_core_exports: &'a HashSet<String>,
+        inspected_macros: &'a HashSet<String>,
+        local_core_imports: &'a HashSet<String>,
+        local_core_items: &'a HashSet<String>,
+        found: bool,
+    }
+
+    impl Visit<'_> for LocalCoreNameProbe<'_> {
+        fn visit_path(&mut self, path: &RustPath) {
+            let segments = path
+                .segments
+                .iter()
+                .map(|segment| ident_name(&segment.ident))
+                .collect::<Vec<_>>();
+            self.found |= segments.first().is_some_and(|segment| {
+                self.local_core_imports.contains(segment) || self.local_core_items.contains(segment)
+            });
+            if !self.found {
+                syn::visit::visit_path(self, path);
+            }
+        }
+
+        fn visit_macro(&mut self, mac: &syn::Macro) {
+            self.found |= path_is_ident(&mac.path, "include")
+                || macro_tokens_contain_core_path(
+                    &mac.tokens,
+                    self.module_depth,
+                    self.crate_root_core_exports,
+                )
+                || !macro_is_inspected(&mac.path, self.inspected_macros);
+            if !self.found {
+                syn::visit::visit_macro(self, mac);
+            }
+        }
+    }
+
+    let mut probe = LocalCoreNameProbe {
+        module_depth,
+        crate_root_core_exports,
+        inspected_macros,
+        local_core_imports,
+        local_core_items,
+        found: false,
+    };
+    probe.visit_item(item);
+    probe.found
 }
 
 fn collect_core_use_exports(
@@ -2970,6 +3222,14 @@ fn core_root_facade_alias_key(alias: &str, module: &str) -> String {
     format!("{CORE_ROOT_FACADE_ALIAS_PREFIX}{alias}->{module}>")
 }
 
+fn brain_root_facade_item_key(path: &str) -> String {
+    format!("{BRAIN_ROOT_FACADE_ITEM_PREFIX}{path}>")
+}
+
+fn brain_root_facade_unknown_key(module: &str) -> String {
+    format!("{BRAIN_ROOT_FACADE_UNKNOWN_PREFIX}{module}>")
+}
+
 fn is_core_root_facade_module(module: &str, exports: &HashSet<String>) -> bool {
     exports.contains(&core_root_facade_module_key(module))
         || exports.contains(&core_root_facade_unknown_key(module))
@@ -3205,29 +3465,45 @@ pub(super) fn scan_crate_root_aliases(
     }
 
     // Root modules can re-export Brain types below the crate root, including
-    // through another nested facade. Treat each module that contains a
-    // Brain-backed import as a blocked root prefix, then repeat so re-exports
-    // through previously discovered facades are also covered.
+    // through another nested facade. Track only the item paths backed by Brain
+    // so neutral siblings in shared facades remain usable.
     loop {
         let mut added_export = false;
         for item in &file.items {
             let Item::Mod(module) = item else {
                 continue;
             };
-            if ident_name(&module.ident) == "tools" || item_is_test_only(&module.attrs) {
+            let module_name = ident_name(&module.ident);
+            if matches!(module_name.as_str(), "brain" | "tools") || item_is_test_only(&module.attrs)
+            {
                 continue;
             }
-            if module_contains_brain_import(
+            let module_path = vec![module_name.clone()];
+            let mut visited = HashSet::new();
+            let mut scan_state = BrainFacadeScanState {
+                crate_root_brain_exports: &crate_root_brain_exports,
+                visited: &mut visited,
+            };
+            match module_brain_export_paths(
                 module,
                 root,
                 &module_directory(root),
                 false,
                 1,
-                &crate_root_brain_exports,
-                &mut HashSet::new(),
-            ) && crate_root_brain_exports.insert(ident_name(&module.ident))
-            {
-                added_export = true;
+                &module_path,
+                &mut scan_state,
+            ) {
+                Some(paths) => {
+                    for path in paths {
+                        added_export |= crate_root_brain_exports.insert(
+                            brain_root_facade_item_key(&format!("{module_name}::{path}")),
+                        );
+                    }
+                }
+                None => {
+                    added_export |= crate_root_brain_exports
+                        .insert(brain_root_facade_unknown_key(&module_name));
+                }
             }
         }
 
@@ -3323,115 +3599,546 @@ pub(super) fn scan_crate_root_aliases(
     crate_root_brain_exports
 }
 
-fn module_contains_brain_import(
+fn module_brain_export_paths(
     module: &syn::ItemMod,
     source_file: &Path,
     module_dir: &Path,
     inside_inline_module: bool,
     module_depth: usize,
-    crate_root_brain_exports: &HashSet<String>,
-    visited: &mut HashSet<PathBuf>,
-) -> bool {
+    module_path: &[String],
+    scan_state: &mut BrainFacadeScanState<'_>,
+) -> Option<HashSet<String>> {
     if item_is_test_only(&module.attrs) {
-        return false;
+        return Some(HashSet::new());
     }
     if module.attrs.iter().any(|attribute| {
         !attribute_is_inspected(
             attribute,
             &HashSet::new(),
             module_depth,
-            crate_root_brain_exports,
+            scan_state.crate_root_brain_exports,
         )
     }) {
-        return true;
+        return None;
     }
     if let Some((_, items)) = &module.content {
         if module_has_path_attribute(&module.attrs) {
-            return true;
+            return None;
         }
-        return items_contain_brain_import(
+        return items_brain_export_paths(
             items,
             source_file,
             &module_dir.join(ident_name(&module.ident)),
             true,
             module_depth,
-            crate_root_brain_exports,
-            visited,
+            module_path,
+            scan_state,
         );
     }
 
-    let Some(resolved_module) =
-        resolve_module(source_file, module_dir, module, inside_inline_module)
-    else {
-        return true;
-    };
+    let resolved_module = resolve_module(source_file, module_dir, module, inside_inline_module)?;
     let normalized = resolved_module
         .file_path
         .canonicalize()
         .unwrap_or_else(|_| resolved_module.file_path.clone());
-    if !visited.insert(normalized.clone()) {
-        return true;
+    if !scan_state.visited.insert(normalized.clone()) {
+        return None;
     }
-    let source = fs::read_to_string(&resolved_module.file_path);
-    let result = match source.and_then(|source| {
-        syn::parse_file(&source)
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
-    }) {
-        Ok(file) => items_contain_brain_import(
-            &file.items,
-            &resolved_module.file_path,
-            &resolved_module.module_dir,
-            false,
-            module_depth,
-            crate_root_brain_exports,
-            visited,
-        ),
-        Err(_) => true,
-    };
-    visited.remove(&normalized);
+    let result = fs::read_to_string(&resolved_module.file_path)
+        .ok()
+        .and_then(|source| syn::parse_file(&source).ok())
+        .and_then(|file| {
+            items_brain_export_paths(
+                &file.items,
+                &resolved_module.file_path,
+                &resolved_module.module_dir,
+                false,
+                module_depth,
+                module_path,
+                scan_state,
+            )
+        });
+    scan_state.visited.remove(&normalized);
     result
 }
 
-fn items_contain_brain_import(
+fn items_brain_export_paths(
     items: &[Item],
     source_file: &Path,
     module_dir: &Path,
     inside_inline_module: bool,
     module_depth: usize,
-    crate_root_brain_exports: &HashSet<String>,
-    visited: &mut HashSet<PathBuf>,
-) -> bool {
-    let mut macro_import_violations = Vec::new();
+    module_path: &[String],
+    scan_state: &mut BrainFacadeScanState<'_>,
+) -> Option<HashSet<String>> {
     let inspected_macros =
-        inspected_macro_imports(items, source_file, &mut macro_import_violations);
-    if !macro_import_violations.is_empty() {
-        return true;
-    }
-    items.iter().any(|item| {
+        inspected_brain_facade_macro_imports(items, source_file, module_path, module_depth)?;
+    let mut exports = HashSet::new();
+
+    for item in items {
         if item_is_test_only(item_attrs(item)) {
-            return false;
+            continue;
+        }
+        if item_attrs(item).iter().any(|attribute| {
+            !attribute_is_inspected(
+                attribute,
+                &inspected_macros,
+                module_depth,
+                scan_state.crate_root_brain_exports,
+            )
+        }) {
+            return None;
+        }
+    }
+
+    // Module item order has no meaning in Rust. Seed local provenance from
+    // every nested module before resolving any `self::...::*` facade imports.
+    for item in items {
+        let Item::Mod(nested) = item else {
+            continue;
+        };
+        if item_is_test_only(&nested.attrs) {
+            continue;
+        }
+        let nested_name = ident_name(&nested.ident);
+        let mut nested_path = module_path.to_vec();
+        nested_path.push(nested_name.clone());
+        let nested_exports = module_brain_export_paths(
+            nested,
+            source_file,
+            module_dir,
+            inside_inline_module,
+            module_depth + 1,
+            &nested_path,
+            scan_state,
+        )?;
+        exports.extend(
+            nested_exports
+                .into_iter()
+                .map(|path| format!("{nested_name}::{path}")),
+        );
+    }
+
+    // Re-export chains can also be declared in any order, so expand local
+    // facade uses until another pass adds no Brain-backed paths.
+    loop {
+        let previous_len = exports.len();
+        for item in items {
+            if item_is_test_only(item_attrs(item)) {
+                continue;
+            }
+            if let Item::Use(item_use) = item {
+                if !brain_use_tree_export_paths(
+                    &item_use.tree,
+                    &mut Vec::new(),
+                    module_depth,
+                    module_path,
+                    scan_state.crate_root_brain_exports,
+                    &mut exports,
+                ) {
+                    return None;
+                }
+            }
+        }
+        if exports.len() == previous_len {
+            break;
+        }
+    }
+
+    for item in items {
+        if item_is_test_only(item_attrs(item)) || matches!(item, Item::Mod(_) | Item::Use(_)) {
+            continue;
         }
         match item {
-            Item::Mod(nested) => module_contains_brain_import(
-                nested,
-                source_file,
-                module_dir,
-                inside_inline_module,
-                module_depth + 1,
-                crate_root_brain_exports,
-                visited,
-            ),
-            // A macro can emit an import or public facade that is absent from
-            // this AST. Mark the containing root module as uninspectable.
-            Item::Macro(_) => true,
-            _ => item_contains_brain_import(
+            // A macro can emit a Brain-backed import or public facade that is
+            // absent from this AST, so fail closed for this facade.
+            Item::Macro(_) | Item::Verbatim(_) => return None,
+            Item::ForeignMod(foreign_mod) => {
+                for foreign_item in &foreign_mod.items {
+                    if matches!(
+                        foreign_item,
+                        syn::ForeignItem::Macro(_) | syn::ForeignItem::Verbatim(_)
+                    ) {
+                        return None;
+                    }
+                    if foreign_item_contains_brain_import(
+                        foreign_item,
+                        scan_state.crate_root_brain_exports,
+                        &inspected_macros,
+                    ) {
+                        return None;
+                    }
+                }
+            }
+            Item::Impl(implementation)
+                if item_contains_brain_import(
+                    item,
+                    module_depth,
+                    scan_state.crate_root_brain_exports,
+                    &inspected_macros,
+                ) =>
+            {
+                let target = root_impl_target_name(implementation)?;
+                exports.insert(format!("{target}::*"));
+            }
+            _ if item_contains_brain_import(
                 item,
                 module_depth,
-                crate_root_brain_exports,
+                scan_state.crate_root_brain_exports,
                 &inspected_macros,
-            ),
+            ) =>
+            {
+                let name = root_item_name(item)?;
+                exports.insert(ident_name(name));
+            }
+            _ => {}
         }
-    })
+    }
+    Some(exports)
+}
+
+fn inspected_brain_facade_macro_imports(
+    items: &[Item],
+    source_file: &Path,
+    module_path: &[String],
+    module_depth: usize,
+) -> Option<HashSet<String>> {
+    let mut violations = Vec::new();
+    let imported = inspected_macro_imports(items, source_file, &mut violations);
+    if violations.is_empty() {
+        return Some(imported);
+    }
+
+    // A glob in a known local facade can be expanded by the Brain path scanner
+    // below. Keep the generic macro-import guard fail-closed elsewhere, and
+    // reject derive and `serde` attributes in this scope because a glob could
+    // shadow a built-in derive or an attribute macro accepted as metadata.
+    if violations
+        .iter()
+        .any(|violation| !violation.contains("glob imports can hide production macros"))
+        || items_contain_glob_shadow_sensitive_attribute(items)
+        || !brain_facade_glob_sources_are_local(items, module_path, module_depth)
+    {
+        return None;
+    }
+    Some(imported)
+}
+
+fn items_contain_glob_shadow_sensitive_attribute(items: &[Item]) -> bool {
+    let mut probe = GlobShadowSensitiveAttributeProbe::default();
+    for item in items {
+        if item_is_test_only(item_attrs(item)) {
+            continue;
+        }
+        probe.visit_item(item);
+        if probe.found {
+            return true;
+        }
+    }
+    false
+}
+
+#[derive(Default)]
+struct GlobShadowSensitiveAttributeProbe {
+    found: bool,
+}
+
+impl Visit<'_> for GlobShadowSensitiveAttributeProbe {
+    fn visit_attribute(&mut self, attribute: &Attribute) {
+        self.found |=
+            path_is_ident(attribute.path(), "derive") || path_is_ident(attribute.path(), "serde");
+        syn::visit::visit_attribute(self, attribute);
+    }
+}
+
+fn brain_facade_glob_sources_are_local(
+    items: &[Item],
+    module_path: &[String],
+    module_depth: usize,
+) -> bool {
+    let mut has_glob = false;
+    for item in items {
+        let Item::Use(item_use) = item else {
+            continue;
+        };
+        if !brain_use_tree_glob_sources_are_local(
+            &item_use.tree,
+            &mut Vec::new(),
+            module_path,
+            module_depth,
+            &mut has_glob,
+        ) {
+            return false;
+        }
+    }
+    has_glob
+}
+
+fn brain_use_tree_glob_sources_are_local(
+    tree: &UseTree,
+    prefix: &mut Vec<String>,
+    module_path: &[String],
+    module_depth: usize,
+    has_glob: &mut bool,
+) -> bool {
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(ident_name(&path.ident));
+            let local = brain_use_tree_glob_sources_are_local(
+                &path.tree,
+                prefix,
+                module_path,
+                module_depth,
+                has_glob,
+            );
+            prefix.pop();
+            local
+        }
+        UseTree::Glob(_) => {
+            *has_glob = true;
+            path_starts_with_brain(prefix, module_depth)
+                || resolve_brain_module_path(prefix, module_path, module_depth)
+                    .is_some_and(|source_path| !source_path.is_empty())
+        }
+        UseTree::Group(group) => group.items.iter().all(|item| {
+            brain_use_tree_glob_sources_are_local(item, prefix, module_path, module_depth, has_glob)
+        }),
+        UseTree::Name(_) | UseTree::Rename(_) => true,
+    }
+}
+
+fn brain_use_tree_export_paths(
+    tree: &UseTree,
+    prefix: &mut Vec<String>,
+    module_depth: usize,
+    module_path: &[String],
+    crate_root_brain_exports: &HashSet<String>,
+    exports: &mut HashSet<String>,
+) -> bool {
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(ident_name(&path.ident));
+            let inspected = brain_use_tree_export_paths(
+                &path.tree,
+                prefix,
+                module_depth,
+                module_path,
+                crate_root_brain_exports,
+                exports,
+            );
+            prefix.pop();
+            inspected
+        }
+        UseTree::Name(name) => {
+            let imported_name = ident_name(&name.ident);
+            if imported_name == "self" {
+                let Some(alias) = prefix.last() else {
+                    return false;
+                };
+                if path_starts_with_brain(prefix, module_depth) {
+                    exports.insert(alias.clone());
+                } else if let Some(source_path) =
+                    resolve_brain_module_path(prefix, module_path, module_depth)
+                {
+                    match brain_facade_module_children(
+                        &source_path,
+                        module_path,
+                        exports,
+                        crate_root_brain_exports,
+                    ) {
+                        None => {
+                            exports.insert(alias.clone());
+                        }
+                        Some(children) => {
+                            for child in children {
+                                exports.insert(format!("{alias}::{child}"));
+                            }
+                        }
+                    }
+                }
+                !prefix.is_empty()
+            } else {
+                prefix.push(imported_name.clone());
+                if path_starts_with_brain(prefix, module_depth)
+                    || path_starts_with_brain_export(prefix, module_depth, crate_root_brain_exports)
+                {
+                    exports.insert(imported_name.clone());
+                } else if let Some(source_path) =
+                    resolve_brain_module_path(prefix, module_path, module_depth)
+                {
+                    match brain_facade_module_children(
+                        &source_path,
+                        module_path,
+                        exports,
+                        crate_root_brain_exports,
+                    ) {
+                        None => {
+                            exports.insert(format!("{imported_name}::*"));
+                        }
+                        Some(children) => {
+                            for child in children {
+                                exports.insert(format!("{imported_name}::{child}"));
+                            }
+                        }
+                    }
+                }
+                prefix.pop();
+                true
+            }
+        }
+        UseTree::Rename(rename) => {
+            let imported_name = ident_name(&rename.ident);
+            prefix.push(imported_name);
+            let alias = ident_name(&rename.rename);
+            if path_starts_with_brain(prefix, module_depth)
+                || path_starts_with_brain_export(prefix, module_depth, crate_root_brain_exports)
+            {
+                exports.insert(alias);
+            } else if let Some(source_path) =
+                resolve_brain_module_path(prefix, module_path, module_depth)
+            {
+                match brain_facade_module_children(
+                    &source_path,
+                    module_path,
+                    exports,
+                    crate_root_brain_exports,
+                ) {
+                    None => {
+                        exports.insert(alias);
+                    }
+                    Some(children) => {
+                        for child in children {
+                            exports.insert(format!("{alias}::{child}"));
+                        }
+                    }
+                }
+            }
+            prefix.pop();
+            true
+        }
+        UseTree::Glob(_) => {
+            if path_starts_with_brain(prefix, module_depth) {
+                exports.insert("*".to_owned());
+            } else if let Some(source_path) =
+                resolve_brain_module_path(prefix, module_path, module_depth)
+            {
+                match brain_facade_module_children(
+                    &source_path,
+                    module_path,
+                    exports,
+                    crate_root_brain_exports,
+                ) {
+                    None => {
+                        exports.insert("*".to_owned());
+                    }
+                    Some(children) => exports.extend(children),
+                }
+            }
+            true
+        }
+        UseTree::Group(group) => group.items.iter().all(|item| {
+            brain_use_tree_export_paths(
+                item,
+                prefix,
+                module_depth,
+                module_path,
+                crate_root_brain_exports,
+                exports,
+            )
+        }),
+    }
+}
+
+fn resolve_brain_module_path(
+    segments: &[String],
+    module_path: &[String],
+    module_depth: usize,
+) -> Option<Vec<String>> {
+    let mut resolved_path = match segments.first().map(String::as_str) {
+        Some("crate" | "$crate") => Vec::new(),
+        Some("self" | "super") => module_path.to_vec(),
+        _ => return None,
+    };
+    let mut index = match segments.first().map(String::as_str) {
+        Some("crate" | "$crate") | Some("self") => 1,
+        Some("super") => {
+            let mut count = 0;
+            while segments
+                .get(count)
+                .is_some_and(|segment| segment == "super")
+            {
+                resolved_path.pop()?;
+                count += 1;
+            }
+            if count > module_depth {
+                return None;
+            }
+            count
+        }
+        _ => return None,
+    };
+    if segments.get(index).is_some_and(|segment| segment == "self") {
+        index += 1;
+    }
+    resolved_path.extend_from_slice(segments.get(index..)?);
+    Some(resolved_path)
+}
+
+fn brain_facade_module_children(
+    source_path: &[String],
+    module_path: &[String],
+    local_exports: &HashSet<String>,
+    root_exports: &HashSet<String>,
+) -> Option<HashSet<String>> {
+    let Some(root_module) = source_path.first() else {
+        return Some(HashSet::new());
+    };
+    if root_exports.contains(root_module)
+        || root_exports.contains(&brain_root_facade_unknown_key(root_module))
+    {
+        return None;
+    }
+
+    let source = source_path.join("::");
+    let mut children = HashSet::new();
+    for entry in root_exports {
+        let Some(export_path) = entry
+            .strip_prefix(BRAIN_ROOT_FACADE_ITEM_PREFIX)
+            .and_then(|entry| entry.strip_suffix('>'))
+        else {
+            continue;
+        };
+        let Some(child) = export_path.strip_prefix(&format!("{source}::")) else {
+            continue;
+        };
+        if child == "*" || child.ends_with("::*") {
+            return None;
+        }
+        children.insert(child.to_owned());
+    }
+
+    if source_path.starts_with(module_path) {
+        let relative_source = source_path
+            .get(module_path.len()..)
+            .unwrap_or_default()
+            .join("::");
+        let local_prefix = if relative_source.is_empty() {
+            String::new()
+        } else {
+            format!("{relative_source}::")
+        };
+        for export_path in local_exports {
+            let Some(child) = export_path.strip_prefix(&local_prefix) else {
+                continue;
+            };
+            if child == "*" || child.ends_with("::*") {
+                return None;
+            }
+            children.insert(child.to_owned());
+        }
+    }
+
+    Some(children)
 }
 
 fn item_contains_brain_import(
@@ -3525,11 +4232,13 @@ struct RootFacadePathProbe<'a> {
 
 impl<'ast> Visit<'ast> for RootFacadePathProbe<'_> {
     fn visit_path(&mut self, path: &'ast RustPath) {
+        let segments = path
+            .segments
+            .iter()
+            .map(|segment| ident_name(&segment.ident))
+            .collect::<Vec<_>>();
         if path.leading_colon.is_none()
-            && path
-                .segments
-                .first()
-                .is_some_and(|segment| self.exports.contains(&ident_name(&segment.ident)))
+            && root_path_starts_with_brain_or_export(&segments, self.exports)
         {
             self.found = true;
         }
@@ -3619,13 +4328,13 @@ fn root_path_starts_with_brain_or_export(
     if root_path_starts_with_brain(segments) {
         return true;
     }
-    let root_segment = match segments.first().map(String::as_str) {
-        Some("crate" | "$crate" | "self") => segments.get(1).map(String::as_str),
-        Some("super") => None,
-        Some(segment) => Some(segment),
-        None => None,
+    let root_path = match segments.first().map(String::as_str) {
+        Some("crate" | "$crate" | "self") => segments.get(1..).unwrap_or_default(),
+        Some("super") => return false,
+        Some(_) => segments,
+        None => return false,
     };
-    root_segment.is_some_and(|segment| crate_root_brain_exports.contains(segment))
+    brain_root_facade_path_is_brain(root_path, crate_root_brain_exports)
 }
 
 fn root_path_starts_with_brain(segments: &[String]) -> bool {
@@ -3733,7 +4442,7 @@ fn attribute_is_inspected(
     crate_root_brain_exports: &HashSet<String>,
 ) -> bool {
     match path_label(attribute.path()).as_str() {
-        "allow" | "cfg" | "doc" | "ignore" | "link" | "test" => true,
+        "allow" | "cfg" | "doc" | "ignore" | "link" | "non_exhaustive" | "test" => true,
         "path" => match &attribute.meta {
             Meta::NameValue(name_value) => {
                 matches!(&name_value.value, syn::Expr::Lit(expression) if matches!(&expression.lit, syn::Lit::Str(_)))

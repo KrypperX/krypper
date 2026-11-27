@@ -1,11 +1,13 @@
 //! The bounded goal-turn loop that drives decisions, actions and turn completion.
 
-use super::action::{execute_action_with_revision, summarize_observation_activity};
-use super::types::{
-    workspace_mutation_target, ActionExecution, BoundedDecisionSource, DecisionSource,
-    GoalTurnError, GoalTurnResult, GoalTurnStopReason, TurnCompletionData, WorkspaceObservation,
-};
+use super::action::execute_action_with_revision;
+use super::summarize_observation_activity;
+use super::types::{ActionExecution, TurnCompletionData};
 use crate::contracts::extensions::ExtensionEffect;
+use crate::contracts::goal_turn::{
+    workspace_mutation_target, BoundedDecisionSource, DecisionSource, GoalTurnError,
+    GoalTurnResult, GoalTurnStopReason, WorkspaceObservation,
+};
 use crate::task_lifecycle::{TaskSession, TurnActivitySummary, TurnOutcome};
 use crate::tools::permission_policy::{
     classify_registered_operation, decide, EffectClass, PermissionDecision, PermissionMode,
