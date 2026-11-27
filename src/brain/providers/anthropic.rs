@@ -37,12 +37,12 @@ pub struct AnthropicDecisionSource {
     workspace_id: Option<AnthropicWorkspaceId>,
 }
 
-fn map_anthropic_assembly_error(error: crate::streaming::AnthropicAssemblyError) -> ModelError {
+fn map_anthropic_assembly_error(error: super::streaming::AnthropicAssemblyError) -> ModelError {
     match error {
-        crate::streaming::AnthropicAssemblyError::InvalidJson => {
+        super::streaming::AnthropicAssemblyError::InvalidJson => {
             ModelError::ProviderInvalidJson(ModelProvider::Anthropic)
         }
-        crate::streaming::AnthropicAssemblyError::InvalidToolCall(message) => {
+        super::streaming::AnthropicAssemblyError::InvalidToolCall(message) => {
             ModelError::ProviderInvalidToolCall(ModelProvider::Anthropic, message)
         }
     }
@@ -198,7 +198,7 @@ impl AnthropicDecisionSource {
         let request = encode_model_request(&body)?;
         let advertised_tools = AdvertisedToolNames::from_request(&request)?;
         let mut assembly =
-            crate::streaming::AnthropicFinalActions::new(MAX_STREAMED_TOOL_ARGUMENT_BYTES);
+            super::streaming::AnthropicFinalActions::new(MAX_STREAMED_TOOL_ARGUMENT_BYTES);
         let workspace_headers = self.workspace_headers();
         super::post_hosted_sse_with_headers(
             &self.core.agent,

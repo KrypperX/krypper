@@ -92,7 +92,7 @@ impl ResponsesDecisionSource {
         let request = super::enable_responses_streaming(&request)?;
         let advertised_tools = AdvertisedToolNames::from_request(&request)?;
         let mut assembly =
-            crate::streaming::ResponsesFinalActions::new(1, MAX_STREAMED_TOOL_ARGUMENT_BYTES);
+            super::streaming::ResponsesFinalActions::new(1, MAX_STREAMED_TOOL_ARGUMENT_BYTES);
         let mut final_calls = None;
         let mut transport_done = false;
         super::post_hosted_sse(
@@ -126,7 +126,7 @@ impl ResponsesDecisionSource {
                 let completed_calls = assembly.consume(&frame).map_err(|_| {
                     ModelError::ProviderInvalidToolCall(provider, "invalid streaming tool call")
                 })?;
-                let text = crate::streaming::provider_text_delta(&frame);
+                let text = super::streaming::provider_text_delta(&frame);
                 if frame.event.as_deref() == Some("response.output_text.delta") && text.is_none() {
                     return Err(ModelError::ProviderInvalidJson(provider));
                 }

@@ -16,6 +16,7 @@ mod parse_gemini;
 mod plan;
 pub mod provider_bridge;
 mod providers;
+pub(crate) use providers::streaming as provider_streaming;
 mod reflection;
 mod request;
 mod tool_set;

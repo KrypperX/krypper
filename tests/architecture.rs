@@ -5,7 +5,7 @@ use std::path::Path;
 mod guard;
 
 use guard::{
-    scan_brain_context_source, scan_brain_harness_context_dependencies, scan_crate_root_aliases,
+    scan_brain_layer_dependencies, scan_brain_layer_source, scan_crate_root_aliases,
     scan_module_file, scan_source, scan_source_at_depth, scan_source_with_root_exports,
     scan_tools_module_from_crate_root,
 };
@@ -779,15 +779,38 @@ fn tools_core_guard_ignores_test_only_dependencies() {
 }
 
 #[test]
-fn production_brain_modules_do_not_import_harness_or_agent_loop() {
+fn production_brain_modules_do_not_import_harness_agent_loop_or_streaming() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/brain");
-    let violations = scan_brain_harness_context_dependencies(&root);
+    let violations = scan_brain_layer_dependencies(&root);
 
     assert!(
         violations.is_empty(),
-        "production Brain modules must use shared contracts instead of Harness or agent_loop:\n{}",
+        "production Brain modules must not import Harness, agent_loop, or presentation Streaming:\n{}",
         violations.join("\n")
     );
+}
+
+#[test]
+fn brain_guard_rejects_streaming_imports_through_paths_aliases_globs_and_macros() {
+    let source = r#"
+        use crate::streaming::SseFrame;
+        use crate::streaming as presentation;
+        use presentation::SseDecoder;
+        mod nested {
+            fn qualified() { let _: crate::streaming::SseFrame; }
+        }
+        macro_rules! hidden_dependency {
+            () => { use crate::streaming::*; };
+        }
+        #[cfg(test)]
+        mod tests {
+            use crate::streaming::*;
+        }
+    "#;
+
+    let violations = scan_brain_layer_source(source, "brain_streaming_fixture.rs");
+
+    assert!(violations.len() >= 5, "{violations:?}");
 }
 
 #[test]
@@ -808,7 +831,7 @@ fn brain_guard_rejects_agent_loop_imports_across_paths_aliases_globs_reexports_a
         }
     "#;
 
-    let violations = scan_brain_context_source(source, "brain_agent_loop_fixture.rs");
+    let violations = scan_brain_layer_source(source, "brain_agent_loop_fixture.rs");
 
     assert!(violations.len() >= 5, "{violations:?}");
 }
@@ -826,7 +849,7 @@ fn brain_guard_ignores_agent_loop_dependencies_under_cfg_test() {
         }
     "#;
 
-    let violations = scan_brain_context_source(source, "brain_test_only_agent_loop_fixture.rs");
+    let violations = scan_brain_layer_source(source, "brain_test_only_agent_loop_fixture.rs");
 
     assert!(violations.is_empty(), "{violations:?}");
 }
@@ -847,7 +870,7 @@ fn brain_context_guard_detects_grouped_and_qualified_paths_but_ignores_tests() {
         }
     "#;
 
-    let violations = scan_brain_context_source(source, "brain_fixture.rs");
+    let violations = scan_brain_layer_source(source, "brain_fixture.rs");
 
     assert_eq!(violations.len(), 4, "{violations:?}");
 }
@@ -863,7 +886,7 @@ fn brain_context_guard_detects_harness_alias_imports() {
         }
     "#;
 
-    let violations = scan_brain_context_source(source, "brain_alias_fixture.rs");
+    let violations = scan_brain_layer_source(source, "brain_alias_fixture.rs");
 
     assert_eq!(violations.len(), 3, "{violations:?}");
 }
@@ -879,7 +902,7 @@ fn brain_context_guard_does_not_block_harness_named_aliases_to_brain() {
         }
     "#;
 
-    let violations = scan_brain_context_source(source, "brain_shadowed_dependency_alias.rs");
+    let violations = scan_brain_layer_source(source, "brain_shadowed_dependency_alias.rs");
 
     assert!(violations.is_empty(), "{violations:?}");
 }
@@ -893,7 +916,7 @@ fn brain_context_guard_resolves_parent_aliases_after_super() {
         }
     "#;
 
-    let violations = scan_brain_context_source(source, "brain_super_alias_fixture.rs");
+    let violations = scan_brain_layer_source(source, "brain_super_alias_fixture.rs");
 
     assert_eq!(violations.len(), 2, "{violations:?}");
 }
@@ -910,7 +933,7 @@ fn brain_context_guard_super_skips_block_import_scopes() {
         }
     "#;
 
-    let violations = scan_brain_context_source(source, "brain_block_super_alias_fixture.rs");
+    let violations = scan_brain_layer_source(source, "brain_block_super_alias_fixture.rs");
 
     assert_eq!(violations.len(), 2, "{violations:?}");
 }
@@ -929,7 +952,7 @@ fn brain_context_guard_respects_alias_shadowing_between_modules() {
         }
     "#;
     let inline_violations =
-        scan_brain_context_source(inline_source, "brain_shadowed_alias_fixture.rs");
+        scan_brain_layer_source(inline_source, "brain_shadowed_alias_fixture.rs");
     assert!(inline_violations.is_empty(), "{inline_violations:?}");
 
     let directory = tempfile::tempdir().unwrap();
@@ -945,7 +968,7 @@ fn brain_context_guard_respects_alias_shadowing_between_modules() {
         "use crate::brain as harness; use harness::WorkspacePlan;",
     )
     .unwrap();
-    let external_violations = scan_brain_harness_context_dependencies(&brain_directory);
+    let external_violations = scan_brain_layer_dependencies(&brain_directory);
     assert!(external_violations.is_empty(), "{external_violations:?}");
 }
 
@@ -975,7 +998,7 @@ fn brain_context_guard_revisits_shared_path_files_for_each_alias_context() {
     )
     .unwrap();
 
-    let violations = scan_brain_harness_context_dependencies(&brain_directory);
+    let violations = scan_brain_layer_dependencies(&brain_directory);
 
     assert_eq!(violations.len(), 2, "{violations:?}");
 }
@@ -987,7 +1010,7 @@ fn brain_context_guard_detects_self_alias_imports() {
         use h::context::RepositoryContext;
     "#;
 
-    let violations = scan_brain_context_source(source, "brain_self_alias_fixture.rs");
+    let violations = scan_brain_layer_source(source, "brain_self_alias_fixture.rs");
 
     assert_eq!(violations.len(), 2, "{violations:?}");
 }
@@ -1004,8 +1027,8 @@ fn brain_context_guard_rejects_harness_globs() {
         fn alias_glob_path() { let _: context::RepositoryContext; }
     "#;
 
-    let direct_violations = scan_brain_context_source(direct_glob, "brain_direct_glob_fixture.rs");
-    let alias_violations = scan_brain_context_source(alias_glob, "brain_alias_glob_fixture.rs");
+    let direct_violations = scan_brain_layer_source(direct_glob, "brain_direct_glob_fixture.rs");
+    let alias_violations = scan_brain_layer_source(alias_glob, "brain_alias_glob_fixture.rs");
 
     assert_eq!(direct_violations.len(), 1, "{direct_violations:?}");
     assert_eq!(alias_violations.len(), 2, "{alias_violations:?}");
@@ -1025,7 +1048,7 @@ fn brain_context_guard_rejects_hidden_harness_imports_in_macros() {
         }
     "#;
 
-    let violations = scan_brain_context_source(source, "brain_macro_fixture.rs");
+    let violations = scan_brain_layer_source(source, "brain_macro_fixture.rs");
 
     assert_eq!(violations.len(), 2, "{violations:?}");
 }
@@ -1042,7 +1065,7 @@ fn brain_context_guard_resolves_outer_harness_aliases_in_macros() {
         }
     "#;
 
-    let violations = scan_brain_context_source(source, "brain_outer_alias_macro_fixture.rs");
+    let violations = scan_brain_layer_source(source, "brain_outer_alias_macro_fixture.rs");
 
     assert_eq!(violations.len(), 3, "{violations:?}");
 }
@@ -1063,7 +1086,7 @@ fn brain_context_guard_carries_parent_aliases_into_external_modules() {
     )
     .unwrap();
 
-    let violations = scan_brain_harness_context_dependencies(&brain_directory);
+    let violations = scan_brain_layer_dependencies(&brain_directory);
 
     assert_eq!(violations.len(), 2, "{violations:?}");
 }
@@ -1084,7 +1107,7 @@ fn brain_context_guard_follows_external_path_attributes() {
     )
     .unwrap();
 
-    let violations = scan_brain_harness_context_dependencies(&brain_directory);
+    let violations = scan_brain_layer_dependencies(&brain_directory);
 
     assert_eq!(violations.len(), 1, "{violations:?}");
 }

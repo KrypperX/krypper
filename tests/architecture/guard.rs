@@ -446,7 +446,7 @@ pub(super) fn scan_source(source: &str, origin: &str) -> Vec<String> {
     scan_source_at_depth(source, origin, TOOLS_MODULE_DEPTH)
 }
 
-pub(super) fn scan_brain_harness_context_dependencies(root: &Path) -> Vec<String> {
+pub(super) fn scan_brain_layer_dependencies(root: &Path) -> Vec<String> {
     let mut sources = Vec::new();
     let mut violations = Vec::new();
     let root_file = if root.is_dir() {
@@ -670,7 +670,7 @@ struct BrainSource {
     alias_scopes: BrainAliasScopes,
 }
 
-pub(super) fn scan_brain_context_source(source: &str, origin: &str) -> Vec<String> {
+pub(super) fn scan_brain_layer_source(source: &str, origin: &str) -> Vec<String> {
     let Ok(file) = syn::parse_file(source) else {
         return vec![format!("{origin}: unable to parse Brain Rust source")];
     };
@@ -724,7 +724,7 @@ impl Visit<'_> for BrainDependencyVisitor {
             .collect::<Vec<_>>();
         if path_resolves_to_forbidden_brain_dependency(&segments, &self.alias_scopes) {
             self.violations.push(format!(
-                "{}: production Brain path imports Harness or agent_loop",
+                "{}: production Brain path imports a forbidden application module",
                 self.origin
             ));
         }
@@ -736,7 +736,7 @@ impl Visit<'_> for BrainDependencyVisitor {
             || macro_references_forbidden_brain_alias(&mac.tokens, &self.alias_scopes)
         {
             self.violations.push(format!(
-                "{}: production Brain macro hides a Harness or agent_loop dependency",
+                "{}: production Brain macro hides a forbidden application dependency",
                 self.origin
             ));
         }
@@ -836,7 +836,7 @@ fn inspect_brain_use_tree(
             prefix.push(ident_name(&name.ident));
             if path_resolves_to_forbidden_brain_dependency(prefix, alias_scopes) {
                 violations.push(format!(
-                    "{origin}: production Brain import uses Harness or agent_loop"
+                    "{origin}: production Brain import uses a forbidden application module"
                 ));
             }
             prefix.pop();
@@ -845,7 +845,7 @@ fn inspect_brain_use_tree(
             prefix.push(ident_name(&rename.ident));
             if path_resolves_to_forbidden_brain_dependency(prefix, alias_scopes) {
                 violations.push(format!(
-                    "{origin}: production Brain import uses Harness or agent_loop"
+                    "{origin}: production Brain import uses a forbidden application module"
                 ));
             }
             prefix.pop();
@@ -855,7 +855,7 @@ fn inspect_brain_use_tree(
                 || path_resolves_to_forbidden_brain_module(prefix, alias_scopes)
             {
                 violations.push(format!(
-                    "{origin}: production Brain glob import uses Harness or agent_loop"
+                    "{origin}: production Brain glob import uses a forbidden application module"
                 ));
             }
         }
@@ -875,9 +875,9 @@ fn path_contains_forbidden_brain_dependency(
         segments.first().map(String::as_str),
         Some("crate" | "$crate")
     ) {
-        return segments
-            .get(1)
-            .is_some_and(|segment| segment == "harness" || segment == "agent_loop");
+        return segments.get(1).is_some_and(|segment| {
+            segment == "harness" || segment == "agent_loop" || segment == "streaming"
+        });
     }
     let mut module_depth = alias_scopes.iter().filter(|scope| scope.is_module).count();
     let mut index = match segments.first().map(String::as_str) {
@@ -896,9 +896,9 @@ fn path_contains_forbidden_brain_dependency(
         index += 1;
     }
     module_depth == 0
-        && segments
-            .get(index)
-            .is_some_and(|segment| segment == "harness" || segment == "agent_loop")
+        && segments.get(index).is_some_and(|segment| {
+            segment == "harness" || segment == "agent_loop" || segment == "streaming"
+        })
 }
 
 fn brain_import_aliases(items: &[Item]) -> BrainImportAliases {

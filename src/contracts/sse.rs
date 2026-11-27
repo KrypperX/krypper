@@ -166,27 +166,3 @@ pub enum SseReadError<E> {
     TooManyFrames,
     Consumer(E),
 }
-
-/// A provider-neutral text delta extracted from a recognized SSE event.
-/// Tool-call argument deltas are deliberately excluded: they must be
-/// assembled and validated by the provider's existing action parser.
-pub fn provider_text_delta(frame: &SseFrame) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(&frame.data).ok()?;
-    match frame.event.as_deref() {
-        Some("response.output_text.delta") => value
-            .get("delta")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned),
-        Some("content_block_delta") => {
-            let delta = value.get("delta")?;
-            if delta.get("type")?.as_str()? != "text_delta" {
-                return None;
-            }
-            delta
-                .get("text")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-        }
-        _ => None,
-    }
-}

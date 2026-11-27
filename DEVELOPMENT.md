@@ -339,7 +339,13 @@ system.
 
 The `src/streaming.rs` module defines a versioned presentation envelope,
 fallible synchronous event sink, stream-local sequence counter, and JSONL
-writer adapter. It does **not** subscribe to the runtime or expose a CLI flag.
+writer adapter. Generic SSE framing and bounded reading live in
+`src/contracts/sse.rs`; provider-specific event parsing and action assembly
+live under `src/brain/providers/streaming/`. The presentation module keeps
+compatibility re-exports for existing SSE and provider-streaming APIs. Brain
+uses Contracts and its own provider parsers directly, without depending on the
+presentation module. This does **not** subscribe to the runtime or expose a
+CLI flag.
 OpenAI Responses, xAI Responses, Anthropic Messages, and local Ollama have
 opt-in native decision-streaming paths. OpenAI/xAI use SSE through
 `KRYPPER_RESPONSES_STREAM`, Anthropic uses SSE through

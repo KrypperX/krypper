@@ -9,9 +9,12 @@ use std::net::SocketAddr;
 use std::time::Duration;
 use ureq::Agent;
 
+use crate::contracts::sse::{consume_sse, SseDecodeError, SseFrame, SseReadError};
+
 use super::errors::*;
 use super::limits::*;
 use super::providers;
+use super::providers::streaming::provider_text_delta;
 use super::providers::*;
 use super::request::*;
 
@@ -285,7 +288,7 @@ pub(crate) fn post_hosted_sse<F>(
     on_frame: F,
 ) -> Result<(), ModelError>
 where
-    F: FnMut(crate::streaming::SseFrame) -> Result<(), ModelError>,
+    F: FnMut(SseFrame) -> Result<(), ModelError>,
 {
     post_hosted_sse_with_headers(agent, provider, endpoint, api_key, &[], body, on_frame)
 }
@@ -305,7 +308,7 @@ pub(crate) fn post_hosted_sse_with_headers<F>(
     on_frame: F,
 ) -> Result<(), ModelError>
 where
-    F: FnMut(crate::streaming::SseFrame) -> Result<(), ModelError>,
+    F: FnMut(SseFrame) -> Result<(), ModelError>,
 {
     validate_endpoint(endpoint)?;
     if body.len() > MAX_MODEL_REQUEST_BYTES {
@@ -338,20 +341,17 @@ where
     })?;
     let mut response_body = response.into_body();
     let mut reader = response_body.as_reader();
-    crate::streaming::consume_sse(&mut reader, MAX_MODEL_RESPONSE_BYTES, on_frame).map_err(
-        |error| match error {
-            crate::streaming::SseReadError::Io(_) => ModelError::ProviderTransport(provider),
-            crate::streaming::SseReadError::Decode(
-                crate::streaming::SseDecodeError::FrameTooLarge,
-            ) => ModelError::ProviderResponseTooLarge(provider),
-            crate::streaming::SseReadError::StreamTooLarge
-            | crate::streaming::SseReadError::TooManyFrames => {
-                ModelError::ProviderResponseTooLarge(provider)
-            }
-            crate::streaming::SseReadError::Decode(_) => ModelError::ProviderInvalidJson(provider),
-            crate::streaming::SseReadError::Consumer(error) => error,
-        },
-    )
+    consume_sse(&mut reader, MAX_MODEL_RESPONSE_BYTES, on_frame).map_err(|error| match error {
+        SseReadError::Io(_) => ModelError::ProviderTransport(provider),
+        SseReadError::Decode(SseDecodeError::FrameTooLarge) => {
+            ModelError::ProviderResponseTooLarge(provider)
+        }
+        SseReadError::StreamTooLarge | SseReadError::TooManyFrames => {
+            ModelError::ProviderResponseTooLarge(provider)
+        }
+        SseReadError::Decode(_) => ModelError::ProviderInvalidJson(provider),
+        SseReadError::Consumer(error) => error,
+    })
 }
 
 pub(crate) fn post_hosted_text_stream<F>(
@@ -366,7 +366,7 @@ where
     F: FnMut(String) -> Result<(), ModelError>,
 {
     post_hosted_sse(agent, provider, endpoint, api_key, body, |frame| {
-        if let Some(text) = crate::streaming::provider_text_delta(&frame) {
+        if let Some(text) = provider_text_delta(&frame) {
             on_text(text)?;
         }
         Ok(())

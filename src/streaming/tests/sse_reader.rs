@@ -72,7 +72,7 @@ fn sse_reader_rejects_cumulative_bytes_over_limit_across_small_events() {
 
 #[test]
 fn sse_reader_rejects_excessive_empty_and_heartbeat_frames() {
-    let input = b":\n\n".repeat(super::super::sse::MAX_SSE_FRAME_COUNT + 1);
+    let input = b":\n\n".repeat(crate::contracts::sse::MAX_SSE_FRAME_COUNT + 1);
     let mut reader = std::io::Cursor::new(input);
     let result = consume_sse(&mut reader, 2 * 1024 * 1024, |_| Ok::<(), ()>(()));
 
