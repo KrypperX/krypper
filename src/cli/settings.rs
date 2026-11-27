@@ -3,26 +3,35 @@
 use super::config::{
     config_path, validate_route_settings, RoutingMode, MAX_FALLBACK_BUDGET_MICRO_USD,
 };
+use super::credential_vault::{self, CredentialsEnvelope, MasterKeyStore, SecretBytes, VaultError};
 use crate::brain::{is_provider_credential_name, validate_model_name_for_provider, ModelProvider};
 use crate::tools::permission_policy::PermissionMode;
+use fs2::FileExt;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use zeroize::Zeroize;
 
 const CREDENTIALS_FILE: &str = "credentials.json";
+const CREDENTIAL_TRANSACTION_FILE: &str = "credentials.json.pending";
+const CREDENTIAL_LOCK_FILE: &str = "credentials.json.lock";
 const PROVIDER_PROFILES_FILE: &str = "provider-profiles.json";
 const MODEL_EVIDENCE_FILE: &str = "model-evidence.json";
 const MODEL_EVIDENCE_KEY_FILE: &str = "model-evidence.key";
 const PERMISSION_MODE_FILE: &str = "permission-mode";
-const MAX_CREDENTIAL_BYTES: u64 = 64 * 1024;
+const MAX_CREDENTIAL_BYTES: u64 = 96 * 1024;
+const MAX_CREDENTIAL_PLAINTEXT_BYTES: usize = 64 * 1024;
+const CREDENTIAL_TRANSACTION_VERSION: u8 = 1;
 const MAX_PERMISSION_MODE_BYTES: u64 = 128;
 static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 
 pub(super) struct CredentialStore {
     values: BTreeMap<String, String>,
+    key_reference: Option<String>,
 }
 
 #[derive(Debug)]
@@ -37,6 +46,15 @@ pub(super) enum CredentialStoreError {
     TooLarge(PathBuf),
     InvalidJson(PathBuf),
     InvalidValue(PathBuf),
+    LegacyPlaintext(PathBuf),
+    UnsupportedVersion(PathBuf),
+    InvalidEnvelope(PathBuf),
+    MissingVaultKey(PathBuf),
+    VaultUnavailable,
+    SecureRandomUnavailable,
+    AuthenticationFailed(PathBuf),
+    TransactionInterrupted(PathBuf),
+    StaleStore(PathBuf),
 }
 
 #[derive(Debug)]
@@ -90,11 +108,133 @@ impl fmt::Display for CredentialStoreError {
                 "credential store '{}' contains an unsupported or invalid value",
                 path.display()
             ),
+            Self::LegacyPlaintext(path) => write!(
+                formatter,
+                "credential store '{}' contains legacy plaintext values; run `krypper setup` and approve migration to the system credential vault",
+                path.display()
+            ),
+            Self::UnsupportedVersion(path) => write!(
+                formatter,
+                "credential store '{}' uses an unsupported encrypted format version",
+                path.display()
+            ),
+            Self::InvalidEnvelope(path) => write!(
+                formatter,
+                "credential store '{}' has an invalid encrypted envelope",
+                path.display()
+            ),
+            Self::MissingVaultKey(path) => write!(
+                formatter,
+                "the system credential vault is missing the key for '{}'; saved credentials are unavailable",
+                path.display()
+            ),
+            Self::VaultUnavailable => formatter.write_str(
+                "the system credential vault is unavailable or locked; the credential operation could not be completed",
+            ),
+            Self::SecureRandomUnavailable => formatter.write_str(
+                "the secure random source is unavailable; credentials were not changed",
+            ),
+            Self::AuthenticationFailed(path) => write!(
+                formatter,
+                "credential store '{}' failed authentication; saved credentials were not loaded",
+                path.display()
+            ),
+            Self::TransactionInterrupted(path) => write!(
+                formatter,
+                "credential storage at '{}' has an interrupted update; retry `krypper setup` when the system credential vault is available",
+                path.display()
+            ),
+            Self::StaleStore(path) => write!(
+                formatter,
+                "credential store '{}' changed during this operation; reload settings and retry",
+                path.display()
+            ),
         }
     }
 }
 
 impl std::error::Error for CredentialStoreError {}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CredentialTransaction {
+    version: u8,
+    old_key_reference: Option<String>,
+    new_key_reference: Option<String>,
+}
+
+enum ExistingCredentialDocument {
+    Missing,
+    Legacy(BTreeMap<String, String>),
+    Encrypted(CredentialsEnvelope),
+}
+
+enum CredentialFileWriteError {
+    BeforeCommit(String),
+    AfterCommit(String),
+}
+
+trait CredentialFileWriter {
+    fn write_journal(&self, path: &Path, bytes: &[u8]) -> Result<(), String>;
+    fn write_document(&self, path: &Path, bytes: &[u8]) -> Result<(), CredentialFileWriteError>;
+}
+
+struct PrivateCredentialFileWriter;
+
+impl CredentialFileWriter for PrivateCredentialFileWriter {
+    fn write_journal(&self, path: &Path, bytes: &[u8]) -> Result<(), String> {
+        write_private_file(path, bytes, "credential transaction journal")
+    }
+
+    fn write_document(&self, path: &Path, bytes: &[u8]) -> Result<(), CredentialFileWriteError> {
+        write_private_file_with_outcome(path, bytes, "credential store", sync_parent_directory)
+    }
+}
+
+struct CredentialFileLock(File);
+
+impl CredentialFileLock {
+    fn acquire(path: &Path) -> Result<Self, CredentialStoreError> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| CredentialStoreError::InvalidValue(path.to_owned()))?;
+        create_private_directory(parent).map_err(|cause| {
+            CredentialStoreError::io(CredentialStoreIoAction::Inspect, parent, cause)
+        })?;
+        set_private_directory_permissions(parent).map_err(CredentialStoreError::Permissions)?;
+        let lock_path = path.with_file_name(CREDENTIAL_LOCK_FILE);
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        let file = options.open(&lock_path).map_err(|cause| {
+            CredentialStoreError::io(CredentialStoreIoAction::Inspect, &lock_path, cause)
+        })?;
+        let metadata = file.metadata().map_err(|cause| {
+            CredentialStoreError::io(CredentialStoreIoAction::Inspect, &lock_path, cause)
+        })?;
+        if !metadata.is_file() {
+            return Err(CredentialStoreError::NotRegularFile(lock_path));
+        }
+        ensure_private_permissions(&lock_path, &metadata, "credential transaction lock")
+            .map_err(CredentialStoreError::Permissions)?;
+        FileExt::lock_exclusive(&file).map_err(|cause| {
+            CredentialStoreError::io(CredentialStoreIoAction::Inspect, &lock_path, cause)
+        })?;
+        Ok(Self(file))
+    }
+}
+
+impl Drop for CredentialFileLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.0);
+    }
+}
 
 /// Credential resolution without a `Debug` implementation so values stay redacted.
 pub(super) enum EffectiveCredentialValue {
@@ -121,6 +261,7 @@ impl CredentialStore {
     pub(super) fn empty() -> Self {
         Self {
             values: BTreeMap::new(),
+            key_reference: None,
         }
     }
 
@@ -129,11 +270,15 @@ impl CredentialStore {
     }
 
     pub(super) fn insert(&mut self, name: &str, value: String) {
-        self.values.insert(name.to_owned(), value);
+        if let Some(mut old_value) = self.values.insert(name.to_owned(), value) {
+            old_value.zeroize();
+        }
     }
 
     pub(super) fn remove(&mut self, name: &str) {
-        self.values.remove(name);
+        if let Some(mut value) = self.values.remove(name) {
+            value.zeroize();
+        }
     }
 
     pub(super) fn len(&self) -> usize {
@@ -142,6 +287,14 @@ impl CredentialStore {
 
     pub(super) fn is_empty(&self) -> bool {
         self.values.is_empty()
+    }
+}
+
+impl Drop for CredentialStore {
+    fn drop(&mut self) {
+        for value in self.values.values_mut() {
+            value.zeroize();
+        }
     }
 }
 
@@ -247,53 +400,103 @@ pub(super) fn save_permission_mode(path: &Path, mode: PermissionMode) -> Result<
 pub(super) fn load_credentials(
     path: &Path,
 ) -> Result<Option<CredentialStore>, CredentialStoreError> {
-    load_credentials_with_open_file(path, open_private_file)
+    let key_store = credential_vault::default_master_key_store();
+    load_credentials_using(
+        path,
+        &*key_store,
+        open_private_file,
+        &PrivateCredentialFileWriter,
+    )
 }
 
+#[cfg(test)]
 fn load_credentials_with_open_file(
     path: &Path,
     open_file: impl FnOnce(&Path) -> io::Result<File>,
 ) -> Result<Option<CredentialStore>, CredentialStoreError> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(cause) if cause.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(cause) => {
-            return Err(CredentialStoreError::io(
-                CredentialStoreIoAction::Inspect,
-                path,
-                cause,
-            ))
-        }
+    let key_store = credential_vault::default_master_key_store();
+    load_credentials_using(path, &*key_store, open_file, &PrivateCredentialFileWriter)
+}
+
+fn load_credentials_using(
+    path: &Path,
+    key_store: &dyn MasterKeyStore,
+    open_file: impl FnOnce(&Path) -> io::Result<File>,
+    writer: &dyn CredentialFileWriter,
+) -> Result<Option<CredentialStore>, CredentialStoreError> {
+    if !credential_file_or_journal_exists(path)? {
+        return Ok(None);
+    }
+    let _lock = CredentialFileLock::acquire(path)?;
+    recover_credential_transaction(path, key_store, open_private_file, writer)?;
+    load_credentials_unlocked(path, key_store, open_file)
+}
+
+fn load_credentials_unlocked(
+    path: &Path,
+    key_store: &dyn MasterKeyStore,
+    open_file: impl FnOnce(&Path) -> io::Result<File>,
+) -> Result<Option<CredentialStore>, CredentialStoreError> {
+    let Some(bytes) = read_private_bytes(path, MAX_CREDENTIAL_BYTES, open_file)? else {
+        return Ok(None);
     };
-    if !metadata.file_type().is_file() {
-        return Err(CredentialStoreError::NotRegularFile(path.to_owned()));
+    let bytes = SecretBytes::new(bytes);
+    match parse_existing_document(path, bytes.as_slice())? {
+        ExistingCredentialDocument::Missing => Ok(None),
+        ExistingCredentialDocument::Legacy(mut values) => {
+            zeroize_values(&mut values);
+            Err(CredentialStoreError::LegacyPlaintext(path.to_owned()))
+        }
+        ExistingCredentialDocument::Encrypted(envelope) => {
+            let key_reference = envelope.key_reference().to_owned();
+            let key = key_store
+                .retrieve(&key_reference)
+                .map_err(|cause| map_vault_error(path, cause))?;
+            let plaintext = credential_vault::decrypt(&envelope, key.as_slice())
+                .map_err(|cause| map_vault_error(path, cause))?;
+            let mut values: BTreeMap<String, String> = serde_json::from_slice(plaintext.as_slice())
+                .map_err(|_| CredentialStoreError::InvalidValue(path.to_owned()))?;
+            if plaintext.as_slice().len() > MAX_CREDENTIAL_PLAINTEXT_BYTES
+                || validate_credential_values(path, &values).is_err()
+            {
+                zeroize_values(&mut values);
+                return Err(CredentialStoreError::InvalidValue(path.to_owned()));
+            }
+            Ok(Some(CredentialStore {
+                values,
+                key_reference: Some(key_reference),
+            }))
+        }
     }
-    let file = open_file(path)
-        .map_err(|cause| CredentialStoreError::io(CredentialStoreIoAction::Read, path, cause))?;
-    let opened_metadata = file
-        .metadata()
-        .map_err(|cause| CredentialStoreError::io(CredentialStoreIoAction::Inspect, path, cause))?;
-    if !opened_metadata.is_file() {
-        return Err(CredentialStoreError::NotRegularFile(path.to_owned()));
+}
+
+pub(super) fn load_legacy_credentials(
+    path: &Path,
+) -> Result<CredentialStore, CredentialStoreError> {
+    let key_store = credential_vault::default_master_key_store();
+    if !credential_file_or_journal_exists(path)? {
+        return Err(CredentialStoreError::InvalidJson(path.to_owned()));
     }
-    ensure_private_permissions(path, &opened_metadata, "credential store")
-        .map_err(CredentialStoreError::Permissions)?;
-    let mut bytes = Vec::new();
-    file.take(MAX_CREDENTIAL_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|cause| CredentialStoreError::io(CredentialStoreIoAction::Read, path, cause))?;
-    if bytes.len() as u64 > MAX_CREDENTIAL_BYTES {
-        return Err(CredentialStoreError::TooLarge(path.to_owned()));
+    let _lock = CredentialFileLock::acquire(path)?;
+    recover_credential_transaction(
+        path,
+        &*key_store,
+        open_private_file,
+        &PrivateCredentialFileWriter,
+    )?;
+    let Some(bytes) = read_private_bytes(path, MAX_CREDENTIAL_BYTES, open_private_file)? else {
+        return Err(CredentialStoreError::InvalidJson(path.to_owned()));
+    };
+    let bytes = SecretBytes::new(bytes);
+    match parse_existing_document(path, bytes.as_slice())? {
+        ExistingCredentialDocument::Legacy(values) => Ok(CredentialStore {
+            values,
+            key_reference: None,
+        }),
+        ExistingCredentialDocument::Encrypted(_) | ExistingCredentialDocument::Missing => {
+            Err(CredentialStoreError::InvalidJson(path.to_owned()))
+        }
     }
-    let values: BTreeMap<String, String> = serde_json::from_slice(&bytes)
-        .map_err(|_| CredentialStoreError::InvalidJson(path.to_owned()))?;
-    if values
-        .iter()
-        .any(|(name, value)| !is_provider_credential_name(name) || !valid_credential(value))
-    {
-        return Err(CredentialStoreError::InvalidValue(path.to_owned()));
-    }
-    Ok(Some(CredentialStore { values }))
 }
 
 #[cfg(test)]
@@ -351,17 +554,204 @@ struct ModelConfiguration<'a> {
     fallback_budget_micro_usd: Option<String>,
 }
 
-pub(super) fn save_credentials(path: &Path, credentials: &CredentialStore) -> Result<(), String> {
+pub(super) fn save_credentials(
+    path: &Path,
+    credentials: &mut CredentialStore,
+) -> Result<(), String> {
+    save_credentials_with_legacy_replacement(path, credentials, false)
+}
+
+pub(super) fn save_credentials_after_approved_migration(
+    path: &Path,
+    credentials: &mut CredentialStore,
+) -> Result<(), String> {
+    save_credentials_with_legacy_replacement(path, credentials, true)
+}
+
+fn save_credentials_with_legacy_replacement(
+    path: &Path,
+    credentials: &mut CredentialStore,
+    allow_legacy_replacement: bool,
+) -> Result<(), String> {
+    let key_store = credential_vault::default_master_key_store();
+    save_credentials_using(
+        path,
+        credentials,
+        &*key_store,
+        &PrivateCredentialFileWriter,
+        allow_legacy_replacement,
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn save_credentials_using(
+    path: &Path,
+    credentials: &mut CredentialStore,
+    key_store: &dyn MasterKeyStore,
+    writer: &dyn CredentialFileWriter,
+    allow_legacy_replacement: bool,
+) -> Result<(), CredentialStoreError> {
+    let _lock = CredentialFileLock::acquire(path)?;
+    recover_credential_transaction(path, key_store, open_private_file, writer)?;
+    let mut existing = inspect_existing_document(path, open_private_file)?;
+    verify_existing_document(path, &mut existing, key_store)?;
+    let old_key_reference = match existing {
+        ExistingCredentialDocument::Missing => {
+            if credentials.key_reference.is_some() {
+                return Err(CredentialStoreError::StaleStore(path.to_owned()));
+            }
+            None
+        }
+        ExistingCredentialDocument::Legacy(mut values) => {
+            zeroize_values(&mut values);
+            if !allow_legacy_replacement {
+                return Err(CredentialStoreError::LegacyPlaintext(path.to_owned()));
+            }
+            if credentials.key_reference.is_some() {
+                return Err(CredentialStoreError::StaleStore(path.to_owned()));
+            }
+            None
+        }
+        ExistingCredentialDocument::Encrypted(envelope) => {
+            let active_reference = envelope.key_reference().to_owned();
+            if credentials.key_reference.as_deref() != Some(active_reference.as_str()) {
+                return Err(CredentialStoreError::StaleStore(path.to_owned()));
+            }
+            Some(active_reference)
+        }
+    };
+
     if credentials.is_empty() {
-        return remove_file_if_present(path, "credential store");
+        remove_credentials_unlocked(path, old_key_reference, key_store, writer)?;
+        credentials.key_reference = None;
+        return Ok(());
     }
-    let bytes = serde_json::to_vec_pretty(&credentials.values)
-        .map_err(|_| "cannot serialize credential store".to_owned())?;
-    write_private_file(path, &bytes, "credential store")
+
+    let plaintext = SecretBytes::new(
+        serde_json::to_vec(&credentials.values)
+            .map_err(|_| CredentialStoreError::InvalidValue(path.to_owned()))?,
+    );
+    if plaintext.as_slice().len() > MAX_CREDENTIAL_PLAINTEXT_BYTES {
+        return Err(CredentialStoreError::TooLarge(path.to_owned()));
+    }
+    let new_key_reference = uuid::Uuid::new_v4().to_string();
+    let new_key = credential_vault::create_key().map_err(|cause| map_vault_error(path, cause))?;
+    let nonce = credential_vault::create_nonce().map_err(|cause| map_vault_error(path, cause))?;
+    let journal = CredentialTransaction {
+        version: CREDENTIAL_TRANSACTION_VERSION,
+        old_key_reference: old_key_reference.clone(),
+        new_key_reference: Some(new_key_reference.clone()),
+    };
+    write_credential_journal(path, &journal, writer)?;
+
+    if key_store
+        .store(&new_key_reference, new_key.as_slice())
+        .is_err()
+    {
+        let _ = recover_credential_transaction(path, key_store, open_private_file, writer);
+        return Err(CredentialStoreError::VaultUnavailable);
+    }
+    let envelope = match credential_vault::encrypt(
+        new_key.as_slice(),
+        &new_key_reference,
+        nonce.as_slice(),
+        plaintext,
+    ) {
+        Ok(envelope) => envelope,
+        Err(cause) => {
+            let _ = recover_credential_transaction(path, key_store, open_private_file, writer);
+            return Err(map_vault_error(path, cause));
+        }
+    };
+    let bytes = match credential_vault::serialize_envelope(&envelope) {
+        Ok(bytes) => bytes,
+        Err(cause) => {
+            recover_credential_transaction(path, key_store, open_private_file, writer)?;
+            return Err(map_vault_error(path, cause));
+        }
+    };
+    match writer.write_document(path, &bytes) {
+        Ok(()) => {
+            credentials.key_reference = Some(new_key_reference);
+            recover_credential_transaction(path, key_store, open_private_file, writer)
+                .map_err(|_| CredentialStoreError::TransactionInterrupted(path.to_owned()))
+        }
+        Err(CredentialFileWriteError::BeforeCommit(_message)) => {
+            recover_credential_transaction(path, key_store, open_private_file, writer)?;
+            Err(CredentialStoreError::TransactionInterrupted(
+                path.to_owned(),
+            ))
+        }
+        Err(CredentialFileWriteError::AfterCommit(_message)) => {
+            credentials.key_reference = Some(new_key_reference);
+            Err(CredentialStoreError::TransactionInterrupted(
+                path.to_owned(),
+            ))
+        }
+    }
+}
+
+fn remove_credentials(path: &Path) -> Result<(), CredentialStoreError> {
+    let key_store = credential_vault::default_master_key_store();
+    let _lock = CredentialFileLock::acquire(path)?;
+    recover_credential_transaction(
+        path,
+        &*key_store,
+        open_private_file,
+        &PrivateCredentialFileWriter,
+    )?;
+    let existing = inspect_existing_document(path, open_private_file)?;
+    match existing {
+        ExistingCredentialDocument::Missing => Ok(()),
+        ExistingCredentialDocument::Legacy(mut values) => {
+            zeroize_values(&mut values);
+            remove_file_if_present(path, "credential store")
+                .map_err(|_| CredentialStoreError::TransactionInterrupted(path.to_owned()))
+        }
+        ExistingCredentialDocument::Encrypted(envelope) => {
+            let old_key_reference = envelope.key_reference().to_owned();
+            let key = key_store
+                .retrieve(&old_key_reference)
+                .map_err(|cause| map_vault_error(path, cause))?;
+            let plaintext = credential_vault::decrypt(&envelope, key.as_slice())
+                .map_err(|cause| map_vault_error(path, cause))?;
+            let mut values: BTreeMap<String, String> = serde_json::from_slice(plaintext.as_slice())
+                .map_err(|_| CredentialStoreError::InvalidValue(path.to_owned()))?;
+            if validate_credential_values(path, &values).is_err() {
+                zeroize_values(&mut values);
+                return Err(CredentialStoreError::InvalidValue(path.to_owned()));
+            }
+            zeroize_values(&mut values);
+            let journal = CredentialTransaction {
+                version: CREDENTIAL_TRANSACTION_VERSION,
+                old_key_reference: Some(old_key_reference),
+                new_key_reference: None,
+            };
+            write_credential_journal(path, &journal, &PrivateCredentialFileWriter)?;
+            if remove_file_if_present(path, "credential store").is_err() {
+                recover_credential_transaction(
+                    path,
+                    &*key_store,
+                    open_private_file,
+                    &PrivateCredentialFileWriter,
+                )?;
+                return Err(CredentialStoreError::TransactionInterrupted(
+                    path.to_owned(),
+                ));
+            }
+            recover_credential_transaction(
+                path,
+                &*key_store,
+                open_private_file,
+                &PrivateCredentialFileWriter,
+            )
+            .map_err(|_| CredentialStoreError::TransactionInterrupted(path.to_owned()))
+        }
+    }
 }
 
 pub(super) fn remove_settings(paths: &UserSettingsPaths) -> Result<(), String> {
-    remove_file_if_present(&paths.credentials, "credential store")?;
+    remove_credentials(&paths.credentials).map_err(|error| error.to_string())?;
     remove_file_if_present(&paths.provider_profiles, "provider profiles")?;
     remove_file_if_present(&paths.model_evidence, "provider evidence")?;
     remove_file_if_present(&paths.model_evidence_key, "provider evidence key")?;
@@ -372,6 +762,319 @@ pub(super) fn remove_settings(paths: &UserSettingsPaths) -> Result<(), String> {
     )?;
     super::task_routing_state::remove_task_routing_states(paths)?;
     remove_file_if_present(&paths.model, "model configuration")
+}
+
+fn credential_file_or_journal_exists(path: &Path) -> Result<bool, CredentialStoreError> {
+    for candidate in [path.to_owned(), credential_journal_path(path)] {
+        match fs::symlink_metadata(&candidate) {
+            Ok(_) => return Ok(true),
+            Err(cause) if cause.kind() == io::ErrorKind::NotFound => {}
+            Err(cause) => {
+                return Err(CredentialStoreError::io(
+                    CredentialStoreIoAction::Inspect,
+                    &candidate,
+                    cause,
+                ));
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn read_private_bytes(
+    path: &Path,
+    maximum_bytes: u64,
+    open_file: impl FnOnce(&Path) -> io::Result<File>,
+) -> Result<Option<Vec<u8>>, CredentialStoreError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(cause) if cause.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(cause) => {
+            return Err(CredentialStoreError::io(
+                CredentialStoreIoAction::Inspect,
+                path,
+                cause,
+            ));
+        }
+    };
+    if !metadata.file_type().is_file() {
+        return Err(CredentialStoreError::NotRegularFile(path.to_owned()));
+    }
+    let file = open_file(path)
+        .map_err(|cause| CredentialStoreError::io(CredentialStoreIoAction::Read, path, cause))?;
+    let opened_metadata = file
+        .metadata()
+        .map_err(|cause| CredentialStoreError::io(CredentialStoreIoAction::Inspect, path, cause))?;
+    if !opened_metadata.is_file() {
+        return Err(CredentialStoreError::NotRegularFile(path.to_owned()));
+    }
+    ensure_private_permissions(path, &opened_metadata, "credential store")
+        .map_err(CredentialStoreError::Permissions)?;
+    let mut bytes = Vec::new();
+    file.take(maximum_bytes + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|cause| CredentialStoreError::io(CredentialStoreIoAction::Read, path, cause))?;
+    if bytes.len() as u64 > maximum_bytes {
+        bytes.zeroize();
+        return Err(CredentialStoreError::TooLarge(path.to_owned()));
+    }
+    Ok(Some(bytes))
+}
+
+fn inspect_existing_document(
+    path: &Path,
+    open_file: impl FnOnce(&Path) -> io::Result<File>,
+) -> Result<ExistingCredentialDocument, CredentialStoreError> {
+    let Some(mut bytes) = read_private_bytes(path, MAX_CREDENTIAL_BYTES, open_file)? else {
+        return Ok(ExistingCredentialDocument::Missing);
+    };
+    let document = parse_existing_document(path, &bytes);
+    bytes.zeroize();
+    document
+}
+
+fn parse_existing_document(
+    path: &Path,
+    bytes: &[u8],
+) -> Result<ExistingCredentialDocument, CredentialStoreError> {
+    match CredentialsEnvelope::parse(bytes) {
+        Ok(envelope) => Ok(ExistingCredentialDocument::Encrypted(envelope)),
+        Err(VaultError::UnsupportedVersion) => {
+            Err(CredentialStoreError::UnsupportedVersion(path.to_owned()))
+        }
+        Err(VaultError::InvalidEnvelope) => {
+            match serde_json::from_slice::<BTreeMap<String, String>>(bytes) {
+                Ok(mut values) => match validate_credential_values(path, &values) {
+                    Ok(()) => Ok(ExistingCredentialDocument::Legacy(values)),
+                    Err(error) => {
+                        zeroize_values(&mut values);
+                        Err(error)
+                    }
+                },
+                Err(_) => {
+                    let looks_encrypted = serde_json::from_slice::<serde_json::Value>(bytes)
+                        .ok()
+                        .and_then(|value| value.as_object().cloned())
+                        .is_some_and(|object| object.contains_key("format"));
+                    if looks_encrypted {
+                        Err(CredentialStoreError::InvalidEnvelope(path.to_owned()))
+                    } else {
+                        Err(CredentialStoreError::InvalidJson(path.to_owned()))
+                    }
+                }
+            }
+        }
+        Err(_) => Err(CredentialStoreError::InvalidEnvelope(path.to_owned())),
+    }
+}
+
+fn validate_credential_values(
+    path: &Path,
+    values: &BTreeMap<String, String>,
+) -> Result<(), CredentialStoreError> {
+    if values
+        .iter()
+        .any(|(name, value)| !is_provider_credential_name(name) || !valid_credential(value))
+    {
+        Err(CredentialStoreError::InvalidValue(path.to_owned()))
+    } else {
+        Ok(())
+    }
+}
+
+fn zeroize_values(values: &mut BTreeMap<String, String>) {
+    for value in values.values_mut() {
+        value.zeroize();
+    }
+}
+
+fn map_vault_error(path: &Path, error: VaultError) -> CredentialStoreError {
+    match error {
+        VaultError::Unavailable => CredentialStoreError::VaultUnavailable,
+        VaultError::RandomSourceUnavailable => CredentialStoreError::SecureRandomUnavailable,
+        VaultError::MissingKey => CredentialStoreError::MissingVaultKey(path.to_owned()),
+        VaultError::InvalidKey | VaultError::InvalidEnvelope => {
+            CredentialStoreError::InvalidEnvelope(path.to_owned())
+        }
+        VaultError::UnsupportedVersion => CredentialStoreError::UnsupportedVersion(path.to_owned()),
+        VaultError::AuthenticationFailed => {
+            CredentialStoreError::AuthenticationFailed(path.to_owned())
+        }
+    }
+}
+
+fn credential_journal_path(path: &Path) -> PathBuf {
+    path.with_file_name(CREDENTIAL_TRANSACTION_FILE)
+}
+
+fn write_credential_journal(
+    path: &Path,
+    journal: &CredentialTransaction,
+    writer: &dyn CredentialFileWriter,
+) -> Result<(), CredentialStoreError> {
+    let bytes = serde_json::to_vec(journal)
+        .map_err(|_| CredentialStoreError::TransactionInterrupted(path.to_owned()))?;
+    writer
+        .write_journal(&credential_journal_path(path), &bytes)
+        .map_err(|_| CredentialStoreError::TransactionInterrupted(path.to_owned()))
+}
+
+fn read_credential_journal(
+    path: &Path,
+) -> Result<Option<CredentialTransaction>, CredentialStoreError> {
+    let journal_path = credential_journal_path(path);
+    let Some(mut bytes) = read_private_bytes(&journal_path, 4096, open_private_file)? else {
+        return Ok(None);
+    };
+    let parsed = serde_json::from_slice::<CredentialTransaction>(&bytes)
+        .map_err(|_| CredentialStoreError::TransactionInterrupted(path.to_owned()));
+    bytes.zeroize();
+    let journal = parsed?;
+    if journal.version != CREDENTIAL_TRANSACTION_VERSION
+        || journal
+            .old_key_reference
+            .as_deref()
+            .is_some_and(|reference| !valid_key_reference(reference))
+        || journal
+            .new_key_reference
+            .as_deref()
+            .is_some_and(|reference| !valid_key_reference(reference))
+    {
+        return Err(CredentialStoreError::TransactionInterrupted(
+            path.to_owned(),
+        ));
+    }
+    Ok(Some(journal))
+}
+
+fn valid_key_reference(reference: &str) -> bool {
+    uuid::Uuid::parse_str(reference).is_ok_and(|parsed| parsed.to_string() == reference)
+}
+
+fn recover_credential_transaction(
+    path: &Path,
+    key_store: &dyn MasterKeyStore,
+    open_file: impl FnOnce(&Path) -> io::Result<File>,
+    _writer: &dyn CredentialFileWriter,
+) -> Result<(), CredentialStoreError> {
+    let Some(journal) = read_credential_journal(path)? else {
+        return Ok(());
+    };
+    let mut existing = inspect_existing_document(path, open_file)?;
+    let active_reference = match &existing {
+        ExistingCredentialDocument::Encrypted(envelope) => {
+            Some(envelope.key_reference().to_owned())
+        }
+        ExistingCredentialDocument::Missing | ExistingCredentialDocument::Legacy(_) => None,
+    };
+    verify_existing_document(path, &mut existing, key_store)?;
+    match journal.new_key_reference.as_deref() {
+        Some(new_reference) if active_reference.as_deref() == Some(new_reference) => {
+            if let Some(old_reference) = journal.old_key_reference.as_deref() {
+                if old_reference != new_reference {
+                    delete_master_key(path, key_store, old_reference)?;
+                }
+            }
+        }
+        Some(new_reference)
+            if active_reference == journal.old_key_reference
+                && (active_reference.is_some()
+                    || matches!(
+                        existing,
+                        ExistingCredentialDocument::Missing | ExistingCredentialDocument::Legacy(_)
+                    )) =>
+        {
+            delete_master_key(path, key_store, new_reference)?;
+        }
+        None if active_reference == journal.old_key_reference => {
+            // The file removal did not commit; keep the referenced key.
+        }
+        None if active_reference.is_none()
+            && matches!(existing, ExistingCredentialDocument::Missing) =>
+        {
+            if let Some(old_reference) = journal.old_key_reference.as_deref() {
+                delete_master_key(path, key_store, old_reference)?;
+            }
+        }
+        _ => {
+            return Err(CredentialStoreError::TransactionInterrupted(
+                path.to_owned(),
+            ));
+        }
+    }
+    remove_file_if_present(
+        &credential_journal_path(path),
+        "credential transaction journal",
+    )
+    .map_err(|_| CredentialStoreError::TransactionInterrupted(path.to_owned()))
+}
+
+fn verify_existing_document(
+    path: &Path,
+    document: &mut ExistingCredentialDocument,
+    key_store: &dyn MasterKeyStore,
+) -> Result<(), CredentialStoreError> {
+    match document {
+        ExistingCredentialDocument::Missing => Ok(()),
+        ExistingCredentialDocument::Legacy(values) => {
+            let result = validate_credential_values(path, values);
+            zeroize_values(values);
+            result
+        }
+        ExistingCredentialDocument::Encrypted(envelope) => {
+            let key = key_store
+                .retrieve(envelope.key_reference())
+                .map_err(|cause| map_vault_error(path, cause))?;
+            let plaintext = credential_vault::decrypt(envelope, key.as_slice())
+                .map_err(|cause| map_vault_error(path, cause))?;
+            let mut values: BTreeMap<String, String> = serde_json::from_slice(plaintext.as_slice())
+                .map_err(|_| CredentialStoreError::InvalidValue(path.to_owned()))?;
+            let result = if plaintext.as_slice().len() > MAX_CREDENTIAL_PLAINTEXT_BYTES {
+                Err(CredentialStoreError::InvalidValue(path.to_owned()))
+            } else {
+                validate_credential_values(path, &values)
+            };
+            zeroize_values(&mut values);
+            result
+        }
+    }
+}
+
+fn delete_master_key(
+    path: &Path,
+    key_store: &dyn MasterKeyStore,
+    key_reference: &str,
+) -> Result<(), CredentialStoreError> {
+    key_store
+        .delete(key_reference)
+        .map_err(|cause| map_vault_error(path, cause))
+}
+
+fn remove_credentials_unlocked(
+    path: &Path,
+    old_key_reference: Option<String>,
+    key_store: &dyn MasterKeyStore,
+    writer: &dyn CredentialFileWriter,
+) -> Result<(), CredentialStoreError> {
+    let Some(old_key_reference) = old_key_reference else {
+        remove_file_if_present(path, "credential store")
+            .map_err(|_| CredentialStoreError::TransactionInterrupted(path.to_owned()))?;
+        return Ok(());
+    };
+    let journal = CredentialTransaction {
+        version: CREDENTIAL_TRANSACTION_VERSION,
+        old_key_reference: Some(old_key_reference),
+        new_key_reference: None,
+    };
+    write_credential_journal(path, &journal, writer)?;
+    if remove_file_if_present(path, "credential store").is_err() {
+        recover_credential_transaction(path, key_store, open_private_file, writer)?;
+        return Err(CredentialStoreError::TransactionInterrupted(
+            path.to_owned(),
+        ));
+    }
+    recover_credential_transaction(path, key_store, open_private_file, writer)
+        .map_err(|_| CredentialStoreError::TransactionInterrupted(path.to_owned()))
 }
 
 pub(super) fn valid_credential(value: &str) -> bool {
@@ -395,28 +1098,53 @@ fn write_private_file_with_directory_sync(
     description: &str,
     sync_directory: impl FnOnce(&Path) -> io::Result<()>,
 ) -> Result<(), String> {
+    write_private_file_with_outcome(path, bytes, description, sync_directory).map_err(|error| {
+        match error {
+            CredentialFileWriteError::BeforeCommit(message)
+            | CredentialFileWriteError::AfterCommit(message) => message,
+        }
+    })
+}
+
+fn write_private_file_with_outcome(
+    path: &Path,
+    bytes: &[u8],
+    description: &str,
+    sync_directory: impl FnOnce(&Path) -> io::Result<()>,
+) -> Result<(), CredentialFileWriteError> {
     let parent = path.parent().ok_or_else(|| {
-        format!("cannot locate the user configuration directory for {description}")
+        CredentialFileWriteError::BeforeCommit(format!(
+            "cannot locate the user configuration directory for {description}"
+        ))
     })?;
-    create_private_directory(parent)
-        .map_err(|cause| file_error("cannot create user configuration directory", parent, cause))?;
+    create_private_directory(parent).map_err(|cause| {
+        CredentialFileWriteError::BeforeCommit(file_error(
+            "cannot create user configuration directory",
+            parent,
+            cause,
+        ))
+    })?;
     let metadata = fs::symlink_metadata(parent).map_err(|cause| {
-        file_error("cannot inspect user configuration directory", parent, cause)
+        CredentialFileWriteError::BeforeCommit(file_error(
+            "cannot inspect user configuration directory",
+            parent,
+            cause,
+        ))
     })?;
     if !metadata.file_type().is_dir() {
-        return Err(format!(
+        return Err(CredentialFileWriteError::BeforeCommit(format!(
             "user configuration path '{}' is not a directory",
             parent.display()
-        ));
+        )));
     }
-    set_private_directory_permissions(parent)?;
+    set_private_directory_permissions(parent).map_err(CredentialFileWriteError::BeforeCommit)?;
 
     if let Ok(existing) = fs::symlink_metadata(path) {
         if !existing.file_type().is_file() {
-            return Err(format!(
+            return Err(CredentialFileWriteError::BeforeCommit(format!(
                 "cannot replace {description} '{}': it is not a regular file",
                 path.display()
-            ));
+            )));
         }
     }
 
@@ -428,28 +1156,36 @@ fn write_private_file_with_directory_sync(
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let mut file = options
-        .open(&temp_path)
-        .map_err(|cause| file_error("cannot create temporary settings file", &temp_path, cause))?;
+    let mut file = options.open(&temp_path).map_err(|cause| {
+        CredentialFileWriteError::BeforeCommit(file_error(
+            "cannot create temporary settings file",
+            &temp_path,
+            cause,
+        ))
+    })?;
     if let Err(cause) = file.write_all(bytes).and_then(|()| file.sync_all()) {
         let _ = fs::remove_file(&temp_path);
-        return Err(file_error("cannot write settings file", &temp_path, cause));
+        return Err(CredentialFileWriteError::BeforeCommit(file_error(
+            "cannot write settings file",
+            &temp_path,
+            cause,
+        )));
     }
     if let Err(message) = set_private_file_permissions(&temp_path) {
         let _ = fs::remove_file(&temp_path);
-        return Err(message);
+        return Err(CredentialFileWriteError::BeforeCommit(message));
     }
     drop(file);
     fs::rename(&temp_path, path).map_err(|cause| {
         let _ = fs::remove_file(&temp_path);
-        file_error("cannot save settings file", path, cause)
+        CredentialFileWriteError::BeforeCommit(file_error("cannot save settings file", path, cause))
     })?;
     sync_directory(parent).map_err(|cause| {
-        format!(
+        CredentialFileWriteError::AfterCommit(format!(
             "saved {description} to '{}', but could not sync its parent directory: {}",
             path.display(),
             cause.kind()
-        )
+        ))
     })
 }
 
@@ -640,6 +1376,122 @@ pub(super) fn open_private_file(path: &Path) -> io::Result<File> {
 mod tests {
     use super::*;
     use crate::test_support::TempDir;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct TestKeyStore {
+        keys: Mutex<HashMap<String, Vec<u8>>>,
+        locked: bool,
+    }
+
+    impl TestKeyStore {
+        fn key_count(&self) -> usize {
+            self.keys.lock().unwrap().len()
+        }
+    }
+
+    impl MasterKeyStore for TestKeyStore {
+        fn store(&self, key_reference: &str, key: &[u8]) -> Result<(), VaultError> {
+            if self.locked {
+                return Err(VaultError::Unavailable);
+            }
+            self.keys
+                .lock()
+                .map_err(|_| VaultError::Unavailable)?
+                .insert(key_reference.to_owned(), key.to_vec());
+            Ok(())
+        }
+
+        fn retrieve(&self, key_reference: &str) -> Result<SecretBytes, VaultError> {
+            if self.locked {
+                return Err(VaultError::Unavailable);
+            }
+            self.keys
+                .lock()
+                .map_err(|_| VaultError::Unavailable)?
+                .get(key_reference)
+                .cloned()
+                .map(SecretBytes::new)
+                .ok_or(VaultError::MissingKey)
+        }
+
+        fn delete(&self, key_reference: &str) -> Result<(), VaultError> {
+            if self.locked {
+                return Err(VaultError::Unavailable);
+            }
+            if let Some(mut key) = self
+                .keys
+                .lock()
+                .map_err(|_| VaultError::Unavailable)?
+                .remove(key_reference)
+            {
+                key.zeroize();
+            }
+            Ok(())
+        }
+    }
+
+    impl Drop for TestKeyStore {
+        fn drop(&mut self) {
+            if let Ok(keys) = self.keys.get_mut() {
+                for key in keys.values_mut() {
+                    key.zeroize();
+                }
+            }
+        }
+    }
+
+    struct FailBeforeCredentialReplace;
+
+    impl CredentialFileWriter for FailBeforeCredentialReplace {
+        fn write_journal(&self, path: &Path, bytes: &[u8]) -> Result<(), String> {
+            PrivateCredentialFileWriter.write_journal(path, bytes)
+        }
+
+        fn write_document(
+            &self,
+            _path: &Path,
+            _bytes: &[u8],
+        ) -> Result<(), CredentialFileWriteError> {
+            Err(CredentialFileWriteError::BeforeCommit(
+                "simulated interruption before replacement".to_owned(),
+            ))
+        }
+    }
+
+    struct CommitThenReportSyncFailure;
+
+    impl CredentialFileWriter for CommitThenReportSyncFailure {
+        fn write_journal(&self, path: &Path, bytes: &[u8]) -> Result<(), String> {
+            PrivateCredentialFileWriter.write_journal(path, bytes)
+        }
+
+        fn write_document(
+            &self,
+            path: &Path,
+            bytes: &[u8],
+        ) -> Result<(), CredentialFileWriteError> {
+            write_private_file(path, bytes, "credential store")
+                .map_err(CredentialFileWriteError::BeforeCommit)?;
+            Err(CredentialFileWriteError::AfterCommit(
+                "simulated directory sync failure".to_owned(),
+            ))
+        }
+    }
+
+    fn credentials_with_secret(secret: &str) -> CredentialStore {
+        let mut credentials = CredentialStore::empty();
+        credentials.insert("OPENAI_API_KEY", secret.to_owned());
+        credentials
+    }
+
+    fn credential_error<T>(result: Result<T, CredentialStoreError>) -> CredentialStoreError {
+        match result {
+            Err(error) => error,
+            Ok(_) => panic!("credential operation unexpectedly succeeded"),
+        }
+    }
 
     #[test]
     fn permission_mode_is_per_user_and_defaults_to_ask() {
@@ -696,8 +1548,11 @@ mod tests {
         let secret = "test-token-never-print";
         let mut credentials = CredentialStore::empty();
         credentials.insert("OPENAI_API_KEY", secret.to_owned());
-        save_credentials(&path, &credentials).unwrap();
+        save_credentials(&path, &mut credentials).unwrap();
 
+        let serialized = fs::read(&path).unwrap();
+        assert!(!String::from_utf8_lossy(&serialized).contains(secret));
+        assert!(CredentialsEnvelope::parse(&serialized).is_ok());
         let loaded = load_credentials(&path).unwrap().unwrap();
         assert_eq!(loaded.get("OPENAI_API_KEY"), Some(secret));
         fs::write(&path, b"not json").unwrap();
@@ -716,6 +1571,212 @@ mod tests {
         );
     }
 
+    #[test]
+    fn updates_rotate_the_key_and_removal_revokes_it() {
+        let directory = TempDir::new();
+        let path = directory.path().join("krypper").join(CREDENTIALS_FILE);
+        let key_store = TestKeyStore::default();
+        let writer = PrivateCredentialFileWriter;
+        let mut credentials = credentials_with_secret("first-key");
+
+        save_credentials_using(&path, &mut credentials, &key_store, &writer, false).unwrap();
+        let first_reference = credentials.key_reference.clone().unwrap();
+        assert_eq!(key_store.key_count(), 1);
+
+        credentials.insert("OPENAI_API_KEY", "rotated-key".to_owned());
+        save_credentials_using(&path, &mut credentials, &key_store, &writer, false).unwrap();
+        let second_reference = credentials.key_reference.clone().unwrap();
+        assert_ne!(first_reference, second_reference);
+        assert_eq!(key_store.key_count(), 1);
+        assert_eq!(
+            load_credentials_using(&path, &key_store, open_private_file, &writer)
+                .unwrap()
+                .unwrap()
+                .get("OPENAI_API_KEY"),
+            Some("rotated-key")
+        );
+
+        remove_credentials_unlocked(&path, Some(second_reference), &key_store, &writer).unwrap();
+        assert!(!path.exists());
+        assert_eq!(key_store.key_count(), 0);
+    }
+
+    #[test]
+    fn unavailable_or_missing_vault_key_never_falls_back_to_plaintext() {
+        let directory = TempDir::new();
+        let path = directory.path().join("krypper").join(CREDENTIALS_FILE);
+        let key_store = TestKeyStore::default();
+        let writer = PrivateCredentialFileWriter;
+        let mut credentials = credentials_with_secret("saved-secret");
+        save_credentials_using(&path, &mut credentials, &key_store, &writer, false).unwrap();
+        let serialized = fs::read(&path).unwrap();
+
+        let locked_store = TestKeyStore {
+            keys: Mutex::new(HashMap::new()),
+            locked: true,
+        };
+        let locked = credential_error(load_credentials_using(
+            &path,
+            &locked_store,
+            open_private_file,
+            &writer,
+        ));
+        assert!(matches!(locked, CredentialStoreError::VaultUnavailable));
+        assert_eq!(fs::read(&path).unwrap(), serialized);
+
+        let reference = credentials.key_reference.as_deref().unwrap();
+        key_store.delete(reference).unwrap();
+        let missing = credential_error(load_credentials_using(
+            &path,
+            &key_store,
+            open_private_file,
+            &writer,
+        ));
+        assert!(matches!(missing, CredentialStoreError::MissingVaultKey(_)));
+        assert_eq!(fs::read(&path).unwrap(), serialized);
+    }
+
+    #[test]
+    fn encrypted_references_are_scoped_to_the_key_that_created_them() {
+        let directory = TempDir::new();
+        let first_path = directory.path().join("first/credentials.json");
+        let second_path = directory.path().join("second/credentials.json");
+        let key_store = TestKeyStore::default();
+        let writer = PrivateCredentialFileWriter;
+        let mut first = credentials_with_secret("first-vault-secret");
+        let mut second = credentials_with_secret("second-vault-secret");
+        save_credentials_using(&first_path, &mut first, &key_store, &writer, false).unwrap();
+        save_credentials_using(&second_path, &mut second, &key_store, &writer, false).unwrap();
+        assert_ne!(
+            first.key_reference.as_deref(),
+            second.key_reference.as_deref()
+        );
+        assert_eq!(key_store.key_count(), 2);
+
+        let mut first_envelope: serde_json::Value =
+            serde_json::from_slice(&fs::read(&first_path).unwrap()).unwrap();
+        first_envelope["key_reference"] = second.key_reference.clone().unwrap().into();
+        write_private_file(
+            &first_path,
+            &serde_json::to_vec(&first_envelope).unwrap(),
+            "credential store",
+        )
+        .unwrap();
+        let error = credential_error(load_credentials_using(
+            &first_path,
+            &key_store,
+            open_private_file,
+            &writer,
+        ));
+        assert!(matches!(
+            error,
+            CredentialStoreError::AuthenticationFailed(_)
+        ));
+    }
+
+    #[test]
+    fn tampered_ciphertext_is_rejected_without_secret_disclosure() {
+        let directory = TempDir::new();
+        let path = directory.path().join("krypper").join(CREDENTIALS_FILE);
+        let key_store = TestKeyStore::default();
+        let writer = PrivateCredentialFileWriter;
+        let mut credentials = credentials_with_secret("tamper-test-secret");
+        save_credentials_using(&path, &mut credentials, &key_store, &writer, false).unwrap();
+
+        let mut envelope: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).expect("encrypted envelope is JSON");
+        let ciphertext = envelope["ciphertext"]
+            .as_str()
+            .expect("ciphertext field is a string")
+            .to_owned();
+        let replacement = if ciphertext.starts_with('A') {
+            'B'
+        } else {
+            'A'
+        };
+        envelope["ciphertext"] = format!("{replacement}{}", &ciphertext[1..]).into();
+        write_private_file(
+            &path,
+            &serde_json::to_vec(&envelope).unwrap(),
+            "credential store",
+        )
+        .unwrap();
+
+        let error = credential_error(load_credentials_using(
+            &path,
+            &key_store,
+            open_private_file,
+            &writer,
+        ));
+        assert!(matches!(
+            error,
+            CredentialStoreError::AuthenticationFailed(_)
+        ));
+        assert!(!error.to_string().contains("tamper-test-secret"));
+    }
+
+    #[test]
+    fn interrupted_migration_before_replacement_preserves_plaintext_and_cleans_new_key() {
+        let directory = TempDir::new();
+        let path = directory.path().join("krypper").join(CREDENTIALS_FILE);
+        let mut legacy = BTreeMap::new();
+        legacy.insert("OPENAI_API_KEY".to_owned(), "legacy-secret".to_owned());
+        let original = serde_json::to_vec(&legacy).unwrap();
+        write_private_file(&path, &original, "credential store").unwrap();
+        let mut credentials = CredentialStore {
+            values: legacy,
+            key_reference: None,
+        };
+        let key_store = TestKeyStore::default();
+
+        let error = save_credentials_using(
+            &path,
+            &mut credentials,
+            &key_store,
+            &FailBeforeCredentialReplace,
+            true,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            CredentialStoreError::TransactionInterrupted(_)
+        ));
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert_eq!(key_store.key_count(), 0);
+        assert!(!credential_journal_path(&path).exists());
+    }
+
+    #[test]
+    fn next_load_recovers_a_committed_file_after_sync_uncertainty() {
+        let directory = TempDir::new();
+        let path = directory.path().join("krypper").join(CREDENTIALS_FILE);
+        let key_store = TestKeyStore::default();
+        let private_writer = PrivateCredentialFileWriter;
+        let mut credentials = credentials_with_secret("interrupted-rotation");
+
+        let error = save_credentials_using(
+            &path,
+            &mut credentials,
+            &key_store,
+            &CommitThenReportSyncFailure,
+            false,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            CredentialStoreError::TransactionInterrupted(_)
+        ));
+        assert!(credential_journal_path(&path).exists());
+        let loaded = load_credentials_using(&path, &key_store, open_private_file, &private_writer)
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.get("OPENAI_API_KEY"), Some("interrupted-rotation"));
+        assert!(!credential_journal_path(&path).exists());
+        assert_eq!(key_store.key_count(), 1);
+    }
+
     #[cfg(unix)]
     #[test]
     fn saved_credentials_and_parent_directory_have_private_permissions() {
@@ -724,7 +1785,7 @@ mod tests {
         let path = directory.path().join("krypper").join(CREDENTIALS_FILE);
         let mut credentials = CredentialStore::empty();
         credentials.insert("OPENAI_API_KEY", "test-token".to_owned());
-        save_credentials(&path, &credentials).unwrap();
+        save_credentials(&path, &mut credentials).unwrap();
 
         assert_eq!(
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
@@ -798,7 +1859,7 @@ mod tests {
         let path = directory.path().join("krypper").join(CREDENTIALS_FILE);
         let mut credentials = CredentialStore::empty();
         credentials.insert("OPENAI_API_KEY", "test-token".to_owned());
-        save_credentials(&path, &credentials).unwrap();
+        save_credentials(&path, &mut credentials).unwrap();
         let opened = open_private_file(&path).unwrap();
         let metadata = opened.metadata().unwrap();
         let another_uid = metadata.uid().wrapping_add(1);
@@ -837,7 +1898,7 @@ mod tests {
         let path = directory.path().join("krypper").join(CREDENTIALS_FILE);
         let mut credentials = CredentialStore::empty();
         credentials.insert("OPENAI_API_KEY", "test-token".to_owned());
-        save_credentials(&path, &credentials).unwrap();
+        save_credentials(&path, &mut credentials).unwrap();
 
         let result = super::load_credentials_with_open_file(&path, |path| {
             fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();

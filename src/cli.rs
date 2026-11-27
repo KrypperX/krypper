@@ -6,6 +6,7 @@ mod checkpoint_files;
 mod config;
 pub(crate) use self::config::{ModelDefaults, RoutingMode};
 mod context;
+mod credential_vault;
 mod fallback_runtime;
 mod help;
 mod model_catalog;

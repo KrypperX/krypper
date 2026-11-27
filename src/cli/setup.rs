@@ -9,9 +9,10 @@ use super::model_catalog::{cache_path_for_user_settings, load_catalog, CatalogOr
 use super::model_routing::ModelRoutingService;
 use super::provider_profiles::load_provider_profiles;
 use super::settings::{
-    load_credentials, load_permission_mode, remove_settings, save_credentials,
-    save_model_configuration, save_permission_mode, user_settings_paths, valid_credential,
-    CredentialStore, UserSettingsPaths,
+    load_credentials, load_legacy_credentials, load_permission_mode, remove_settings,
+    save_credentials, save_credentials_after_approved_migration, save_model_configuration,
+    save_permission_mode, user_settings_paths, valid_credential, CredentialStore,
+    CredentialStoreError, UserSettingsPaths,
 };
 use super::setup_probe::test_connection;
 use crate::brain::{
@@ -485,7 +486,11 @@ fn write_status(
             output,
             "Stored credentials: present ({credential_count} field(s); values hidden)"
         )?;
-        writeln!(output, "Credential file: {}", paths.credentials.display())?;
+        writeln!(
+            output,
+            "Encrypted credential file: {}",
+            paths.credentials.display()
+        )?;
     }
     if config_override {
         writeln!(
@@ -542,6 +547,7 @@ fn configure(
     output: &mut dyn Write,
     error: &mut dyn Write,
 ) -> io::Result<i32> {
+    let mut migration_approved = false;
     let existing_defaults = match load_model_defaults(&paths.model) {
         Ok(defaults) => defaults,
         Err(message) => return usage_error(error, Some("setup"), &message),
@@ -549,6 +555,26 @@ fn configure(
     let mut credentials = match load_credentials(&paths.credentials) {
         Ok(Some(credentials)) => credentials,
         Ok(None) => CredentialStore::empty(),
+        Err(CredentialStoreError::LegacyPlaintext(_)) => {
+            writeln!(
+                output,
+                "The existing credential file contains plaintext values. Saving setup will store them in the system credential vault and replace the active file."
+            )?;
+            if !prompt_yes_no(
+                input,
+                output,
+                "Allow migration when these setup settings are saved? [y/N] ",
+                false,
+            )? {
+                writeln!(output, "No settings changed.")?;
+                return Ok(0);
+            }
+            migration_approved = true;
+            match load_legacy_credentials(&paths.credentials) {
+                Ok(credentials) => credentials,
+                Err(message) => return usage_error(error, Some("setup"), &message.to_string()),
+            }
+        }
         Err(message) => return usage_error(error, Some("setup"), &message.to_string()),
     };
     if existing_defaults.is_some() || !credentials.is_empty() {
@@ -557,17 +583,34 @@ fn configure(
             "Existing settings found. Continuing replaces the provider/model defaults and updates the selected provider's credentials; credentials for other providers are kept."
         )?;
         if !prompt_yes_no(input, output, "Continue? [y/N] ", false)? {
-            writeln!(output, "No settings changed.")?;
+            if migration_approved {
+                writeln!(
+                    output,
+                    "No model settings saved; the approved legacy credential file was left in place."
+                )?;
+            } else {
+                writeln!(output, "No settings changed.")?;
+            }
             return Ok(0);
         }
     }
 
-    let Some(provider) = choose_provider(input, output)? else {
-        writeln!(output, "Setup cancelled; no settings changed.")?;
+    let Some(provider) = choose_provider(input, output, existing_defaults.as_ref())? else {
+        write_cancelled_setup(output, migration_approved)?;
         return Ok(0);
     };
-    let Some(model) = choose_model(input, output, provider, paths)? else {
-        writeln!(output, "Setup cancelled; no settings changed.")?;
+    let current_model = existing_defaults
+        .as_ref()
+        .filter(|defaults| {
+            defaults
+                .provider
+                .as_deref()
+                .unwrap_or("ollama")
+                .eq_ignore_ascii_case(provider.selector)
+        })
+        .map(|defaults| defaults.model.as_str());
+    let Some(model) = choose_model(input, output, provider, paths, current_model)? else {
+        write_cancelled_setup(output, migration_approved)?;
         return Ok(0);
     };
     if let Err(message) = collect_credentials(input, output, provider, &mut credentials) {
@@ -579,21 +622,32 @@ fn configure(
         .iter()
         .filter(|field| credentials.get(field.name).is_some())
         .count();
-    write_review(output, paths, provider, &model, selected_credential_count)?;
+    let retained_credential_count = credentials.len().saturating_sub(selected_credential_count);
+    write_review(
+        output,
+        paths,
+        provider,
+        &model,
+        selected_credential_count,
+        retained_credential_count,
+    )?;
     if !prompt_yes_no(
         input,
         output,
         "Save these settings for this user? [y/N] ",
         false,
     )? {
-        writeln!(output, "No settings changed.")?;
+        write_cancelled_setup(output, migration_approved)?;
         return Ok(0);
     }
 
-    if !credentials.is_empty() {
-        if let Err(message) = save_credentials(&paths.credentials, &credentials) {
-            return usage_error(error, Some("setup"), &message);
-        }
+    let save_result = if migration_approved {
+        save_credentials_after_approved_migration(&paths.credentials, &mut credentials)
+    } else {
+        save_credentials(&paths.credentials, &mut credentials)
+    };
+    if let Err(message) = save_result {
+        return usage_error(error, Some("setup"), &message);
     }
     let routing = existing_defaults.as_ref();
     if let Err(message) = save_model_configuration(
@@ -606,6 +660,12 @@ fn configure(
     ) {
         return usage_error(error, Some("setup"), &message);
     }
+    if migration_approved {
+        writeln!(
+            output,
+            "The approved legacy credentials were migrated to encrypted system-vault storage."
+        )?;
+    }
     writeln!(
         output,
         "Saved {} with model `{model}` for this user.\nModel defaults: {}",
@@ -615,7 +675,7 @@ fn configure(
     if !provider.auth_fields.is_empty() {
         writeln!(
             output,
-            "Credentials were saved locally. Unix restricts access to your user; other systems use permissions inherited from the per-user config directory. The credential file is not encrypted."
+            "Credentials are encrypted with a key stored in the system credential vault."
         )?;
         writeln!(
             output,
@@ -642,27 +702,51 @@ fn configure(
     Ok(0)
 }
 
+fn write_cancelled_setup(output: &mut dyn Write, migration_approved: bool) -> io::Result<()> {
+    if migration_approved {
+        writeln!(
+            output,
+            "Setup cancelled; no settings saved and the approved legacy credential file was left in place."
+        )
+    } else {
+        writeln!(output, "Setup cancelled; no settings changed.")
+    }
+}
+
 fn write_review(
     output: &mut dyn Write,
     paths: &UserSettingsPaths,
     provider: ProviderDescriptor,
     model: &str,
-    credential_count: usize,
+    selected_credential_count: usize,
+    retained_credential_count: usize,
 ) -> io::Result<()> {
     writeln!(output, "\nReview your setup:")?;
     writeln!(output, "  Provider: {}", provider.setup_label)?;
     writeln!(output, "  Model: {model}")?;
-    if credential_count == 0 {
-        writeln!(output, "  Credentials: none required")?;
+    if selected_credential_count == 0 {
+        writeln!(output, "  Credentials: none required for this provider")?;
     } else {
         writeln!(
             output,
-            "  Credentials: {credential_count} field(s); values hidden"
+            "  Credentials for this provider: {selected_credential_count} field(s); values hidden"
         )?;
-        writeln!(output, "  Credential file: {}", paths.credentials.display())?;
+    }
+    if retained_credential_count > 0 {
         writeln!(
             output,
-            "  Credential file is local plain text, not encrypted."
+            "  Other saved credentials kept: {retained_credential_count} field(s); values hidden"
+        )?;
+    }
+    if selected_credential_count + retained_credential_count > 0 {
+        writeln!(
+            output,
+            "  Encrypted credential file: {}",
+            paths.credentials.display()
+        )?;
+        writeln!(
+            output,
+            "  A key stored in the system credential vault protects the credential values."
         )?;
     }
     writeln!(output, "  Model defaults: {}", paths.model.display())?;
@@ -676,20 +760,57 @@ fn has_config_override() -> bool {
 fn choose_provider(
     input: &mut dyn Read,
     output: &mut dyn Write,
+    existing_defaults: Option<&ModelDefaults>,
 ) -> io::Result<Option<ProviderDescriptor>> {
+    let current = existing_defaults
+        .and_then(|defaults| {
+            provider_descriptor_by_selector(defaults.provider.as_deref().unwrap_or("ollama"))
+        })
+        .copied();
+    let default_provider = current.or_else(|| provider_descriptors().first().copied());
     writeln!(output, "Choose a model provider:")?;
     for (index, provider) in provider_descriptors().iter().enumerate() {
-        writeln!(output, "  {}. {}", index + 1, provider.setup_label)?;
+        let current_marker = if current.is_some_and(|current| current.selector == provider.selector)
+        {
+            " (current)"
+        } else {
+            ""
+        };
+        let credential_hint = if provider.auth_fields.is_empty() {
+            "no credentials needed"
+        } else {
+            "credentials needed"
+        };
+        writeln!(
+            output,
+            "  {}. {} — {}{}",
+            index + 1,
+            provider.setup_label,
+            credential_hint,
+            current_marker
+        )?;
     }
+    let default_index = default_provider
+        .and_then(|provider| {
+            provider_descriptors()
+                .iter()
+                .position(|candidate| candidate.selector == provider.selector)
+        })
+        .map_or(1, |index| index + 1);
     loop {
-        let Some(value) = prompt_line(input, output, "Provider [1; q cancels]: ")? else {
+        let prompt = if current.is_some() {
+            format!("Provider [{default_index}; Enter keeps current; q cancels]: ")
+        } else {
+            format!("Provider [{default_index}; q cancels]: ")
+        };
+        let Some(value) = prompt_line(input, output, &prompt)? else {
             return Ok(None);
         };
         if value.eq_ignore_ascii_case("q") {
             return Ok(None);
         }
         if value.trim().is_empty() {
-            return Ok(provider_descriptors().first().copied());
+            return Ok(default_provider);
         }
         if let Ok(index) = value.trim().parse::<usize>() {
             if let Some(provider) = index
@@ -699,11 +820,13 @@ fn choose_provider(
                 return Ok(Some(*provider));
             }
         }
-        writeln!(
-            output,
-            "Choose a number from 1 to {} or enter q.",
-            provider_descriptors().len()
-        )?;
+        if let Some(provider) = provider_descriptors().iter().find(|provider| {
+            provider.selector.eq_ignore_ascii_case(value.trim())
+                || provider.setup_label.eq_ignore_ascii_case(value.trim())
+        }) {
+            return Ok(Some(*provider));
+        }
+        writeln!(output, "Choose a provider number or name, or enter q.")?;
     }
 }
 
@@ -712,13 +835,18 @@ fn choose_model(
     output: &mut dyn Write,
     provider: ProviderDescriptor,
     paths: &UserSettingsPaths,
+    current_model: Option<&str>,
 ) -> io::Result<Option<String>> {
-    let Some(query) = prompt_line(
-        input,
-        output,
-        "Search the offline model catalog by name or ID (Enter to type an ID; q cancels): ",
-    )?
-    else {
+    let prompt = match current_model {
+        Some(model) => format!(
+            "Search offline models by name or ID (Enter keeps `{}`; q cancels): ",
+            escape_terminal_text(model)
+        ),
+        None => {
+            "Search offline models by name or ID (Enter to type a model ID; q cancels): ".to_owned()
+        }
+    };
+    let Some(query) = prompt_line(input, output, &prompt)? else {
         return Ok(None);
     };
     let query = query.trim();
@@ -728,6 +856,11 @@ fn choose_model(
     let query = query.to_owned();
 
     if query.is_empty() {
+        if let Some(model) = current_model {
+            return validate_model(provider.selector, model)
+                .map(Some)
+                .map_err(io::Error::other);
+        }
         return prompt_model_id(input, output, provider);
     }
     let catalog = load_catalog(Some(&cache_path_for_user_settings(&paths.model)))
@@ -764,8 +897,9 @@ fn choose_model(
     for (index, model) in candidates.iter().enumerate() {
         writeln!(
             output,
-            "  {}. {}",
+            "  {}. {} ({})",
             index + 1,
+            escape_terminal_text(&model.model.name),
             escape_terminal_text(&model.model.id)
         )?;
     }
@@ -838,6 +972,26 @@ fn collect_credentials(
     for field in provider.auth_fields {
         match field.role {
             AuthFieldRole::ApiKey if field.secret => {
+                let saved = credentials.get(field.name).is_some();
+                if std::env::var_os(field.name).is_some() {
+                    writeln!(
+                        output,
+                        "{} is set in the environment and overrides the saved credential while set.",
+                        field.name
+                    )
+                    .map_err(|_| "could not display setup guidance".to_owned())?;
+                }
+                if saved
+                    && prompt_yes_no(
+                        input,
+                        output,
+                        &format!("Keep the saved {} credential? [Y/n] ", field.name),
+                        true,
+                    )
+                    .map_err(|_| "could not read credential preference".to_owned())?
+                {
+                    continue;
+                }
                 credentials.insert(
                     field.name,
                     prompt_required_secret(output, field.setup_prompt)?,
@@ -975,6 +1129,99 @@ fn escape_terminal_text(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    fn settings_paths(directory: &crate::test_support::TempDir) -> UserSettingsPaths {
+        let config = directory.path().join("krypper");
+        UserSettingsPaths {
+            model: config.join("config.toml"),
+            credentials: config.join("credentials.json"),
+            permission_mode: config.join("permission-mode"),
+            provider_profiles: config.join("provider-profiles.json"),
+            model_evidence: config.join("model-evidence.json"),
+            model_evidence_key: config.join("model-evidence.key"),
+        }
+    }
+
+    #[test]
+    fn legacy_credential_migration_requires_explicit_consent() {
+        let directory = crate::test_support::TempDir::new();
+        let paths = settings_paths(&directory);
+        let secret = "legacy-token-never-print";
+        let mut values = std::collections::BTreeMap::new();
+        values.insert("OPENAI_API_KEY", secret);
+        let legacy = serde_json::to_vec(&values).unwrap();
+        super::super::settings::write_private_file(&paths.credentials, &legacy, "credential store")
+            .unwrap();
+
+        let mut input = &b"n\n"[..];
+        let mut output = Vec::new();
+        let mut error = Vec::new();
+        assert_eq!(
+            configure(&paths, &mut input, &mut output, &mut error).unwrap(),
+            0
+        );
+        assert_eq!(fs::read(&paths.credentials).unwrap(), legacy);
+        assert!(String::from_utf8(output)
+            .unwrap()
+            .contains("Allow migration when these setup settings are saved?"));
+    }
+
+    #[test]
+    fn approved_legacy_migration_commits_only_after_settings_are_saved() {
+        let directory = crate::test_support::TempDir::new();
+        let paths = settings_paths(&directory);
+        let secret = "legacy-token-never-print";
+        let values = std::collections::BTreeMap::from([("OPENAI_API_KEY", secret)]);
+        super::super::settings::write_private_file(
+            &paths.credentials,
+            &serde_json::to_vec(&values).unwrap(),
+            "credential store",
+        )
+        .unwrap();
+
+        let mut input = &b"y\ny\n\n\nllama3.2:1b\ny\n"[..];
+        let mut output = Vec::new();
+        let mut error = Vec::new();
+        assert_eq!(
+            configure(&paths, &mut input, &mut output, &mut error).unwrap(),
+            0
+        );
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("credentials were migrated to encrypted system-vault storage"));
+        assert!(!output.contains(secret));
+        let serialized = fs::read(&paths.credentials).unwrap();
+        assert!(!String::from_utf8_lossy(&serialized).contains(secret));
+        assert!(super::super::settings::load_credentials(&paths.credentials)
+            .unwrap()
+            .unwrap()
+            .get("OPENAI_API_KEY")
+            .is_some_and(|value| value == secret));
+    }
+
+    #[test]
+    fn approved_legacy_migration_keeps_plaintext_file_when_setup_is_cancelled() {
+        let directory = crate::test_support::TempDir::new();
+        let paths = settings_paths(&directory);
+        let secret = "legacy-token-never-print";
+        let values = std::collections::BTreeMap::from([("OPENAI_API_KEY", secret)]);
+        let legacy = serde_json::to_vec(&values).unwrap();
+        super::super::settings::write_private_file(&paths.credentials, &legacy, "credential store")
+            .unwrap();
+
+        let mut input = &b"y\nn\n"[..];
+        let mut output = Vec::new();
+        let mut error = Vec::new();
+        assert_eq!(
+            configure(&paths, &mut input, &mut output, &mut error).unwrap(),
+            0
+        );
+        assert_eq!(fs::read(&paths.credentials).unwrap(), legacy);
+        assert!(String::from_utf8(output)
+            .unwrap()
+            .contains("approved legacy credential file was left in place"));
+        assert!(!paths.model.exists());
+    }
 
     #[test]
     fn provider_list_matches_every_supported_cli_provider() {
@@ -997,6 +1244,75 @@ mod tests {
                 .setup_label,
             "Cloudflare AI Gateway"
         );
+    }
+
+    #[test]
+    fn provider_picker_keeps_the_saved_choice_and_accepts_provider_names() {
+        let defaults = ModelDefaults {
+            model: "gpt-4.1".to_owned(),
+            provider: Some("openai".to_owned()),
+            routing_mode: RoutingMode::Manual,
+            allow_cross_provider_data_transfer: false,
+            fallback_budget_micro_usd: None,
+            path: PathBuf::from("/user/config/krypper/config.toml"),
+        };
+        let mut input = &b"\n"[..];
+        let mut output = Vec::new();
+        let selected = choose_provider(&mut input, &mut output, Some(&defaults))
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.selector, "openai");
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("OpenAI — credentials needed (current)"));
+        assert!(output.contains("Enter keeps current"));
+
+        let mut input = &b"Google Gemini\n"[..];
+        let mut output = Vec::new();
+        let selected = choose_provider(&mut input, &mut output, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.selector, "gemini");
+    }
+
+    #[test]
+    fn model_picker_keeps_the_saved_model_and_shows_catalog_names_with_ids() {
+        let directory = crate::test_support::TempDir::new();
+        let paths = settings_paths(&directory);
+        let openai = provider_descriptor_by_selector("openai").unwrap();
+        let mut input = &b"\n"[..];
+        let mut output = Vec::new();
+        assert_eq!(
+            choose_model(&mut input, &mut output, *openai, &paths, Some("gpt-4.1"))
+                .unwrap()
+                .as_deref(),
+            Some("gpt-4.1")
+        );
+
+        let mut input = &b"gpt-4.1-m\n\n"[..];
+        let mut output = Vec::new();
+        let model = choose_model(&mut input, &mut output, *openai, &paths, None)
+            .unwrap()
+            .unwrap();
+        assert!(model.starts_with("gpt-4"));
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("GPT-4.1 mini (gpt-4.1-mini)"), "{output}");
+    }
+
+    #[test]
+    fn credential_prompt_keeps_an_existing_secret_by_default() {
+        let provider = provider_descriptor_by_selector("openai").unwrap();
+        let field = provider.auth_fields[0];
+        let mut credentials = CredentialStore::empty();
+        credentials.insert(field.name, "existing-secret-never-print".to_owned());
+        let mut input = &b"\n"[..];
+        let mut output = Vec::new();
+        collect_credentials(&mut input, &mut output, *provider, &mut credentials).unwrap();
+        assert!(credentials
+            .get(field.name)
+            .is_some_and(|value| value == "existing-secret-never-print"));
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("Keep the saved OPENAI_API_KEY credential? [Y/n]"));
+        assert!(!output.contains("existing-secret-never-print"));
     }
 
     #[test]
@@ -1088,7 +1404,7 @@ mod tests {
             .find(|provider| provider.selector == "openai")
             .unwrap();
         let mut output = Vec::new();
-        write_review(&mut output, &paths, *provider, "gpt-4.1", credentials.len()).unwrap();
+        write_review(&mut output, &paths, *provider, "gpt-4.1", 1, 0).unwrap();
         let output = String::from_utf8(output).unwrap();
         assert!(output.contains("OpenAI"));
         assert!(output.contains("gpt-4.1"));

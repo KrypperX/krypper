@@ -275,7 +275,10 @@ fn setup_help_describes_local_configuration_and_masked_credentials() {
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let help = stdout(&output);
     assert!(help.contains("offline model catalog"), "{help}");
-    assert!(help.contains("not encrypted"), "{help}");
+    assert!(
+        help.contains("encrypted in the user's Krypper config directory"),
+        "{help}"
+    );
     assert!(help.contains("may incur provider charges"), "{help}");
 }
 
@@ -317,10 +320,9 @@ fn setup_status_redacts_saved_credentials_and_writes_nothing_to_the_workspace() 
         .env("XDG_CONFIG_HOME", xdg.path())
         .output()
         .expect("show setup status");
-    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
     let visible = format!("{}{}", stdout(&output), stderr(&output));
-    assert!(visible.contains("Provider: OpenAI"), "{visible}");
-    assert!(visible.contains("values hidden"), "{visible}");
+    assert!(visible.contains("approve migration"), "{visible}");
     assert!(!visible.contains(secret), "{visible}");
     assert!(!workspace
         .path()
@@ -331,15 +333,9 @@ fn setup_status_redacts_saved_credentials_and_writes_nothing_to_the_workspace() 
         .env("XDG_CONFIG_HOME", xdg.path())
         .output()
         .expect("show JSON setup status");
-    assert!(json.status.success(), "{}", stderr(&json));
-    let status: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
-    assert_eq!(status["provider"], "openai");
-    assert_eq!(status["model"], "gpt-4.1");
-    assert_eq!(status["routing_mode"], "manual");
-    assert_eq!(status["route"]["reason"], "manual_override");
-    assert!(status["provider_readiness"].is_object());
-    assert!(status["catalog"]["provenance"].is_array());
+    assert_eq!(json.status.code(), Some(2), "{}", stderr(&json));
     assert!(!String::from_utf8_lossy(&json.stdout).contains(secret));
+    assert!(!String::from_utf8_lossy(&json.stderr).contains(secret));
 }
 
 #[test]
@@ -380,7 +376,6 @@ fn setup_status_reports_readiness_for_a_saved_provider_profile() {
     fs::create_dir_all(&config_directory).unwrap();
     let config_path = config_directory.join("config.toml");
     let profiles_path = config_directory.join("provider-profiles.json");
-    let credentials_path = config_directory.join("credentials.json");
     fs::write(
         &config_path,
         "provider = \"my-worker\"\nmodel = \"gpt-4.1\"\n",
@@ -391,23 +386,20 @@ fn setup_status_reports_readiness_for_a_saved_provider_profile() {
         r#"{"version":1,"profiles":[{"id":"my-worker","label":"My Worker","enabled":true,"protocol":"openai-compatible-chat","endpoint":"https://example.invalid/v1/chat/completions","credential_ref":"profile:my-worker:api-key"}]}"#,
     )
     .unwrap();
-    fs::write(
-        &credentials_path,
-        r#"{"KRYPPER_PROVIDER_MY_WORKER_API_KEY":"private-profile-secret"}"#,
-    )
-    .unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&config_directory, fs::Permissions::from_mode(0o700)).unwrap();
         fs::set_permissions(&profiles_path, fs::Permissions::from_mode(0o600)).unwrap();
-        fs::set_permissions(&credentials_path, fs::Permissions::from_mode(0o600)).unwrap();
     }
 
     let output = command(Some(workspace.path()), &["setup", "--status", "--json"])
         .env("XDG_CONFIG_HOME", xdg.path())
         .env_remove("KRYPPER_CONFIG")
-        .env_remove("KRYPPER_PROVIDER_MY_WORKER_API_KEY")
+        .env(
+            "KRYPPER_PROVIDER_MY_WORKER_API_KEY",
+            "private-profile-secret",
+        )
         .output()
         .expect("show status for the saved provider profile");
     assert!(output.status.success(), "{}", stderr(&output));

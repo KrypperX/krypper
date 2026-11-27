@@ -973,7 +973,7 @@ fn saved_credentials_are_used_by_explicit_model_selection_when_enabled() {
     let mut credentials = CredentialStore::empty();
     credentials.insert("OPENAI_API_KEY", "saved-openai-test-key".to_owned());
     let credentials_path = temporary.path().join("krypper/credentials.json");
-    save_credentials(&credentials_path, &credentials).expect("save test credentials");
+    save_credentials(&credentials_path, &mut credentials).expect("save test credentials");
 
     let provider = ModelProvider::parse("openai").expect("parse OpenAI provider");
     let endpoint = SocketAddr::from(([127, 0, 0, 1], 0));

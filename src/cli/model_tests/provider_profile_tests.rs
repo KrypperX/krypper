@@ -75,7 +75,7 @@ fn task_cli_uses_per_user_profiles_env_precedence_and_no_config_selection() {
     );
     save_credentials(
         &config_home.path().join("krypper/credentials.json"),
-        &credentials,
+        &mut credentials,
     )
     .expect("save profile credential fixture");
 
