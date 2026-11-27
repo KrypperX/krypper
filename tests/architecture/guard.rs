@@ -8,6 +8,7 @@ use syn::{Attribute, Item, Meta, Path as RustPath, UseTree};
 const TOOLS_MODULE_DEPTH: usize = 1;
 const INSPECTED_CRATE_ROOTS: &[&str] = &["serde", "serde_derive", "serde_json"];
 const CORE_ROOT_GLOB_EXPORT: &str = "<core-root-glob>";
+const CORE_ROOT_SELF_ALIAS_PREFIX: &str = "<core-root-self-alias:";
 
 #[derive(Hash, Eq, PartialEq)]
 struct ModuleVisitKey {
@@ -1139,6 +1140,19 @@ impl Visit<'_> for DirectionVisitor<'_> {
         syn::visit::visit_foreign_item(self, item);
     }
 
+    fn visit_stmt(&mut self, statement: &syn::Stmt) {
+        let attributes = match statement {
+            syn::Stmt::Local(local) => &local.attrs[..],
+            syn::Stmt::Item(item) => item_attrs(item),
+            syn::Stmt::Macro(mac) => &mac.attrs[..],
+            syn::Stmt::Expr(_, _) => &[],
+        };
+        if item_is_test_only(attributes) {
+            return;
+        }
+        syn::visit::visit_stmt(self, statement);
+    }
+
     fn visit_expr(&mut self, expression: &syn::Expr) {
         if matches!(expression, syn::Expr::Verbatim(_)) {
             self.reject_uninspected_syntax("expression syntax");
@@ -1562,7 +1576,7 @@ fn scan_crate_root_core_aliases(root: &Path, violations: &mut Vec<String>) -> Ha
                     if ident_name(&item.ident) == "self" && item.rename.is_some() =>
                 {
                     if let Some((_, alias)) = &item.rename {
-                        exports.insert(ident_name(alias));
+                        exports.insert(core_root_self_alias_key(&ident_name(alias)));
                     }
                 }
                 _ => {}
@@ -1586,6 +1600,11 @@ fn module_contains_core_dependency(
 ) -> bool {
     if item_is_test_only(&module.attrs) {
         return false;
+    }
+    if module.attrs.iter().any(|attribute| {
+        !attribute_is_inspected(attribute, &HashSet::new(), module_depth, &HashSet::new())
+    }) {
+        return true;
     }
     if let Some((_, items)) = &module.content {
         if module_has_path_attribute(&module.attrs) {
@@ -1641,6 +1660,12 @@ fn items_contain_core_dependency(
     crate_root_core_exports: &HashSet<String>,
     visited: &mut HashSet<PathBuf>,
 ) -> bool {
+    let mut macro_import_violations = Vec::new();
+    let inspected_macros =
+        inspected_macro_imports(items, source_file, &mut macro_import_violations);
+    if !macro_import_violations.is_empty() {
+        return true;
+    }
     items.iter().any(|item| {
         if item_is_test_only(item_attrs(item)) {
             return false;
@@ -1656,9 +1681,17 @@ fn items_contain_core_dependency(
                 visited,
             );
         }
+        if matches!(item, Item::Macro(_))
+            || item_attrs(item).iter().any(|attribute| {
+                !attribute_is_inspected(attribute, &inspected_macros, module_depth, &HashSet::new())
+            })
+        {
+            return true;
+        }
         let mut probe = CoreDependencyProbe {
             module_depth,
             crate_root_core_exports,
+            inspected_macro_imports: &inspected_macros,
             found: false,
         };
         probe.visit_item(item);
@@ -1669,6 +1702,7 @@ fn items_contain_core_dependency(
 struct CoreDependencyProbe<'a> {
     module_depth: usize,
     crate_root_core_exports: &'a HashSet<String>,
+    inspected_macro_imports: &'a HashSet<String>,
     found: bool,
 }
 
@@ -1746,18 +1780,15 @@ impl Visit<'_> for CoreDependencyProbe<'_> {
                 &mac.tokens,
                 self.module_depth,
                 self.crate_root_core_exports,
-            );
+            )
+            || !macro_is_inspected(&mac.path, self.inspected_macro_imports);
         if !self.found {
             syn::visit::visit_macro(self, mac);
         }
     }
 
-    fn visit_item_macro(&mut self, item: &syn::ItemMacro) {
-        self.found |= macro_tokens_contain_core_path(
-            &item.mac.tokens,
-            self.module_depth,
-            self.crate_root_core_exports,
-        );
+    fn visit_item_macro(&mut self, _item: &syn::ItemMacro) {
+        self.found = true;
     }
 }
 
@@ -1777,10 +1808,10 @@ fn collect_core_aliases(tree: &UseTree, prefix: &mut Vec<String>, exports: &mut 
         }
         UseTree::Rename(rename) => {
             prefix.push(ident_name(&rename.ident));
-            if root_path_starts_with_core_or_export(prefix, exports)
-                || path_resolves_to_crate_root(prefix, 0)
-            {
+            if root_path_starts_with_core_or_export(prefix, exports) {
                 exports.insert(ident_name(&rename.rename));
+            } else if path_resolves_to_crate_root(prefix, 0) {
+                exports.insert(core_root_self_alias_key(&ident_name(&rename.rename)));
             }
             prefix.pop();
         }
@@ -1805,13 +1836,22 @@ fn root_path_starts_with_core_or_export(segments: &[String], exports: &HashSet<S
         Some("crate" | "$crate" | "self") => 1,
         Some("super") => return false,
         Some(segment) if exports.contains(segment) => 0,
+        Some(segment) if exports.contains(&core_root_self_alias_key(segment)) => 1,
         Some(_) | None => return false,
     };
     if segments.get(start).is_some_and(|segment| segment == "self") {
         start += 1;
     }
+    if segments
+        .get(start)
+        .is_some_and(|segment| exports.contains(&core_root_self_alias_key(segment)))
+    {
+        start += 1;
+    }
     segments.get(start).is_some_and(|segment| {
-        matches!(segment.as_str(), "core" | "task_lifecycle") || exports.contains(segment)
+        matches!(segment.as_str(), "core" | "task_lifecycle")
+            || exports.contains(segment)
+            || exports.contains(CORE_ROOT_GLOB_EXPORT)
     })
 }
 
@@ -1851,6 +1891,7 @@ fn path_starts_with_core_export(
     let mut start = match segments.first().map(String::as_str) {
         Some("crate" | "$crate" | "self") => 1,
         Some("super") => 0,
+        Some(segment) if exports.contains(&core_root_self_alias_key(segment)) => 1,
         Some(_) => return false,
         None => return false,
     };
@@ -1871,11 +1912,21 @@ fn path_starts_with_core_export(
     {
         return false;
     }
+    if segments
+        .get(start)
+        .is_some_and(|segment| exports.contains(&core_root_self_alias_key(segment)))
+    {
+        start += 1;
+    }
     segments.get(start).is_some_and(|segment| {
-        exports.contains(segment)
-            || (exports.contains(CORE_ROOT_GLOB_EXPORT)
-                && segments.len() == start.saturating_add(1))
+        matches!(segment.as_str(), "core" | "task_lifecycle")
+            || exports.contains(segment)
+            || (exports.contains(CORE_ROOT_GLOB_EXPORT) && segments.len() > start)
     })
+}
+
+fn core_root_self_alias_key(alias: &str) -> String {
+    format!("{CORE_ROOT_SELF_ALIAS_PREFIX}{alias}>")
 }
 
 fn use_tree_starts_with_core_export(

@@ -76,6 +76,17 @@ fn tools_core_guard_detects_direct_alias_facade_and_parent_paths() {
         "#,
         r#"
             pub mod core { pub mod task { pub struct Task; } }
+            #[opaque::facade]
+            pub mod compatibility {}
+            pub(crate) mod tools { use crate::compatibility::Task; }
+        "#,
+        r#"
+            pub mod core { pub mod task { pub struct Task; } }
+            pub mod compatibility { define_core_facade!(); }
+            pub(crate) mod tools { use crate::compatibility::Task; }
+        "#,
+        r#"
+            pub mod core { pub mod task { pub struct Task; } }
             pub mod engine_facade { pub use crate::core as runtime; }
             pub mod compatibility {
                 pub use crate::engine_facade::runtime::task::Task;
@@ -117,6 +128,134 @@ fn tools_core_guard_detects_direct_alias_facade_and_parent_paths() {
             .iter()
             .any(|violation| violation.contains("Core")),
         "external Core facade was not detected: {violations:?}"
+    );
+}
+
+#[test]
+fn tools_core_guard_detects_glob_include_and_external_transitive_facades() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("lib.rs");
+    fs::write(
+        &root,
+        r#"
+            pub mod core { pub mod task { pub struct Task; } }
+            pub use crate::core::*;
+            pub(crate) mod tools { use crate::task::Task; }
+        "#,
+    )
+    .unwrap();
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("Core")),
+        "Core glob re-export was not detected: {violations:?}"
+    );
+
+    fs::write(
+        &root,
+        r#"
+            pub mod core { pub mod task { pub struct Task; } }
+            pub mod compatibility { include!("compatibility.rs"); }
+            pub(crate) mod tools { use crate::compatibility::Task; }
+        "#,
+    )
+    .unwrap();
+    fs::write(
+        directory.path().join("compatibility.rs"),
+        "pub use crate::core::task::Task;",
+    )
+    .unwrap();
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("Core")),
+        "included Core facade was not detected: {violations:?}"
+    );
+
+    fs::write(&root, "pub mod core { pub struct Task; }\npub mod facade_a;\npub mod facade_b;\npub(crate) mod tools { use crate::facade_a::Task; }").unwrap();
+    fs::write(
+        directory.path().join("facade_a.rs"),
+        "pub use crate::facade_b::Task;",
+    )
+    .unwrap();
+    fs::write(
+        directory.path().join("facade_b.rs"),
+        "pub use crate::core::Task;",
+    )
+    .unwrap();
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("Core")),
+        "multi-hop external Core facade was not detected: {violations:?}"
+    );
+}
+
+#[test]
+fn tools_core_guard_handles_self_aliases_without_treating_the_crate_as_core() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("lib.rs");
+    fs::write(
+        &root,
+        r#"
+            extern crate self as application;
+            pub mod contracts { pub struct ProcessOutcome; }
+            pub mod core { pub struct Task; }
+            pub(crate) mod tools { use application::contracts::ProcessOutcome; }
+        "#,
+    )
+    .unwrap();
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations
+            .iter()
+            .all(|violation| !violation.contains("Core")),
+        "neutral contracts through a self alias were classified as Core: {violations:?}"
+    );
+
+    fs::write(
+        &root,
+        r#"
+            extern crate self as application;
+            pub mod core { pub struct Task; }
+            pub(crate) mod tools { use application::core::Task; }
+        "#,
+    )
+    .unwrap();
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("Core")),
+        "Core path through a self alias was not detected: {violations:?}"
+    );
+}
+
+#[test]
+fn tools_core_guard_ignores_test_only_statements() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("lib.rs");
+    fs::write(
+        &root,
+        r#"
+            pub mod core { pub mod task { pub struct Task; } }
+            pub(crate) mod tools {
+                fn production_helper() {
+                    #[cfg(test)]
+                    let _: crate::core::task::Task;
+                }
+            }
+        "#,
+    )
+    .unwrap();
+
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations.is_empty(),
+        "test-only statement was classified as a production Core dependency: {violations:?}"
     );
 }
 
