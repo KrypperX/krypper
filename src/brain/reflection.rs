@@ -3,9 +3,9 @@ use super::context::{
 };
 use super::{
     consume_decision_budget, encode_model_request, parse_model_plan_response, post_chat,
-    validate_model_name_for_provider, workspace_tool_definitions, AdvertisedToolNames, ModelError,
-    ModelProvider, OllamaChatResponse, OllamaDecisionSource, OllamaMessageRole, WorkspacePlan,
-    WorkspacePlanError, MAX_PLAN_OPERATIONS,
+    validate_model_name_for_provider, workspace_plan_tool_definitions, AdvertisedToolNames,
+    ModelError, ModelProvider, OllamaChatResponse, OllamaDecisionSource, OllamaMessageRole,
+    WorkspacePlan, WorkspacePlanError, MAX_PLAN_OPERATIONS,
 };
 use crate::contracts::completion::{
     CompletionEvidenceSource, CompletionVerification, CompletionVerificationStatus,
@@ -18,7 +18,7 @@ use crate::contracts::goal_turn::{
 use crate::task_lifecycle::{
     TaskSession, TurnActivitySummary, TurnOutcome, TurnState, WorkspaceGuidanceReadError,
 };
-use crate::{ProcessOutcome, ProcessResult};
+use crate::{ProcessExecutionProfile, ProcessOutcome, ProcessResult};
 use serde_json::json;
 use std::collections::BTreeSet;
 use std::fmt;
@@ -141,9 +141,11 @@ pub(super) fn create_process_failure_correction_plan(
     let is_recorded_failure = prior_result.stop_reason() == GoalTurnStopReason::ActionFailed
         && matches!(
             prior_result.observations().last(),
-            Some(WorkspaceObservation::ProcessFinished { result }) if result == failure
+            Some(WorkspaceObservation::ProcessFinished { result })
+                if result == failure && result.profile == ProcessExecutionProfile::OfflineCargoTest
         );
-    let is_correctable_failure = !failure.truncated
+    let is_correctable_failure = failure.profile == ProcessExecutionProfile::OfflineCargoTest
+        && !failure.truncated
         && failure.cleanup_confirmed
         && match failure.outcome {
             ProcessOutcome::Exited(code) => code != 0,
@@ -472,7 +474,7 @@ fn build_reflective_plan_request(
             { "role": "system", "content": if options.verification.is_some() { CORRECTION_PLAN_SYSTEM_INSTRUCTIONS } else { REFLECTIVE_PLAN_SYSTEM_INSTRUCTIONS } },
             { "role": "user", "content": prompt }
         ],
-        "tools": workspace_tool_definitions(),
+        "tools": workspace_plan_tool_definitions(),
         "stream": false
     });
     encode_model_request(&request)

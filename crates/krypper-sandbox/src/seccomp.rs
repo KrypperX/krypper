@@ -117,6 +117,17 @@ pub(crate) fn compile_filter() -> io::Result<Vec<u8>> {
     serialize_program(&compile_program()?)
 }
 
+/// Compile the immutable deny policy selected by one validated process profile.
+/// The two versioned requirements currently share the same syscall deny set; the distinct tags
+/// force every request to negotiate a profile-specific requirement before this common policy is
+/// applied to the payload and its descendants.
+pub(crate) fn compile_filter_for(requirement: crate::SyscallRequirement) -> io::Result<Vec<u8>> {
+    match requirement {
+        crate::SyscallRequirement::OfflineCargoTestV1
+        | crate::SyscallRequirement::OfflineReadOnlyExecV1 => compile_filter(),
+    }
+}
+
 #[cfg(not(all(
     target_endian = "little",
     any(
@@ -130,6 +141,18 @@ pub(crate) fn compile_filter() -> io::Result<Vec<u8>> {
         io::ErrorKind::Unsupported,
         "offline Cargo syscall filtering is unsupported on this Linux architecture or ABI",
     ))
+}
+
+#[cfg(not(all(
+    target_endian = "little",
+    any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "riscv64"
+    )
+)))]
+pub(crate) fn compile_filter_for(_requirement: crate::SyscallRequirement) -> io::Result<Vec<u8>> {
+    compile_filter()
 }
 
 #[cfg(all(target_arch = "x86_64", target_endian = "little"))]

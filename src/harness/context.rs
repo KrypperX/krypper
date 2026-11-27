@@ -614,6 +614,7 @@ mod tests {
             result: crate::ProcessResult {
                 run_id: uuid::Uuid::new_v4(),
                 outcome: crate::ProcessOutcome::NoTestsMatched,
+                profile: crate::ProcessExecutionProfile::OfflineCargoTest,
                 stdout: String::new(),
                 stderr: String::new(),
                 truncated: false,
@@ -655,6 +656,7 @@ mod tests {
             result: crate::ProcessResult {
                 run_id: uuid::Uuid::new_v4(),
                 outcome: crate::ProcessOutcome::Exited(0),
+                profile: crate::ProcessExecutionProfile::OfflineCargoTest,
                 stdout: "x".repeat(OBSERVATION_LIMIT - fixed_size),
                 stderr: String::new(),
                 truncated: false,
@@ -677,6 +679,7 @@ mod tests {
             result: crate::ProcessResult {
                 run_id: uuid::Uuid::new_v4(),
                 outcome: crate::ProcessOutcome::Exited(0),
+                profile: crate::ProcessExecutionProfile::OfflineCargoTest,
                 stdout: "x".repeat(OBSERVATION_LIMIT - fixed_size + 1),
                 stderr: String::new(),
                 truncated: false,

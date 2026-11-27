@@ -22,6 +22,8 @@ mod tests;
 pub(crate) use create::{create_directory_at, create_text_file, create_text_file_at};
 pub(crate) use listing::{list_directory, list_task_directory_names_at};
 pub(crate) use patch::MAX_PATCH_BYTES;
+#[cfg(target_os = "linux")]
+pub(crate) use paths::open_workspace_directory_no_follow;
 pub(crate) use read::{
     capture_workspace_root, capture_workspace_root_at, capture_workspace_root_at_with_error,
     read_project_guidance_at, read_root_agents_md_at, read_text_file, read_text_file_at,

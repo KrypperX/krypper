@@ -1,8 +1,8 @@
 # Proposed Process-Execution Safety Boundary
 
-> **Historical design proposal (#176).** The observations below describe the inspected base revision, not current capabilities. Issue #178 implements one [opt-in Linux offline Cargo profile](offline-cargo-profile.md); that document describes its actual authorization, host requirements, confinement, limits and verification. The broader contracts here remain a requirements reference, not a claim that every proposed feature is implemented.
+> **Historical design proposal (#176).** The observations below describe the inspected base revision, not current capabilities. Issues #178 and #78 implement the [fixed offline Cargo profile and bounded direct-argv profile](offline-cargo-profile.md); that document describes their actual authorization, host requirements, confinement, limits and verification. The broader contracts here remain a requirements reference, not a claim that every proposed feature is implemented.
 >
-> See [Current state at dcd22b5](#current-state-at-dcd22b53b176668ae4b5f134d98b21b84ce55f40) for the implemented architecture. The sections below are retained as the original requirements and threat model.
+> See [the historical Cargo implementation snapshot](#current-state-at-dcd22b53b176668ae4b5f134d98b21b84ce55f40) and the [C3 direct-argv update](#c3-direct-argv-update) for implemented behavior. The remaining sections are retained as the original requirements and threat model.
 
 ## Current state at dcd22b53b176668ae4b5f134d98b21b84ce55f40
 
@@ -41,7 +41,7 @@ The sandbox crate is a private Cargo workspace member. It accepts only captured 
 - **Syscalls:** the fixed Linux offline Cargo profile passes the same immutable seccomp program to its trusted readiness probe and Cargo process tree. It returns `EPERM` for ptrace and cross-process memory inspection, keyring requests, io_uring entry points, and vsock socket creation; Unix-domain sockets remain allowed. A wrong syscall architecture is killed, and unsupported Linux targets fail before Cargo starts. This is defense in depth alongside the namespace, mount and cgroup controls; it is not a filesystem or general-purpose sandbox.
 - **Readiness:** a non-root Linux gate, exclusive host lease, transient cgroup with finite control readbacks and a `/usr/bin/true` probe through the exact Bubblewrap command precede workspace code. Missing primitives deny the run.
 - **Limits and output:** fixed public limits are 180 wall seconds, 120 aggregate CPU seconds, 3 GiB memory, 128 processes, 256 descriptors, 64 MiB per file, 256 KiB combined raw stdout/stderr and a transient-unit bound 15 seconds above the wall limit. Output retains stream identity, is lossily decoded and is marked truncated when the cap is reached. CPU accounting is poll-based and can overshoot slightly.
-- **Outcomes and cleanup:** typed results distinguish denial, sandbox/setup failure, spawn failure, signals, timeouts, cancellation, resource/output limits, zero matches and unknown outcomes. Results also carry bounded audit metadata (elapsed milliseconds, retained raw pipe bytes and enforced output byte count, ordered kernel limit events and a recovery-hold flag) in the existing process observation. Outcome selection is deterministic: unconfirmed cleanup outranks kernel limit events, which outrank the observed stop condition. Cleanup uses whole-cgroup termination plus direct-child reaping; uncertain cleanup latches further runs, marks results with the recovery hold and preserves the lease. There is no canonical approval digest binding profile, argv, cwd and workspace revision.
+- **Outcomes and cleanup:** typed results distinguish denial, sandbox/setup failure, spawn failure, signals, timeouts, cancellation, resource/output limits, zero matches and unknown outcomes. Results also carry bounded audit metadata (elapsed milliseconds, retained raw pipe bytes and enforced output byte count, ordered kernel limit events and a recovery-hold flag) in the existing process observation. Outcome selection is deterministic: unconfirmed cleanup outranks kernel limit events, which outrank the observed stop condition. Cleanup uses whole-cgroup termination plus direct-child reaping; uncertain cleanup latches further runs, marks results with the recovery hold and preserves the lease. The versioned approval digest is an internal consistency binding, not an authenticated token. The C3 direct-argv profile below adds the request and workspace-revision binding for its exact one-shot grant.
 
 ### Evidence classes
 
@@ -59,7 +59,47 @@ Requested requirements are distinct from `SandboxIsolationEvidence`, which remai
 
 ### Current unknowns
 
-Supported OS set remains Linux-only in code; Bubblewrap feature/version detection, in-payload namespace assertions, PID-reuse protection, stream sequence identifiers, a canonical approval digest and cross-process recovery after a supervisor crash are not established by ordinary CI. macOS and Windows behavior is unknown. A broader profile or dispatch path requires separate design, tests and review.
+Supported OS set remains Linux-only in code; Bubblewrap feature/version detection, in-payload namespace assertions, PID-reuse protection, stream sequence identifiers, an authenticated approval token and cross-process recovery after a supervisor crash are not established by ordinary CI. macOS and Windows behavior is unknown. A broader profile or dispatch path requires separate design, tests and review.
+
+## C3 direct-argv update
+
+This addendum records the implemented bounded `offline_read_only_exec` operation.
+It is a separate profile from the fixed `offline_cargo_test` operation and does
+not change that operation's request, argv, limits, or authorization wording.
+
+The model may select only the registered `cargo` or `rustc` executable identity,
+1 to 32 direct argv entries (at most 1,024 bytes each and 4,096 bytes total),
+and a normalized workspace-relative working directory. Parsing rejects unknown
+fields. There is no shell-text, executable-path, environment, sandbox-setting,
+network, or limit input. The host resolves the executable from its pinned
+toolchain; argv entries are forwarded literally and are never shell-parsed.
+
+The host process profile supplies the fixed environment, 90-second wall limit,
+60 CPU-second limit, 1.5 GiB memory limit, 128 KiB combined output cap, 64
+process ceiling, deny-all network policy, ephemeral process tree, pinned
+read-only workspace/toolchain/registry mounts, and private temporary filesystems.
+It also requires Landlock write confinement in addition to the common Linux
+sandbox controls. A cwd other than `.` is opened beneath the captured workspace
+without following symlinks and pinned for the sandbox mount. Missing required
+controls fail closed before payload launch.
+
+In Ask and Risk-based modes, the Harness asks the trusted host to approve each
+exact direct-argv action. After a positive answer, TaskSession derives a
+one-shot `ExactIntent` grant from the task's current active, unexpired,
+unconsumed host-installed process policy. The grant binds the exact request and
+workspace revision, expires after 60 seconds, and is consumed at the guarded
+spawn. Missing or stale policy, a denied or unavailable prompt, or a changed
+request fails closed. The model cannot authorize the action. After a one-shot is
+consumed, the host must provision a fresh active policy grant before a later
+direct-argv request can run. The current CLI does not provision this policy or
+interactive prompt; embeddings must provide them through the existing host
+authorization path.
+
+The original sections below remain a historical threat model and proposal. If
+their open questions conflict with this addendum or
+[`offline-cargo-profile.md`](offline-cargo-profile.md), use the implemented
+behavior documented here; all other proposed capabilities remain unimplemented
+unless documented separately.
 
 ## Request, evidence, and acceptance
 

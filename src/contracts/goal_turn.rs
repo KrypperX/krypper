@@ -132,6 +132,10 @@ impl DecisionFailureCode {
 pub enum WorkspaceAction {
     /// Request the fixed, explicitly authorized offline Cargo profile.
     OfflineCargoTest { test_filter: Option<String> },
+    /// Request bounded direct argv for one pinned Cargo or Rustc executable.
+    OfflineReadOnlyExec {
+        request: krypper_sandbox::OfflineReadOnlyExecRequest,
+    },
     /// Read one UTF-8 file under the task's workspace safety policy.
     ReadFile { path: PathBuf },
     /// Read at most 200 one-based lines from a UTF-8 file under the task's workspace safety policy.
@@ -186,6 +190,7 @@ impl WorkspaceAction {
 pub(crate) fn workspace_action_name(action: &WorkspaceAction) -> &'static str {
     match action {
         WorkspaceAction::OfflineCargoTest { .. } => "offline_cargo_test",
+        WorkspaceAction::OfflineReadOnlyExec { .. } => "offline_read_only_exec",
         WorkspaceAction::ReadFile { .. } => "read_file",
         WorkspaceAction::ReadRange { .. } => "read_range",
         WorkspaceAction::ListDirectory { .. } => "list_directory",
@@ -416,6 +421,8 @@ impl GoalTurnResult {
 pub enum GoalTurnError {
     /// The fixed process profile did not produce verified success.
     Process(crate::contracts::process_execution::ProcessOutcome),
+    /// The bounded offline/read-only direct-argv profile did not produce verified success.
+    ReadOnlyProcess(crate::contracts::process_execution::ProcessOutcome),
     /// The host denied this action under the selected permission mode.
     PermissionDenied { action: &'static str },
     /// This action requires a host capability the current runner does not provide.
@@ -458,6 +465,9 @@ impl fmt::Display for GoalTurnError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Process(outcome) => write!(formatter, "offline Cargo profile: {outcome:?}"),
+            Self::ReadOnlyProcess(outcome) => {
+                write!(formatter, "offline read-only process: {outcome:?}")
+            }
             Self::PermissionDenied { action } => {
                 write!(formatter, "permission denied for action '{action}'")
             }
@@ -505,6 +515,7 @@ impl std::error::Error for GoalTurnError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Process(_)
+            | Self::ReadOnlyProcess(_)
             | Self::PermissionDenied { .. }
             | Self::PermissionUnavailable { .. }
             | Self::PermissionPromptUnavailable { .. }
@@ -524,10 +535,21 @@ impl std::error::Error for GoalTurnError {
 
 pub(crate) fn summarize_observation(observation: &WorkspaceObservation) -> TurnActivitySummary {
     match observation {
-        WorkspaceObservation::ProcessFinished { result } => TurnActivitySummary::ProcessFinished {
-            succeeded: result.succeeded(),
-            output_bytes: result.stdout.len() + result.stderr.len(),
-        },
+        WorkspaceObservation::ProcessFinished { result }
+            if result.profile
+                == crate::contracts::process_execution::ProcessExecutionProfile::OfflineCargoTest =>
+        {
+            TurnActivitySummary::ProcessFinished {
+                succeeded: result.succeeded(),
+                output_bytes: result.stdout.len() + result.stderr.len(),
+            }
+        }
+        WorkspaceObservation::ProcessFinished { result } => {
+            TurnActivitySummary::OfflineReadOnlyExecFinished {
+                succeeded: result.succeeded(),
+                output_bytes: result.stdout.len() + result.stderr.len(),
+            }
+        }
         WorkspaceObservation::FileRead { contents, .. } => TurnActivitySummary::FileRead {
             bytes_read: contents.len(),
         },
@@ -592,6 +614,9 @@ pub(crate) fn summarize_observation(observation: &WorkspaceObservation) -> TurnA
         WorkspaceObservation::ActionFailed { action, .. } => {
             let action = match action {
                 WorkspaceAction::OfflineCargoTest { .. } => TurnActivityAction::OfflineCargoTest,
+                WorkspaceAction::OfflineReadOnlyExec { .. } => {
+                    TurnActivityAction::OfflineReadOnlyExec
+                }
                 WorkspaceAction::ReadFile { .. } => TurnActivityAction::ReadFile,
                 WorkspaceAction::ReadRange { .. } => TurnActivityAction::ReadRange,
                 WorkspaceAction::ListDirectory { .. } => TurnActivityAction::ListDirectory,
@@ -617,7 +642,10 @@ pub(crate) fn summarize_observation_activity(
 ) -> Vec<TurnActivitySummary> {
     let mut activity = vec![summarize_observation(observation)];
     match observation {
-        WorkspaceObservation::ProcessFinished { result } => {
+        WorkspaceObservation::ProcessFinished { result }
+            if result.profile
+                == crate::contracts::process_execution::ProcessExecutionProfile::OfflineCargoTest =>
+        {
             activity.push(TurnActivitySummary::OfflineCargoTestFinished {
                 filter_hash: result.test_filter.as_deref().map(offline_test_filter_hash),
                 passed: result.succeeded()
@@ -634,6 +662,7 @@ pub(crate) fn summarize_observation_activity(
                     && !result.recovery_hold,
             });
         }
+        WorkspaceObservation::ProcessFinished { .. } => {}
         WorkspaceObservation::ActionFailed {
             action: WorkspaceAction::OfflineCargoTest { test_filter },
             ..
@@ -657,4 +686,57 @@ fn offline_test_filter_hash(filter: &str) -> [u8; 32] {
     let mut hash = [0_u8; 32];
     hash.copy_from_slice(digest.as_ref());
     hash
+}
+
+#[cfg(test)]
+mod offline_read_only_exec_activity_tests {
+    use super::{summarize_observation_activity, GoalTurnError, WorkspaceObservation};
+    use crate::contracts::process_execution::{
+        ProcessExecutionProfile, ProcessOutcome, ProcessResult,
+    };
+    use crate::task_lifecycle::TurnActivitySummary;
+
+    #[test]
+    fn generic_process_results_do_not_emit_cargo_test_completion_evidence() {
+        let mut result = ProcessResult::empty(ProcessOutcome::Exited(0));
+        result.profile = ProcessExecutionProfile::OfflineReadOnlyExecV1;
+        result.stdout = "metadata".to_owned();
+
+        assert_eq!(
+            summarize_observation_activity(&WorkspaceObservation::ProcessFinished { result }),
+            vec![TurnActivitySummary::OfflineReadOnlyExecFinished {
+                succeeded: true,
+                output_bytes: 8,
+            }]
+        );
+    }
+
+    #[test]
+    fn fixed_cargo_process_results_keep_the_existing_cargo_completion_evidence() {
+        let result = ProcessResult::empty(ProcessOutcome::Exited(0));
+
+        assert!(matches!(
+            summarize_observation_activity(&WorkspaceObservation::ProcessFinished { result })
+                .as_slice(),
+            [
+                TurnActivitySummary::ProcessFinished {
+                    succeeded: true,
+                    ..
+                },
+                TurnActivitySummary::OfflineCargoTestFinished { passed: false, .. }
+            ]
+        ));
+    }
+
+    #[test]
+    fn process_errors_name_their_profile_without_changing_fixed_cargo_text() {
+        assert_eq!(
+            GoalTurnError::Process(ProcessOutcome::Exited(1)).to_string(),
+            "offline Cargo profile: Exited(1)"
+        );
+        assert_eq!(
+            GoalTurnError::ReadOnlyProcess(ProcessOutcome::Exited(1)).to_string(),
+            "offline read-only process: Exited(1)"
+        );
+    }
 }

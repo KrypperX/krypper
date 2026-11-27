@@ -47,6 +47,15 @@ pub struct TaskSession {
         std::cell::RefCell<std::collections::HashMap<Uuid, Vec<Option<String>>>>,
 }
 
+struct ProcessGrantSpec {
+    mode: GrantMode,
+    scope: GrantScope,
+    exact_filter: Option<String>,
+    expiry: Option<GrantExpiry>,
+    read_only_exec: Option<crate::tools::process::OfflineReadOnlyExecRequest>,
+    source_grant_id: Option<Uuid>,
+}
+
 /// An immutable view of the current identifiers and states in a task session.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TaskSessionSnapshot {
@@ -521,10 +530,14 @@ impl TaskSession {
         self.install_process_grant(
             task_id,
             Arc::new(policy),
-            GrantMode::Standing,
-            GrantScope::Session,
-            None,
-            None,
+            ProcessGrantSpec {
+                mode: GrantMode::Standing,
+                scope: GrantScope::Session,
+                exact_filter: None,
+                expiry: None,
+                read_only_exec: None,
+                source_grant_id: None,
+            },
         )
     }
 
@@ -541,10 +554,14 @@ impl TaskSession {
         self.install_process_grant(
             task_id,
             Arc::new(policy),
-            GrantMode::Standing,
-            GrantScope::ExactFilter,
-            exact_filter.map(str::to_owned),
-            Some(expiry),
+            ProcessGrantSpec {
+                mode: GrantMode::Standing,
+                scope: GrantScope::ExactFilter,
+                exact_filter: exact_filter.map(str::to_owned),
+                expiry: Some(expiry),
+                read_only_exec: None,
+                source_grant_id: None,
+            },
         )
     }
 
@@ -561,10 +578,89 @@ impl TaskSession {
         self.install_process_grant(
             task_id,
             Arc::new(policy),
-            GrantMode::OneShot,
-            GrantScope::ExactFilter,
-            exact_filter.map(str::to_owned),
-            Some(expiry),
+            ProcessGrantSpec {
+                mode: GrantMode::OneShot,
+                scope: GrantScope::ExactFilter,
+                exact_filter: exact_filter.map(str::to_owned),
+                expiry: Some(expiry),
+                read_only_exec: None,
+                source_grant_id: None,
+            },
+        )
+    }
+
+    /// Grants one exact direct-argv request after the trusted host obtains approval.
+    /// The grant is one-shot, bound to the current workspace revision, and expires within 24 hours.
+    pub fn authorize_offline_read_only_exec_once(
+        &self,
+        task_id: Uuid,
+        policy: crate::OfflineCargoPolicy,
+        request: crate::tools::process::OfflineReadOnlyExecRequest,
+        lifetime: Duration,
+    ) -> Result<(), &'static str> {
+        let expiry = GrantExpiry::from_lifetime(lifetime)?;
+        self.install_process_grant(
+            task_id,
+            Arc::new(policy),
+            ProcessGrantSpec {
+                mode: GrantMode::OneShot,
+                scope: GrantScope::ExactIntent,
+                exact_filter: None,
+                expiry: Some(expiry),
+                read_only_exec: Some(request),
+                source_grant_id: None,
+            },
+        )
+    }
+
+    /// Converts a current host-installed process policy into one exact direct-argv grant after
+    /// approval. The source grant must remain current and nonexpired through the replacement.
+    pub fn authorize_offline_read_only_exec_once_from_current_policy(
+        &self,
+        task_id: Uuid,
+        request: crate::tools::process::OfflineReadOnlyExecRequest,
+        lifetime: Duration,
+    ) -> Result<(), &'static str> {
+        let expiry = GrantExpiry::from_lifetime(lifetime)?;
+        let grants = self
+            .process_grants
+            .lock()
+            .map_err(|_| "process grant state is unavailable")?;
+        let state = grants
+            .get(&task_id)
+            .cloned()
+            .ok_or("trusted process policy is unavailable")?;
+        drop(grants);
+        let (policy, source_grant_id) = {
+            let state = state
+                .lock()
+                .map_err(|_| "process grant state is unavailable")?;
+            let grant = state
+                .current
+                .as_ref()
+                .filter(|grant| {
+                    grant.task_id == task_id
+                        && !grant.expired()
+                        && !grant.consumed
+                        && !grant
+                            .policy
+                            .cancellation()
+                            .load(std::sync::atomic::Ordering::SeqCst)
+                })
+                .ok_or("trusted process policy is unavailable")?;
+            (grant.policy.fork_for_new_grant()?, grant.grant_id)
+        };
+        self.install_process_grant(
+            task_id,
+            Arc::new(policy),
+            ProcessGrantSpec {
+                mode: GrantMode::OneShot,
+                scope: GrantScope::ExactIntent,
+                exact_filter: None,
+                expiry: Some(expiry),
+                read_only_exec: Some(request),
+                source_grant_id: Some(source_grant_id),
+            },
         )
     }
 
@@ -598,11 +694,16 @@ impl TaskSession {
         &self,
         task_id: Uuid,
         policy: Arc<crate::OfflineCargoPolicy>,
-        mode: GrantMode,
-        scope: GrantScope,
-        exact_filter: Option<String>,
-        expiry: Option<GrantExpiry>,
+        spec: ProcessGrantSpec,
     ) -> Result<(), &'static str> {
+        let ProcessGrantSpec {
+            mode,
+            scope,
+            exact_filter,
+            expiry,
+            read_only_exec,
+            source_grant_id,
+        } = spec;
         let task = self.get_task(task_id).ok_or("task not found")?;
         let root = task
             .workspace_root
@@ -616,7 +717,14 @@ impl TaskSession {
         {
             return Err("test filter is invalid");
         }
-        if expiry.is_some() != (scope == GrantScope::ExactFilter) {
+        let scoped = matches!(scope, GrantScope::ExactFilter | GrantScope::ExactIntent);
+        if expiry.is_some() != scoped
+            || (scope == GrantScope::ExactIntent
+                && (mode != GrantMode::OneShot
+                    || exact_filter.is_some()
+                    || read_only_exec.is_none()))
+            || (scope != GrantScope::ExactIntent && read_only_exec.is_some())
+        {
             return Err("grant scope and expiry are inconsistent");
         }
         if policy
@@ -640,6 +748,20 @@ impl TaskSession {
             let mut state = state
                 .lock()
                 .map_err(|_| "process grant state is unavailable")?;
+            if let Some(source_grant_id) = source_grant_id {
+                let source_is_current = state.current.as_ref().is_some_and(|grant| {
+                    grant.grant_id == source_grant_id
+                        && !grant.expired()
+                        && !grant.consumed
+                        && !grant
+                            .policy
+                            .cancellation()
+                            .load(std::sync::atomic::Ordering::SeqCst)
+                });
+                if !source_is_current {
+                    return Err("trusted process policy changed while authorizing");
+                }
+            }
             (state.candidate_epoch()?, Uuid::new_v4())
         };
         let mut grant = ProcessGrant {
@@ -651,6 +773,7 @@ impl TaskSession {
             exact_filter,
             expiry,
             policy,
+            read_only_exec,
             consumed: false,
             approved_digest: None,
         };
@@ -677,10 +800,24 @@ impl TaskSession {
             None
         };
 
-        state
+        let mut state = state
             .lock()
-            .map_err(|_| "process grant state is unavailable")?
-            .replace_at_epoch(next_epoch, grant)?;
+            .map_err(|_| "process grant state is unavailable")?;
+        if let Some(source_grant_id) = source_grant_id {
+            let source_is_current = state.current.as_ref().is_some_and(|source| {
+                source.grant_id == source_grant_id
+                    && !source.expired()
+                    && !source.consumed
+                    && !source
+                        .policy
+                        .cancellation()
+                        .load(std::sync::atomic::Ordering::SeqCst)
+            });
+            if !source_is_current {
+                return Err("trusted process policy changed while authorizing");
+            }
+        }
+        state.replace_at_epoch(next_epoch, grant)?;
         drop(revision_guard);
         Ok(())
     }
@@ -715,6 +852,7 @@ impl TaskSession {
             return Ok(crate::ProcessResult::denied(test_filter));
         };
         if grant.task_id != task_id
+            || grant.read_only_exec.is_some()
             || !grant.allows_filter(test_filter)
             || grant.expired()
             || grant.consumed
@@ -749,7 +887,26 @@ impl TaskSession {
             return Ok(crate::ProcessResult::denied(test_filter));
         }
         #[cfg(test)]
-        if let Some(results) = self.test_process_results.borrow_mut().get_mut(&task_id) {
+        if self.test_process_results.borrow().contains_key(&task_id) {
+            let authorized = state.lock().ok().is_some_and(|mut state| {
+                matches!(
+                    start_if_authorized(
+                        &mut state,
+                        &grant,
+                        expected_digest,
+                        Some(expected_digest),
+                        || Ok::<(), ()>(()),
+                    ),
+                    Ok(())
+                )
+            });
+            if !authorized {
+                return Ok(crate::ProcessResult::denied_read_only_exec());
+            }
+            let mut process_results = self.test_process_results.borrow_mut();
+            let Some(results) = process_results.get_mut(&task_id) else {
+                return Ok(crate::ProcessResult::denied_read_only_exec());
+            };
             self.test_process_filters
                 .borrow_mut()
                 .entry(task_id)
@@ -774,6 +931,118 @@ impl TaskSession {
             root,
             &policy,
             test_filter,
+            spawn_gate,
+        ))
+    }
+
+    /// Executes one exactly approved direct-argv request through the existing process grant.
+    pub fn run_offline_read_only_exec(
+        &self,
+        task_id: Uuid,
+        turn_id: Uuid,
+        request: &crate::tools::process::OfflineReadOnlyExecRequest,
+    ) -> Result<crate::ProcessResult, WorkspaceReadError> {
+        let task = self.running_workspace_task(task_id, turn_id)?;
+        let state = self
+            .process_grants
+            .lock()
+            .ok()
+            .and_then(|grants| grants.get(&task_id).cloned());
+        let Some(state) = state else {
+            return Ok(crate::ProcessResult::denied_read_only_exec());
+        };
+        let grant = state.lock().ok().and_then(|state| {
+            state
+                .current
+                .as_ref()
+                .filter(|grant| grant.epoch == state.epoch)
+                .cloned()
+        });
+        let Some(grant) = grant else {
+            return Ok(crate::ProcessResult::denied_read_only_exec());
+        };
+        if grant.task_id != task_id
+            || grant.scope != GrantScope::ExactIntent
+            || grant.read_only_exec.as_ref() != Some(request)
+            || grant.exact_filter.is_some()
+            || grant.expired()
+            || grant.consumed
+            || grant.epoch == 0
+        {
+            return Ok(crate::ProcessResult::denied_read_only_exec());
+        }
+        let root = task
+            .workspace_root
+            .as_ref()
+            .map_err(|error| WorkspaceReadError::File {
+                message: error.message().to_owned(),
+            })?;
+        if !workspace_revision_fence_is_registered_for_root(&task.workspace_revision, root) {
+            return Ok(crate::ProcessResult::denied_read_only_exec());
+        }
+        let (revision_guard, revision) =
+            task.workspace_revision
+                .begin_read()
+                .map_err(|_| WorkspaceReadError::File {
+                    message: "workspace revision state is unavailable".into(),
+                })?;
+        let _revision_guard = revision_guard;
+        let intent = process_intent(&grant, self.id, None, root, revision);
+        let Ok(intent) = intent else {
+            return Ok(crate::ProcessResult::denied_read_only_exec());
+        };
+        let Ok(expected_digest) = intent.digest() else {
+            return Ok(crate::ProcessResult::denied_read_only_exec());
+        };
+        if grant.approved_digest != Some(expected_digest) {
+            return Ok(crate::ProcessResult::denied_read_only_exec());
+        }
+        #[cfg(test)]
+        if self.test_process_results.borrow().contains_key(&task_id) {
+            let authorized = state.lock().ok().is_some_and(|mut state| {
+                matches!(
+                    start_if_authorized(
+                        &mut state,
+                        &grant,
+                        expected_digest,
+                        Some(expected_digest),
+                        || Ok::<(), ()>(()),
+                    ),
+                    Ok(())
+                )
+            });
+            if !authorized {
+                return Ok(crate::ProcessResult::denied_read_only_exec());
+            }
+            let mut process_results = self.test_process_results.borrow_mut();
+            let Some(results) = process_results.get_mut(&task_id) else {
+                return Ok(crate::ProcessResult::denied_read_only_exec());
+            };
+            self.test_process_filters
+                .borrow_mut()
+                .entry(task_id)
+                .or_default()
+                .push(None);
+            let mut result = results
+                .pop_front()
+                .unwrap_or_else(crate::ProcessResult::denied_read_only_exec);
+            result.profile = crate::ProcessExecutionProfile::OfflineReadOnlyExecV1;
+            return Ok(result);
+        }
+        let spawn_gate = process_spawn_gate(ProcessSpawnGateContext {
+            state,
+            expected: grant.clone(),
+            expected_intent: intent,
+            expected_digest,
+            revision: Arc::clone(&task.workspace_revision),
+            root: Arc::clone(root),
+            session_id: self.id,
+            test_filter: None,
+        });
+        Ok(crate::tools::process::run_read_only_exec(
+            root,
+            &grant.policy,
+            request,
             spawn_gate,
         ))
     }
@@ -1124,7 +1393,12 @@ fn process_intent(
     let identity = root
         .identity()
         .map_err(|_| "workspace identity is unavailable")?;
-    let facts = grant.policy.authorization_facts()?;
+    let facts = match grant.read_only_exec.as_ref() {
+        Some(request) => grant
+            .policy
+            .authorization_facts_for_read_only_exec(request)?,
+        None => grant.policy.authorization_facts()?,
+    };
     Ok(ProcessIntent::for_grant(
         grant,
         session_id,
@@ -1200,14 +1474,22 @@ fn process_spawn_gate(context: ProcessSpawnGateContext) -> SpawnAuthorizationGat
         let Some(active) = state.current.as_ref() else {
             return Err(SpawnGateError::Denied);
         };
+        let active_scope_matches = if expected.read_only_exec.is_some() {
+            active.scope == GrantScope::ExactIntent
+                && active.read_only_exec == expected.read_only_exec
+                && test_filter.is_none()
+        } else {
+            active.allows_filter(test_filter.as_deref())
+        };
         if active.task_id != expected.task_id
             || active.grant_id != expected.grant_id
             || active.epoch != expected.epoch
             || active.mode != expected.mode
             || active.scope != expected.scope
             || active.exact_filter != expected.exact_filter
+            || active.read_only_exec != expected.read_only_exec
             || active.expiry != expected.expiry
-            || !active.allows_filter(test_filter.as_deref())
+            || !active_scope_matches
             || active.expired()
             || !Arc::ptr_eq(&active.policy, &expected.policy)
         {
@@ -1277,6 +1559,154 @@ mod process_grant_tests {
         let turn = task.create_turn().unwrap();
         task.transition_turn(turn, TurnState::Running).unwrap();
         turn
+    }
+
+    #[test]
+    fn approved_read_only_exec_is_bound_to_one_request_and_consumed_once() {
+        let workspace = TempDir::with_prefix("read-only-exec-grant-workspace-");
+        let (_runtime, policy) = policy_fixture();
+        let mut session = TaskSession::new_in_workspace(workspace.path()).unwrap();
+        let task_id = session.create_task("direct process grant").id();
+        let turn_id = running_turn(&mut session, task_id);
+        session
+            .authorize_offline_cargo_tests(task_id, policy)
+            .unwrap();
+        let grant_state = session
+            .process_grants
+            .lock()
+            .unwrap()
+            .get(&task_id)
+            .unwrap()
+            .clone();
+        let source_cancellation = {
+            let state = grant_state.lock().unwrap();
+            state.current.as_ref().unwrap().policy.cancellation()
+        };
+        session.queue_offline_cargo_results_for_test(
+            task_id,
+            [
+                crate::ProcessResult::empty(crate::ProcessOutcome::Exited(0)),
+                crate::ProcessResult::empty(crate::ProcessOutcome::Exited(0)),
+            ],
+        );
+
+        let approved = crate::tools::process::OfflineReadOnlyExecRequest::new(
+            crate::tools::process::SandboxExecutable::Cargo,
+            vec!["--version".into()],
+            ".",
+        )
+        .unwrap();
+        let widened = crate::tools::process::OfflineReadOnlyExecRequest::new(
+            crate::tools::process::SandboxExecutable::Cargo,
+            vec!["--help".into()],
+            ".",
+        )
+        .unwrap();
+        let source_facts = {
+            let state = grant_state.lock().unwrap();
+            state
+                .current
+                .as_ref()
+                .unwrap()
+                .policy
+                .authorization_facts_for_read_only_exec(&approved)
+                .unwrap()
+        };
+        session
+            .authorize_offline_read_only_exec_once_from_current_policy(
+                task_id,
+                approved.clone(),
+                Duration::from_secs(60),
+            )
+            .unwrap();
+
+        {
+            let state = grant_state.lock().unwrap();
+            let grant = state.current.as_ref().unwrap();
+            assert_eq!(grant.mode, GrantMode::OneShot);
+            assert_eq!(grant.scope, GrantScope::ExactIntent);
+            assert_eq!(grant.read_only_exec.as_ref(), Some(&approved));
+            assert!(grant.approved_digest.is_some());
+        }
+        let approved_cancellation = {
+            let state = grant_state.lock().unwrap();
+            let grant = state.current.as_ref().unwrap();
+            let approved_facts = grant
+                .policy
+                .authorization_facts_for_read_only_exec(&approved)
+                .unwrap();
+            assert_eq!(
+                approved_facts.toolchain_identity, source_facts.toolchain_identity,
+                "the approved grant retains the pinned toolchain identity"
+            );
+            assert_eq!(
+                approved_facts.registry_identity, source_facts.registry_identity,
+                "the approved grant retains the pinned registry identity"
+            );
+            grant.policy.cancellation()
+        };
+        assert!(
+            source_cancellation.load(Ordering::SeqCst),
+            "replacing the source grant cancels work already using its policy"
+        );
+        assert!(
+            !approved_cancellation.load(Ordering::SeqCst),
+            "the new exact-intent grant must have independent cancellation state"
+        );
+        assert!(
+            !Arc::ptr_eq(&source_cancellation, &approved_cancellation),
+            "each grant epoch owns a distinct cancellation handle"
+        );
+
+        let widened_result = session
+            .run_offline_read_only_exec(task_id, turn_id, &widened)
+            .unwrap();
+        assert_eq!(widened_result.outcome, crate::ProcessOutcome::Denied);
+        assert_eq!(
+            widened_result.profile,
+            crate::ProcessExecutionProfile::OfflineReadOnlyExecV1
+        );
+        assert!(
+            !grant_state
+                .lock()
+                .unwrap()
+                .current
+                .as_ref()
+                .unwrap()
+                .consumed
+        );
+
+        let accepted = session
+            .run_offline_read_only_exec(task_id, turn_id, &approved)
+            .unwrap();
+        assert_eq!(accepted.outcome, crate::ProcessOutcome::Exited(0));
+        assert_eq!(
+            accepted.profile,
+            crate::ProcessExecutionProfile::OfflineReadOnlyExecV1
+        );
+        assert!(
+            grant_state
+                .lock()
+                .unwrap()
+                .current
+                .as_ref()
+                .unwrap()
+                .consumed
+        );
+
+        let stale_cargo_grant = session
+            .run_offline_cargo_tests(task_id, turn_id, None)
+            .unwrap();
+        assert_eq!(
+            stale_cargo_grant.outcome,
+            crate::ProcessOutcome::Denied,
+            "the exact approval replaces the former standing Cargo grant"
+        );
+
+        let replay = session
+            .run_offline_read_only_exec(task_id, turn_id, &approved)
+            .unwrap();
+        assert_eq!(replay.outcome, crate::ProcessOutcome::Denied);
     }
 
     #[test]
@@ -2046,6 +2476,7 @@ mod process_grant_tests {
             exact_filter: Some("selected_case".into()),
             expiry: Some(expiry),
             policy: Arc::new(policy),
+            read_only_exec: None,
             consumed: false,
             approved_digest: None,
         };

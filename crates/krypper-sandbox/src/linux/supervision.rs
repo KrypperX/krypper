@@ -24,6 +24,7 @@ pub(super) struct PayloadResult {
     stderr: Vec<u8>,
     resource_events: Vec<SandboxResource>,
     diagnostic: Option<String>,
+    test_evidence_available: bool,
 }
 
 pub(super) struct PayloadInputs<'a> {
@@ -33,6 +34,7 @@ pub(super) struct PayloadInputs<'a> {
     pub(super) output_limit: usize,
     pub(super) cancelled: &'a AtomicBool,
     pub(super) started: Instant,
+    pub(super) test_evidence_available: bool,
 }
 
 impl PayloadResult {
@@ -43,7 +45,7 @@ impl PayloadResult {
         result.output_bytes = self.output_bytes;
         result.stdout = self.stdout;
         result.stderr = self.stderr;
-        result.test_evidence_available = true;
+        result.test_evidence_available = self.test_evidence_available;
         result.resource_events = self.resource_events;
         if self.diagnostic.is_some() {
             result.diagnostic = self.diagnostic;
@@ -63,6 +65,7 @@ pub(super) fn supervise(
         output_limit,
         cancelled,
         started,
+        test_evidence_available,
     } = inputs;
     nonblocking(&out)?;
     nonblocking(&err)?;
@@ -165,6 +168,7 @@ pub(super) fn supervise(
         stderr,
         resource_events: events,
         diagnostic,
+        test_evidence_available,
     })
 }
 
@@ -216,6 +220,7 @@ mod tests {
                 output_limit,
                 cancelled: &cancelled,
                 started: Instant::now(),
+                test_evidence_available: true,
             },
             out,
             err,
@@ -307,6 +312,7 @@ mod tests {
                 output_limit: 1024,
                 cancelled: &cancelled,
                 started: Instant::now(),
+                test_evidence_available: true,
             },
             out,
             err,

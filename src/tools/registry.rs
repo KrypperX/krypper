@@ -4,6 +4,7 @@ use serde_json::{json, Map, Value};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WorkspaceOperation {
     OfflineCargoTest,
+    OfflineReadOnlyExec,
     ReadFile,
     ReadRange,
     ListDirectory,
@@ -19,6 +20,7 @@ impl WorkspaceOperation {
     const fn name(self) -> &'static str {
         match self {
             Self::OfflineCargoTest => "offline_cargo_test",
+            Self::OfflineReadOnlyExec => "offline_read_only_exec",
             Self::ReadFile => "read_file",
             Self::ReadRange => "read_range",
             Self::ListDirectory => "list_directory",
@@ -37,6 +39,7 @@ pub(crate) enum EffectClass {
     ReadOnlyWorkspaceAccess,
     WorkspaceMutation,
     FixedSandboxedOfflineCargoTest,
+    SandboxedOfflineReadOnlyExec,
 }
 
 impl EffectClass {
@@ -45,6 +48,9 @@ impl EffectClass {
             Self::ReadOnlyWorkspaceAccess => "read-only workspace access",
             Self::WorkspaceMutation => "workspace mutation",
             Self::FixedSandboxedOfflineCargoTest => "fixed sandboxed offline Cargo test",
+            Self::SandboxedOfflineReadOnlyExec => {
+                "bounded sandboxed offline read-only direct-argv execution"
+            }
         }
     }
 }
@@ -58,9 +64,7 @@ pub(crate) enum AuthorizationPrerequisite {
 impl AuthorizationPrerequisite {
     pub(crate) const fn as_description(self) -> &'static str {
         match self {
-            Self::ExistingTaskAuthorization => {
-                "usable only within the existing task authorization"
-            }
+            Self::ExistingTaskAuthorization => "usable only within the existing task authorization",
             Self::ExistingTaskAuthorizationHostAuthorizationAndVerifiedConfinement => {
                 "usable only within the existing task authorization and additionally requires the existing host authorization and verified Linux confinement"
             }
@@ -72,9 +76,21 @@ impl AuthorizationPrerequisite {
 enum ArgumentSchema {
     String,
     NonEmptyString,
-    BoundedString { max_length: usize },
+    BoundedString {
+        max_length: usize,
+    },
+    StringEnum {
+        values: &'static [&'static str],
+    },
+    BoundedStringArray {
+        min_items: usize,
+        max_items: usize,
+        max_item_length: usize,
+    },
     PositiveInteger,
-    BoundedPositiveInteger { maximum: usize },
+    BoundedPositiveInteger {
+        maximum: usize,
+    },
 }
 
 impl ArgumentSchema {
@@ -85,6 +101,19 @@ impl ArgumentSchema {
             Self::BoundedString { max_length } => {
                 json!({"type":"string","minLength":1,"maxLength":max_length})
             }
+            Self::StringEnum { values } => {
+                json!({"type":"string","enum":values})
+            }
+            Self::BoundedStringArray {
+                min_items,
+                max_items,
+                max_item_length,
+            } => json!({
+                "type":"array",
+                "minItems":min_items,
+                "maxItems":max_items,
+                "items":{"type":"string","minLength":1,"maxLength":max_item_length}
+            }),
             Self::PositiveInteger => json!({"type":"integer","minimum":1}),
             Self::BoundedPositiveInteger { maximum } => {
                 json!({"type":"integer","minimum":1,"maximum":maximum})
@@ -181,6 +210,31 @@ const fn bounded_string(name: &'static str, max_length: usize) -> ArgumentDefini
     }
 }
 
+const fn string_enum(name: &'static str, values: &'static [&'static str]) -> ArgumentDefinition {
+    ArgumentDefinition {
+        name,
+        schema: ArgumentSchema::StringEnum { values },
+        required: true,
+    }
+}
+
+const fn bounded_string_array(
+    name: &'static str,
+    min_items: usize,
+    max_items: usize,
+    max_item_length: usize,
+) -> ArgumentDefinition {
+    ArgumentDefinition {
+        name,
+        schema: ArgumentSchema::BoundedStringArray {
+            min_items,
+            max_items,
+            max_item_length,
+        },
+        required: true,
+    }
+}
+
 const fn optional_bounded_string(name: &'static str, max_length: usize) -> ArgumentDefinition {
     ArgumentDefinition {
         name,
@@ -205,7 +259,7 @@ const fn bounded_positive_integer(name: &'static str, maximum: usize) -> Argumen
     }
 }
 
-const WORKSPACE_OPERATIONS: [OperationDefinition; 10] = [
+const WORKSPACE_OPERATIONS: [OperationDefinition; 11] = [
     OperationDefinition {
         operation: WorkspaceOperation::ReadFile,
         description: "Read one safe UTF-8 workspace file.",
@@ -291,6 +345,22 @@ const WORKSPACE_OPERATIONS: [OperationDefinition; 10] = [
             crate::tools::process::MAX_TEST_FILTER_BYTES,
         )],
     },
+    OperationDefinition {
+        operation: WorkspaceOperation::OfflineReadOnlyExec,
+        description: "Run bounded direct argv through the host-pinned Cargo or Rustc executable in the offline read-only workspace profile.",
+        effect_class: EffectClass::SandboxedOfflineReadOnlyExec,
+        authorization_prerequisite: AuthorizationPrerequisite::ExistingTaskAuthorizationHostAuthorizationAndVerifiedConfinement,
+        arguments: &[
+            string_enum("executable", &["cargo", "rustc"]),
+            bounded_string_array(
+                "argv",
+                1,
+                krypper_sandbox::runner_contract::MAX_READ_ONLY_EXEC_ARGUMENTS,
+                krypper_sandbox::runner_contract::MAX_READ_ONLY_EXEC_ARGUMENT_BYTES,
+            ),
+            bounded_string("working_directory", 4_096),
+        ],
+    },
 ];
 
 pub(crate) fn workspace_operations() -> &'static [OperationDefinition] {
@@ -306,7 +376,7 @@ pub(crate) fn effect_class_for(name: &str) -> Option<EffectClass> {
 
 #[cfg(test)]
 mod tests {
-    use super::{workspace_operations, AuthorizationPrerequisite, EffectClass};
+    use super::{effect_class_for, workspace_operations, AuthorizationPrerequisite, EffectClass};
 
     #[test]
     fn registered_operations_have_exactly_one_effect_and_authorization_prerequisite() {
@@ -374,7 +444,47 @@ mod tests {
                     EffectClass::FixedSandboxedOfflineCargoTest,
                     AuthorizationPrerequisite::ExistingTaskAuthorizationHostAuthorizationAndVerifiedConfinement,
                 ),
+                (
+                    "offline_read_only_exec",
+                    EffectClass::SandboxedOfflineReadOnlyExec,
+                    AuthorizationPrerequisite::ExistingTaskAuthorizationHostAuthorizationAndVerifiedConfinement,
+                ),
             ]
+        );
+    }
+
+    #[test]
+    fn offline_read_only_exec_schema_exposes_only_closed_direct_argv_inputs() {
+        let operation = workspace_operations()
+            .iter()
+            .find(|operation| operation.name() == "offline_read_only_exec")
+            .expect("direct-argv operation is registered");
+
+        assert_eq!(
+            operation.parameters(),
+            serde_json::json!({
+                "type":"object",
+                "properties":{
+                    "executable":{"type":"string", "enum":["cargo", "rustc"]},
+                    "argv":{
+                        "type":"array",
+                        "minItems":1,
+                        "maxItems":krypper_sandbox::runner_contract::MAX_READ_ONLY_EXEC_ARGUMENTS,
+                        "items":{
+                            "type":"string",
+                            "minLength":1,
+                            "maxLength":krypper_sandbox::runner_contract::MAX_READ_ONLY_EXEC_ARGUMENT_BYTES
+                        }
+                    },
+                    "working_directory":{"type":"string", "minLength":1, "maxLength":4096}
+                },
+                "required":["argv", "executable", "working_directory"],
+                "additionalProperties":false
+            })
+        );
+        assert_eq!(
+            effect_class_for("offline_read_only_exec"),
+            Some(EffectClass::SandboxedOfflineReadOnlyExec)
         );
     }
 

@@ -369,6 +369,7 @@ mod tests {
         let mut process = crate::ProcessResult {
             run_id: uuid::Uuid::nil(),
             outcome: crate::ProcessOutcome::Exited(0),
+            profile: crate::ProcessExecutionProfile::OfflineCargoTest,
             stdout: String::new(),
             stderr: String::new(),
             truncated: false,

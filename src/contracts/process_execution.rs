@@ -37,6 +37,22 @@ pub enum ProcessResource {
     FileSize,
 }
 
+/// Host-owned process profile represented by one result.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessExecutionProfile {
+    /// The legacy fixed offline Cargo test profile.
+    OfflineCargoTest,
+    /// The bounded direct-argv offline/read-only profile.
+    OfflineReadOnlyExecV1,
+}
+
+impl ProcessExecutionProfile {
+    fn is_offline_cargo_test(&self) -> bool {
+        *self == Self::OfflineCargoTest
+    }
+}
+
 /// Bounded process output and the verified typed outcome of one attempt.
 ///
 /// Renderers must escape terminal controls and treat output as untrusted evidence, never as
@@ -46,6 +62,10 @@ pub struct ProcessResult {
     #[serde(serialize_with = "serialize_run_id")]
     pub run_id: Uuid,
     pub outcome: ProcessOutcome,
+    /// Host-selected profile that produced the result. The fixed Cargo value is omitted from
+    /// serialized legacy results to preserve their existing public representation.
+    #[serde(skip_serializing_if = "ProcessExecutionProfile::is_offline_cargo_test")]
+    pub profile: ProcessExecutionProfile,
     pub stdout: String,
     pub stderr: String,
     pub truncated: bool,
@@ -92,6 +112,7 @@ impl ProcessResult {
         Self {
             run_id: Uuid::new_v4(),
             outcome,
+            profile: ProcessExecutionProfile::OfflineCargoTest,
             stdout: String::new(),
             stderr: String::new(),
             truncated: false,
@@ -107,6 +128,18 @@ impl ProcessResult {
             recovery_hold: false,
             sandbox_evidence: None,
         }
+    }
+
+    pub(crate) fn denied_read_only_exec() -> Self {
+        let mut result = Self::empty(ProcessOutcome::Denied);
+        result.profile = ProcessExecutionProfile::OfflineReadOnlyExecV1;
+        result
+    }
+
+    pub(crate) fn empty_read_only_exec(outcome: ProcessOutcome) -> Self {
+        let mut result = Self::empty(outcome);
+        result.profile = ProcessExecutionProfile::OfflineReadOnlyExecV1;
+        result
     }
 
     /// Reports whether this attempt completed with verified success and no incomplete cleanup.

@@ -4,9 +4,13 @@ use super::outcome::{ProcessOutcome, ProcessResource};
 use super::policy::{validate_test_filter, OfflineCargoPolicy};
 use super::result::ProcessResult;
 use crate::tools::WorkspaceRoot;
+use crate::ProcessExecutionProfile;
+#[cfg(target_os = "linux")]
+use krypper_sandbox::run_process;
 use krypper_sandbox::{
-    run_offline_cargo, DirectoryDescriptors, LandlockRequirement, RunLimits, SandboxOutcome,
-    SandboxResource, SandboxRunRequest, SandboxRunResult, SpawnAuthorizationGate,
+    run_offline_cargo, DirectoryDescriptors, LandlockRequirement, OfflineReadOnlyExecRequest,
+    RunLimits, SandboxOutcome, SandboxResource, SandboxRunRequest, SandboxRunResult,
+    SpawnAuthorizationGate,
 };
 #[cfg(target_os = "linux")]
 use std::path::Path;
@@ -37,6 +41,61 @@ pub(crate) fn run(
         spawn_gate,
         LandlockRequirement::Optional,
     )
+}
+
+/// Run one typed direct-argv request through the same supervisor and grant gate as fixed Cargo.
+pub(crate) fn run_read_only_exec(
+    root: &WorkspaceRoot,
+    policy: &OfflineCargoPolicy,
+    request: &OfflineReadOnlyExecRequest,
+    spawn_gate: SpawnAuthorizationGate,
+) -> ProcessResult {
+    #[cfg(target_os = "linux")]
+    {
+        if super::effective_uid() == 0 {
+            return ProcessResult::empty_read_only_exec(ProcessOutcome::SandboxUnavailable);
+        }
+        if policy.cancellation().load(Ordering::SeqCst) {
+            return ProcessResult::empty_read_only_exec(ProcessOutcome::Cancelled);
+        }
+        if [&policy.toolchain, &policy.registry]
+            .iter()
+            .any(|runtime| paths_overlap(root.path(), runtime.path()))
+        {
+            return ProcessResult::denied_read_only_exec();
+        }
+        let directories = match directory_descriptors_for_read_only_exec(
+            root,
+            policy,
+            request.working_directory(),
+        ) {
+            Ok(directories) => directories,
+            Err(message) => {
+                let mut result =
+                    ProcessResult::empty_read_only_exec(ProcessOutcome::SandboxSetupFailed);
+                result.diagnostic = Some(message);
+                return result;
+            }
+        };
+        let requirements = request.requirements();
+        let limits = match requirements.profile_limits().to_run_limits() {
+            Ok(limits) => limits,
+            Err(_) => return ProcessResult::denied_read_only_exec(),
+        };
+        execute_read_only_exec(
+            policy,
+            request,
+            requirements,
+            limits,
+            directories,
+            spawn_gate,
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (root, policy, request, spawn_gate);
+        ProcessResult::empty_read_only_exec(ProcessOutcome::SandboxUnavailable)
+    }
 }
 
 fn run_with_landlock_requirement(
@@ -235,6 +294,34 @@ fn directory_descriptors(
     ))
 }
 
+#[cfg(target_os = "linux")]
+fn directory_descriptors_for_read_only_exec(
+    root: &WorkspaceRoot,
+    policy: &OfflineCargoPolicy,
+    cwd: &str,
+) -> Result<DirectoryDescriptors, String> {
+    let workspace = root
+        .process_descriptor()
+        .map_err(|error| error.to_string())?;
+    let toolchain = policy
+        .toolchain
+        .process_descriptor()
+        .map_err(|error| error.to_string())?;
+    let registry = policy
+        .registry
+        .process_descriptor()
+        .map_err(|error| error.to_string())?;
+    let directories = DirectoryDescriptors::new(workspace, toolchain, registry);
+    if cwd == "." {
+        Ok(directories)
+    } else {
+        let workspace_cwd = root
+            .process_subdirectory_descriptor(cwd)
+            .map_err(|error| error.to_string())?;
+        Ok(directories.with_workspace_cwd(workspace_cwd))
+    }
+}
+
 fn execute(
     policy: &OfflineCargoPolicy,
     test_filter: Option<&str>,
@@ -260,7 +347,37 @@ fn execute(
     )
     .with_landlock_requirement(landlock_requirement)
     .with_spawn_gate(spawn_gate);
-    from_runner(run_offline_cargo(request), test_filter)
+    from_runner(
+        run_offline_cargo(request),
+        test_filter,
+        ProcessExecutionProfile::OfflineCargoTest,
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn execute_read_only_exec(
+    policy: &OfflineCargoPolicy,
+    _request: &OfflineReadOnlyExecRequest,
+    requirements: krypper_sandbox::ValidatedExecutionRequirements,
+    limits: RunLimits,
+    directories: DirectoryDescriptors,
+    spawn_gate: SpawnAuthorizationGate,
+) -> ProcessResult {
+    let request = SandboxRunRequest::new_with_requirements(
+        Uuid::new_v4(),
+        Some(directories),
+        None,
+        limits,
+        policy.cancellation(),
+        requirements,
+    )
+    .with_landlock_requirement(LandlockRequirement::Required)
+    .with_spawn_gate(spawn_gate);
+    from_runner(
+        run_process(request),
+        None,
+        ProcessExecutionProfile::OfflineReadOnlyExecV1,
+    )
 }
 
 #[cfg(target_os = "linux")]
@@ -281,8 +398,13 @@ fn setup_failed(
     result
 }
 
-fn from_runner(raw: SandboxRunResult, test_filter: Option<&str>) -> ProcessResult {
+fn from_runner(
+    raw: SandboxRunResult,
+    test_filter: Option<&str>,
+    profile: ProcessExecutionProfile,
+) -> ProcessResult {
     let mut result = ProcessResult::empty_with_filter(map_outcome(raw.outcome), test_filter);
+    result.profile = profile;
     result.run_id = raw.run_id;
     result.stdout = String::from_utf8_lossy(&raw.stdout).into_owned();
     result.stderr = String::from_utf8_lossy(&raw.stderr).into_owned();
@@ -366,6 +488,7 @@ pub(super) fn record_raw_output(result: &mut ProcessResult, stdout: Vec<u8>, std
 mod isolation_evidence_tests {
     use super::from_runner;
     use crate::tools::process::outcome::{ProcessOutcome, ProcessResource};
+    use crate::ProcessExecutionProfile;
     use krypper_sandbox::{
         SandboxBackend, SandboxIsolationEvidence, SandboxOutcome, SandboxResource, SandboxRunResult,
     };
@@ -395,7 +518,7 @@ mod isolation_evidence_tests {
         let evidence = SandboxIsolationEvidence::new(Some(SandboxBackend::Bubblewrap));
         let raw = runner_result(Some(evidence.clone()));
         let run_id = raw.run_id;
-        let result = from_runner(raw, None);
+        let result = from_runner(raw, None, ProcessExecutionProfile::OfflineCargoTest);
 
         assert_eq!(result.run_id, run_id);
         assert_eq!(result.outcome, ProcessOutcome::Exited(7));
@@ -417,7 +540,11 @@ mod isolation_evidence_tests {
 
     #[test]
     fn absent_evidence_keeps_the_legacy_json_shape() {
-        let result = from_runner(runner_result(None), None);
+        let result = from_runner(
+            runner_result(None),
+            None,
+            ProcessExecutionProfile::OfflineCargoTest,
+        );
         let json = serde_json::to_value(result).expect("serialize process result");
 
         assert!(json.get("sandbox_evidence").is_none());

@@ -17,7 +17,7 @@ use crate::task_lifecycle::{
     TaskSession, TaskState, TurnActivityAction, TurnActivitySummary, TurnOutcome, TurnState,
 };
 use crate::tools::registry::workspace_operations;
-use crate::{ProcessOutcome, ProcessResult};
+use crate::{ProcessExecutionProfile, ProcessOutcome, ProcessResult};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io;
@@ -915,7 +915,13 @@ where
         .observations()
         .iter()
         .chain(correction_result.observations())
-        .any(|observation| matches!(observation, WorkspaceObservation::ProcessFinished { .. }));
+        .any(|observation| {
+            matches!(
+                observation,
+                WorkspaceObservation::ProcessFinished { result }
+                    if result.profile == ProcessExecutionProfile::OfflineCargoTest
+            )
+        });
     let current_test_verification = if test_was_requested {
         Some(process_test_verification(
             &correction_result,
@@ -1290,6 +1296,9 @@ fn last_correctable_process_failure(result: &GoalTurnResult) -> Option<&ProcessR
     else {
         return None;
     };
+    if result.profile != ProcessExecutionProfile::OfflineCargoTest {
+        return None;
+    }
     let complete = !result.truncated && result.cleanup_confirmed;
     let determinate_failure = match result.outcome {
         ProcessOutcome::Exited(code) => code != 0,
@@ -1310,10 +1319,13 @@ pub(crate) fn process_test_verification(
         return ProcessTestVerificationStatus::Passed;
     }
     if required_after_correction
-        || result
-            .observations()
-            .iter()
-            .any(|observation| matches!(observation, WorkspaceObservation::ProcessFinished { .. }))
+        || result.observations().iter().any(|observation| {
+            matches!(
+                observation,
+                WorkspaceObservation::ProcessFinished { result }
+                    if result.profile == ProcessExecutionProfile::OfflineCargoTest
+            )
+        })
     {
         ProcessTestVerificationStatus::Failed
     } else {
@@ -1370,6 +1382,10 @@ pub(crate) fn task_test_verification(
                 passed_after_latest_change = false;
                 requirements.require_full_suite();
             }
+            TurnActivitySummary::ActionFailed {
+                action: TurnActivityAction::OfflineReadOnlyExec,
+            }
+            | TurnActivitySummary::OfflineReadOnlyExecFinished { .. } => {}
             TurnActivitySummary::DirectoryCreated
             | TurnActivitySummary::FileCreated { .. }
             | TurnActivitySummary::TextReplaced { .. }
@@ -1504,7 +1520,11 @@ fn successful_test_follows_workspace_changes(
         .enumerate()
         .rev()
         .find_map(|(index, observation)| match observation {
-            WorkspaceObservation::ProcessFinished { result } => Some((index, result)),
+            WorkspaceObservation::ProcessFinished { result }
+                if result.profile == ProcessExecutionProfile::OfflineCargoTest =>
+            {
+                Some((index, result))
+            }
             _ => None,
         })
     else {
@@ -1744,7 +1764,13 @@ fn finish_completion_without_correction(
     let current_test_verification = initial_result
         .observations()
         .iter()
-        .any(|observation| matches!(observation, WorkspaceObservation::ProcessFinished { .. }))
+        .any(|observation| {
+            matches!(
+                observation,
+                WorkspaceObservation::ProcessFinished { result }
+                    if result.profile == ProcessExecutionProfile::OfflineCargoTest
+            )
+        })
         .then(|| process_test_verification(&initial_result, false, None));
     let test_verification = task_test_verification(session, task_id, current_test_verification);
     let final_stop_reason =
@@ -1932,6 +1958,7 @@ mod tests {
         ProcessResult {
             run_id: Uuid::new_v4(),
             outcome,
+            profile: crate::ProcessExecutionProfile::OfflineCargoTest,
             stdout: stdout.to_owned(),
             stderr: stderr.to_owned(),
             truncated: false,
@@ -2777,7 +2804,9 @@ mod task_test_verification_tests {
         TaskSession, TaskState, TurnActivityAction, TurnActivitySummary, TurnOutcome, TurnState,
     };
 
-    fn verification_for(activity: &[TurnActivitySummary]) -> ProcessTestVerificationStatus {
+    fn verification_status(
+        activity: &[TurnActivitySummary],
+    ) -> Option<ProcessTestVerificationStatus> {
         let mut session = TaskSession::new();
         let task_id = session.create_task("check test verification history").id();
         let task = session.get_task_mut(task_id).expect("created task");
@@ -2796,7 +2825,11 @@ mod task_test_verification_tests {
             )
             .expect("complete turn with activity");
 
-        task_test_verification(&session, task_id, None).expect("test history is present")
+        task_test_verification(&session, task_id, None)
+    }
+
+    fn verification_for(activity: &[TurnActivitySummary]) -> ProcessTestVerificationStatus {
+        verification_status(activity).expect("test history is present")
     }
 
     fn record_test(
@@ -2918,6 +2951,21 @@ mod task_test_verification_tests {
     }
 
     #[test]
+    fn offline_read_only_execution_does_not_create_cargo_test_evidence() {
+        let activity = [TurnActivitySummary::OfflineReadOnlyExecFinished {
+            succeeded: true,
+            output_bytes: 12,
+        }];
+
+        assert_eq!(verification_status(&activity), None);
+
+        let failed = [TurnActivitySummary::ActionFailed {
+            action: TurnActivityAction::OfflineReadOnlyExec,
+        }];
+        assert_eq!(verification_status(&failed), None);
+    }
+
+    #[test]
     fn failed_test_action_keeps_full_suite_requirement_after_filter_summary() {
         let mut activity = vec![TurnActivitySummary::ActionFailed {
             action: TurnActivityAction::OfflineCargoTest,
@@ -2938,6 +2986,91 @@ mod task_test_verification_tests {
         record_test(&mut activity, None, true, false);
         assert_eq!(
             verification_for(&activity),
+            ProcessTestVerificationStatus::Passed
+        );
+    }
+}
+
+#[cfg(test)]
+mod offline_read_only_exec_profile_routing_tests {
+    use super::{
+        last_correctable_process_failure, process_test_verification,
+        successful_test_follows_workspace_changes, ProcessTestVerificationStatus,
+    };
+    use crate::contracts::goal_turn::{GoalTurnResult, GoalTurnStopReason, WorkspaceObservation};
+    use crate::task_lifecycle::TurnOutcome;
+    use crate::{ProcessExecutionProfile, ProcessOutcome, ProcessResult};
+
+    fn result_for(
+        profile: ProcessExecutionProfile,
+        outcome: ProcessOutcome,
+        stop_reason: GoalTurnStopReason,
+    ) -> GoalTurnResult {
+        let mut process = ProcessResult::empty(outcome);
+        process.profile = profile;
+        process.tests_ran = true;
+        process.executed_tests = Some(1);
+        let task_id = uuid::Uuid::new_v4();
+        GoalTurnResult {
+            task_id,
+            turn_id: uuid::Uuid::new_v4(),
+            read_result: String::new(),
+            observations: vec![WorkspaceObservation::ProcessFinished { result: process }],
+            actions_taken: 1,
+            stop_reason,
+            outcome: Some(match stop_reason {
+                GoalTurnStopReason::ActionFailed => TurnOutcome::Failure {
+                    detail: "process failed".to_owned(),
+                },
+                _ => TurnOutcome::Success {
+                    result: "process finished".to_owned(),
+                },
+            }),
+        }
+    }
+
+    #[test]
+    fn generic_process_failures_do_not_enter_cargo_correction_or_test_verification() {
+        let generic_failure = result_for(
+            ProcessExecutionProfile::OfflineReadOnlyExecV1,
+            ProcessOutcome::Exited(1),
+            GoalTurnStopReason::ActionFailed,
+        );
+
+        assert!(last_correctable_process_failure(&generic_failure).is_none());
+        assert_eq!(
+            process_test_verification(&generic_failure, false, None),
+            ProcessTestVerificationStatus::NotRequested
+        );
+    }
+
+    #[test]
+    fn only_fixed_cargo_results_supply_successful_test_evidence() {
+        let generic_success = result_for(
+            ProcessExecutionProfile::OfflineReadOnlyExecV1,
+            ProcessOutcome::Exited(0),
+            GoalTurnStopReason::ActionCompleted,
+        );
+        let cargo_success = result_for(
+            ProcessExecutionProfile::OfflineCargoTest,
+            ProcessOutcome::Exited(0),
+            GoalTurnStopReason::ActionCompleted,
+        );
+
+        assert!(!successful_test_follows_workspace_changes(
+            &generic_success,
+            None
+        ));
+        assert!(successful_test_follows_workspace_changes(
+            &cargo_success,
+            None
+        ));
+        assert_eq!(
+            process_test_verification(&generic_success, false, None),
+            ProcessTestVerificationStatus::NotRequested
+        );
+        assert_eq!(
+            process_test_verification(&cargo_success, false, None),
             ProcessTestVerificationStatus::Passed
         );
     }

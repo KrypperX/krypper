@@ -69,7 +69,7 @@ pub(crate) use request::{
     validate_model_name, validate_model_name_for_provider,
 };
 pub(crate) use tool_set::AdvertisedToolNames;
-pub(crate) use tools_schema::{tool_definitions, workspace_tool_definitions};
+pub(crate) use tools_schema::{tool_definitions, workspace_plan_tool_definitions};
 
 #[cfg(test)]
 pub(crate) use limits::MAX_MODEL_REQUEST_BYTES;

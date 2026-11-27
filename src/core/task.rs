@@ -219,6 +219,8 @@ impl TurnOutcome {
 pub enum TurnActivityAction {
     /// The fixed offline Cargo profile failed.
     OfflineCargoTest,
+    /// A bounded direct-argv offline/read-only process profile failed.
+    OfflineReadOnlyExec,
     /// A workspace file read failed.
     ReadFile,
     /// A bounded workspace file range read failed.
@@ -256,6 +258,11 @@ pub enum TurnActivitySummary {
         passed: bool,
         /// A determinate `NoTestsMatched` failure permits a later filter choice.
         retry_any_filter: bool,
+    },
+    /// Metadata for one bounded offline/read-only direct-argv process operation.
+    OfflineReadOnlyExecFinished {
+        succeeded: bool,
+        output_bytes: usize,
     },
     /// A file was read; only its byte count is retained.
     FileRead { bytes_read: usize },

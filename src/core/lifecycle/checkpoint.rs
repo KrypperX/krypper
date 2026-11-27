@@ -253,6 +253,7 @@ impl From<CheckpointTurnOutcome> for TurnOutcome {
 #[serde(rename_all = "snake_case")]
 enum CheckpointActivityAction {
     OfflineCargoTest,
+    OfflineReadOnlyExec,
     ReadFile,
     ReadRange,
     ListDirectory,
@@ -268,6 +269,7 @@ impl From<TurnActivityAction> for CheckpointActivityAction {
     fn from(action: TurnActivityAction) -> Self {
         match action {
             TurnActivityAction::OfflineCargoTest => Self::OfflineCargoTest,
+            TurnActivityAction::OfflineReadOnlyExec => Self::OfflineReadOnlyExec,
             TurnActivityAction::ReadFile => Self::ReadFile,
             TurnActivityAction::ReadRange => Self::ReadRange,
             TurnActivityAction::ListDirectory => Self::ListDirectory,
@@ -285,6 +287,7 @@ impl From<CheckpointActivityAction> for TurnActivityAction {
     fn from(action: CheckpointActivityAction) -> Self {
         match action {
             CheckpointActivityAction::OfflineCargoTest => Self::OfflineCargoTest,
+            CheckpointActivityAction::OfflineReadOnlyExec => Self::OfflineReadOnlyExec,
             CheckpointActivityAction::ReadFile => Self::ReadFile,
             CheckpointActivityAction::ReadRange => Self::ReadRange,
             CheckpointActivityAction::ListDirectory => Self::ListDirectory,
@@ -309,6 +312,10 @@ enum CheckpointActivitySummary {
         filter_hash: Option<[u8; 32]>,
         passed: bool,
         retry_any_filter: bool,
+    },
+    OfflineReadOnlyExecFinished {
+        succeeded: bool,
+        output_bytes: usize,
     },
     FileRead {
         bytes_read: usize,
@@ -364,6 +371,13 @@ impl From<TurnActivitySummary> for CheckpointActivitySummary {
                 filter_hash,
                 passed,
                 retry_any_filter,
+            },
+            TurnActivitySummary::OfflineReadOnlyExecFinished {
+                succeeded,
+                output_bytes,
+            } => Self::OfflineReadOnlyExecFinished {
+                succeeded,
+                output_bytes,
             },
             TurnActivitySummary::FileRead { bytes_read } => Self::FileRead { bytes_read },
             TurnActivitySummary::FileRangeRead {
@@ -421,6 +435,13 @@ impl From<CheckpointActivitySummary> for TurnActivitySummary {
                 filter_hash,
                 passed,
                 retry_any_filter,
+            },
+            CheckpointActivitySummary::OfflineReadOnlyExecFinished {
+                succeeded,
+                output_bytes,
+            } => Self::OfflineReadOnlyExecFinished {
+                succeeded,
+                output_bytes,
             },
             CheckpointActivitySummary::FileRead { bytes_read } => Self::FileRead { bytes_read },
             CheckpointActivitySummary::FileRangeRead {

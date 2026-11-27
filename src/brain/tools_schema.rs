@@ -1,6 +1,6 @@
 //! Tool definitions and provider-specific schema adapters.
 
-use crate::tools::registry::workspace_operations;
+use crate::tools::registry::{workspace_operations, OperationDefinition};
 use serde_json::{json, Value};
 
 pub(crate) fn gemini_function_declarations() -> Vec<Value> {
@@ -115,11 +115,22 @@ pub(crate) fn adapt_anthropic_strict_schema(schema: &mut Value) {
 pub(crate) fn workspace_tool_definitions() -> Vec<Value> {
     workspace_operations()
         .iter()
-        .map(|operation| {
-            let description = operation.provider_description();
-            function_tool_with_parameters(operation.name(), &description, operation.parameters())
-        })
+        .map(operation_tool_definition)
         .collect::<Vec<_>>()
+}
+
+/// Plan and correction requests may contain only operations accepted by `WorkspacePlan`.
+pub(crate) fn workspace_plan_tool_definitions() -> Vec<Value> {
+    workspace_operations()
+        .iter()
+        .filter(|operation| operation.name() != "offline_read_only_exec")
+        .map(operation_tool_definition)
+        .collect()
+}
+
+fn operation_tool_definition(operation: &OperationDefinition) -> Value {
+    let description = operation.provider_description();
+    function_tool_with_parameters(operation.name(), &description, operation.parameters())
 }
 
 pub(crate) fn tool_definitions() -> Value {
@@ -160,4 +171,23 @@ pub(crate) fn function_tool_with_parameters(
             "parameters":parameters
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{workspace_plan_tool_definitions, workspace_tool_definitions};
+
+    fn has_direct_exec_tool(definitions: &[serde_json::Value]) -> bool {
+        definitions.iter().any(|tool| {
+            tool.pointer("/function/name")
+                .and_then(serde_json::Value::as_str)
+                == Some("offline_read_only_exec")
+        })
+    }
+
+    #[test]
+    fn direct_action_is_advertised_for_turns_but_not_for_unhandled_plans() {
+        assert!(has_direct_exec_tool(&workspace_tool_definitions()));
+        assert!(!has_direct_exec_tool(&workspace_plan_tool_definitions()));
+    }
 }

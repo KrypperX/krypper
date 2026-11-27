@@ -470,6 +470,7 @@ fn process_result(outcome: ProcessOutcome, succeeded: bool) -> ProcessResult {
     ProcessResult {
         run_id: Uuid::new_v4(),
         outcome,
+        profile: crate::ProcessExecutionProfile::OfflineCargoTest,
         stdout: if succeeded {
             "running 1 test\ntest api_smoke ... ok\n".to_owned()
         } else {

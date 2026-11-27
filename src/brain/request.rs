@@ -220,7 +220,7 @@ pub(crate) fn build_plan_request_with_project_guidance_and_targets(
             { "role": "system", "content": PLAN_SYSTEM_INSTRUCTIONS },
             { "role": "user", "content": prompt }
         ],
-        "tools": workspace_tool_definitions(),
+        "tools": workspace_plan_tool_definitions(),
         "stream": false
     });
     encode_model_request(&request)
@@ -261,7 +261,7 @@ pub(crate) fn build_impact_review_request(
             { "role": "system", "content": PLAN_SYSTEM_INSTRUCTIONS },
             { "role": "user", "content": prompt }
         ],
-        "tools": workspace_tool_definitions(),
+        "tools": workspace_plan_tool_definitions(),
         "stream": false
     });
     encode_model_request(&request)

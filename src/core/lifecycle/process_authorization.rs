@@ -1,6 +1,6 @@
-//! TaskSession-owned grants and canonical binding for the fixed offline Cargo operation.
+//! TaskSession-owned grants and canonical binding for supported offline process profiles.
 
-use crate::tools::process::{OfflineCargoPolicy, ProcessPolicyFacts};
+use crate::tools::process::{OfflineCargoPolicy, OfflineReadOnlyExecRequest, ProcessPolicyFacts};
 use crate::tools::FileIdentity;
 use krypper_sandbox::runner_contract::{FIXED_FD_MOUNTS, RUNNER_MOUNT_PATH, WORKSPACE_MOUNT};
 use krypper_sandbox::runner_protocol::{ACK_FD, STATUS_FD};
@@ -29,6 +29,7 @@ pub(super) enum GrantMode {
 pub(super) enum GrantScope {
     Session,
     ExactFilter,
+    ExactIntent,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -74,6 +75,7 @@ pub(super) struct ProcessGrant {
     pub(super) exact_filter: Option<String>,
     pub(super) expiry: Option<GrantExpiry>,
     pub(super) policy: Arc<OfflineCargoPolicy>,
+    pub(super) read_only_exec: Option<OfflineReadOnlyExecRequest>,
     pub(super) consumed: bool,
     pub(super) approved_digest: Option<[u8; 32]>,
 }
@@ -83,6 +85,7 @@ impl ProcessGrant {
         match self.scope {
             GrantScope::Session => true,
             GrantScope::ExactFilter => self.exact_filter.as_deref() == filter,
+            GrantScope::ExactIntent => false,
         }
     }
 
@@ -163,6 +166,7 @@ pub(super) fn start_if_authorized<T, E>(
         || current.scope != expected.scope
         || current.exact_filter != expected.exact_filter
         || current.expiry != expected.expiry
+        || current.read_only_exec != expected.read_only_exec
         || current.approved_digest != expected.approved_digest
         || current.consumed
         || current.expired()
@@ -213,7 +217,11 @@ impl ProcessIntent {
     ) -> Self {
         Self {
             version: PROCESS_INTENT_VERSION,
-            operation: "offline_cargo_test".to_owned(),
+            operation: if grant.read_only_exec.is_some() {
+                "offline_read_only_exec_v1".to_owned()
+            } else {
+                "offline_cargo_test".to_owned()
+            },
             task_id: grant.task_id,
             session_id,
             grant_id: grant.grant_id,
@@ -235,31 +243,72 @@ impl ProcessIntent {
             return Err("unsupported process intent version");
         }
         let requirements = &self.facts.requirements;
-        if self.operation != "offline_cargo_test"
-            || self.facts.profile_id != "offline_cargo_test"
-            || self.facts.executable != "/toolchain/bin/cargo"
-            || self.facts.profile_version != requirements.version()
-            || self.facts.arguments != requirements.arguments()
-            || self.facts.working_directory != requirements.working_directory()
-            || self.facts.environment_names != requirements.environment_names()
-            || self
+        let is_fixed_cargo = self.operation == "offline_cargo_test"
+            && self.facts.profile_id == "offline_cargo_test"
+            && self.facts.executable == "/toolchain/bin/cargo"
+            && self.facts.profile_version == requirements.version()
+            && self.facts.arguments == requirements.arguments()
+            && self.facts.working_directory == requirements.working_directory()
+            && krypper_sandbox::runner_contract::workspace_cwd_path(&self.facts.working_directory)
+                .is_some()
+            && self.facts.environment_names == requirements.environment_names()
+            && self
                 .facts
                 .environment
                 .iter()
                 .map(|(name, value)| (name.as_str(), value.as_str()))
-                .ne(krypper_sandbox::OFFLINE_CARGO_TEST_ENVIRONMENT
+                .eq(krypper_sandbox::OFFLINE_CARGO_TEST_ENVIRONMENT
                     .iter()
                     .copied())
-            || self.facts.profile_limits != requirements.profile_limits()
-            || requirements
-                != &krypper_sandbox::ValidatedExecutionRequirements::offline_cargo_test()
+            && self.facts.profile_limits == requirements.profile_limits()
+            && requirements
+                == &krypper_sandbox::ValidatedExecutionRequirements::offline_cargo_test();
+        let is_read_only_exec = self.operation == "offline_read_only_exec_v1"
+            && self.scope == GrantScope::ExactIntent
+            && self.filter.is_none()
+            && self.facts.profile_id == "offline_read_only_exec_v1"
+            && self.facts.profile_version == requirements.version()
+            && self.facts.arguments == requirements.arguments()
+            && self.facts.working_directory == requirements.working_directory()
+            && self.facts.environment_names == requirements.environment_names()
+            && self.facts.profile_limits == requirements.profile_limits()
+            && matches!(
+                (requirements.executable(), self.facts.executable.as_str()),
+                (SandboxExecutable::Cargo, "/toolchain/bin/cargo")
+                    | (SandboxExecutable::Rustc, "/toolchain/bin/rustc")
+            )
+            && requirements.network() == NetworkRequirement::DenyAll
+            && requirements.syscall() == SyscallRequirement::OfflineReadOnlyExecV1
+            && requirements.process_tree() == ProcessTreeRequirement::EphemeralTree
+            && requirements.resources().len() == 3
+            && requirements
+                .resources()
+                .iter()
+                .map(|resource| (resource.id, resource.access))
+                .eq([
+                    (PinnedResourceId::Workspace, PinnedResourceAccess::ReadOnly),
+                    (PinnedResourceId::Toolchain, PinnedResourceAccess::ReadOnly),
+                    (
+                        PinnedResourceId::CargoRegistry,
+                        PinnedResourceAccess::ReadOnly,
+                    ),
+                ])
+            && self
+                .facts
+                .environment
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_str()))
+                .eq(read_only_exec_environment(&self.facts.working_directory)
+                    .iter()
+                    .map(|(name, value)| (name.as_str(), value.as_str())));
+        if !(is_fixed_cargo || is_read_only_exec)
             || self
                 .facts
                 .effective_limits
                 .validate_against(self.facts.profile_limits)
                 .is_err()
         {
-            return Err("process intent is outside the fixed offline Cargo contract");
+            return Err("process intent is outside a supported offline process contract");
         }
         let mut encoder = CanonicalEncoder::new(PROCESS_INTENT_DOMAIN);
         encoder.u32(1, self.version);
@@ -323,15 +372,46 @@ pub(super) fn launch_command_matches_intent(command: &Command, intent: &ProcessI
     }
     let args = command.get_args().collect::<Vec<_>>();
     let count_arg = |value: &OsStr| args.iter().filter(|arg| *arg == &value).count();
+    let expected_mounts = if intent.facts.profile_id == "offline_read_only_exec_v1" {
+        let Some(mounts) = krypper_sandbox::runner_contract::read_only_exec_fd_mounts(
+            &intent.facts.working_directory,
+        ) else {
+            return false;
+        };
+        mounts
+    } else {
+        FIXED_FD_MOUNTS
+            .iter()
+            .map(|(fd, path)| (*fd, (*path).to_owned()))
+            .collect()
+    };
+    let expected_working_directory = if intent.facts.profile_id == "offline_read_only_exec_v1" {
+        let Some(path) =
+            krypper_sandbox::runner_contract::workspace_cwd_path(&intent.facts.working_directory)
+        else {
+            return false;
+        };
+        path
+    } else {
+        WORKSPACE_MOUNT.1.to_owned()
+    };
+    let expected_separator_count = 2
+        + intent
+            .facts
+            .arguments
+            .iter()
+            .filter(|argument| argument.as_str() == "--")
+            .count()
+        + usize::from(intent.filter.is_some());
     let fd_mounts = args
         .windows(3)
         .filter(|mount| mount[0] == OsStr::new("--ro-bind-fd"))
         .collect::<Vec<_>>();
     if count_arg(OsStr::new("--clearenv")) != 1
-        || count_arg(OsStr::new("--")) != 2 + usize::from(intent.filter.is_some())
-        || count_arg(OsStr::new("--ro-bind-fd")) != FIXED_FD_MOUNTS.len()
-        || fd_mounts.len() != FIXED_FD_MOUNTS.len()
-        || FIXED_FD_MOUNTS.iter().any(|(fd, path)| {
+        || count_arg(OsStr::new("--")) != expected_separator_count
+        || count_arg(OsStr::new("--ro-bind-fd")) != expected_mounts.len()
+        || fd_mounts.len() != expected_mounts.len()
+        || expected_mounts.iter().any(|(fd, path)| {
             let fd = fd.to_string();
             fd_mounts
                 .iter()
@@ -345,7 +425,7 @@ pub(super) fn launch_command_matches_intent(command: &Command, intent: &ProcessI
             .count()
             != 1
         || !args.windows(2).any(|pair| {
-            pair[0] == OsStr::new("--chdir") && pair[1] == OsStr::new(WORKSPACE_MOUNT.1)
+            pair[0] == OsStr::new("--chdir") && pair[1] == OsStr::new(&expected_working_directory)
         })
     {
         return false;
@@ -355,10 +435,10 @@ pub(super) fn launch_command_matches_intent(command: &Command, intent: &ProcessI
         .filter(|triple| triple[0] == OsStr::new("--setenv"))
         .map(|triple| (triple[1], triple[2]))
         .collect::<Vec<_>>();
-    if actual_environment.len() != krypper_sandbox::OFFLINE_CARGO_TEST_ENVIRONMENT.len()
+    if actual_environment.len() != intent.facts.environment.len()
         || actual_environment
             .iter()
-            .zip(krypper_sandbox::OFFLINE_CARGO_TEST_ENVIRONMENT)
+            .zip(intent.facts.environment.iter())
             .any(|((name, value), (expected_name, expected_value))| {
                 *name != OsStr::new(expected_name) || *value != OsStr::new(expected_value)
             })
@@ -374,10 +454,24 @@ pub(super) fn launch_command_matches_intent(command: &Command, intent: &ProcessI
         STATUS_FD.to_string(),
         "--ack-fd".to_owned(),
         ACK_FD.to_string(),
-        "--optional".to_owned(),
-        "--".to_owned(),
-        intent.facts.executable.clone(),
     ];
+    if intent.facts.profile_id == "offline_read_only_exec_v1" {
+        expected_tail.extend([
+            "--required".to_owned(),
+            "--profile".to_owned(),
+            "offline_read_only_exec_v1".to_owned(),
+            "--cwd".to_owned(),
+            intent.facts.working_directory.clone(),
+            "--".to_owned(),
+            intent.facts.executable.clone(),
+        ]);
+    } else {
+        expected_tail.extend([
+            "--optional".to_owned(),
+            "--".to_owned(),
+            intent.facts.executable.clone(),
+        ]);
+    }
     expected_tail.extend(intent.facts.arguments.iter().cloned());
     if let Some(filter) = &intent.filter {
         expected_tail.extend(["--".to_owned(), filter.clone()]);
@@ -400,6 +494,7 @@ fn scope_tag(scope: GrantScope) -> u8 {
     match scope {
         GrantScope::Session => 1,
         GrantScope::ExactFilter => 2,
+        GrantScope::ExactIntent => 3,
     }
 }
 
@@ -419,7 +514,26 @@ fn network_tag(network: NetworkRequirement) -> u8 {
 fn syscall_tag(syscall: SyscallRequirement) -> u8 {
     match syscall {
         SyscallRequirement::OfflineCargoTestV1 => 1,
+        SyscallRequirement::OfflineReadOnlyExecV1 => 2,
     }
+}
+
+fn read_only_exec_environment(working_directory: &str) -> Vec<(String, String)> {
+    let cwd =
+        krypper_sandbox::runner_contract::workspace_cwd_path(working_directory).unwrap_or_default();
+    krypper_sandbox::OFFLINE_CARGO_TEST_ENVIRONMENT
+        .iter()
+        .map(|(name, value)| {
+            (
+                (*name).to_owned(),
+                if *name == "PWD" {
+                    cwd.clone()
+                } else {
+                    (*value).to_owned()
+                },
+            )
+        })
+        .collect()
 }
 
 fn process_tree_tag(tree: ProcessTreeRequirement) -> u8 {
@@ -671,6 +785,7 @@ mod tests {
             exact_filter: filter.map(str::to_owned),
             expiry,
             policy: policy(),
+            read_only_exec: None,
             consumed: false,
             approved_digest: None,
         };
