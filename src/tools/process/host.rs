@@ -93,7 +93,7 @@ impl HostProcessRequest {
         &self.arguments
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(test, target_os = "linux"))]
     pub(crate) fn working_directory(&self) -> &PathBuf {
         &self.working_directory
     }
