@@ -7,11 +7,13 @@ use super::{
     ModelProvider, OllamaChatResponse, OllamaDecisionSource, OllamaMessageRole, WorkspacePlan,
     WorkspacePlanError, MAX_PLAN_OPERATIONS,
 };
-use crate::agent_loop::{GoalTurnResult, GoalTurnStopReason, WorkspaceObservation};
-use crate::harness::execution::workspace_mutation_target;
-use crate::harness::verification::{
+use crate::contracts::completion::{
     CompletionEvidenceSource, CompletionVerification, CompletionVerificationStatus,
     MAX_COMPLETION_CHECKS, MAX_COMPLETION_TEXT_BYTES,
+};
+use crate::contracts::goal_turn::{
+    summarize_observation_activity, workspace_mutation_target, GoalTurnResult, GoalTurnStopReason,
+    WorkspaceObservation,
 };
 use crate::task_lifecycle::{
     TaskSession, TurnActivitySummary, TurnOutcome, TurnState, WorkspaceGuidanceReadError,
@@ -298,7 +300,7 @@ fn verified_execution_evidence<'a>(
     let expected_activity = result
         .observations()
         .iter()
-        .flat_map(crate::harness::execution::summarize_observation_activity)
+        .flat_map(summarize_observation_activity)
         .collect::<Vec<_>>();
     let activity = turn.activity_history();
     if activity.get(..expected_activity.len()) != Some(expected_activity.as_slice()) {

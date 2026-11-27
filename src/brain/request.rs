@@ -5,7 +5,7 @@ use super::context::{
     build_plan_prompt_with_targets_and_repository_context, build_task_prompt_with_project_guidance,
     RepositoryContext,
 };
-use crate::agent_loop::WorkspaceObservation;
+use crate::contracts::goal_turn::WorkspaceObservation;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 

@@ -1,6 +1,6 @@
 //! Model error taxonomy and its formatting.
 
-use crate::agent_loop::DecisionFailureCode;
+use crate::contracts::goal_turn::DecisionFailureCode;
 use serde_json::Value;
 use std::fmt;
 

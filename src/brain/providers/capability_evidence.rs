@@ -4,8 +4,8 @@
 //! verifies only that a decision request completed for the selected account,
 //! model, and configuration revision; it does not prove unrelated model features.
 
-use crate::agent_loop::DecisionFailureCode;
 use crate::brain::providers::ModelTokenUsage;
+use crate::contracts::goal_turn::DecisionFailureCode;
 use crate::routing::{
     CapabilityAssertion, CapabilityName, CapabilityProvenance, CapabilitySupport,
     CapabilityVerification, ProviderReadiness,

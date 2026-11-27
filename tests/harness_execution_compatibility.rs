@@ -9,6 +9,26 @@ use std::fs;
 use std::path::PathBuf;
 use uuid::Uuid;
 
+#[allow(dead_code)]
+fn compatibility_type_paths_are_identical(
+    action: krypper::agent_loop::WorkspaceAction,
+    result: krypper::agent_loop::GoalTurnResult,
+    failure: krypper::agent_loop::DecisionFailureCode,
+) -> (
+    krypper::harness::execution::WorkspaceAction,
+    krypper::harness::execution::GoalTurnResult,
+    krypper::harness::execution::DecisionFailureCode,
+) {
+    (action, result, failure)
+}
+
+#[allow(dead_code)]
+fn completion_types_keep_the_verification_path(
+    verification: krypper::harness::verification::CompletionVerification,
+) -> krypper::harness::verification::CompletionVerification {
+    verification
+}
+
 #[path = "../src/test_support.rs"]
 mod test_support;
 

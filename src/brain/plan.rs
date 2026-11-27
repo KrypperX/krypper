@@ -1,4 +1,4 @@
-use crate::harness::execution::{workspace_action_name, WorkspaceAction};
+use crate::contracts::goal_turn::{workspace_action_name, WorkspaceAction};
 use crate::task_lifecycle::WorkspaceGuidanceReadError;
 use crate::tools::registry::workspace_operations;
 use std::fmt;
