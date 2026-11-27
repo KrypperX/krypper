@@ -29,7 +29,7 @@ fn owned_file_or_error(descriptor: RawFd) -> io::Result<File> {
 }
 
 pub(crate) fn open_current_directory() -> io::Result<DirHandle> {
-    let path = CString::new(".").expect("invariant: a dot path contains no NUL byte");
+    let path = c".";
     // SAFETY: `path` is NUL-terminated and remains valid for this call.
     let descriptor = unsafe {
         libc::open(
@@ -53,7 +53,7 @@ pub(crate) fn open_directory_path(path: &Path) -> io::Result<DirHandle> {
 }
 
 pub(crate) fn duplicate_directory(directory: &DirHandle) -> io::Result<DirHandle> {
-    let name = CString::new(".").expect("invariant: a dot path contains no NUL byte");
+    let name = c".";
     // SAFETY: `directory` is an open directory and `name` is a live NUL-terminated dot path.
     let descriptor = unsafe {
         libc::openat(
