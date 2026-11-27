@@ -1,4 +1,4 @@
-use crate::tools::{capture_workspace_root, FileIdentity, WorkspaceRoot};
+use crate::tools::{capture_workspace_root, CliError, FileIdentity, WorkspaceRoot};
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -614,7 +614,7 @@ impl Turn {
 pub struct Task {
     pub(super) id: Uuid,
     pub(super) description: String,
-    pub(super) workspace_root: Result<Arc<WorkspaceRoot>, String>,
+    pub(super) workspace_root: Result<Arc<WorkspaceRoot>, CliError>,
     pub(super) workspace_revision: Arc<WorkspaceRevisionFence>,
     pub(super) state: TaskState,
     pub(super) events: Vec<TaskEvent>,
@@ -767,7 +767,7 @@ impl Task {
 
     pub(super) fn new_with_workspace_root(
         description: impl Into<String>,
-        workspace_root: Result<Arc<WorkspaceRoot>, String>,
+        workspace_root: Result<Arc<WorkspaceRoot>, CliError>,
         workspace_revision: Arc<WorkspaceRevisionFence>,
     ) -> Self {
         Self {

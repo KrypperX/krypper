@@ -658,8 +658,8 @@ impl TaskSession {
         let root = task
             .workspace_root
             .as_ref()
-            .map_err(|message| WorkspaceReadError::File {
-                message: message.clone(),
+            .map_err(|error| WorkspaceReadError::File {
+                message: error.message().to_owned(),
             })?;
         if !workspace_revision_fence_is_registered_for_root(&task.workspace_revision, root) {
             return Ok(crate::ProcessResult::denied(test_filter));
@@ -746,8 +746,8 @@ impl TaskSession {
         let root = task
             .workspace_root
             .as_ref()
-            .map_err(|message| WorkspaceReadError::File {
-                message: format!("task workspace could not be resolved: {message}"),
+            .map_err(|error| WorkspaceReadError::File {
+                message: format!("task workspace could not be resolved: {}", error.message()),
             })?;
         read_text_file_at(root, path.as_os_str()).map_err(|error| WorkspaceReadError::File {
             message: error.message().to_owned(),
@@ -771,12 +771,12 @@ impl TaskSession {
         let task = self
             .running_workspace_task(task_id, turn_id)
             .map_err(WorkspaceListError::from)?;
-        let root =
-            task.workspace_root
-                .as_ref()
-                .map_err(|message| WorkspaceListError::Directory {
-                    message: format!("task workspace could not be resolved: {message}"),
-                })?;
+        let root = task
+            .workspace_root
+            .as_ref()
+            .map_err(|error| WorkspaceListError::Directory {
+                message: format!("task workspace could not be resolved: {}", error.message()),
+            })?;
         list_task_directory_names_at(root, path.as_os_str()).map_err(|error| {
             WorkspaceListError::Directory {
                 message: error.message().to_owned(),
@@ -801,12 +801,12 @@ impl TaskSession {
         let task = self
             .running_workspace_task(task_id, turn_id)
             .map_err(WorkspaceSearchError::from)?;
-        let root =
-            task.workspace_root
-                .as_ref()
-                .map_err(|message| WorkspaceSearchError::Search {
-                    message: format!("task workspace could not be resolved: {message}"),
-                })?;
+        let root = task
+            .workspace_root
+            .as_ref()
+            .map_err(|error| WorkspaceSearchError::Search {
+                message: format!("task workspace could not be resolved: {}", error.message()),
+            })?;
         search_text_files_at(root, directory.as_os_str(), query)
             .map(|matches| {
                 matches
@@ -833,9 +833,9 @@ impl TaskSession {
         let task = self
             .running_workspace_task(task_id, turn_id)
             .map_err(WorkspaceCreateDirectoryError::from)?;
-        let root = task.workspace_root.as_ref().map_err(|message| {
+        let root = task.workspace_root.as_ref().map_err(|error| {
             WorkspaceCreateDirectoryError::Directory {
-                message: format!("task workspace could not be resolved: {message}"),
+                message: format!("task workspace could not be resolved: {}", error.message()),
             }
         })?;
         let _mutation =
@@ -867,12 +867,12 @@ impl TaskSession {
         let task = self
             .running_workspace_task(task_id, turn_id)
             .map_err(WorkspaceSearchError::from)?;
-        let root =
-            task.workspace_root
-                .as_ref()
-                .map_err(|message| WorkspaceSearchError::Search {
-                    message: format!("task workspace could not be resolved: {message}"),
-                })?;
+        let root = task
+            .workspace_root
+            .as_ref()
+            .map_err(|error| WorkspaceSearchError::Search {
+                message: format!("task workspace could not be resolved: {}", error.message()),
+            })?;
         search_tree_text_files_at(root, directory.as_os_str(), query)
             .map(|matches| {
                 matches
@@ -929,8 +929,8 @@ impl TaskSession {
         let root = task
             .workspace_root
             .as_ref()
-            .map_err(|message| WorkspaceWriteError::File {
-                message: format!("task workspace could not be resolved: {message}"),
+            .map_err(|error| WorkspaceWriteError::File {
+                message: format!("task workspace could not be resolved: {}", error.message()),
             })?;
         let _mutation =
             begin_managed_workspace_mutation(&task.workspace_revision, root).map_err(|_| {
@@ -985,8 +985,8 @@ impl TaskSession {
         let root = task
             .workspace_root
             .as_ref()
-            .map_err(|message| WorkspaceReplaceError::File {
-                message: format!("task workspace could not be resolved: {message}"),
+            .map_err(|error| WorkspaceReplaceError::File {
+                message: format!("task workspace could not be resolved: {}", error.message()),
             })?;
         let _mutation =
             begin_managed_workspace_mutation(&task.workspace_revision, root).map_err(|_| {
@@ -1025,8 +1025,8 @@ impl TaskSession {
         let root = task
             .workspace_root
             .as_ref()
-            .map_err(|message| WorkspaceReplaceError::File {
-                message: format!("task workspace could not be resolved: {message}"),
+            .map_err(|error| WorkspaceReplaceError::File {
+                message: format!("task workspace could not be resolved: {}", error.message()),
             })?;
         let _mutation =
             begin_managed_workspace_mutation(&task.workspace_revision, root).map_err(|_| {
