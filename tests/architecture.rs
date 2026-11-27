@@ -1960,6 +1960,53 @@ fn crate_root_brain_glob_facade_with_serde_attribute_fails_closed() {
 }
 
 #[test]
+fn crate_root_brain_glob_facade_ignores_test_only_derive_attributes() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("lib.rs");
+    fs::write(
+        &root,
+        r#"
+            pub mod brain { pub struct ModelError; }
+            pub mod extensions { pub use crate::brain::ModelError; }
+            pub mod compatibility {
+                pub use crate::extensions::*;
+                pub struct NeutralType;
+                #[cfg(test)]
+                pub mod test_support {
+                    #[derive(Clone)]
+                    pub struct TestOnly;
+                }
+            }
+        "#,
+    )
+    .unwrap();
+
+    let mut violations = Vec::new();
+    let brain_exports = scan_crate_root_aliases(&root, &mut violations);
+    let neutral_violations = scan_source_with_root_exports(
+        "use crate::compatibility::NeutralType;",
+        "tools_test_only_derive_neutral_sibling.rs",
+        1,
+        &brain_exports,
+    );
+    let brain_violations = scan_source_with_root_exports(
+        "use crate::compatibility::ModelError;",
+        "tools_brain_item_through_test_module_glob.rs",
+        1,
+        &brain_exports,
+    );
+
+    assert!(
+        neutral_violations.is_empty(),
+        "a derive inside a test-only module must not taint a neutral sibling: {neutral_violations:?}"
+    );
+    assert!(
+        !brain_violations.is_empty(),
+        "the production Brain-backed re-export must remain blocked"
+    );
+}
+
+#[test]
 fn crate_root_facade_rejects_globs_of_the_crate_root() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("lib.rs");

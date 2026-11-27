@@ -3844,6 +3844,13 @@ struct GlobShadowSensitiveAttributeProbe {
 }
 
 impl Visit<'_> for GlobShadowSensitiveAttributeProbe {
+    fn visit_item(&mut self, item: &Item) {
+        if item_is_test_only(item_attrs(item)) {
+            return;
+        }
+        syn::visit::visit_item(self, item);
+    }
+
     fn visit_attribute(&mut self, attribute: &Attribute) {
         self.found |=
             path_is_ident(attribute.path(), "derive") || path_is_ident(attribute.path(), "serde");
