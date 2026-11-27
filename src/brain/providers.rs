@@ -25,6 +25,7 @@ mod compatible;
 mod gemini;
 mod provider_catalog;
 mod responses;
+pub(crate) mod streaming;
 
 pub(crate) use provider_catalog::{
     all as provider_descriptors, by_provider as provider_descriptor,

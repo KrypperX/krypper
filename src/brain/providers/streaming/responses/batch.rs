@@ -1,5 +1,5 @@
-use super::super::sse::SseFrame;
 use super::arguments::{ArgumentsError, ResponsesArguments};
+use crate::contracts::sse::SseFrame;
 
 /// Collect interleaved Responses function-call fragments by output index.
 ///

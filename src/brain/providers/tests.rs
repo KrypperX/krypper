@@ -650,7 +650,8 @@ fn assert_responses_stream_validates_action(provider: super::ResponsesProvider) 
 
 #[test]
 fn anthropic_text_delta_excludes_tool_argument_chunks() {
-    use crate::streaming::{provider_text_delta, SseFrame};
+    use super::streaming::provider_text_delta;
+    use crate::contracts::sse::SseFrame;
     let text = SseFrame {
         event: Some("content_block_delta".into()),
         data: serde_json::json!({

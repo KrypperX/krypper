@@ -1,8 +1,6 @@
-use super::super::emitter::{EmitError, EventSink, StreamEmitter};
-use super::super::events::StreamEvent;
-use super::super::sse::{provider_text_delta, SseFrame};
 use super::arguments::ArgumentsError;
 use super::batch::ResponsesCallBatch;
+use crate::contracts::sse::SseFrame;
 
 /// Stateful, fail-closed assembler for one OpenAI Responses function-call stream.
 ///
@@ -85,22 +83,4 @@ impl ResponsesFinalActions {
             }
         }
     }
-}
-
-/// Project a recognized provider SSE text delta into the caller's event stream.
-/// Unknown events (including tool argument deltas) are ignored. Sink failures
-/// propagate to the caller so it can stop reading instead of buffering forever.
-pub fn emit_provider_text_delta<S: EventSink>(
-    emitter: &mut StreamEmitter<S>,
-    item_id: &str,
-    frame: &SseFrame,
-) -> Result<bool, EmitError<S::Error>> {
-    let Some(text) = provider_text_delta(frame) else {
-        return Ok(false);
-    };
-    emitter.emit(StreamEvent::TextDelta {
-        item_id: item_id.to_owned(),
-        text,
-    })?;
-    Ok(true)
 }

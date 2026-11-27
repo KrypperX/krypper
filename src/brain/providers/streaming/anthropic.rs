@@ -1,4 +1,5 @@
-use super::sse::{provider_text_delta, SseFrame};
+use super::provider_text_delta;
+use crate::contracts::sse::SseFrame;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -178,7 +179,7 @@ impl AnthropicFinalActions {
 #[cfg(test)]
 mod tests {
     use super::AnthropicFinalActions;
-    use crate::streaming::SseFrame;
+    use crate::contracts::sse::SseFrame;
     use serde_json::{json, Value};
 
     fn frame(event: &str, mut data: Value) -> SseFrame {

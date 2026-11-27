@@ -1,4 +1,4 @@
-use super::super::sse::SseFrame;
+use crate::contracts::sse::SseFrame;
 
 /// Bounded, provider-native argument fragments for one Responses output index.
 ///
