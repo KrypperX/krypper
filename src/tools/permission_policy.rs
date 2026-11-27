@@ -130,6 +130,10 @@ mod tests {
             PermissionDecision::Ask
         );
         assert_eq!(
+            decide(PermissionMode::Ask, EffectClass::ExternalOrUnclassified),
+            PermissionDecision::Ask
+        );
+        assert_eq!(
             decide(PermissionMode::RiskBased, EffectClass::FixedOfflineProcess),
             PermissionDecision::Allow
         );

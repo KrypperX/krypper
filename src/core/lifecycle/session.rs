@@ -21,7 +21,7 @@ use crate::tools::{
     capture_workspace_root_at_with_error, create_directory_at, create_text_file_at,
     list_task_directory_names_at, read_project_guidance_at, read_root_agents_md_at,
     read_text_file_at, replace_text_file_at_with_revision, search_text_files_at,
-    search_tree_text_files_at, PatchEvidence, WorkspaceRoot,
+    search_tree_text_files_at, FileIdentity, PatchEvidence, WorkspaceRoot,
 };
 use krypper_sandbox::{SpawnAuthorizationGate, SpawnGateError};
 use std::ffi::OsString;
@@ -441,6 +441,73 @@ impl TaskSession {
         turn_id: Uuid,
     ) -> Result<(), WorkspaceReadError> {
         self.running_workspace_task(task_id, turn_id).map(|_| ())
+    }
+
+    /// Captures the current managed revision for an approved registered extension effect.
+    pub(crate) fn extension_workspace_snapshot(
+        &self,
+        task_id: Uuid,
+        turn_id: Uuid,
+    ) -> Result<(FileIdentity, u64), WorkspaceReadError> {
+        let task = self.running_workspace_task(task_id, turn_id)?;
+        let root = task
+            .workspace_root
+            .as_ref()
+            .map_err(|error| WorkspaceReadError::File {
+                message: error.message().to_owned(),
+            })?;
+        if !workspace_revision_fence_is_registered_for_root(&task.workspace_revision, root) {
+            return Err(WorkspaceReadError::File {
+                message: "workspace revision state is unavailable".into(),
+            });
+        }
+        let (_read_lease, revision) =
+            task.workspace_revision
+                .begin_read()
+                .map_err(|_| WorkspaceReadError::File {
+                    message: "workspace revision state is unavailable".into(),
+                })?;
+        let identity = root.identity().map_err(|error| WorkspaceReadError::File {
+            message: error.to_string(),
+        })?;
+        Ok((identity, revision))
+    }
+
+    /// Runs one effect only while the captured workspace identity and revision are still current.
+    /// The read lease stays held for the full synchronous effect, excluding managed writers.
+    pub(crate) fn with_extension_workspace_snapshot<T>(
+        &self,
+        task_id: Uuid,
+        turn_id: Uuid,
+        expected_identity: FileIdentity,
+        expected_revision: u64,
+        effect: impl FnOnce() -> T,
+    ) -> Result<Option<T>, WorkspaceReadError> {
+        let task = self.running_workspace_task(task_id, turn_id)?;
+        let root = task
+            .workspace_root
+            .as_ref()
+            .map_err(|error| WorkspaceReadError::File {
+                message: error.message().to_owned(),
+            })?;
+        if !workspace_revision_fence_is_registered_for_root(&task.workspace_revision, root) {
+            return Err(WorkspaceReadError::File {
+                message: "workspace revision state is unavailable".into(),
+            });
+        }
+        let (_read_lease, current_revision) =
+            task.workspace_revision
+                .begin_read()
+                .map_err(|_| WorkspaceReadError::File {
+                    message: "workspace revision state is unavailable".into(),
+                })?;
+        let current_identity = root.identity().map_err(|error| WorkspaceReadError::File {
+            message: error.to_string(),
+        })?;
+        if current_identity != expected_identity || current_revision != expected_revision {
+            return Ok(None);
+        }
+        Ok(Some(effect()))
     }
 
     /// Grants this task the fixed offline Cargo profile for the TaskSession lifetime.
@@ -1210,6 +1277,61 @@ mod process_grant_tests {
         let turn = task.create_turn().unwrap();
         task.transition_turn(turn, TurnState::Running).unwrap();
         turn
+    }
+
+    #[test]
+    fn extension_effect_read_lease_blocks_managed_writer_until_effect_returns() {
+        let workspace = TempDir::with_prefix("extension-workspace-lease-");
+        let mut effect_session = TaskSession::new_in_workspace(workspace.path()).unwrap();
+        let effect_task_id = effect_session.create_task("extension effect").id();
+        let effect_turn_id = running_turn(&mut effect_session, effect_task_id);
+        let mut writer_session = TaskSession::new_in_workspace(workspace.path()).unwrap();
+        let writer_task_id = writer_session.create_task("managed writer").id();
+        let writer_turn_id = running_turn(&mut writer_session, writer_task_id);
+        let (identity, revision) = effect_session
+            .extension_workspace_snapshot(effect_task_id, effect_turn_id)
+            .unwrap();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+
+        let effect_result = effect_session
+            .with_extension_workspace_snapshot(
+                effect_task_id,
+                effect_turn_id,
+                identity,
+                revision,
+                || {
+                    let writer = thread::spawn(move || {
+                        started_tx.send(()).unwrap();
+                        let result = writer_session.create_workspace_file(
+                            writer_task_id,
+                            writer_turn_id,
+                            Path::new("writer.txt"),
+                            "committed",
+                        );
+                        done_tx.send(result).unwrap();
+                    });
+                    started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+                    assert!(matches!(
+                        done_rx.recv_timeout(Duration::from_millis(50)),
+                        Err(mpsc::RecvTimeoutError::Timeout)
+                    ));
+                    writer
+                },
+            )
+            .unwrap()
+            .expect("captured revision remains current");
+
+        // The effect closure's return drops the read lease, allowing the queued writer to finish.
+        effect_result.join().unwrap();
+        done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .unwrap();
+        let (_, final_revision) = effect_session
+            .extension_workspace_snapshot(effect_task_id, effect_turn_id)
+            .unwrap();
+        assert_eq!(final_revision, revision + 1);
     }
 
     fn command_for_intent(intent: &ProcessIntent) -> Command {

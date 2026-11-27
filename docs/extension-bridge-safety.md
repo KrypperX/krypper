@@ -6,12 +6,33 @@ host-facing declaration and turn APIs. A provider supplies only a registered
 tool name and a JSON argument object. The provider cannot install a handler,
 mint a grant, or choose an arbitrary executor.
 
+A reusable `CapabilityGrant` is only a prerequisite. A registered effect runs
+only through the prompt-aware dispatch/turn APIs, which ask the host to approve
+an immutable request bound to the current task, turn, operation, schema,
+arguments, workspace identity and managed revision. The host must provide a
+current capability-context callback; the grant is rechecked against its fresh
+generation after approval.
+
+The approved extension APIs always request exact approval for every effect.
+They do not accept a permission mode or let a reusable grant skip that prompt.
+This matches the current Ask and Risk-based policy, where external or
+unclassified effects require approval; only the fixed offline process profile
+is automatically available in Risk-based mode. Full Access is unavailable and
+cannot bypass extension approval.
+
 ## Threat model
 
 - Only host-validated descriptors may be advertised. Names that collide with a
   built-in action or another extension are rejected before advertisement.
-- Capability grants, turn ownership and JSON schemas are rechecked at dispatch,
-  not only when a tool is advertised. Denials fail closed.
+- Capability grants, turn ownership and JSON schemas are checked before the
+  prompt and again at the effect boundary. The one-shot approval expires 30
+  seconds after the prompt request is created and binds the canonical request
+  digest. Denials, unavailable
+  authority and callback errors fail closed.
+- The final workspace identity/revision comparison and synchronous handler call
+  hold TaskSession's existing read lease, so managed Krypper workspace
+  mutations cannot interleave with that effect. Direct writes by trusted host
+  handlers or unrelated processes are outside this managed revision fence.
 - Raw argument values are never persisted in observations or logs. Successful
   observations retain the tool name and the host handler's result; denials
   retain only the tool name, matching existing unsupported-tool behaviour.
@@ -34,13 +55,17 @@ mint a grant, or choose an arbitrary executor.
   migration. Downstream exhaustive matches must add a wildcard arm or the new
   variants.
 - The `krypper::extensions` module adds host-facing declaration, request-builder,
-  decision-source and dispatch APIs; these are additive and require no changes
-  to built-in provider configuration.
+  decision-source and dispatch APIs; the approved dispatch and turn APIs are
+  additive and require no changes to built-in provider configuration. Existing
+  direct dispatch APIs without a prompt remain source-compatible and fail closed
+  with `ApprovalRequired`; existing turn wrappers without the exact prompt gate
+  return `PermissionPromptUnavailable` for registered extension actions.
 - With an empty host registry, existing built-in turn flows and observations are
   unchanged.
 - Unsupported provider tool calls that carry JSON arguments now map to the new
   extension action instead of a generic error string, so a handler can receive
-  them only when the host has explicitly registered and granted that name.
+  them only when the host has explicitly registered and granted that name and
+  the host approves the exact effect for this turn.
 
 ## MCP stdio transport (PR 4)
 

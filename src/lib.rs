@@ -51,9 +51,13 @@ pub mod extensions {
         ResponsesDecisionSource, ResponsesProvider,
     };
     pub use crate::harness::execution::{
+        dispatch_registered_extension_with_approval_for_turn,
         dispatch_registered_extension_with_arguments_for_turn,
+        run_goal_turn_with_approved_extensions, run_goal_turn_with_budget_and_approved_extensions,
         run_goal_turn_with_budget_and_extensions, run_goal_turn_with_extensions,
-        ExtensionDispatchError, RegisteredExtensionWithArguments, TurnExtensions,
+        CurrentExtensionContext, ExtensionApprovalGate, ExtensionApprovalPrompt,
+        ExtensionApprovalRequest, ExtensionDispatchError, RegisteredExtensionWithArguments,
+        TurnExtensions,
     };
     pub use crate::tools::capability_policy::{
         CapabilityContext, CapabilityDenial, CapabilityGrant,
