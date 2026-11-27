@@ -188,7 +188,31 @@ fn tools_core_guard_detects_glob_include_and_external_transitive_facades() {
         &root,
         r#"
             pub mod core { pub struct Task; }
-            pub mod compatibility { pub use crate::core::Task as CompatibilityTask; }
+            pub mod compatibility {
+                pub use crate::core::Task as CompatibilityTask;
+                pub struct ProcessOutcome;
+            }
+            pub use crate::compatibility::*;
+            pub(crate) mod tools { use crate::ProcessOutcome; }
+        "#,
+    )
+    .unwrap();
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations
+            .iter()
+            .all(|violation| !violation.contains("Core")),
+        "neutral facade export was classified as Core: {violations:?}"
+    );
+
+    fs::write(
+        &root,
+        r#"
+            pub mod core { pub struct Task; }
+            pub mod compatibility {
+                pub use crate::core::Task as CompatibilityTask;
+                pub struct ProcessOutcome;
+            }
             pub use crate::compatibility::*;
             pub(crate) mod tools { use crate::CompatibilityTask; }
         "#,
@@ -200,6 +224,28 @@ fn tools_core_guard_detects_glob_include_and_external_transitive_facades() {
             .iter()
             .any(|violation| violation.contains("Core")),
         "Core re-export through a facade glob was not detected: {violations:?}"
+    );
+
+    fs::write(
+        &root,
+        r#"
+            pub mod core { pub struct Task; }
+            pub mod compatibility {
+                pub use crate::core::Task as CompatibilityTask;
+                pub struct ProcessOutcome;
+            }
+            pub use crate::compatibility as compat;
+            pub use crate::compat::*;
+            pub(crate) mod tools { use crate::ProcessOutcome; }
+        "#,
+    )
+    .unwrap();
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations
+            .iter()
+            .all(|violation| !violation.contains("Core")),
+        "neutral export through an aliased facade glob was classified as Core: {violations:?}"
     );
 
     fs::write(

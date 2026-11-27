@@ -1581,37 +1581,48 @@ fn scan_crate_root_core_aliases(root: &Path, violations: &mut Vec<String>) -> Ha
         }
         _ => None,
     });
-    let root_module_glob_exports = file
-        .items
-        .iter()
-        .filter_map(|item| match item {
-            Item::Mod(module) if !item_is_test_only(&module.attrs) => Some((
-                ident_name(&module.ident),
-                module_public_glob_exports(module, root, &module_directory(root), false),
-            )),
-            _ => None,
-        })
-        .collect::<HashMap<_, _>>();
     let mut ignored_macro_import_violations = Vec::new();
     let root_inspected_macros =
         inspected_macro_imports(&file.items, root, &mut ignored_macro_import_violations);
+    let mut root_module_aliases = HashMap::new();
 
     loop {
-        let previous_count = exports.len();
+        let previous_counts = (exports.len(), root_module_aliases.len());
+        let root_module_glob_exports = file
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Mod(module) if !item_is_test_only(&module.attrs) => Some((
+                    ident_name(&module.ident),
+                    module_core_glob_exports(
+                        module,
+                        root,
+                        &module_directory(root),
+                        false,
+                        1,
+                        &exports,
+                        &mut HashSet::new(),
+                    ),
+                )),
+                _ => None,
+            })
+            .collect::<HashMap<_, _>>();
         for item in &file.items {
             if item_is_test_only(item_attrs(item)) {
                 continue;
             }
             match item {
-                Item::Use(item) => collect_core_aliases(
-                    &item.tree,
-                    &mut Vec::new(),
-                    &mut exports,
-                    core_glob_exports.as_ref().and_then(Option::as_ref),
-                    &root_module_glob_exports,
-                    &root.display().to_string(),
-                    violations,
-                ),
+                Item::Use(item) => {
+                    let origin = root.display().to_string();
+                    let mut context = CoreAliasContext {
+                        core_glob_exports: core_glob_exports.as_ref().and_then(Option::as_ref),
+                        root_module_glob_exports: &root_module_glob_exports,
+                        root_module_aliases: &mut root_module_aliases,
+                        origin: &origin,
+                        violations,
+                    };
+                    collect_core_aliases(&item.tree, &mut Vec::new(), &mut exports, &mut context);
+                }
                 Item::Mod(module)
                     if !matches!(ident_name(&module.ident).as_str(), "core" | "tools")
                         && module_contains_core_dependency(
@@ -1649,7 +1660,7 @@ fn scan_crate_root_core_aliases(root: &Path, violations: &mut Vec<String>) -> Ha
                 }
             }
         }
-        if previous_count == exports.len() {
+        if previous_counts == (exports.len(), root_module_aliases.len()) {
             break;
         }
     }
@@ -1902,27 +1913,24 @@ impl Visit<'_> for CoreDependencyProbe<'_> {
     }
 }
 
+struct CoreAliasContext<'a> {
+    core_glob_exports: Option<&'a HashSet<String>>,
+    root_module_glob_exports: &'a HashMap<String, Option<HashSet<String>>>,
+    root_module_aliases: &'a mut HashMap<String, String>,
+    origin: &'a str,
+    violations: &'a mut Vec<String>,
+}
+
 fn collect_core_aliases(
     tree: &UseTree,
     prefix: &mut Vec<String>,
     exports: &mut HashSet<String>,
-    core_glob_exports: Option<&HashSet<String>>,
-    root_module_glob_exports: &HashMap<String, Option<HashSet<String>>>,
-    origin: &str,
-    violations: &mut Vec<String>,
+    context: &mut CoreAliasContext<'_>,
 ) {
     match tree {
         UseTree::Path(path) => {
             prefix.push(ident_name(&path.ident));
-            collect_core_aliases(
-                &path.tree,
-                prefix,
-                exports,
-                core_glob_exports,
-                root_module_glob_exports,
-                origin,
-                violations,
-            );
+            collect_core_aliases(&path.tree, prefix, exports, context);
             prefix.pop();
         }
         UseTree::Name(name) => {
@@ -1938,6 +1946,12 @@ fn collect_core_aliases(
                 exports.insert(ident_name(&rename.rename));
                 if root_path_is_core_module(prefix, exports) {
                     exports.insert(core_root_module_alias_key(&ident_name(&rename.rename)));
+                } else if let Some(module_name) =
+                    root_path_root_module_name(prefix, exports, context.root_module_aliases)
+                {
+                    context
+                        .root_module_aliases
+                        .insert(ident_name(&rename.rename), module_name);
                 }
             } else if path_resolves_to_crate_root(prefix, 0) {
                 exports.insert(core_root_self_alias_key(&ident_name(&rename.rename)));
@@ -1947,34 +1961,39 @@ fn collect_core_aliases(
         UseTree::Glob(_) => {
             if root_path_starts_with_core_or_export(prefix, exports) {
                 if root_path_is_core_module(prefix, exports) {
-                    if let Some(names) = core_glob_exports {
+                    if let Some(names) = context.core_glob_exports {
                         exports.extend(names.iter().cloned());
-                    } else if !violations.iter().any(|violation| {
+                    } else if !context.violations.iter().any(|violation| {
                         violation.contains("Core glob export names are not inspectable")
                     }) {
-                        violations.push(format!(
-                            "{origin}: Core glob export names are not inspectable"
+                        context.violations.push(format!(
+                            "{}: Core glob export names are not inspectable",
+                            context.origin
                         ));
                     }
-                } else if let Some(module_name) = root_path_root_module_name(prefix, exports) {
-                    match root_module_glob_exports.get(&module_name) {
+                } else if let Some(module_name) =
+                    root_path_root_module_name(prefix, exports, context.root_module_aliases)
+                {
+                    match context.root_module_glob_exports.get(&module_name) {
                         Some(Some(names)) => exports.extend(names.iter().cloned()),
                         Some(None) | None => {
-                            if !violations.iter().any(|violation| {
+                            if !context.violations.iter().any(|violation| {
                                 violation.contains("Core facade glob exports are not inspectable")
                             }) {
-                                violations.push(format!(
-                                    "{origin}: Core facade glob exports are not inspectable"
+                                context.violations.push(format!(
+                                    "{}: Core facade glob exports are not inspectable",
+                                    context.origin
                                 ));
                             }
                         }
                     }
                 } else {
-                    if !violations.iter().any(|violation| {
+                    if !context.violations.iter().any(|violation| {
                         violation.contains("Core facade glob exports are not inspectable")
                     }) {
-                        violations.push(format!(
-                            "{origin}: Core facade glob exports are not inspectable"
+                        context.violations.push(format!(
+                            "{}: Core facade glob exports are not inspectable",
+                            context.origin
                         ));
                     }
                 }
@@ -1982,15 +2001,7 @@ fn collect_core_aliases(
         }
         UseTree::Group(group) => {
             for item in &group.items {
-                collect_core_aliases(
-                    item,
-                    prefix,
-                    exports,
-                    core_glob_exports,
-                    root_module_glob_exports,
-                    origin,
-                    violations,
-                );
+                collect_core_aliases(item, prefix, exports, context);
             }
         }
     }
@@ -2015,7 +2026,11 @@ fn root_path_is_core_module(segments: &[String], exports: &HashSet<String>) -> b
         })
 }
 
-fn root_path_root_module_name(segments: &[String], exports: &HashSet<String>) -> Option<String> {
+fn root_path_root_module_name(
+    segments: &[String],
+    exports: &HashSet<String>,
+    aliases: &HashMap<String, String>,
+) -> Option<String> {
     let mut start = match segments.first().map(String::as_str) {
         Some("crate" | "$crate" | "self") => 1,
         Some(segment) if exports.contains(&core_root_self_alias_key(segment)) => 1,
@@ -2028,7 +2043,18 @@ fn root_path_root_module_name(segments: &[String], exports: &HashSet<String>) ->
     {
         start += 1;
     }
-    (segments.len() == start + 1).then(|| segments[start].clone())
+    if segments.len() != start + 1 {
+        return None;
+    }
+    let mut module_name = segments[start].clone();
+    let mut visited = HashSet::new();
+    while let Some(source) = aliases.get(&module_name) {
+        if !visited.insert(module_name.clone()) {
+            return None;
+        }
+        module_name = source.clone();
+    }
+    Some(module_name)
 }
 
 fn module_public_glob_exports(
@@ -2051,6 +2077,215 @@ fn module_public_glob_exports(
     let source = fs::read_to_string(resolved.file_path).ok()?;
     let file = syn::parse_file(&source).ok()?;
     core_items_glob_exports(&file.items)
+}
+
+fn module_core_glob_exports(
+    module: &syn::ItemMod,
+    source_file: &Path,
+    module_dir: &Path,
+    inside_inline_module: bool,
+    module_depth: usize,
+    crate_root_core_exports: &HashSet<String>,
+    visited: &mut HashSet<PathBuf>,
+) -> Option<HashSet<String>> {
+    if item_is_test_only(&module.attrs)
+        || module.attrs.iter().any(|attribute| {
+            !attribute_is_inspected(
+                attribute,
+                &HashSet::new(),
+                module_depth - 1,
+                &HashSet::new(),
+            )
+        })
+    {
+        return None;
+    }
+    if let Some((_, items)) = &module.content {
+        return core_items_core_glob_exports(
+            items,
+            source_file,
+            &module_dir.join(ident_name(&module.ident)),
+            true,
+            module_depth,
+            crate_root_core_exports,
+            visited,
+        );
+    }
+    let resolved = resolve_module(source_file, module_dir, module, inside_inline_module)?;
+    let normalized = resolved
+        .file_path
+        .canonicalize()
+        .unwrap_or_else(|_| resolved.file_path.clone());
+    if !visited.insert(normalized.clone()) {
+        return None;
+    }
+    let result = fs::read_to_string(&resolved.file_path)
+        .ok()
+        .and_then(|source| syn::parse_file(&source).ok())
+        .and_then(|file| {
+            core_items_core_glob_exports(
+                &file.items,
+                &resolved.file_path,
+                &resolved.module_dir,
+                false,
+                module_depth,
+                crate_root_core_exports,
+                visited,
+            )
+        });
+    visited.remove(&normalized);
+    result
+}
+
+fn core_items_core_glob_exports(
+    items: &[Item],
+    source_file: &Path,
+    module_dir: &Path,
+    inside_inline_module: bool,
+    module_depth: usize,
+    crate_root_core_exports: &HashSet<String>,
+    visited: &mut HashSet<PathBuf>,
+) -> Option<HashSet<String>> {
+    let mut macro_import_violations = Vec::new();
+    let inspected_macros =
+        inspected_macro_imports(items, source_file, &mut macro_import_violations);
+    if !macro_import_violations.is_empty() {
+        return None;
+    }
+
+    let mut exports = HashSet::new();
+    for item in items {
+        if item_is_test_only(item_attrs(item)) {
+            continue;
+        }
+        if matches!(item, Item::Macro(_) | Item::Verbatim(_)) {
+            return None;
+        }
+
+        if let Item::Use(item_use) = item {
+            if !visibility_reaches_core_parent(&item_use.vis) {
+                continue;
+            }
+            if item_use.attrs.iter().any(|attribute| {
+                !attribute_is_inspected(attribute, &inspected_macros, module_depth, &HashSet::new())
+            }) {
+                return None;
+            }
+            collect_core_use_exports(
+                &item_use.tree,
+                &mut Vec::new(),
+                module_depth,
+                crate_root_core_exports,
+                &mut exports,
+            )?;
+            continue;
+        }
+
+        let Some(visibility) = item_visibility(item) else {
+            continue;
+        };
+        if !visibility_reaches_core_parent(visibility) {
+            continue;
+        }
+        if item_attrs(item).iter().any(|attribute| {
+            !attribute_is_inspected(attribute, &inspected_macros, module_depth, &HashSet::new())
+        }) {
+            return None;
+        }
+
+        let name = if let Item::Mod(module) = item {
+            module_contains_core_dependency(
+                module,
+                source_file,
+                module_dir,
+                inside_inline_module,
+                module_depth + 1,
+                crate_root_core_exports,
+                visited,
+            )
+            .then(|| ident_name(&module.ident))
+        } else {
+            let mut probe = CoreDependencyProbe {
+                module_depth,
+                crate_root_core_exports,
+                inspected_macro_imports: &inspected_macros,
+                found: false,
+            };
+            probe.visit_item(item);
+            probe
+                .found
+                .then(|| root_item_name(item).map(ident_name))
+                .flatten()
+        };
+        if let Some(name) = name {
+            exports.insert(name);
+        }
+    }
+    Some(exports)
+}
+
+fn collect_core_use_exports(
+    tree: &UseTree,
+    prefix: &mut Vec<String>,
+    module_depth: usize,
+    crate_root_core_exports: &HashSet<String>,
+    exports: &mut HashSet<String>,
+) -> Option<()> {
+    let add_if_core = |path: &[String], name: String, exports: &mut HashSet<String>| {
+        if path_starts_with_core(path, module_depth)
+            || path_starts_with_core_export(path, module_depth, crate_root_core_exports)
+        {
+            exports.insert(name);
+        }
+    };
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(ident_name(&path.ident));
+            collect_core_use_exports(
+                &path.tree,
+                prefix,
+                module_depth,
+                crate_root_core_exports,
+                exports,
+            )?;
+            prefix.pop();
+        }
+        UseTree::Name(name) => {
+            prefix.push(ident_name(&name.ident));
+            let exported_name = if ident_name(&name.ident) == "self" {
+                prefix.get(prefix.len().checked_sub(2)?)?.clone()
+            } else {
+                ident_name(&name.ident)
+            };
+            add_if_core(prefix, exported_name, exports);
+            prefix.pop();
+        }
+        UseTree::Rename(rename) => {
+            prefix.push(ident_name(&rename.ident));
+            let exported_name = ident_name(&rename.rename);
+            add_if_core(prefix, exported_name, exports);
+            prefix.pop();
+        }
+        UseTree::Glob(_) => {
+            if path_starts_with_core(prefix, module_depth)
+                || path_starts_with_core_export(prefix, module_depth, crate_root_core_exports)
+            {
+                return None;
+            }
+        }
+        UseTree::Group(group) => {
+            for item in &group.items {
+                collect_core_use_exports(
+                    item,
+                    prefix,
+                    module_depth,
+                    crate_root_core_exports,
+                    exports,
+                )?;
+            }
+        }
+    }
+    Some(())
 }
 
 fn core_items_glob_exports(items: &[Item]) -> Option<HashSet<String>> {
