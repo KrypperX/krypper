@@ -11,15 +11,132 @@ use guard::{
 };
 
 #[test]
-fn production_tools_modules_do_not_import_brain() {
+fn production_tools_modules_do_not_import_brain_or_core() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs");
     let violations = scan_tools_module_from_crate_root(&root);
 
     assert!(
         violations.is_empty(),
-        "production Tools modules must not depend on Brain:\n{}",
+        "production Tools modules must not depend on Brain or Core:\n{}",
         violations.join("\n")
     );
+}
+
+#[test]
+fn tools_core_guard_detects_direct_alias_facade_and_parent_paths() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("lib.rs");
+    let sources = [
+        r#"
+            pub mod core { pub mod task { pub struct Task; } }
+            pub(crate) mod tools {
+                use crate::core::task::Task;
+                fn reference() { let _: Task; let _: crate::core::task::Task; }
+            }
+        "#,
+        r#"
+            use crate::core as runtime;
+            pub mod core { pub mod task { pub struct Task; } }
+            pub(crate) mod tools { use crate::runtime::task::Task; }
+        "#,
+        r#"
+            pub mod core { pub mod task { pub struct Task; } }
+            pub mod task_lifecycle { pub use crate::core::task::Task; }
+            pub(crate) mod tools { use crate::task_lifecycle::Task; }
+        "#,
+        r#"
+            pub mod core { pub mod task { pub struct Task; } }
+            pub(crate) mod tools {
+                mod nested { use super::super::core::task::Task; }
+            }
+        "#,
+        r#"
+            pub mod core { pub mod task { pub struct Task; } }
+            pub(crate) mod tools { use super::core::task::Task; }
+        "#,
+        r#"
+            pub mod core { pub mod task { pub struct Task; } }
+            pub mod task_lifecycle { pub use crate::core::task::Task; }
+            pub(crate) mod tools { use super::task_lifecycle::Task; }
+        "#,
+        r#"
+            use crate as application;
+            pub mod core { pub mod task { pub struct Task; } }
+            pub(crate) mod tools { use crate::application::core::task::Task; }
+        "#,
+        r#"
+            extern crate self as application;
+            pub mod core { pub mod task { pub struct Task; } }
+            pub(crate) mod tools { use application::core::task::Task; }
+        "#,
+        r#"
+            pub mod core { pub mod task { pub struct Task; } }
+            pub mod compatibility { pub use crate::core::task::Task; }
+            pub(crate) mod tools { use crate::compatibility::Task; }
+        "#,
+        r#"
+            pub mod core { pub mod task { pub struct Task; } }
+            pub mod engine_facade { pub use crate::core as runtime; }
+            pub mod compatibility {
+                pub use crate::engine_facade::runtime::task::Task;
+            }
+            pub(crate) mod tools { use crate::compatibility::Task; }
+        "#,
+    ];
+
+    for source in sources {
+        fs::write(&root, source).unwrap();
+        let violations = scan_tools_module_from_crate_root(&root);
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.contains("Core")),
+            "Core dependency was not detected: {violations:?}"
+        );
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("lib.rs");
+    fs::write(
+        &root,
+        r#"
+            pub mod core { pub mod task { pub struct Task; } }
+            pub mod compatibility;
+            pub(crate) mod tools { use crate::compatibility::Task; }
+        "#,
+    )
+    .unwrap();
+    fs::write(
+        directory.path().join("compatibility.rs"),
+        "pub use crate::core::task::Task;",
+    )
+    .unwrap();
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("Core")),
+        "external Core facade was not detected: {violations:?}"
+    );
+}
+
+#[test]
+fn tools_core_guard_ignores_test_only_dependencies() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("lib.rs");
+    fs::write(
+        &root,
+        r#"
+            pub mod core { pub mod task { pub struct Task; } }
+            pub(crate) mod tools {
+                #[cfg(test)]
+                use crate::core::task::Task;
+            }
+        "#,
+    )
+    .unwrap();
+
+    assert!(scan_tools_module_from_crate_root(&root).is_empty());
 }
 
 #[test]
