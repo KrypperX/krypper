@@ -118,6 +118,42 @@ pub(crate) fn action_from_call(
             })?;
             Ok(WorkspaceAction::OfflineReadOnlyExec { request })
         }
+        "full_access_host_process" => {
+            let arguments = checked_arguments(
+                arguments,
+                &["executable", "argv", "working_directory"],
+                &["executable", "argv", "working_directory"],
+            )?;
+            let executable = string_argument(arguments, "executable")?.to_owned();
+            let argv = arguments
+                .get("argv")
+                .and_then(Value::as_array)
+                .filter(|argv| argv.len() <= crate::tools::process::MAX_HOST_EXEC_ARGUMENTS)
+                .ok_or(ModelError::InvalidArguments(
+                    "argv must contain at most 32 strings",
+                ))?;
+            let mut checked_argv = Vec::with_capacity(argv.len());
+            for argument in argv {
+                let argument = argument
+                    .as_str()
+                    .filter(|argument| {
+                        argument.len() <= crate::tools::process::MAX_HOST_EXEC_ARGUMENT_BYTES
+                            && !argument.chars().any(char::is_control)
+                    })
+                    .ok_or(ModelError::InvalidArguments(
+                        "argv items must be bounded strings without control characters",
+                    ))?;
+                checked_argv.push(argument.to_owned());
+            }
+            let working_directory = string_argument(arguments, "working_directory")?.to_owned();
+            let request = crate::tools::process::HostProcessRequest::new(
+                executable,
+                checked_argv,
+                working_directory,
+            )
+            .map_err(ModelError::InvalidArguments)?;
+            Ok(WorkspaceAction::FullAccessHostProcess { request })
+        }
         "read_file" => {
             let arguments = checked_arguments(arguments, &["path"], &["path"])?;
             Ok(WorkspaceAction::ReadFile {
@@ -615,5 +651,58 @@ mod offline_read_only_exec_action_tests {
             parse(json!({"executable":"cargo", "argv":over_total, "working_directory":"."})),
             Err(ModelError::InvalidArguments(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod full_access_host_process_action_tests {
+    use super::{action_from_call, ModelError, WorkspaceAction};
+    use crate::brain::tool_set::AdvertisedToolNames;
+    use serde_json::json;
+
+    fn parse(arguments: serde_json::Value) -> Result<WorkspaceAction, ModelError> {
+        action_from_call(
+            "full_access_host_process",
+            &arguments,
+            &AdvertisedToolNames::all_builtins(),
+        )
+    }
+
+    #[test]
+    fn host_process_preserves_direct_argv_without_shell_interpretation() {
+        let literal = "$(touch marker); still-one-argument";
+        let action = parse(json!({
+            "executable":"/usr/bin/printf",
+            "argv":["%s", literal],
+            "working_directory":"/tmp"
+        }))
+        .unwrap();
+
+        let WorkspaceAction::FullAccessHostProcess { request } = action else {
+            panic!("expected a typed direct-argv host action");
+        };
+        assert_eq!(request.executable(), "/usr/bin/printf");
+        assert_eq!(request.arguments(), &["%s", literal]);
+        assert_eq!(request.working_directory(), std::path::Path::new("/tmp"));
+    }
+
+    #[test]
+    fn shell_and_environment_fields_are_rejected() {
+        for extra in [json!({"shell":"sh -c id"}), json!({"env":{"PATH":"/tmp"}})] {
+            let mut arguments = json!({
+                "executable":"/usr/bin/true",
+                "argv":[],
+                "working_directory":"/tmp"
+            });
+            arguments
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+
+            assert!(matches!(
+                parse(arguments),
+                Err(ModelError::InvalidArguments(_))
+            ));
+        }
     }
 }

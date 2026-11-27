@@ -123,7 +123,12 @@ pub(crate) fn workspace_tool_definitions() -> Vec<Value> {
 pub(crate) fn workspace_plan_tool_definitions() -> Vec<Value> {
     workspace_operations()
         .iter()
-        .filter(|operation| operation.name() != "offline_read_only_exec")
+        .filter(|operation| {
+            !matches!(
+                operation.name(),
+                "offline_read_only_exec" | "full_access_host_process"
+            )
+        })
         .map(operation_tool_definition)
         .collect()
 }

@@ -1,4 +1,7 @@
-use super::{read_repository_context_json, run_task_with_endpoint, run_task_with_selection_loader};
+use super::{
+    read_repository_context_json, run_task_with_endpoint, run_task_with_selection_loader,
+    TaskCancellationSignal,
+};
 use crate::task_lifecycle::{TaskSession, TaskState, TurnActivitySummary, TurnOutcome, TurnState};
 use serde_json::{json, Value};
 use std::ffi::OsString;
@@ -7,6 +10,27 @@ use std::io::{Cursor, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::thread::{self, JoinHandle};
+
+#[cfg(unix)]
+#[test]
+fn task_cancellation_signal_sets_only_its_task_flag() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let _registration = TaskCancellationSignal::register_for(
+        signal_hook::consts::SIGUSR1,
+        Arc::clone(&cancellation),
+    )
+    .expect("register task signal");
+
+    // SAFETY: this test registered SIGUSR1 above; the handler only sets the supplied atomic flag.
+    unsafe {
+        libc::raise(signal_hook::consts::SIGUSR1);
+    }
+
+    assert!(cancellation.load(Ordering::SeqCst));
+}
 
 struct TempWorkspace {
     root: PathBuf,

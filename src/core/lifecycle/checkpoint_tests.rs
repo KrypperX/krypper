@@ -163,6 +163,31 @@ fn restored_tasks_share_workspace_revision_fence_by_identity() {
     assert!(Arc::ptr_eq(&first_revision, &second_revision));
 }
 
+#[test]
+fn checkpoint_restore_does_not_restore_full_access_confirmation_or_mode() {
+    let workspace = TempWorkspace::new();
+    let mut session = TaskSession::new_in_workspace(workspace.0.path()).unwrap();
+    let task_id = session.create_task("confirmed task").id();
+    session
+        .set_task_permission_mode(
+            task_id,
+            crate::tools::permission_policy::PermissionMode::FullAccess,
+            true,
+        )
+        .unwrap();
+    assert!(session.task_has_confirmed_full_access(task_id));
+
+    let checkpoint = session.export_checkpoint().unwrap();
+    let serialized = String::from_utf8_lossy(&checkpoint);
+    assert!(!serialized.contains("full_access_confirmed"));
+    assert!(!serialized.contains("full-access"));
+
+    let restored =
+        TaskSession::restore_checkpoint_in_workspace(&checkpoint, workspace.0.path()).unwrap();
+    assert!(!restored.task_has_confirmed_full_access(task_id));
+    assert!(restored.permission_modes.lock().unwrap().is_empty());
+}
+
 fn checkpoint_description() -> impl Strategy<Value = String> {
     prop::collection::vec(any::<char>(), 0..32)
         .prop_map(|characters| characters.into_iter().collect())

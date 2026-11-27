@@ -17,12 +17,16 @@ pub enum ProcessOutcome {
     NoTestsMatched,
     SandboxUnavailable,
     SandboxSetupFailed,
+    /// The requested direct host process is unavailable on this platform.
+    HostExecutionUnavailable,
     SpawnFailed,
     Exited(i32),
     Signaled(i32),
     TimedOut,
     Cancelled,
-    ResourceLimitExceeded { resource: ProcessResource },
+    ResourceLimitExceeded {
+        resource: ProcessResource,
+    },
     OutputLimitExceeded,
     OutcomeUnknown,
 }
@@ -45,6 +49,8 @@ pub enum ProcessExecutionProfile {
     OfflineCargoTest,
     /// The bounded direct-argv offline/read-only profile.
     OfflineReadOnlyExecV1,
+    /// Direct host process execution after task-level Full Access confirmation.
+    FullAccessHostProcessV1,
 }
 
 impl ProcessExecutionProfile {
@@ -70,6 +76,8 @@ pub struct ProcessResult {
     pub stderr: String,
     pub truncated: bool,
     pub diagnostic: Option<String>,
+    /// Whether this profile's cleanup boundary is verified. For Full Access this covers only
+    /// the original process group and captured pipes; escaped descendants are not discoverable.
     pub cleanup_confirmed: bool,
     pub test_filter: Option<String>,
     pub tests_ran: bool,
@@ -136,13 +144,41 @@ impl ProcessResult {
         result
     }
 
+    pub(crate) fn denied_host_process() -> Self {
+        let mut result = Self::empty(ProcessOutcome::Denied);
+        result.profile = ProcessExecutionProfile::FullAccessHostProcessV1;
+        result.diagnostic =
+            Some("host execution requires an explicitly confirmed Full Access task".into());
+        result
+    }
+
+    pub(crate) fn host_process_recovery_hold() -> Self {
+        let mut result = Self::denied_host_process();
+        result.cleanup_confirmed = false;
+        result.recovery_hold = true;
+        result.diagnostic = Some(
+            "host process was not started because cleanup of an earlier host process was not confirmed; a detached descendant may remain".into(),
+        );
+        result
+    }
+
+    pub(crate) fn empty_host_process(outcome: ProcessOutcome) -> Self {
+        let mut result = Self::empty(outcome);
+        result.profile = ProcessExecutionProfile::FullAccessHostProcessV1;
+        result.diagnostic = Some(
+            "direct host execution has no Krypper sandbox, workspace fence, or egress restriction; process-group cleanup covers only the original group and captured pipes, so escaped descendants may remain undetected; outer OS policy still applies".into(),
+        );
+        result
+    }
+
     pub(crate) fn empty_read_only_exec(outcome: ProcessOutcome) -> Self {
         let mut result = Self::empty(outcome);
         result.profile = ProcessExecutionProfile::OfflineReadOnlyExecV1;
         result
     }
 
-    /// Reports whether this attempt completed with verified success and no incomplete cleanup.
+    /// Reports whether the direct process completed successfully and profile-specific cleanup
+    /// was verified. Full Access cannot establish that a process did not escape its process group.
     pub fn succeeded(&self) -> bool {
         self.outcome == ProcessOutcome::Exited(0)
             && !self.truncated

@@ -153,6 +153,7 @@ fn mocked_model_performs_multiple_actions_and_completes_the_task() {
             "apply_patch",
             "offline_cargo_test",
             "offline_read_only_exec",
+            "full_access_host_process",
             "complete_task"
         ]
     );

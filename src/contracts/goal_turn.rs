@@ -136,6 +136,10 @@ pub enum WorkspaceAction {
     OfflineReadOnlyExec {
         request: krypper_sandbox::OfflineReadOnlyExecRequest,
     },
+    /// Run one exact direct-argv host process for a task confirmed for Full Access.
+    FullAccessHostProcess {
+        request: crate::tools::process::HostProcessRequest,
+    },
     /// Read one UTF-8 file under the task's workspace safety policy.
     ReadFile { path: PathBuf },
     /// Read at most 200 one-based lines from a UTF-8 file under the task's workspace safety policy.
@@ -191,6 +195,7 @@ pub(crate) fn workspace_action_name(action: &WorkspaceAction) -> &'static str {
     match action {
         WorkspaceAction::OfflineCargoTest { .. } => "offline_cargo_test",
         WorkspaceAction::OfflineReadOnlyExec { .. } => "offline_read_only_exec",
+        WorkspaceAction::FullAccessHostProcess { .. } => "full_access_host_process",
         WorkspaceAction::ReadFile { .. } => "read_file",
         WorkspaceAction::ReadRange { .. } => "read_range",
         WorkspaceAction::ListDirectory { .. } => "list_directory",
@@ -544,8 +549,17 @@ pub(crate) fn summarize_observation(observation: &WorkspaceObservation) -> TurnA
                 output_bytes: result.stdout.len() + result.stderr.len(),
             }
         }
-        WorkspaceObservation::ProcessFinished { result } => {
+        WorkspaceObservation::ProcessFinished { result }
+            if result.profile
+                == crate::contracts::process_execution::ProcessExecutionProfile::OfflineReadOnlyExecV1 =>
+        {
             TurnActivitySummary::OfflineReadOnlyExecFinished {
+                succeeded: result.succeeded(),
+                output_bytes: result.stdout.len() + result.stderr.len(),
+            }
+        }
+        WorkspaceObservation::ProcessFinished { result } => {
+            TurnActivitySummary::ProcessFinished {
                 succeeded: result.succeeded(),
                 output_bytes: result.stdout.len() + result.stderr.len(),
             }
@@ -616,6 +630,9 @@ pub(crate) fn summarize_observation(observation: &WorkspaceObservation) -> TurnA
                 WorkspaceAction::OfflineCargoTest { .. } => TurnActivityAction::OfflineCargoTest,
                 WorkspaceAction::OfflineReadOnlyExec { .. } => {
                     TurnActivityAction::OfflineReadOnlyExec
+                }
+                WorkspaceAction::FullAccessHostProcess { .. } => {
+                    TurnActivityAction::FullAccessHostProcess
                 }
                 WorkspaceAction::ReadFile { .. } => TurnActivityAction::ReadFile,
                 WorkspaceAction::ReadRange { .. } => TurnActivityAction::ReadRange,

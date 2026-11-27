@@ -97,7 +97,11 @@ fn set_permission_mode(
     error: &mut dyn Write,
 ) -> io::Result<i32> {
     if arguments.len() != 2 || arguments[0] != "--permission-mode" {
-        return usage_error(error, Some("setup"), "use --permission-mode ask|risk-based");
+        return usage_error(
+            error,
+            Some("setup"),
+            "use --permission-mode ask|risk-based|full-access",
+        );
     }
     let Some(value) = arguments[1].to_str() else {
         return usage_error(error, Some("setup"), "permission mode must be valid UTF-8");
@@ -121,10 +125,12 @@ fn set_permission_mode(
         "Saved {} permission mode for this user.",
         mode.as_str()
     )?;
-    writeln!(
-        output,
-        "Full Access is unavailable until Krypper has a verified unrestricted host execution path."
-    )?;
+    if mode == PermissionMode::FullAccess {
+        writeln!(
+            output,
+            "This is only a per-user preference. Each Linux task still needs an explicit controlling-terminal confirmation before its provider starts."
+        )?;
+    }
     Ok(0)
 }
 
@@ -294,7 +300,10 @@ fn show_status(output: &mut dyn Write, json: bool) -> io::Result<i32> {
         Ok(None) => {
             writeln!(output, "No per-user configuration directory is available.")?;
             writeln!(output, "Permission mode: ask (default)")?;
-            writeln!(output, "Full Access: unavailable")?;
+            writeln!(
+                output,
+                "Full Access: Linux only; each task requires terminal confirmation"
+            )?;
             return Ok(0);
         }
         Err(message) => {
@@ -379,7 +388,8 @@ fn show_status(output: &mut dyn Write, json: bool) -> io::Result<i32> {
             "credential_count": credential_count,
             "provider_profile_count": profile_count,
             "permission_mode": permission_mode.as_str(),
-            "full_access_available": false,
+            "full_access_available": cfg!(target_os = "linux"),
+            "full_access_task_confirmation_required": true,
             "config_override": has_config_override(),
         });
         serde_json::to_writer_pretty(&mut *output, &value)?;
@@ -398,7 +408,7 @@ fn show_status(output: &mut dyn Write, json: bool) -> io::Result<i32> {
     writeln!(output, "Permission mode: {}", permission_mode.as_str())?;
     writeln!(
         output,
-        "Full Access: unavailable (no unrestricted host execution path)"
+        "Full Access: Linux direct-argv host process; per-task terminal confirmation required"
     )?;
     match readiness {
         Some(readiness) => writeln!(

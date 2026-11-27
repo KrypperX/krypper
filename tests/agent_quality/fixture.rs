@@ -851,6 +851,7 @@ fn action_name(action: &WorkspaceAction) -> &'static str {
     match action {
         WorkspaceAction::OfflineCargoTest { .. } => "offline_cargo_test",
         WorkspaceAction::OfflineReadOnlyExec { .. } => "offline_read_only_exec",
+        WorkspaceAction::FullAccessHostProcess { .. } => "full_access_host_process",
         WorkspaceAction::ReadFile { .. } => "read_file",
         WorkspaceAction::ReadRange { .. } => "read_range",
         WorkspaceAction::ListDirectory { .. } => "list_directory",

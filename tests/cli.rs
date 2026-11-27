@@ -362,6 +362,7 @@ fn setup_status_json_matches_manual_routing_snapshot() {
     assert!(status["catalog"]["provenance"][0]["retrieved_at_unix"].is_u64());
     status["catalog"]["stale"] = serde_json::json!("<dynamic>");
     status["catalog"]["provenance"][0]["retrieved_at_unix"] = serde_json::json!("<dynamic>");
+    status["full_access_available"] = serde_json::json!("<dynamic>");
     assert_eq!(
         serde_json::to_string_pretty(&status).unwrap(),
         include_str!("fixtures/cli/setup-status-manual.json").trim_end()

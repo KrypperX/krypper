@@ -254,6 +254,7 @@ impl From<CheckpointTurnOutcome> for TurnOutcome {
 enum CheckpointActivityAction {
     OfflineCargoTest,
     OfflineReadOnlyExec,
+    FullAccessHostProcess,
     ReadFile,
     ReadRange,
     ListDirectory,
@@ -270,6 +271,7 @@ impl From<TurnActivityAction> for CheckpointActivityAction {
         match action {
             TurnActivityAction::OfflineCargoTest => Self::OfflineCargoTest,
             TurnActivityAction::OfflineReadOnlyExec => Self::OfflineReadOnlyExec,
+            TurnActivityAction::FullAccessHostProcess => Self::FullAccessHostProcess,
             TurnActivityAction::ReadFile => Self::ReadFile,
             TurnActivityAction::ReadRange => Self::ReadRange,
             TurnActivityAction::ListDirectory => Self::ListDirectory,
@@ -288,6 +290,7 @@ impl From<CheckpointActivityAction> for TurnActivityAction {
         match action {
             CheckpointActivityAction::OfflineCargoTest => Self::OfflineCargoTest,
             CheckpointActivityAction::OfflineReadOnlyExec => Self::OfflineReadOnlyExec,
+            CheckpointActivityAction::FullAccessHostProcess => Self::FullAccessHostProcess,
             CheckpointActivityAction::ReadFile => Self::ReadFile,
             CheckpointActivityAction::ReadRange => Self::ReadRange,
             CheckpointActivityAction::ListDirectory => Self::ListDirectory,
@@ -638,6 +641,7 @@ impl TaskSession {
             workspace_root: None,
             tasks,
             process_grants: Default::default(),
+            permission_modes: Arc::new(std::sync::Mutex::default()),
             #[cfg(test)]
             test_process_results: Default::default(),
             #[cfg(test)]

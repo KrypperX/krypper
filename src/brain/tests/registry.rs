@@ -74,6 +74,11 @@ fn workspace_registry_contains_only_existing_operations_and_schemas() {
                 "name":"offline_read_only_exec",
                 "description":"Run bounded direct argv through the host-pinned Cargo or Rustc executable in the offline read-only workspace profile.",
                 "parameters":{"type":"object","properties":{"argv":{"type":"array","items":{"type":"string","minLength":1,"maxLength":1024},"minItems":1,"maxItems":32},"executable":{"type":"string","enum":["cargo","rustc"]},"working_directory":{"type":"string","minLength":1,"maxLength":4096}},"required":["argv","executable","working_directory"],"additionalProperties":false}
+            },
+            {
+                "name":"full_access_host_process",
+                "description":"Run one bounded direct-argv host process as the current OS user, from the requested host working directory, with inherited environment, filesystem and network access. This has no Krypper sandbox, workspace fence, or egress restriction; use only in a task explicitly confirmed for Full Access.",
+                "parameters":{"type":"object","properties":{"argv":{"type":"array","items":{"type":"string","maxLength":1024},"minItems":0,"maxItems":32},"executable":{"type":"string","minLength":1,"maxLength":4096},"working_directory":{"type":"string","minLength":1,"maxLength":4096}},"required":["argv","executable","working_directory"],"additionalProperties":false}
             }
         ])
     );
@@ -143,6 +148,7 @@ fn provider_request_builders_keep_their_formats_with_registry_tools() {
             "apply_patch",
             "offline_cargo_test",
             "offline_read_only_exec",
+            "full_access_host_process",
             "complete_task"
         ]
     );

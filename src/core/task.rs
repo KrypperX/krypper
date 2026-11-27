@@ -221,6 +221,8 @@ pub enum TurnActivityAction {
     OfflineCargoTest,
     /// A bounded direct-argv offline/read-only process profile failed.
     OfflineReadOnlyExec,
+    /// A direct host process requested under Full Access.
+    FullAccessHostProcess,
     /// A workspace file read failed.
     ReadFile,
     /// A bounded workspace file range read failed.

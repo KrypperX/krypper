@@ -4,8 +4,7 @@ use crate::brain::WorkspacePlan;
 use crate::brain::WorkspacePlanError;
 use crate::harness::execution::{
     run_goal_turn_with_impact_checked_completion_correction_and_permission_gate,
-    run_goal_turn_with_impact_checked_plan_and_permission_gate, CompletionCorrectionError,
-    GoalTurnError, RegisteredExtensionWithArguments,
+    CompletionCorrectionError, GoalTurnError, RegisteredExtensionWithArguments,
 };
 use crate::task_lifecycle::{TaskSession, TaskState, TurnState};
 use crate::tools::capability_policy::{CapabilityContext, CapabilityGrant};
@@ -327,38 +326,111 @@ fn unconfigured_fixed_process_is_unavailable_before_prompt_or_b4_dispatch() {
 }
 
 #[test]
-fn full_access_is_unavailable_and_impact_checked_plans_cannot_skip_the_gate() {
+fn unconfirmed_full_access_action_is_unavailable() {
     let (mut session, task_id, turn_id) = running_turn();
-    let plan = WorkspacePlan::try_from_actions(
-        vec![super::super::WorkspaceAction::ReadFile {
-            path: "missing.txt".into(),
-        }],
-        1,
+    let request = crate::tools::process::HostProcessRequest::new(
+        "/bin/true".into(),
+        Vec::new(),
+        "/tmp".into(),
     )
-    .expect("registered plan operation");
-    let checked = checked_plan(&session, task_id, turn_id, plan);
-    let mut control = |_: &str, _: &[WorkspaceObservation]| -> super::super::WorkspaceAction {
-        panic!("plan with one action must not request task control")
-    };
+    .expect("host process request");
+    let action = super::super::WorkspaceAction::FullAccessHostProcess { request };
+    let mut decide = |_: &str, _: &[WorkspaceObservation]| action.clone();
     let mut gate = ActionPermissionGate::new(PermissionMode::FullAccess, false, None);
 
-    let result = run_goal_turn_with_impact_checked_plan_and_permission_gate(
+    let result = run_goal_turn_with_budget_and_permission_gate(
         &mut session,
         task_id,
         turn_id,
         "goal",
         1,
-        Ok(checked),
-        &mut control,
+        &mut decide,
         &mut gate,
     );
 
     assert!(matches!(
         result,
         Err(GoalTurnError::PermissionUnavailable {
-            action: "read_file"
+            action: "full_access_host_process"
         })
     ));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn full_access_cancellation_stops_the_turn_after_reaping_the_host_process() {
+    use std::fs;
+    use std::sync::atomic::Ordering;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    let directory = tempfile::tempdir().expect("host fixture directory");
+    let descendant_file = directory.path().join("descendant.pid");
+    let script = format!("sleep 30 & echo $! > '{}'; wait", descendant_file.display());
+    let request = crate::tools::process::HostProcessRequest::new(
+        "/bin/sh".into(),
+        vec!["-c".into(), script],
+        directory.path().to_string_lossy().into_owned(),
+    )
+    .expect("direct host request");
+    let (mut session, task_id, turn_id) = running_turn();
+    session
+        .set_task_permission_mode(task_id, PermissionMode::FullAccess, true)
+        .expect("confirmed Full Access mode");
+    let cancellation = session
+        .task_cancellation_flag(task_id)
+        .expect("task cancellation flag");
+    let trigger_path = descendant_file.clone();
+    let trigger = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline && !trigger_path.exists() {
+            thread::sleep(Duration::from_millis(10));
+        }
+        cancellation.store(true, Ordering::SeqCst);
+    });
+
+    let action = crate::harness::execution::WorkspaceAction::FullAccessHostProcess { request };
+    let mut decisions = 0;
+    let mut decide = |_: &str, _: &[WorkspaceObservation]| {
+        decisions += 1;
+        action.clone()
+    };
+    let mut gate = ActionPermissionGate::new(PermissionMode::FullAccess, false, None);
+    let result = run_goal_turn_with_budget_and_permission_gate(
+        &mut session,
+        task_id,
+        turn_id,
+        "cancel during host execution",
+        3,
+        &mut decide,
+        &mut gate,
+    )
+    .expect("cancelled turn result");
+    trigger.join().expect("cancellation trigger");
+
+    assert_eq!(
+        decisions, 1,
+        "the model must not be asked for another action"
+    );
+    assert_eq!(
+        result.stop_reason(),
+        crate::contracts::goal_turn::GoalTurnStopReason::Cancelled
+    );
+    assert_eq!(
+        session.get_task(task_id).expect("task").state(),
+        TaskState::Cancelled
+    );
+    let process = result
+        .observations()
+        .iter()
+        .find_map(|observation| match observation {
+            WorkspaceObservation::ProcessFinished { result } => Some(result),
+            _ => None,
+        })
+        .expect("host cancellation evidence");
+    assert_eq!(process.outcome, crate::ProcessOutcome::Cancelled);
+    assert!(process.cleanup_confirmed || process.recovery_hold);
+    assert!(fs::read_to_string(descendant_file).is_ok());
 }
 
 #[test]
