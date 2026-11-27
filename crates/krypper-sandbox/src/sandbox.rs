@@ -2,7 +2,7 @@
 
 use crate::runner_contract::{
     REGISTRY_MOUNT, RESOURCE_FD_MOUNTS, RUNNER_MOUNT, RUNNER_MOUNT_FD, TOOLCHAIN_MOUNT,
-    WORKSPACE_MOUNT,
+    WORKSPACE_CWD_MOUNT_FD, WORKSPACE_MOUNT,
 };
 use crate::runner_handshake::RunnerHandshakePipes;
 use crate::runner_protocol::{ACK_FD, STATUS_FD};
@@ -75,6 +75,19 @@ pub(super) fn sandbox(
     let pinned_runner = runner
         .map(|runner| duplicate_fd_at_or_above(runner.executable().as_raw_fd(), FIRST_PINNED_FD))
         .transpose()?;
+    let pinned_workspace_cwd = directories
+        .workspace_cwd()
+        .map(|directory| duplicate_fd_at_or_above(directory.as_raw_fd(), FIRST_PINNED_FD))
+        .transpose()?;
+    let needs_pinned_workspace_cwd = requirements.profile_id()
+        == crate::runner_contract::READ_ONLY_EXEC_PROFILE_ID
+        && requirements.working_directory() != ".";
+    if needs_pinned_workspace_cwd != pinned_workspace_cwd.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "pinned workspace cwd does not match the selected profile",
+        ));
+    }
     let pinned_status_writer = handshake
         .map(|pipes| duplicate_fd_at_or_above(pipes.status_writer()?.as_raw_fd(), FIRST_PINNED_FD))
         .transpose()?;
@@ -192,6 +205,22 @@ pub(super) fn sandbox(
         SandboxControl::ReadOnlyRegistry,
         REGISTRY_MOUNT,
     );
+    if pinned_workspace_cwd.is_some() {
+        let cwd_path = crate::runner_contract::workspace_cwd_path(requirements.working_directory())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "invalid workspace working directory",
+                )
+            })?;
+        push_read_only_fd_mount_at(
+            &mut command,
+            evidence,
+            SandboxControl::ReadOnlyWorkspace,
+            WORKSPACE_CWD_MOUNT_FD,
+            &cwd_path,
+        );
+    }
     push_control_args(
         &mut command,
         evidence,
@@ -218,12 +247,30 @@ pub(super) fn sandbox(
         "--dir",
         crate::runner_contract::OFFLINE_CARGO_TMPDIR,
     ]);
+    let working_directory =
+        if requirements.profile_id() == crate::runner_contract::READ_ONLY_EXEC_PROFILE_ID {
+            crate::runner_contract::workspace_cwd_path(requirements.working_directory())
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "invalid workspace working directory",
+                    )
+                })?
+        } else if requirements.working_directory() == "." {
+            WORKSPACE_MOUNT.1.to_owned()
+        } else {
+            format!(
+                "{}/{}/",
+                WORKSPACE_MOUNT.1,
+                requirements.working_directory()
+            )
+        };
     command.args([
         "--symlink",
         REGISTRY_MOUNT.1,
         crate::runner_contract::OFFLINE_CARGO_REGISTRY,
         "--chdir",
-        WORKSPACE_MOUNT.1,
+        working_directory.trim_end_matches('/'),
     ]);
     if pinned_runner.is_some() {
         push_read_only_fd_mount(
@@ -235,8 +282,12 @@ pub(super) fn sandbox(
     }
     let mut environment_args = vec!["--clearenv"];
     for (name, value) in crate::OFFLINE_CARGO_TEST_ENVIRONMENT {
-        environment_args.extend(["--setenv", name, value]);
+        if *name != "PWD" {
+            environment_args.extend(["--setenv", name, value]);
+        }
     }
+    let pwd = working_directory.trim_end_matches('/');
+    environment_args.extend(["--setenv", "PWD", pwd]);
     push_control_args(
         &mut command,
         evidence,
@@ -251,7 +302,7 @@ pub(super) fn sandbox(
     );
     // Pinned directory descriptors remove validation-to-mount pathname races; cgroup
     // attachment precedes sandbox exec. Sources stay at or above 208; fixed child descriptors
-    // 200-206 are populated only after close_range marks ambient descriptors close-on-exec.
+    // 200-207 are populated only after close_range marks ambient descriptors close-on-exec.
     //
     // SAFETY: the closure runs between fork and exec, where only async-signal-safe calls are
     // allowed. It calls only `getpid`, `write`, `syscall(SYS_close_range)`, `dup2`,
@@ -295,6 +346,11 @@ pub(super) fn sandbox(
             }
             for (fd, (target, _)) in roots.iter().zip(RESOURCE_FD_MOUNTS) {
                 if libc::dup2(fd.as_raw_fd(), target) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+            if let Some(workspace_cwd) = &pinned_workspace_cwd {
+                if libc::dup2(workspace_cwd.as_raw_fd(), WORKSPACE_CWD_MOUNT_FD) < 0 {
                     return Err(io::Error::last_os_error());
                 }
             }
@@ -354,6 +410,17 @@ fn push_read_only_fd_mount(
     evidence: &mut SandboxIsolationEvidence,
     control: SandboxControl,
     (fd, path): (i32, &str),
+) {
+    let fd = fd.to_string();
+    push_control_args(command, evidence, control, &["--ro-bind-fd", &fd, path]);
+}
+
+fn push_read_only_fd_mount_at(
+    command: &mut Command,
+    evidence: &mut SandboxIsolationEvidence,
+    control: SandboxControl,
+    fd: i32,
+    path: &str,
 ) {
     let fd = fd.to_string();
     push_control_args(command, evidence, control, &["--ro-bind-fd", &fd, path]);

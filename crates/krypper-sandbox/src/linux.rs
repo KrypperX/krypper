@@ -2,7 +2,7 @@
 
 use crate::host::effective_uid;
 use crate::sandbox::sandbox;
-use crate::seccomp::compile_filter;
+use crate::seccomp::compile_filter_for;
 use crate::{
     runner_contract::RUNNER_MOUNT_PATH,
     runner_handshake::RunnerHandshakePipes,
@@ -136,7 +136,7 @@ fn run_with_containment(request: SandboxRunRequest, contained: bool) -> SandboxR
         result.diagnostic = Some("captured sandbox descriptor is not a directory".into());
         return finish_before_launch(result, evidence);
     }
-    let filter = match compile_filter() {
+    let filter = match compile_filter_for(requirements.syscall()) {
         Ok(filter) => filter,
         Err(error) => {
             result.outcome = SandboxOutcome::SandboxSetupFailed;
@@ -331,6 +331,7 @@ fn run_with_containment(request: SandboxRunRequest, contained: bool) -> SandboxR
                 output_limit: output,
                 cancelled: &cancelled,
                 started,
+                test_evidence_available: requirements.profile_id() == "offline_cargo_test",
             },
             out,
             err,
@@ -443,6 +444,14 @@ fn landlock_runner_command_args(
             LandlockRequirement::Required => "--required".into(),
         },
     ];
+    if requirements.profile_id() == crate::runner_contract::READ_ONLY_EXEC_PROFILE_ID {
+        args.extend([
+            "--profile".into(),
+            requirements.profile_id().into(),
+            "--cwd".into(),
+            requirements.working_directory().into(),
+        ]);
+    }
     args.extend(cargo_command_args(requirements, test_filter));
     args
 }

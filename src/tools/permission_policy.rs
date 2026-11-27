@@ -81,6 +81,7 @@ pub(crate) fn classify_registered_operation(name: &str) -> EffectClass {
             EffectClass::Workspace
         }
         Some(RegisteredEffect::FixedSandboxedOfflineCargoTest) => EffectClass::FixedOfflineProcess,
+        Some(RegisteredEffect::SandboxedOfflineReadOnlyExec) => EffectClass::ExternalOrUnclassified,
         None => EffectClass::ExternalOrUnclassified,
     }
 }
@@ -142,6 +143,18 @@ mod tests {
                 PermissionMode::RiskBased,
                 EffectClass::ExternalOrUnclassified
             ),
+            PermissionDecision::Ask
+        );
+    }
+
+    #[test]
+    fn model_selected_read_only_exec_still_prompts_under_risk_based_mode() {
+        let effect = classify_registered_operation("offline_read_only_exec");
+
+        assert_eq!(effect, EffectClass::ExternalOrUnclassified);
+        assert_eq!(decide(PermissionMode::Ask, effect), PermissionDecision::Ask);
+        assert_eq!(
+            decide(PermissionMode::RiskBased, effect),
             PermissionDecision::Ask
         );
     }

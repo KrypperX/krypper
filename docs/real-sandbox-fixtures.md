@@ -73,6 +73,25 @@ invocations would contend for the same host resource.
 | `real_sandbox_syscall_filter_covers_cargo_payload_and_descendant` | After checking the host does not already return `EPERM` for the probes, Cargo and an exec'd test descendant can call `getpid` and use `AF_UNIX`; `io_uring_enter` and `AF_VSOCK` socket calls return `EPERM`; x86_64 also checks tagged x32 and reserved syscall handling. Cargo succeeds and the supervisor confirms cleanup. |
 | `real_sandbox_landlock_limits_writes_and_reaches_descendants` | Requires a supported Landlock ABI. Confirms the writable Bubblewrap `/tmp` tmpfs is Landlock-restricted, profile scratch directories remain writable, an unlisted `/tmp` path is denied, the exec descendant inherits the denial, and result evidence reports `applied`. |
 | `real_sandbox_limits_and_cancellation_stay_bounded` | Zero matches, nonzero exit, wall timeout, output ceiling, CPU/memory/process ceilings and cancellation all return their typed outcome with confirmed cleanup. |
+| `real_offline_read_only_exec_preserves_nested_cwd_and_confinement` | Exercises the exact permission prompt, one-shot grant and Harness dispatch. Direct Cargo requests launch with cwd `crates/member` and `.` (workspace root), covering both the nested-cwd FD 207 mount and the root route; the payload verifies workspace visibility, workspace-relative parents, FD hygiene, no-new-privileges, empty effective capabilities, PID namespace state, hidden host paths, offline network, read-only workspace, and seccomp denial in an exec descendant. |
+| `real_offline_read_only_exec_limits_cancellation_and_cleanup` | Runs a permitted direct Cargo argv that exceeds the output ceiling, then authorizes one exact request and cancels its held policy during execution; checks the typed outcomes, confirmed cleanup and no recovery hold. |
+
+The C3 fixtures require the same host prerequisites and pinned toolchain/registry above, with the
+locked `libc` 0.2.191 crate available in the offline registry. The confinement fixture also needs
+a reachable host loopback canary and a host ptrace baseline that does not already return `EPERM`;
+otherwise it cannot attribute the denial to the sandbox policy. Run only these fixtures with:
+
+```bash
+KRYPPER_REAL_SANDBOX=1 \
+KRYPPER_TEST_TOOLCHAIN=/opt/rust-toolchain \
+KRYPPER_TEST_REGISTRY=/opt/cargo-registry \
+cargo test --locked --lib real_offline_read_only_exec -- --ignored --nocapture --test-threads=1
+```
+
+These results describe the one provisioned host, kernel and Bubblewrap build where they ran.
+Ordinary CI checks the typed request, authorization, generated command and failure handling; it
+does not run payload-controlled code or prove host namespace, seccomp, descriptor or filesystem
+enforcement. No C4 umbrella completion is claimed by these C3 fixtures.
 
 Nothing in this module grants authority, adds a profile, changes the CLI, or weakens the fixed
 policy. A failing fixture is a host or product regression, never something to skip.

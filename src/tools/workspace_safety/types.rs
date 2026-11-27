@@ -160,6 +160,12 @@ impl WorkspaceRoot {
         super::syscalls::duplicate_directory_file(&self.descriptor)
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn process_subdirectory_descriptor(&self, relative: &str) -> io::Result<File> {
+        super::open_workspace_directory_no_follow(self, relative)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.message()))
+    }
+
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }

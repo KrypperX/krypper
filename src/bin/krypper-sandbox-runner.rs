@@ -3,7 +3,9 @@
 #[cfg(target_os = "linux")]
 mod linux {
     use krypper_sandbox::runner_contract::{
-        is_valid_test_filter, FIXED_CARGO_ARGUMENTS, RUNNER_MOUNT_PATH, WORKSPACE_MOUNT,
+        is_valid_read_only_exec_arguments, is_valid_test_filter, is_valid_workspace_relative_path,
+        workspace_cwd_path, FIXED_CARGO_ARGUMENTS, READ_ONLY_EXEC_PROFILE_ID, RUNNER_MOUNT_PATH,
+        WORKSPACE_CWD_MOUNT_FD, WORKSPACE_MOUNT,
     };
     use krypper_sandbox::runner_protocol::{
         encode_status, RunnerStatus, ACK_FD, ACK_FRAME, STATUS_FD,
@@ -18,7 +20,16 @@ mod linux {
     use std::process::Command;
 
     const CARGO_EXECUTABLE: &str = "/toolchain/bin/cargo";
-    const EXPECTED_CWD: &str = WORKSPACE_MOUNT.1;
+    const RUSTC_EXECUTABLE: &str = "/toolchain/bin/rustc";
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct Invocation {
+        requirement: Requirement,
+        profile_id: &'static str,
+        executable: &'static str,
+        working_directory: String,
+        payload_arguments: Vec<String>,
+    }
 
     pub(super) fn run() -> i32 {
         let Ok(arguments) = std::env::args_os()
@@ -27,11 +38,14 @@ mod linux {
         else {
             return 126;
         };
-        let Some(requirement) = parse_invocation(&arguments) else {
+        let Some(invocation) = parse_invocation(&arguments) else {
             return 126;
         };
-        if !valid_execution_context() {
+        if !valid_execution_context(&invocation) {
             return report_failure(libc::EPERM);
+        }
+        if let Err(error) = close_if_open(WORKSPACE_CWD_MOUNT_FD) {
+            return report_failure(error.raw_os_error().unwrap_or(libc::EIO));
         }
 
         let status = match apply_landlock_write_policy() {
@@ -42,7 +56,7 @@ mod linux {
             },
         };
         if matches!(status, RunnerStatus::Unavailable { .. })
-            && requirement == Requirement::Required
+            && invocation.requirement == Requirement::Required
         {
             return report_status(status);
         }
@@ -71,10 +85,10 @@ mod linux {
         drop(status_pipe);
         drop(acknowledgement);
 
-        let mut cargo = Command::new(CARGO_EXECUTABLE);
-        cargo.args(&arguments[9..]);
-        let error = cargo.exec();
-        eprintln!("fixed offline Cargo exec failed: {error}");
+        let mut payload = Command::new(invocation.executable);
+        payload.args(&invocation.payload_arguments);
+        let error = payload.exec();
+        eprintln!("offline process exec failed: {error}");
         126
     }
 
@@ -84,7 +98,7 @@ mod linux {
         Required,
     }
 
-    fn parse_invocation(arguments: &[String]) -> Option<Requirement> {
+    fn parse_invocation(arguments: &[String]) -> Option<Invocation> {
         if arguments.len() < 13
             || arguments[0] != RUNNER_MOUNT_PATH
             || arguments[1] != "--krypper-landlock-runner-v1"
@@ -100,6 +114,36 @@ mod linux {
             "--required" => Requirement::Required,
             _ => return None,
         };
+        if arguments
+            .get(7)
+            .is_some_and(|argument| argument == "--profile")
+        {
+            if requirement != Requirement::Required
+                || arguments.len() < 14
+                || arguments[8] != READ_ONLY_EXEC_PROFILE_ID
+                || arguments[9] != "--cwd"
+                || !is_valid_workspace_relative_path(&arguments[10])
+                || arguments[11] != "--"
+            {
+                return None;
+            }
+            let executable = match arguments[12].as_str() {
+                CARGO_EXECUTABLE => CARGO_EXECUTABLE,
+                RUSTC_EXECUTABLE => RUSTC_EXECUTABLE,
+                _ => return None,
+            };
+            let payload_arguments = arguments[13..].to_vec();
+            if !is_valid_read_only_exec_arguments(&payload_arguments) {
+                return None;
+            }
+            return Some(Invocation {
+                requirement,
+                profile_id: READ_ONLY_EXEC_PROFILE_ID,
+                executable,
+                working_directory: arguments[10].clone(),
+                payload_arguments,
+            });
+        }
         if arguments[7] != "--" || arguments[8] != CARGO_EXECUTABLE {
             return None;
         }
@@ -114,17 +158,37 @@ mod linux {
             return None;
         }
         match &cargo_arguments[FIXED_CARGO_ARGUMENTS.len()..] {
-            [] => Some(requirement),
+            [] => Some(Invocation {
+                requirement,
+                profile_id: "offline_cargo_test",
+                executable: CARGO_EXECUTABLE,
+                working_directory: ".".to_owned(),
+                payload_arguments: cargo_arguments.to_vec(),
+            }),
             [separator, filter] if separator.as_str() == "--" && is_valid_test_filter(filter) => {
-                Some(requirement)
+                Some(Invocation {
+                    requirement,
+                    profile_id: "offline_cargo_test",
+                    executable: CARGO_EXECUTABLE,
+                    working_directory: ".".to_owned(),
+                    payload_arguments: cargo_arguments.to_vec(),
+                })
             }
             _ => None,
         }
     }
 
-    fn valid_execution_context() -> bool {
+    fn valid_execution_context(invocation: &Invocation) -> bool {
+        let expected_cwd = if invocation.profile_id == READ_ONLY_EXEC_PROFILE_ID {
+            workspace_cwd_path(&invocation.working_directory).unwrap_or_default()
+        } else if invocation.working_directory == "." {
+            WORKSPACE_MOUNT.1.to_owned()
+        } else {
+            format!("{}/{}/", WORKSPACE_MOUNT.1, invocation.working_directory)
+        };
         if std::env::current_exe().ok().as_deref() != Some(Path::new(RUNNER_MOUNT_PATH))
-            || std::env::current_dir().ok().as_deref() != Some(Path::new(EXPECTED_CWD))
+            || std::env::current_dir().ok().as_deref()
+                != Some(Path::new(expected_cwd.trim_end_matches('/')))
         {
             return false;
         }
@@ -134,9 +198,19 @@ mod linux {
         let Some(actual) = actual else {
             return false;
         };
+        let expected_pwd = expected_cwd.trim_end_matches('/');
         let expected = krypper_sandbox::OFFLINE_CARGO_TEST_ENVIRONMENT
             .iter()
-            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .map(|(name, value)| {
+                (
+                    (*name).to_owned(),
+                    if *name == "PWD" {
+                        expected_pwd.to_owned()
+                    } else {
+                        (*value).to_owned()
+                    },
+                )
+            })
             .collect::<BTreeMap<_, _>>();
         actual == expected
     }
@@ -156,6 +230,25 @@ mod linux {
         // SAFETY: this process inherited the fixed descriptor from the sandbox supervisor and
         // `fcntl(F_GETFD)` confirmed it is open. The returned File owns it from this point onward.
         Some(unsafe { File::from_raw_fd(fd) })
+    }
+
+    fn close_if_open(fd: i32) -> std::io::Result<()> {
+        // SAFETY: F_GETFD only inspects the fixed host-owned descriptor slot.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        if flags < 0 {
+            let error = std::io::Error::last_os_error();
+            return if error.raw_os_error() == Some(libc::EBADF) {
+                Ok(())
+            } else {
+                Err(error)
+            };
+        }
+        // SAFETY: F_GETFD established that this fixed descriptor slot is open.
+        if unsafe { libc::close(fd) } == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
     }
 
     fn report_failure(errno: i32) -> i32 {
@@ -206,13 +299,48 @@ mod linux {
         #[test]
         fn accepts_fixed_optional_and_required_invocations() {
             assert_eq!(
-                parse_invocation(&invocation("--optional", &[])),
+                parse_invocation(&invocation("--optional", &[])).map(|value| value.requirement),
                 Some(Requirement::Optional)
             );
             assert_eq!(
-                parse_invocation(&invocation("--required", &["--", "fixture::case"])),
+                parse_invocation(&invocation("--required", &["--", "fixture::case"]))
+                    .map(|value| value.requirement),
                 Some(Requirement::Required)
             );
+        }
+
+        #[test]
+        fn accepts_only_the_pinned_direct_exec_profile_and_executables() {
+            let mut args = vec![
+                RUNNER_MOUNT_PATH.to_owned(),
+                "--krypper-landlock-runner-v1".to_owned(),
+                "--status-fd".to_owned(),
+                STATUS_FD.to_string(),
+                "--ack-fd".to_owned(),
+                ACK_FD.to_string(),
+                "--required".to_owned(),
+                "--profile".to_owned(),
+                "offline_read_only_exec_v1".to_owned(),
+                "--cwd".to_owned(),
+                "crates/example".to_owned(),
+                "--".to_owned(),
+                "/toolchain/bin/rustc".to_owned(),
+                "--version".to_owned(),
+            ];
+            let parsed = parse_invocation(&args).unwrap();
+            assert_eq!(parsed.profile_id, "offline_read_only_exec_v1");
+            assert_eq!(parsed.executable, "/toolchain/bin/rustc");
+            assert_eq!(parsed.working_directory, "crates/example");
+            assert_eq!(parsed.payload_arguments, ["--version"]);
+
+            args[6] = "--optional".to_owned();
+            assert!(parse_invocation(&args).is_none());
+            args[6] = "--required".to_owned();
+            args[12] = "/tmp/rustc".to_owned();
+            assert!(parse_invocation(&args).is_none());
+            args[12] = "/toolchain/bin/rustc".to_owned();
+            args[10] = "../outside".to_owned();
+            assert!(parse_invocation(&args).is_none());
         }
 
         #[test]

@@ -2,20 +2,23 @@
 
 ## Registered operation effects
 
-The current workspace registry exposes nine filesystem Tools and one process
-Tool, `offline_cargo_test`. The five read-only filesystem Tools are
+The current workspace registry exposes nine filesystem Tools and two process
+Tools: `offline_cargo_test` and `offline_read_only_exec`. The five read-only filesystem Tools are
 `read_file`, `read_range`, `list_directory`, `search_text`, and
 `search_tree_text`; each has the `read-only workspace access` effect. The four
 filesystem Tools that mutate the workspace are `create_directory`,
 `create_file`, `replace_text`, and `apply_patch`; each has the
-`workspace mutation` effect. The process Tool has the
-`fixed sandboxed offline Cargo test` effect.
+`workspace mutation` effect. `offline_cargo_test` has the
+`fixed sandboxed offline Cargo test` effect. `offline_read_only_exec` has the
+`sandboxed offline read-only execution` effect.
 
 These provider-facing descriptions are informational. Every workspace
-operation still requires its existing task authorization, while
-`offline_cargo_test` additionally requires its existing host authorization and
-verified Linux confinement. Runtime authorization checks remain authoritative
-and fail closed; descriptive metadata and model output do not grant access.
+operation still requires its existing task authorization. Each process operation
+also requires host-owned authorization and verified Linux confinement.
+`offline_read_only_exec` additionally requires a host approval for its exact
+request and a one-shot TaskSession grant. Runtime authorization checks remain
+authoritative and fail closed; descriptive metadata and model output do not
+grant access.
 
 ## Fixed profile
 
@@ -41,8 +44,51 @@ descriptors. No host path or environment value is accepted in the request.
 The optional test filter remains a separate, validated literal argument after
 Cargo's fixed `--` separator.
 
+## Bounded direct-argv profile
+
+`offline_read_only_exec` is separate from the fixed Cargo test operation. It
+accepts only a closed executable identity (`cargo` or `rustc`), a direct `argv`
+array of 1 to 32 nonempty strings (at most 1,024 bytes per item and 4,096 bytes
+total), and a normalized workspace-relative working directory. The request
+rejects unknown fields. It contains no shell string, executable path, environment
+values, sandbox options, network input, or caller-selected limits. Argument
+contents are passed as individual argv entries and are never parsed as shell
+syntax.
+
+The host resolves the selected binary from its pinned toolchain and supplies the
+profile's fixed environment, limits, read-only workspace/toolchain/registry
+mounts, deny-all network namespace, syscall policy, ephemeral process tree, and
+private temporary filesystems. The workspace cwd is resolved and pinned beneath
+the captured workspace before it is mounted into the sandbox. This profile has
+90 seconds wall time, 60 CPU seconds, 1.5 GiB memory, 128 KiB combined output,
+and 64 processes as hard ceilings. Its Linux launch also requires the profile's
+Landlock write restriction in addition to the common sandbox controls. Missing
+required controls fail closed without a less restricted fallback.
+
+The permission gate asks the trusted host for approval for each exact
+`offline_read_only_exec` action in both Ask and Risk-based modes. Only after a
+positive host answer does it ask TaskSession to derive a one-shot exact-intent
+grant from that task's current active, unexpired, unconsumed host-installed
+process policy. The approval grant is bound to the request and workspace
+revision, expires after 60 seconds, and is consumed at the guarded spawn. A
+missing, stale, consumed, or cancelled source policy, absent prompt, or denied
+approval fails closed before process dispatch. A model request cannot create or
+reuse that grant. Once it is consumed, trusted host code must provision a fresh
+active process grant before any later process operation can run, including
+another direct-argv action or the fixed `offline_cargo_test` action. TaskSession
+has one active process-grant slot per task: installing the exact direct-argv
+approval replaces and revokes the prior grant, signals cancellation to work
+still using its policy, and leaves no standing Cargo authority behind. The
+current CLI does not provision a process policy or interactive prompt for this operation;
+it is available to embeddings that provide both through the existing host-owned
+TaskSession and Harness interfaces.
+
+The existing `offline_cargo_test` behavior remains unchanged: its request still
+contains only the optional literal test filter and always uses the fixed Cargo
+argv, cwd, environment, limits, and process profile described above.
+
 Legacy version 1 `ProcessProfile` values remain metadata-only. Only the fixed
-version 2 profile has execution requirements and can be passed by the Tools
+version 2 contracts have execution requirements and can be passed by the Tools
 adapter to `SandboxRunRequest`. The common runner boundary validates the exact
 contract, captured resource roles, and effective limits, then compares the
 profile's required controls with the selected backend's declared capabilities.
@@ -52,7 +98,7 @@ capability means the backend can attempt to establish that control; it does not
 prove that the current host provides it or that setup succeeded.
 
 The Linux backend still performs its host prerequisite checks, exact Bubblewrap
-readiness probe, and cgroup readback before launching Cargo. A setup failure
+readiness probe, and cgroup readback before launching a process. A setup failure
 returns a typed non-success result and never falls back to a less restricted
 launch. `SandboxIsolationEvidence` remains separate from backend capabilities:
 it records per-run setup status, while behavioral enforcement still requires

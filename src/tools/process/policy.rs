@@ -1,9 +1,10 @@
-//! The fixed offline Cargo policy: limits, test filters and the trusted toolchain profile.
+//! Host-owned offline process policy, limits and the trusted toolchain profile.
 
 use crate::tools::process_profile::ProcessProfile;
 use crate::tools::FileIdentity;
 #[cfg(target_os = "linux")]
 use crate::tools::{capture_workspace_root_at, WorkspaceRoot};
+use krypper_sandbox::OfflineReadOnlyExecRequest;
 use krypper_sandbox::{ProfileLimits, RunLimits, ValidatedExecutionRequirements};
 #[cfg(all(test, target_os = "linux"))]
 use std::ffi::OsString;
@@ -147,6 +148,32 @@ impl OfflineCargoPolicy {
         })
     }
 
+    /// Forks the captured host policy for a newly authorized grant.
+    ///
+    /// Directory descriptors and their identities remain pinned to the same trusted roots, but
+    /// cancellation belongs to a single grant epoch. Replacing a source grant must therefore
+    /// cancel its in-flight process without cancelling the exact request installed in its place.
+    pub(crate) fn fork_for_new_grant(&self) -> Result<Self, &'static str> {
+        #[cfg(target_os = "linux")]
+        let (toolchain, registry) = (
+            self.toolchain
+                .duplicate()
+                .map_err(|_| "trusted process policy is unavailable")?,
+            self.registry
+                .duplicate()
+                .map_err(|_| "trusted process policy is unavailable")?,
+        );
+
+        Ok(Self {
+            #[cfg(target_os = "linux")]
+            toolchain,
+            #[cfg(target_os = "linux")]
+            registry,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            profile: self.profile.clone(),
+        })
+    }
+
     /// A trusted caller may cancel the current run. Cancellation never raises a limit.
     pub fn cancellation(&self) -> Arc<AtomicBool> {
         self.cancelled.clone()
@@ -162,7 +189,48 @@ impl OfflineCargoPolicy {
             .execution_requirements()
             .cloned()
             .ok_or("process profile has no validated requirements")?;
+        let environment = krypper_sandbox::OFFLINE_CARGO_TEST_ENVIRONMENT
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect();
+        self.authorization_facts_for_requirements(requirements, environment)
+    }
+
+    pub(crate) fn authorization_facts_for_read_only_exec(
+        &self,
+        request: &OfflineReadOnlyExecRequest,
+    ) -> Result<ProcessPolicyFacts, &'static str> {
+        let requirements = request.requirements();
+        let workspace_cwd =
+            krypper_sandbox::runner_contract::workspace_cwd_path(request.working_directory())
+                .ok_or("process working directory is invalid")?;
+        let environment = krypper_sandbox::OFFLINE_CARGO_TEST_ENVIRONMENT
+            .iter()
+            .map(|(name, value)| {
+                (
+                    (*name).to_owned(),
+                    if *name == "PWD" {
+                        workspace_cwd.clone()
+                    } else {
+                        (*value).to_owned()
+                    },
+                )
+            })
+            .collect();
+        self.authorization_facts_for_requirements(requirements, environment)
+    }
+
+    fn authorization_facts_for_requirements(
+        &self,
+        requirements: ValidatedExecutionRequirements,
+        environment: Vec<(String, String)>,
+    ) -> Result<ProcessPolicyFacts, &'static str> {
         let profile_limits = self.profile.limits();
+        let profile_limits = if requirements.profile_id() == "offline_read_only_exec_v1" {
+            requirements.profile_limits()
+        } else {
+            profile_limits
+        };
         let effective_limits = profile_limits
             .to_run_limits()
             .map_err(|_| "process profile limits are invalid")?;
@@ -179,27 +247,18 @@ impl OfflineCargoPolicy {
         );
         #[cfg(not(target_os = "linux"))]
         let (toolchain_identity, registry_identity) = (None, None);
+        let executable = match requirements.executable() {
+            krypper_sandbox::SandboxExecutable::Cargo => "/toolchain/bin/cargo",
+            krypper_sandbox::SandboxExecutable::Rustc => "/toolchain/bin/rustc",
+        };
         Ok(ProcessPolicyFacts {
-            profile_version: self.profile.version(),
-            profile_id: self.profile.id().to_owned(),
-            executable: self.profile.executable().to_owned(),
-            arguments: self
-                .profile
-                .arguments()
-                .iter()
-                .map(|argument| (*argument).to_owned())
-                .collect(),
-            working_directory: self.profile.cwd().to_owned(),
-            environment_names: self
-                .profile
-                .environment_allowlist()
-                .iter()
-                .map(|name| (*name).to_owned())
-                .collect(),
-            environment: krypper_sandbox::OFFLINE_CARGO_TEST_ENVIRONMENT
-                .iter()
-                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
-                .collect(),
+            profile_version: requirements.version(),
+            profile_id: requirements.profile_id().to_owned(),
+            executable: executable.to_owned(),
+            arguments: requirements.arguments().to_vec(),
+            working_directory: requirements.working_directory().to_owned(),
+            environment_names: requirements.environment_names().to_vec(),
+            environment,
             profile_limits,
             effective_limits,
             requirements,

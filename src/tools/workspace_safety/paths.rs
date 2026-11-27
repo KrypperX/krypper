@@ -55,6 +55,49 @@ pub(super) fn open_workspace_directory(
     open_workspace_relative(root, path, true).map(DirHandle::from_file)
 }
 
+/// Open a workspace-relative directory without following any symlink component.
+///
+/// Process working directories use this stricter walk because a symlink could select another
+/// in-sandbox mount even though it cannot escape Bubblewrap. The returned descriptor pins the
+/// validated directory for the lifetime of the process request.
+#[cfg(target_os = "linux")]
+pub(crate) fn open_workspace_directory_no_follow(
+    root: &WorkspaceRoot,
+    relative: &str,
+) -> Result<File, CliError> {
+    if relative == "." {
+        return duplicate_directory_file(&root.descriptor).map_err(|error| {
+            CliError::from_io(&error, "unable to open process working directory")
+        });
+    }
+    if !super::syscalls::is_relative_workspace_path(OsStr::new(relative)) {
+        return Err(CliError::new("invalid process working directory"));
+    }
+
+    let mut directory = duplicate_directory(&root.descriptor)
+        .map_err(|error| CliError::from_io(&error, "unable to open process working directory"))?;
+    for component in relative.split('/') {
+        if component.is_empty() || matches!(component, "." | "..") {
+            return Err(CliError::new("invalid process working directory"));
+        }
+        let opened = open_at(
+            &directory,
+            OsStr::new(component),
+            OpenRequest::ReadDirectory,
+        )
+        .map_err(|error| CliError::from_io(&error, "process working directory is unavailable"))?;
+        let status = fstat_file(&opened).map_err(|error| {
+            CliError::from_io(&error, "process working directory is unavailable")
+        })?;
+        if !is_directory(&status) {
+            return Err(CliError::new("process working directory is unavailable"));
+        }
+        directory = DirHandle::from_file(opened);
+    }
+    duplicate_directory_file(&directory)
+        .map_err(|error| CliError::from_io(&error, "unable to pin process working directory"))
+}
+
 pub(crate) fn open_workspace_relative_with_resolved_path(
     root: &WorkspaceRoot,
     path: &OsStr,

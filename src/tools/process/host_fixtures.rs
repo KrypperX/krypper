@@ -25,6 +25,7 @@ mod cargo;
 mod environment;
 mod landlock;
 mod limits;
+mod read_only_exec;
 mod syscalls;
 
 /// The explicit opt-in. Presence is not enough; only the exact value `1` opens the gate.

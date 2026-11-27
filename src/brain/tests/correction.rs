@@ -37,6 +37,7 @@ fn process_failure_correction_reflection_receives_the_typed_bounded_result() {
         [ProcessResult {
             run_id: Uuid::new_v4(),
             outcome: ProcessOutcome::Exited(101),
+            profile: crate::ProcessExecutionProfile::OfflineCargoTest,
             stdout: "running 1 test\n".to_owned(),
             stderr: "test focused_test ... FAILED\n".to_owned(),
             truncated: false,

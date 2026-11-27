@@ -54,6 +54,70 @@ pub(crate) fn action_from_call(
                 test_filter: test_filter.map(str::to_owned),
             })
         }
+        "offline_read_only_exec" => {
+            let arguments = checked_arguments(
+                arguments,
+                &["executable", "argv", "working_directory"],
+                &["executable", "argv", "working_directory"],
+            )?;
+            let executable = match string_argument(arguments, "executable")? {
+                "cargo" => crate::tools::process::SandboxExecutable::Cargo,
+                "rustc" => crate::tools::process::SandboxExecutable::Rustc,
+                _ => {
+                    return Err(ModelError::InvalidArguments(
+                        "executable must be cargo or rustc",
+                    ));
+                }
+            };
+            let argv = arguments
+                .get("argv")
+                .and_then(Value::as_array)
+                .filter(|argv| {
+                    !argv.is_empty()
+                        && argv.len()
+                            <= krypper_sandbox::runner_contract::MAX_READ_ONLY_EXEC_ARGUMENTS
+                })
+                .ok_or(ModelError::InvalidArguments(
+                    "argv must contain 1 to 32 strings",
+                ))?;
+            let mut argument_bytes = 0_usize;
+            let mut checked_argv = Vec::with_capacity(argv.len());
+            for argument in argv {
+                let argument = argument
+                    .as_str()
+                    .filter(|argument| {
+                        !argument.is_empty()
+                            && argument.len()
+                                <= krypper_sandbox::runner_contract::MAX_READ_ONLY_EXEC_ARGUMENT_BYTES
+                            && !argument.chars().any(char::is_control)
+                    })
+                    .ok_or(ModelError::InvalidArguments(
+                        "argv items must be nonempty bounded strings without control characters",
+                    ))?;
+                argument_bytes = argument_bytes
+                    .checked_add(argument.len())
+                    .filter(|bytes| {
+                        *bytes
+                            <= krypper_sandbox::runner_contract::MAX_READ_ONLY_EXEC_ARGUMENT_TOTAL_BYTES
+                    })
+                    .ok_or(ModelError::InvalidArguments(
+                        "argv exceeds the total byte limit",
+                    ))?;
+                checked_argv.push(argument.to_owned());
+            }
+            let working_directory = string_argument(arguments, "working_directory")?;
+            let request = crate::tools::process::OfflineReadOnlyExecRequest::new(
+                executable,
+                checked_argv,
+                working_directory,
+            )
+            .map_err(|_| {
+                ModelError::InvalidArguments(
+                    "working_directory or direct argv is outside the offline read-only profile",
+                )
+            })?;
+            Ok(WorkspaceAction::OfflineReadOnlyExec { request })
+        }
         "read_file" => {
             let arguments = checked_arguments(arguments, &["path"], &["path"])?;
             Ok(WorkspaceAction::ReadFile {
@@ -455,5 +519,101 @@ mod decision_error_mapping_tests {
             .decision_failure_code(),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod offline_read_only_exec_action_tests {
+    use super::{action_from_call, ModelError, WorkspaceAction};
+    use crate::brain::tool_set::AdvertisedToolNames;
+    use serde_json::json;
+
+    fn parse(arguments: serde_json::Value) -> Result<WorkspaceAction, ModelError> {
+        action_from_call(
+            "offline_read_only_exec",
+            &arguments,
+            &AdvertisedToolNames::all_builtins(),
+        )
+    }
+
+    #[test]
+    fn accepts_only_pinned_executable_direct_argv_and_workspace_cwd() {
+        let action = parse(json!({
+            "executable":"cargo",
+            "argv":["metadata", "--format-version=1"],
+            "working_directory":"crates/example"
+        }))
+        .unwrap();
+
+        let WorkspaceAction::OfflineReadOnlyExec { request } = action else {
+            panic!("expected a typed direct-argv action");
+        };
+        assert_eq!(
+            request.executable(),
+            crate::tools::process::SandboxExecutable::Cargo
+        );
+        assert_eq!(request.arguments(), &["metadata", "--format-version=1"]);
+        assert_eq!(request.working_directory(), "crates/example");
+    }
+
+    #[test]
+    fn argv_text_is_preserved_as_data_without_shell_parsing() {
+        let literal = "--message=$(touch marker); echo still-an-argument";
+        let action = parse(json!({
+            "executable":"rustc",
+            "argv":[literal],
+            "working_directory":"."
+        }))
+        .unwrap();
+
+        let WorkspaceAction::OfflineReadOnlyExec { request } = action else {
+            panic!("expected a typed direct-argv action");
+        };
+        assert_eq!(request.arguments(), &[literal]);
+    }
+
+    #[test]
+    fn malformed_process_payloads_fail_before_an_action_is_constructed() {
+        let invalid = [
+            json!({"executable":"/usr/bin/cargo", "argv":["metadata"], "working_directory":"."}),
+            json!({"executable":"sh", "argv":["-c", "id"], "working_directory":"."}),
+            json!({"executable":"cargo", "argv":[], "working_directory":"."}),
+            json!({"executable":"cargo", "argv":[1], "working_directory":"."}),
+            json!({"executable":"cargo", "argv":["metadata"], "working_directory":"../outside"}),
+            json!({"executable":"cargo", "argv":["metadata"], "working_directory":"." , "env":{"PATH":"/tmp"}}),
+            json!({"executable":"cargo", "argv":["metadata"], "working_directory":".", "shell":"sh -c metadata"}),
+        ];
+
+        for arguments in invalid {
+            assert!(
+                matches!(parse(arguments), Err(ModelError::InvalidArguments(_))),
+                "malformed payload must be rejected before execution"
+            );
+        }
+    }
+
+    #[test]
+    fn argv_bounds_are_checked_before_cloning_into_the_typed_request() {
+        let too_many_arguments =
+            vec!["x"; krypper_sandbox::runner_contract::MAX_READ_ONLY_EXEC_ARGUMENTS + 1];
+        assert!(matches!(
+            parse(
+                json!({"executable":"cargo", "argv":too_many_arguments, "working_directory":"."})
+            ),
+            Err(ModelError::InvalidArguments(_))
+        ));
+
+        let too_long =
+            "x".repeat(krypper_sandbox::runner_contract::MAX_READ_ONLY_EXEC_ARGUMENT_BYTES + 1);
+        assert!(matches!(
+            parse(json!({"executable":"cargo", "argv":[too_long], "working_directory":"."})),
+            Err(ModelError::InvalidArguments(_))
+        ));
+
+        let over_total = vec!["x".repeat(1_024); 5];
+        assert!(matches!(
+            parse(json!({"executable":"cargo", "argv":over_total, "working_directory":"."})),
+            Err(ModelError::InvalidArguments(_))
+        ));
     }
 }

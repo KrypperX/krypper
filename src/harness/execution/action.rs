@@ -29,6 +29,19 @@ pub(super) fn execute_action_with_revision(
                 ActionExecution::Failed { observation, error }
             })
         }
+        WorkspaceAction::OfflineReadOnlyExec { request } => {
+            let result = session
+                .run_offline_read_only_exec(task_id, turn_id, request)
+                .map_err(GoalTurnError::WorkspaceRead)?;
+            let error = GoalTurnError::ReadOnlyProcess(result.outcome);
+            let succeeded = result.succeeded();
+            let observation = WorkspaceObservation::ProcessFinished { result };
+            Ok(if succeeded {
+                ActionExecution::Observation(observation)
+            } else {
+                ActionExecution::Failed { observation, error }
+            })
+        }
         WorkspaceAction::ReadFile { path } => {
             match session.read_workspace_file(task_id, turn_id, path) {
                 Ok(contents) => Ok(ActionExecution::Observation(

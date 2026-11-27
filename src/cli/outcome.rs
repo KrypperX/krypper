@@ -83,16 +83,24 @@ pub(super) fn write_observation(
 ) -> io::Result<()> {
     match observation {
         WorkspaceObservation::ProcessFinished { result } => {
-            writeln!(
-                output,
-                "Observation {number}: offline Cargo {:?}; filter={:?}; tests_ran={} executed_tests={:?}; cleanup={} truncated={}",
-                result.outcome,
-                result.test_filter,
-                result.tests_ran,
-                result.executed_tests,
-                result.cleanup_confirmed,
-                result.truncated
-            )?;
+            if result.profile == crate::ProcessExecutionProfile::OfflineCargoTest {
+                writeln!(
+                    output,
+                    "Observation {number}: offline Cargo {:?}; filter={:?}; tests_ran={} executed_tests={:?}; cleanup={} truncated={}",
+                    result.outcome,
+                    result.test_filter,
+                    result.tests_ran,
+                    result.executed_tests,
+                    result.cleanup_confirmed,
+                    result.truncated
+                )?;
+            } else {
+                writeln!(
+                    output,
+                    "Observation {number}: offline read-only exec {:?}; cleanup={} truncated={}",
+                    result.outcome, result.cleanup_confirmed, result.truncated
+                )?;
+            }
             writeln!(
                 output,
                 "stdout: {:?}\nstderr: {:?}",
@@ -312,6 +320,7 @@ mod tests {
                     result: ProcessResult {
                         run_id: uuid::Uuid::new_v4(),
                         outcome: ProcessOutcome::NoTestsMatched,
+                        profile: crate::ProcessExecutionProfile::OfflineCargoTest,
                         stdout: String::new(),
                         stderr: String::new(),
                         truncated: false,

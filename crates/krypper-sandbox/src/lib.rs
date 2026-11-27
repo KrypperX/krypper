@@ -187,6 +187,14 @@ const FIXED_CARGO_PROFILE_LIMITS: ProfileLimits = ProfileLimits {
     output_bytes: MAX_OUTPUT_BYTES,
     processes: MAX_PROCESSES,
 };
+const READ_ONLY_EXEC_PROFILE_ID: &str = runner_contract::READ_ONLY_EXEC_PROFILE_ID;
+const READ_ONLY_EXEC_PROFILE_LIMITS: ProfileLimits = ProfileLimits {
+    wall_secs: 90,
+    cpu_ms: 60_000,
+    memory_bytes: 1536 * 1024 * 1024,
+    output_bytes: 128 * 1024,
+    processes: 64,
+};
 
 /// Resource ceilings expressed as seconds, milliseconds, and bytes at profile-definition time.
 ///
@@ -271,6 +279,7 @@ pub enum NetworkRequirement {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SyscallRequirement {
     OfflineCargoTestV1,
+    OfflineReadOnlyExecV1,
 }
 
 /// Process-session behavior supported by the execution contract.
@@ -369,6 +378,34 @@ impl ValidatedExecutionRequirements {
         .expect("fixed offline Cargo requirements are valid")
     }
 
+    /// Build the bounded direct-argv profile for the pinned Cargo or rustc executable.
+    ///
+    /// This profile accepts model-selected arguments only as a direct argv vector. It never
+    /// interprets them as shell text. The sandbox still owns the executable path, environment,
+    /// mounts, network namespace, syscall policy, and resource limits.
+    pub fn offline_read_only_exec_v1(
+        executable: SandboxExecutable,
+        arguments: Vec<String>,
+        working_directory: impl Into<String>,
+    ) -> Result<Self, ExecutionRequirementsError> {
+        Self::new(
+            EXECUTION_REQUIREMENTS_VERSION,
+            READ_ONLY_EXEC_PROFILE_ID,
+            executable,
+            arguments,
+            working_directory,
+            fixed_resource_requirements(),
+            FIXED_CARGO_ENVIRONMENT_NAMES
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect(),
+            READ_ONLY_EXEC_PROFILE_LIMITS,
+            NetworkRequirement::DenyAll,
+            SyscallRequirement::OfflineReadOnlyExecV1,
+            ProcessTreeRequirement::EphemeralTree,
+        )
+    }
+
     fn validate(&self) -> Result<(), ExecutionRequirementsError> {
         if self.version != EXECUTION_REQUIREMENTS_VERSION {
             return Err(ExecutionRequirementsError::UnsupportedVersion);
@@ -382,20 +419,24 @@ impl ValidatedExecutionRequirements {
         {
             return Err(ExecutionRequirementsError::InvalidProfileId);
         }
-        if self.arguments.is_empty()
-            || self.arguments.len() > MAX_ARGUMENTS
-            || self.arguments.iter().any(|argument| {
-                argument.is_empty()
-                    || argument.len() > MAX_ARGUMENT_BYTES
-                    || !argument.bytes().all(|byte| {
-                        byte.is_ascii_alphanumeric()
-                            || matches!(
-                                byte,
-                                b'.' | b'_' | b'-' | b'/' | b':' | b'=' | b',' | b'@' | b'+'
-                            )
-                    })
-            })
-        {
+        let arguments_valid = if self.profile_id == READ_ONLY_EXEC_PROFILE_ID {
+            runner_contract::is_valid_read_only_exec_arguments(&self.arguments)
+        } else {
+            !self.arguments.is_empty()
+                && self.arguments.len() <= MAX_ARGUMENTS
+                && self.arguments.iter().all(|argument| {
+                    !argument.is_empty()
+                        && argument.len() <= MAX_ARGUMENT_BYTES
+                        && argument.bytes().all(|byte| {
+                            byte.is_ascii_alphanumeric()
+                                || matches!(
+                                    byte,
+                                    b'.' | b'_' | b'-' | b'/' | b':' | b'=' | b',' | b'@' | b'+'
+                                )
+                        })
+                })
+        };
+        if !arguments_valid {
             return Err(ExecutionRequirementsError::InvalidArguments);
         }
         if !valid_workspace_relative_path(&self.working_directory) {
@@ -488,6 +529,91 @@ impl ValidatedExecutionRequirements {
     fn is_fixed_offline_cargo_test(&self) -> bool {
         self == &Self::offline_cargo_test()
     }
+
+    fn is_offline_read_only_exec_v1(&self) -> bool {
+        self.version == EXECUTION_REQUIREMENTS_VERSION
+            && self.profile_id == READ_ONLY_EXEC_PROFILE_ID
+            && matches!(
+                self.executable,
+                SandboxExecutable::Cargo | SandboxExecutable::Rustc
+            )
+    }
+
+    fn has_supported_shape(&self) -> bool {
+        if self.is_fixed_offline_cargo_test() {
+            return true;
+        }
+        self.is_offline_read_only_exec_v1()
+            && runner_contract::is_valid_read_only_exec_arguments(&self.arguments)
+            && valid_workspace_relative_path(&self.working_directory)
+            && self.resources == fixed_resource_requirements()
+            && self.environment_names
+                == FIXED_CARGO_ENVIRONMENT_NAMES
+                    .iter()
+                    .map(|name| (*name).to_owned())
+                    .collect::<Vec<_>>()
+            && self.profile_limits == READ_ONLY_EXEC_PROFILE_LIMITS
+            && self.network == NetworkRequirement::DenyAll
+            && self.syscall == SyscallRequirement::OfflineReadOnlyExecV1
+            && self.process_tree == ProcessTreeRequirement::EphemeralTree
+    }
+}
+
+/// A bounded direct-argv request for one pinned Cargo or rustc executable.
+///
+/// The request contains no executable path, shell text, environment, or sandbox settings. The
+/// host profile resolves the executable identity and constructs every execution requirement.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OfflineReadOnlyExecRequest {
+    executable: SandboxExecutable,
+    arguments: Vec<String>,
+    working_directory: String,
+}
+
+impl OfflineReadOnlyExecRequest {
+    /// Validate a direct argv request under the versioned offline/read-only profile.
+    pub fn new(
+        executable: SandboxExecutable,
+        arguments: Vec<String>,
+        working_directory: impl Into<String>,
+    ) -> Result<Self, ExecutionRequirementsError> {
+        let working_directory = working_directory.into();
+        ValidatedExecutionRequirements::offline_read_only_exec_v1(
+            executable,
+            arguments.clone(),
+            working_directory.clone(),
+        )?;
+        Ok(Self {
+            executable,
+            arguments,
+            working_directory,
+        })
+    }
+
+    /// Closed host-owned executable identity.
+    pub fn executable(&self) -> SandboxExecutable {
+        self.executable
+    }
+
+    /// Ordered direct arguments, with no shell parsing or expansion.
+    pub fn arguments(&self) -> &[String] {
+        &self.arguments
+    }
+
+    /// Workspace-relative working directory.
+    pub fn working_directory(&self) -> &str {
+        &self.working_directory
+    }
+
+    /// Build the immutable requirements contract checked by the sandbox boundary.
+    pub fn requirements(&self) -> ValidatedExecutionRequirements {
+        ValidatedExecutionRequirements::offline_read_only_exec_v1(
+            self.executable,
+            self.arguments.clone(),
+            self.working_directory.clone(),
+        )
+        .expect("validated read-only process request remains valid")
+    }
 }
 
 fn fixed_resource_requirements() -> Vec<PinnedResourceRequirement> {
@@ -505,16 +631,7 @@ fn fixed_resource_requirements() -> Vec<PinnedResourceRequirement> {
 }
 
 fn valid_workspace_relative_path(value: &str) -> bool {
-    value == "."
-        || (!value.is_empty()
-            && value.len() <= 4_096
-            && !value.starts_with('/')
-            && value
-                .split('/')
-                .all(|part| !part.is_empty() && part != "." && part != "..")
-            && value.bytes().all(|byte| {
-                byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'/' | b'.')
-            }))
+    runner_contract::is_valid_workspace_relative_path(value)
 }
 
 #[cfg(target_os = "linux")]
@@ -611,6 +728,7 @@ pub struct DirectoryDescriptors {
     workspace: File,
     toolchain: File,
     registry: File,
+    workspace_cwd: Option<File>,
 }
 
 impl DirectoryDescriptors {
@@ -620,7 +738,14 @@ impl DirectoryDescriptors {
             workspace,
             toolchain,
             registry,
+            workspace_cwd: None,
         }
+    }
+
+    /// Transfer captured descriptors plus a no-symlink workspace cwd for direct-argv execution.
+    pub fn with_workspace_cwd(mut self, workspace_cwd: File) -> Self {
+        self.workspace_cwd = Some(workspace_cwd);
+        self
     }
 
     fn for_resource(&self, id: PinnedResourceId) -> &File {
@@ -632,7 +757,17 @@ impl DirectoryDescriptors {
     }
 
     fn matches_requirements(&self, requirements: &ValidatedExecutionRequirements) -> bool {
-        requirements.resources().len() == 3
+        let needs_cwd_mount = requirements.profile_id() == READ_ONLY_EXEC_PROFILE_ID
+            && requirements.working_directory() != ".";
+        let cwd_matches = if needs_cwd_mount {
+            self.workspace_cwd.as_ref().is_some_and(|directory| {
+                directory.metadata().is_ok_and(|metadata| metadata.is_dir())
+            })
+        } else {
+            self.workspace_cwd.is_none()
+        };
+        cwd_matches
+            && requirements.resources().len() == 3
             && requirements.resources().iter().all(|resource| {
                 resource.access == PinnedResourceAccess::ReadOnly
                     && self
@@ -647,10 +782,18 @@ impl DirectoryDescriptors {
         [&self.workspace, &self.toolchain, &self.registry]
             .iter()
             .all(|directory| directory.metadata().is_ok_and(|metadata| metadata.is_dir()))
+            && self.workspace_cwd.as_ref().map_or(true, |directory| {
+                directory.metadata().is_ok_and(|metadata| metadata.is_dir())
+            })
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn workspace_cwd(&self) -> Option<&File> {
+        self.workspace_cwd.as_ref()
     }
 }
 
-/// The only request accepted by this runner: one bounded offline Cargo test attempt.
+/// One bounded process request accepted by the existing sandbox runner.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub struct SandboxRunRequest {
     pub(crate) run_id: Uuid,
@@ -733,8 +876,15 @@ impl SandboxRunRequest {
     }
 
     fn validate(&self) -> Result<(), &'static str> {
-        if !self.requirements.is_fixed_offline_cargo_test() {
-            return Err("execution requirements do not match the fixed profile");
+        if !self.requirements.has_supported_shape() {
+            return Err("execution requirements do not match a supported profile");
+        }
+        if self.requirements.is_fixed_offline_cargo_test() {
+            validate_test_filter(self.test_filter.as_deref())?;
+        } else if self.test_filter.is_some()
+            || self.landlock_requirement != LandlockRequirement::Required
+        {
+            return Err("read-only exec requires direct argv and mandatory Landlock");
         }
         self.limits
             .validate_against(self.requirements.profile_limits())?;
@@ -1054,9 +1204,14 @@ impl SandboxRunResult {
     }
 }
 
-/// Execute the fixed offline Cargo test profile with the host-enforced sandbox.
-pub fn run_offline_cargo(request: SandboxRunRequest) -> SandboxRunResult {
+/// Execute one host-owned offline process profile through the single sandbox dispatcher.
+pub fn run_process(request: SandboxRunRequest) -> SandboxRunResult {
     run_offline_cargo_with_backend(request, selected_backend())
+}
+
+/// Compatibility entry point for the original fixed offline Cargo test profile.
+pub fn run_offline_cargo(request: SandboxRunRequest) -> SandboxRunResult {
+    run_process(request)
 }
 
 fn selected_backend() -> &'static dyn SandboxExecutionBackend {
@@ -1107,7 +1262,11 @@ fn run_offline_cargo_with_backend(
         return result;
     }
 
-    let missing = OFFLINE_CARGO_REQUIRED_CONTROLS
+    let mut required_controls = OFFLINE_CARGO_REQUIRED_CONTROLS.to_vec();
+    if request.requirements.is_offline_read_only_exec_v1() {
+        required_controls.push(SandboxControl::LandlockFilesystemWrites);
+    }
+    let missing = required_controls
         .iter()
         .copied()
         .filter(|control| !backend.supports_control(*control))
@@ -1127,7 +1286,7 @@ fn run_offline_cargo_with_backend(
             .into(),
         );
 
-        for control in OFFLINE_CARGO_REQUIRED_CONTROLS {
+        for control in required_controls {
             if missing.contains(&control) {
                 evidence.unavailable(control);
             } else {

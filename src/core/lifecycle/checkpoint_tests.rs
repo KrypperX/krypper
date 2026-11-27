@@ -82,6 +82,10 @@ fn checkpoint_preserves_only_metadata_for_workspace_activity() {
             passed: true,
             retry_any_filter: false,
         },
+        TurnActivitySummary::OfflineReadOnlyExecFinished {
+            succeeded: true,
+            output_bytes: 12,
+        },
         TurnActivitySummary::ExtensionCompleted,
         TurnActivitySummary::BudgetExhausted { actions: 5 },
     ];

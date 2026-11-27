@@ -21,7 +21,8 @@ pub(crate) use self::policy::{validate_test_filter, ProcessPolicyFacts, MAX_TEST
 pub use self::policy::{OfflineCargoPolicy, OfflineCargoPolicyError};
 #[allow(unused_imports)]
 pub use self::result::ProcessResult;
-pub(crate) use self::supervisor::run;
+pub(crate) use self::supervisor::{run, run_read_only_exec};
+pub use krypper_sandbox::{OfflineReadOnlyExecRequest, SandboxExecutable};
 
 #[cfg(all(test, target_os = "linux"))]
 use self::policy::cargo_command_args;
