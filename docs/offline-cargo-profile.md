@@ -129,6 +129,12 @@ their provenance, integrity and immutability, just as for `/usr` and the kernel;
 an ELF header alone is not an authenticity check. No installer or downloader
 runs through this API.
 
+Policy construction returns the public `OfflineCargoPolicyError` type. Callers
+can distinguish unavailable toolchain and registry roots, unreadable toolchain
+binaries, non-ELF binaries, and invalid fixed-profile configuration. Binary I/O
+errors preserve their `std::io::Error` source. Existing error display messages
+remain stable for callers that present them to an operator.
+
 The public Tools and `ProcessResult` imports remain in the Product crate. Its
 adapter passes the profile's validated requirements, captured directory
 handles, effective limits, test filter and cancellation state to the private

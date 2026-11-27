@@ -17,8 +17,8 @@ mod tests;
 // Keep the historical module paths available to internal callers.
 #[allow(unused_imports)]
 pub use self::outcome::{ProcessOutcome, ProcessResource};
-pub use self::policy::OfflineCargoPolicy;
 pub(crate) use self::policy::{validate_test_filter, ProcessPolicyFacts, MAX_TEST_FILTER_BYTES};
+pub use self::policy::{OfflineCargoPolicy, OfflineCargoPolicyError};
 #[allow(unused_imports)]
 pub use self::result::ProcessResult;
 pub(crate) use self::supervisor::run;

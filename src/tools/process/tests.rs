@@ -133,6 +133,89 @@ fn fixture() -> TempDir {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
+fn offline_cargo_policy_reports_typed_toolchain_binary_failures() {
+    let root = TempDir::with_prefix("krypper-process-policy-error-");
+    let toolchain = root.join("toolchain");
+    let registry = root.join("registry");
+    fs::create_dir_all(toolchain.join("bin")).unwrap();
+    fs::create_dir_all(&registry).unwrap();
+
+    let error = crate::OfflineCargoPolicy::new(&toolchain, &registry).unwrap_err();
+
+    assert!(matches!(
+        error,
+        crate::OfflineCargoPolicyError::ToolchainBinaryUnavailable {
+            binary: "cargo",
+            ..
+        }
+    ));
+    assert_eq!(error.to_string(), "toolchain binary unavailable");
+    assert_eq!(
+        std::error::Error::source(&error)
+            .and_then(|source| source.downcast_ref::<std::io::Error>())
+            .map(std::io::Error::kind),
+        Some(std::io::ErrorKind::NotFound)
+    );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn offline_cargo_policy_reports_typed_non_elf_binary_failures() {
+    let root = TempDir::with_prefix("krypper-process-policy-non-elf-");
+    let toolchain = root.join("toolchain");
+    let registry = root.join("registry");
+    fs::create_dir_all(toolchain.join("bin")).unwrap();
+    fs::write(toolchain.join("bin/cargo"), b"not an ELF binary").unwrap();
+    fs::create_dir_all(&registry).unwrap();
+
+    let error = crate::OfflineCargoPolicy::new(&toolchain, &registry).unwrap_err();
+
+    assert!(matches!(
+        error,
+        crate::OfflineCargoPolicyError::ToolchainBinaryNotElf { binary: "cargo" }
+    ));
+    assert_eq!(error.to_string(), "real ELF toolchain required");
+    assert!(std::error::Error::source(&error).is_none());
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn offline_cargo_policy_reports_typed_root_failures() {
+    let root = TempDir::with_prefix("krypper-process-policy-root-");
+    let missing_toolchain = root.join("missing-toolchain");
+    let registry = root.join("registry");
+    fs::create_dir_all(&registry).unwrap();
+
+    let error = crate::OfflineCargoPolicy::new(&missing_toolchain, &registry).unwrap_err();
+
+    assert!(matches!(
+        error,
+        crate::OfflineCargoPolicyError::ToolchainRootUnavailable(_)
+    ));
+    assert!(!error.to_string().is_empty());
+    assert!(std::error::Error::source(&error).is_none());
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn offline_cargo_policy_reports_typed_registry_root_failures() {
+    let root = TempDir::with_prefix("krypper-process-policy-registry-root-");
+    let toolchain = root.join("toolchain");
+    let missing_registry = root.join("missing-registry");
+    fs::create_dir_all(toolchain.join("bin")).unwrap();
+
+    let error = crate::OfflineCargoPolicy::new(&toolchain, &missing_registry).unwrap_err();
+
+    assert!(matches!(
+        error,
+        crate::OfflineCargoPolicyError::RegistryRootUnavailable(_)
+    ));
+    assert!(!error.to_string().is_empty());
+    assert!(std::error::Error::source(&error).is_none());
+}
+
+#[test]
 fn profile_is_denied_without_explicit_task_authority() {
     let path = fixture();
     let mut session = TaskSession::new_in_workspace(&path).unwrap();

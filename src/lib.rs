@@ -21,7 +21,7 @@ pub mod task_lifecycle;
 pub(crate) mod tools;
 
 pub use contracts::process_execution::{ProcessOutcome, ProcessResource, ProcessResult};
-pub use tools::process::OfflineCargoPolicy;
+pub use tools::process::{OfflineCargoPolicy, OfflineCargoPolicyError};
 
 pub use brain::{
     BrainReflectionError, ModelError, ModelProvider, OllamaDecisionSource, WorkspacePlan,
