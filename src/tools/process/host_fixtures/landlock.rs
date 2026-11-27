@@ -34,7 +34,7 @@ fn real_sandbox_landlock_limits_writes_and_reaches_descendants() {
 use std::fs::OpenOptions;
 use std::io::ErrorKind;
 use std::os::unix::fs::MetadataExt;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 fn assert_denies_write(path: &str) {
     match OpenOptions::new().write(true).create_new(true).open(path) {
@@ -144,6 +144,17 @@ fn landlock_allows_profile_scratch_and_denies_unlisted_tmp() {
     ));
 
     assert_denies_write("__KRYPPER_LANDLOCK_SHARED_TMP_PROBE__");
+    let mut null_stdio_child = Command::new("/usr/bin/true")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("Landlock must permit subprocesses to redirect output to private /dev/null");
+    assert!(
+        null_stdio_child.wait().unwrap().success(),
+        "null-stdio subprocess must exit successfully"
+    );
+
     let process_id = std::process::id();
     let descendant_path = format!("/tmp/krypper-landlock-descendant-denied-{process_id}");
     let child = Command::new(std::env::current_exe().unwrap())

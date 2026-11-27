@@ -106,10 +106,14 @@ fixtures on a provisioned host.
 
 The Product adapter requests optional Landlock filesystem-write confinement for
 this fixed Linux profile. The pinned in-sandbox runner applies the policy after
-Bubblewrap creates its filesystem view and before Cargo starts. Writes are
-allowed only under `/tmp/home`, `/tmp/target`, and `/tmp/tmp`. `CARGO_HOME` is
-the `/tmp/home` scratch directory; its `registry` entry points to the separate
-read-only `/cargo/registry` mount, which is outside Landlock's write allowlist.
+Bubblewrap creates its filesystem view and before Cargo starts. Filesystem writes
+are allowed under `/tmp/home`, `/tmp/target`, and `/tmp/tmp`. The only other
+write permission is `WRITE_FILE` on Bubblewrap's private `/dev/null`, so
+subprocesses can redirect stdout or stderr there. This does not grant the device-ioctl
+right; kernels with Landlock ABI 5 or later keep that right restricted.
+`CARGO_HOME` is the `/tmp/home` scratch directory; its `registry` entry points
+to the separate read-only `/cargo/registry` mount, which is outside Landlock's
+write allowlist.
 The fixed `TMPDIR` is `/tmp/tmp`. If the kernel does not provide a supported Landlock ABI, the
 result reports `unavailable` and Cargo may continue only after the existing
 required controls pass. A setup error after ABI support is detected fails the
@@ -400,8 +404,11 @@ path, network-enabled profile, macOS/Windows backend, or persistent build cache.
 
 The additional ignored `real_product_workspace_runs_the_fixed_profile` fixture
 accepts `KRYPPER_TEST_WORKSPACE` in the trusted test harness only, and runs that
-selected repository through the unchanged fixed production profile. It was
-also exercised against this implementation's full source workspace, including
-all ordinary unit/integration/example targets: Cargo exited zero with complete
-output and confirmed cleanup. This is a local host validation result, separate
-from required GitHub Verify and independent code review.
+selected repository through the unchanged fixed production profile. On the
+provisioned host recorded on 2026-11-27, a minimal locked workspace with the
+Rustix 1.1.6 dependency completed successfully after the `/dev/null` write rule
+was added. Running the entire Product workspace stopped at the profile's
+120-second aggregate CPU limit before any Product tests ran. The Rustix build
+script behavior is verified on this host; the full Product workspace remains
+unverified under the current fixed resource limits. This local host evidence is
+separate from required GitHub Verify and independent code review.

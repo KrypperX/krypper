@@ -1,7 +1,8 @@
 //! Optional filesystem write confinement for the fixed offline Cargo runner.
 //!
 //! This is applied inside Bubblewrap, before Cargo is executed. The Bwrap mounts remain the
-//! primary boundary; Landlock limits writes to prepared scratch and temporary work directories.
+//! primary boundary; Landlock limits writes to prepared scratch and temporary work directories,
+//! with a write-only exception for Bubblewrap's private `/dev/null` device.
 
 use crate::runner_protocol::{MAX_LANDLOCK_ABI, MIN_LANDLOCK_ABI};
 use crate::LandlockSetupStatus;
@@ -29,6 +30,7 @@ const ACCESS_FS_MAKE_SYM: u64 = 1 << 12;
 const ACCESS_FS_REFER: u64 = 1 << 13;
 const ACCESS_FS_TRUNCATE: u64 = 1 << 14;
 const ACCESS_FS_IOCTL_DEV: u64 = 1 << 15;
+const NULL_DEVICE_WRITE_ACCESS: u64 = ACCESS_FS_WRITE_FILE;
 
 const WRITE_ACCESS_ABI_1: u64 = ACCESS_FS_WRITE_FILE
     | ACCESS_FS_REMOVE_DIR
@@ -102,6 +104,10 @@ pub(crate) fn apply_fixed_write_policy() -> io::Result<LandlockSetupStatus> {
     ] {
         add_write_rule(ruleset.as_raw_fd(), scratch, handled_access_fs)?;
     }
+    // Subprocesses commonly request Stdio::null() for stdout/stderr. Bubblewrap supplies a
+    // private /dev tree, so allow only file writes to its null device; this rule never grants the
+    // device-ioctl right, which Landlock can enforce starting with ABI 5.
+    add_null_device_write_rule(ruleset.as_raw_fd())?;
 
     // SAFETY: `ruleset` owns a live Landlock ruleset descriptor and the fixed zero flags are valid.
     let result = unsafe { libc::syscall(LANDLOCK_RESTRICT_SELF, ruleset.as_raw_fd(), 0u32) };
@@ -135,12 +141,24 @@ fn add_write_rule(ruleset_fd: RawFd, path: &str, access: u64) -> io::Result<()> 
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW)
         .open(path)?;
+    add_path_beneath_rule(ruleset_fd, directory.as_raw_fd(), access)
+}
+
+fn add_null_device_write_rule(ruleset_fd: RawFd) -> io::Result<()> {
+    let device = OpenOptions::new()
+        .write(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open("/dev/null")?;
+    add_path_beneath_rule(ruleset_fd, device.as_raw_fd(), NULL_DEVICE_WRITE_ACCESS)
+}
+
+fn add_path_beneath_rule(ruleset_fd: RawFd, parent_fd: RawFd, access: u64) -> io::Result<()> {
     let rule = PathBeneathAttr {
         allowed_access: access,
-        parent_fd: directory.as_raw_fd(),
+        parent_fd,
     };
-    // SAFETY: `rule` has the UAPI's packed 12-byte layout and is live for the call; `directory`
-    // keeps its parent descriptor open, while the ruleset descriptor is borrowed and valid.
+    // SAFETY: `rule` has the UAPI's packed 12-byte layout and is live for the call; the caller
+    // keeps the referenced path descriptor open, while the ruleset descriptor is borrowed.
     let result = unsafe {
         libc::syscall(
             LANDLOCK_ADD_RULE,
@@ -166,7 +184,10 @@ fn abi_unavailable(error: &io::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{abi_unavailable, PathBeneathAttr, WRITE_ACCESS_ABI_1};
+    use super::{
+        abi_unavailable, PathBeneathAttr, ACCESS_FS_IOCTL_DEV, ACCESS_FS_WRITE_FILE,
+        NULL_DEVICE_WRITE_ACCESS, WRITE_ACCESS_ABI_1,
+    };
     use std::io;
 
     #[test]
@@ -180,6 +201,12 @@ mod tests {
         assert_ne!(super::ACCESS_FS_REFER, 0);
         assert_ne!(super::ACCESS_FS_TRUNCATE, 0);
         assert_ne!(super::ACCESS_FS_IOCTL_DEV, 0);
+    }
+
+    #[test]
+    fn null_device_exception_allows_file_writes_without_device_ioctls() {
+        assert_eq!(NULL_DEVICE_WRITE_ACCESS, ACCESS_FS_WRITE_FILE);
+        assert_eq!(NULL_DEVICE_WRITE_ACCESS & ACCESS_FS_IOCTL_DEV, 0);
     }
 
     #[test]
