@@ -12,6 +12,23 @@ use super::syscalls::{
 };
 use super::types::{CliError, DirHandle, WorkspaceRoot, MAX_SYMLINKS};
 
+pub(super) fn current_directory(directories: &[DirHandle]) -> Result<&DirHandle, CliError> {
+    directories
+        .last()
+        .ok_or_else(|| CliError::new("invalid path"))
+}
+
+pub(super) fn move_to_parent_directory(directories: &mut Vec<DirHandle>) -> Result<(), CliError> {
+    match directories.len() {
+        0 => Err(CliError::new("invalid path")),
+        1 => Err(CliError::new("path must stay inside the current directory")),
+        _ => directories
+            .pop()
+            .map(|_| ())
+            .ok_or_else(|| CliError::new("invalid path")),
+    }
+}
+
 pub(super) fn open_cwd_relative(path: &OsStr, directory: bool) -> Result<File, CliError> {
     if !is_relative_workspace_path(path) {
         return Err(CliError::new("absolute paths are not allowed"));
@@ -96,10 +113,7 @@ pub(super) fn open_root_relative_with_resolved_path(
         let name = match component {
             PathComponent::Current => continue,
             PathComponent::Parent => {
-                if directories.len() == 1 {
-                    return Err(CliError::new("path must stay inside the current directory"));
-                }
-                directories.pop();
+                move_to_parent_directory(&mut directories)?;
                 resolved_components.pop();
                 continue;
             }
@@ -109,9 +123,7 @@ pub(super) fn open_root_relative_with_resolved_path(
             }
         };
 
-        let parent = directories
-            .last()
-            .expect("invariant: the root handle remains on the stack");
+        let parent = current_directory(&directories)?;
         let status = stat_at(parent, &name).map_err(|error| {
             if is_not_found(&error) {
                 CliError::new("file not found")
@@ -183,10 +195,8 @@ pub(super) fn open_root_relative_with_resolved_path(
         directories.push(DirHandle::from_file(opened));
     }
 
-    let current_directory = directories
-        .last()
-        .expect("invariant: the root handle remains on the stack");
-    let file = duplicate_directory_file(current_directory)
+    let current = current_directory(&directories)?;
+    let file = duplicate_directory_file(current)
         .map_err(|error| CliError::from_io(&error, "unable to read file"))?;
     Ok((file, resolved_components.into_iter().collect()))
 }
@@ -227,10 +237,7 @@ pub(super) fn open_workspace_parent(
         let name = match component {
             PathComponent::Current => continue,
             PathComponent::Parent => {
-                if directories.len() == 1 {
-                    return Err(CliError::new("path must stay inside the current directory"));
-                }
-                directories.pop();
+                move_to_parent_directory(&mut directories)?;
                 continue;
             }
             PathComponent::Normal(name) => name,
@@ -239,9 +246,7 @@ pub(super) fn open_workspace_parent(
             }
         };
 
-        let parent = directories
-            .last()
-            .expect("invariant: the root handle remains on the stack");
+        let parent = current_directory(&directories)?;
         let status = stat_at(parent, &name).map_err(|error| {
             if is_not_found(&error) {
                 CliError::new("parent directory not found")
@@ -269,7 +274,7 @@ pub(super) fn open_workspace_parent(
 
     let parent = directories
         .pop()
-        .expect("invariant: the root handle remains on the stack");
+        .ok_or_else(|| CliError::new("invalid path"))?;
     Ok((parent, name))
 }
 
