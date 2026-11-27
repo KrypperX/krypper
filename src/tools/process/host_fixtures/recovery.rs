@@ -467,6 +467,7 @@ fn payload_is_running(group: &Path) -> bool {
 }
 
 fn receipt_path() -> PathBuf {
+    // SAFETY: `geteuid` has no pointer arguments or preconditions.
     let uid = unsafe { libc::geteuid() };
     PathBuf::from(format!("/run/user/{uid}/{RECEIPT_NAME}"))
 }
