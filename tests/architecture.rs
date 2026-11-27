@@ -116,7 +116,7 @@ fn tools_core_guard_detects_direct_alias_facade_and_parent_paths() {
             violations
                 .iter()
                 .any(|violation| violation.contains("Core")),
-            "Core dependency was not detected: {violations:?}"
+            "Core dependency was not detected in {source}: {violations:?}"
         );
     }
 
@@ -213,6 +213,167 @@ fn tools_core_guard_detects_glob_include_and_external_transitive_facades() {
                 pub use crate::core::Task as CompatibilityTask;
                 pub struct ProcessOutcome;
             }
+            pub(crate) mod tools {
+                use crate::compatibility::ProcessOutcome;
+            }
+        "#,
+    )
+    .unwrap();
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations
+            .iter()
+            .all(|violation| !violation.contains("Core")),
+        "qualified neutral facade item was classified as Core: {violations:?}"
+    );
+
+    fs::write(
+        &root,
+        r#"
+            pub mod core { pub struct Task; }
+            pub mod compatibility {
+                pub use crate::core::Task as CompatibilityTask;
+                pub struct ProcessOutcome;
+            }
+            pub use crate::compatibility::ProcessOutcome;
+            pub(crate) mod tools { use crate::ProcessOutcome; }
+        "#,
+    )
+    .unwrap();
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations
+            .iter()
+            .all(|violation| !violation.contains("Core")),
+        "named neutral facade re-export was classified as Core: {violations:?}"
+    );
+
+    fs::write(
+        &root,
+        r#"
+            pub mod core { pub struct Task; }
+            pub mod compatibility {
+                pub use crate::core::Task as CompatibilityTask;
+                pub struct ProcessOutcome;
+            }
+            pub(crate) mod tools {
+                use crate::compatibility::CompatibilityTask;
+            }
+        "#,
+    )
+    .unwrap();
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("Core")),
+        "qualified Core facade item was not detected: {violations:?}"
+    );
+
+    fs::write(
+        &root,
+        r#"
+            pub mod core { pub struct Task; }
+            pub mod compatibility {
+                pub mod nested {
+                    pub use crate::core::Task as CompatibilityTask;
+                    pub struct ProcessOutcome;
+                }
+            }
+            pub(crate) mod tools {
+                use crate::compatibility::nested::ProcessOutcome;
+            }
+        "#,
+    )
+    .unwrap();
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations
+            .iter()
+            .all(|violation| !violation.contains("Core")),
+        "qualified neutral nested facade item was classified as Core: {violations:?}"
+    );
+
+    fs::write(
+        &root,
+        r#"
+            pub mod core { pub struct Task; }
+            pub mod compatibility {
+                pub mod nested {
+                    pub use crate::core::Task as CompatibilityTask;
+                    pub struct ProcessOutcome;
+                }
+            }
+            pub use crate::compatibility as compat;
+            pub(crate) mod tools {
+                use crate::compat::nested::ProcessOutcome;
+            }
+        "#,
+    )
+    .unwrap();
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations
+            .iter()
+            .all(|violation| !violation.contains("Core")),
+        "qualified neutral nested item through a facade alias was classified as Core: {violations:?}"
+    );
+
+    fs::write(
+        &root,
+        r#"
+            pub mod core { pub struct Task; }
+            pub mod compatibility {
+                pub mod nested {
+                    pub use crate::core::Task as CompatibilityTask;
+                    pub struct ProcessOutcome;
+                }
+            }
+            pub(crate) mod tools {
+                use crate::compatibility::nested::CompatibilityTask;
+            }
+        "#,
+    )
+    .unwrap();
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("Core")),
+        "qualified Core nested facade item was not detected: {violations:?}"
+    );
+
+    fs::write(
+        &root,
+        r#"
+            pub mod core { pub struct Task; }
+            pub mod compatibility {
+                pub use crate::core::Task as CompatibilityTask;
+                pub struct ProcessOutcome;
+            }
+            pub(crate) mod tools {
+                use crate::compatibility::{self as compat};
+                fn reference(_: compat::CompatibilityTask) {}
+            }
+        "#,
+    )
+    .unwrap();
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("Core")),
+        "self-as alias to a Core facade was not detected: {violations:?}"
+    );
+
+    fs::write(
+        &root,
+        r#"
+            pub mod core { pub struct Task; }
+            pub mod compatibility {
+                pub use crate::core::Task as CompatibilityTask;
+                pub struct ProcessOutcome;
+            }
             pub use crate::compatibility::*;
             pub(crate) mod tools { use crate::CompatibilityTask; }
         "#,
@@ -246,6 +407,48 @@ fn tools_core_guard_detects_glob_include_and_external_transitive_facades() {
             .iter()
             .all(|violation| !violation.contains("Core")),
         "neutral export through an aliased facade glob was classified as Core: {violations:?}"
+    );
+
+    fs::write(
+        &root,
+        r#"
+            pub mod core { pub struct Task; }
+            pub mod compatibility {
+                pub use crate::core::Task as CompatibilityTask;
+                pub struct ProcessOutcome;
+            }
+            pub use crate::compatibility as compat;
+            pub(crate) mod tools { use crate::compat::ProcessOutcome; }
+        "#,
+    )
+    .unwrap();
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations
+            .iter()
+            .all(|violation| !violation.contains("Core")),
+        "neutral export through a named aliased facade was classified as Core: {violations:?}"
+    );
+
+    fs::write(
+        &root,
+        r#"
+            pub mod core { pub struct Task; }
+            pub mod compatibility {
+                pub use crate::core::Task as CompatibilityTask;
+                pub struct ProcessOutcome;
+            }
+            pub use crate::compatibility as compat;
+            pub(crate) mod tools { use crate::compat::CompatibilityTask; }
+        "#,
+    )
+    .unwrap();
+    let violations = scan_tools_module_from_crate_root(&root);
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("Core")),
+        "Core export through a named aliased facade was not detected: {violations:?}"
     );
 
     fs::write(
