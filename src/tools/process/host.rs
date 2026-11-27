@@ -5,13 +5,21 @@
 //! cleans up descendants that remain in the launched process group.
 
 use crate::contracts::process_execution::{ProcessOutcome, ProcessResult};
-use krypper_sandbox::{SpawnAction, SpawnAuthorizationGate, SpawnGateError};
+use krypper_sandbox::SpawnAuthorizationGate;
+#[cfg(target_os = "linux")]
+use krypper_sandbox::{SpawnAction, SpawnGateError};
+#[cfg(target_os = "linux")]
 use std::io::{self, Read};
 use std::path::PathBuf;
+#[cfg(target_os = "linux")]
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
+#[cfg(target_os = "linux")]
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(target_os = "linux")]
+use std::time::Instant;
 
 pub(crate) const MAX_HOST_EXEC_ARGUMENTS: usize = 32;
 pub(crate) const MAX_HOST_EXEC_ARGUMENT_BYTES: usize = 1_024;
@@ -20,7 +28,9 @@ pub(crate) const MAX_HOST_EXEC_TEXT_BYTES: usize = 4_096;
 
 const HOST_EXEC_WALL_LIMIT: Duration = Duration::from_secs(300);
 const HOST_EXEC_OUTPUT_LIMIT: usize = 1024 * 1024;
+#[cfg(target_os = "linux")]
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
+#[cfg(target_os = "linux")]
 const CLEANUP_WAIT: Duration = Duration::from_millis(500);
 
 /// One bounded direct-argv request. Its working directory may be anywhere the current OS user
@@ -73,19 +83,23 @@ impl HostProcessRequest {
         })
     }
 
+    #[cfg(any(test, target_os = "linux"))]
     pub(crate) fn executable(&self) -> &str {
         &self.executable
     }
 
+    #[cfg(any(test, target_os = "linux"))]
     pub(crate) fn arguments(&self) -> &[String] {
         &self.arguments
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn working_directory(&self) -> &PathBuf {
         &self.working_directory
     }
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Default)]
 struct CapturedOutput {
     stdout: Vec<u8>,
@@ -95,6 +109,7 @@ struct CapturedOutput {
 }
 
 /// Drains currently available bytes without blocking; returns true only on EOF.
+#[cfg(target_os = "linux")]
 fn drain_pipe(
     pipe: &mut impl Read,
     stdout: bool,
@@ -434,6 +449,7 @@ fn finish_without_readers(
     })
 }
 
+#[cfg(target_os = "linux")]
 fn stdout_bytes_to_string(bytes: Vec<u8>) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
