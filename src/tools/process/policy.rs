@@ -30,6 +30,58 @@ pub struct OfflineCargoPolicy {
     pub(super) profile: ProcessProfile<'static>,
 }
 
+/// Why a host-owned offline Cargo policy could not be constructed.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum OfflineCargoPolicyError {
+    /// The preprovisioned Cargo toolchain root could not be captured.
+    ToolchainRootUnavailable(String),
+    /// The offline registry root could not be captured.
+    RegistryRootUnavailable(String),
+    /// A required toolchain binary could not be read.
+    ToolchainBinaryUnavailable {
+        /// The required executable name (`cargo` or `rustc`).
+        binary: &'static str,
+        /// The underlying filesystem error.
+        source: std::io::Error,
+    },
+    /// A required toolchain binary did not contain an ELF header.
+    ToolchainBinaryNotElf {
+        /// The required executable name (`cargo` or `rustc`).
+        binary: &'static str,
+    },
+    /// The fixed process profile failed its internal validation.
+    InvalidFixedProfile(String),
+}
+
+impl std::fmt::Display for OfflineCargoPolicyError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ToolchainRootUnavailable(message) | Self::RegistryRootUnavailable(message) => {
+                formatter.write_str(message)
+            }
+            Self::ToolchainBinaryUnavailable { .. } => {
+                formatter.write_str("toolchain binary unavailable")
+            }
+            Self::ToolchainBinaryNotElf { .. } => {
+                formatter.write_str("real ELF toolchain required")
+            }
+            Self::InvalidFixedProfile(reason) => {
+                write!(formatter, "invalid fixed process profile: {reason}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for OfflineCargoPolicyError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::ToolchainBinaryUnavailable { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
+
 /// Closed host-owned policy details used to bind one process request to its approval.
 #[derive(Clone, Debug)]
 pub(crate) struct ProcessPolicyFacts {
@@ -51,27 +103,40 @@ impl OfflineCargoPolicy {
     /// Capture preprovisioned toolchain/registry identities on Linux. Does not install or fetch
     /// anything. Other platforms retain only cancellation state because execution is unavailable.
     /// The toolchain contains real `bin/cargo` and `bin/rustc` executables (not rustup shims).
-    pub fn new(_toolchain: &Path, _registry: &Path) -> Result<Self, String> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OfflineCargoPolicyError`] with a category for unavailable roots, unreadable or
+    /// non-ELF toolchain binaries, or an invalid fixed profile. Binary I/O failures retain their
+    /// underlying [`std::io::Error`] as the error source.
+    pub fn new(_toolchain: &Path, _registry: &Path) -> Result<Self, OfflineCargoPolicyError> {
         #[cfg(target_os = "linux")]
-        let toolchain =
-            capture_workspace_root_at(_toolchain).map_err(|error| error.message().to_owned())?;
+        let toolchain = capture_workspace_root_at(_toolchain).map_err(|error| {
+            OfflineCargoPolicyError::ToolchainRootUnavailable(error.message().to_owned())
+        })?;
         #[cfg(target_os = "linux")]
-        let registry =
-            capture_workspace_root_at(_registry).map_err(|error| error.message().to_owned())?;
+        let registry = capture_workspace_root_at(_registry).map_err(|error| {
+            OfflineCargoPolicyError::RegistryRootUnavailable(error.message().to_owned())
+        })?;
         #[cfg(target_os = "linux")]
         {
             for binary in ["cargo", "rustc"] {
                 let mut magic = [0; 4];
                 File::open(toolchain.path().join("bin").join(binary))
                     .and_then(|mut f| f.read_exact(&mut magic))
-                    .map_err(|_| "toolchain binary unavailable")?;
+                    .map_err(
+                        |source| OfflineCargoPolicyError::ToolchainBinaryUnavailable {
+                            binary,
+                            source,
+                        },
+                    )?;
                 if magic != *b"\x7fELF" {
-                    return Err("real ELF toolchain required".into());
+                    return Err(OfflineCargoPolicyError::ToolchainBinaryNotElf { binary });
                 }
             }
         }
         let profile = ProcessProfile::offline_cargo_test()
-            .map_err(|error| format!("invalid fixed process profile: {error:?}"))?;
+            .map_err(|error| OfflineCargoPolicyError::InvalidFixedProfile(format!("{error:?}")))?;
         Ok(Self {
             #[cfg(target_os = "linux")]
             toolchain,
