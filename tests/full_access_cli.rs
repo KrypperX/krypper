@@ -8,7 +8,9 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -73,6 +75,28 @@ fn terminal_sigint_cancels_full_access_host_process_group_before_another_model_r
     )
     .expect("write provider profile");
     set_private_file(&profiles_path);
+
+    let helper_executable = std::env::current_exe().expect("locate process fixture executable");
+    let action_arguments = json!({
+        "executable": helper_executable,
+        "argv": [
+            "--ignored",
+            "--exact",
+            "full_access_process_group_child_fixture",
+            "--nocapture"
+        ],
+        "working_directory": workspace
+    });
+    let confirmation_submitted = Arc::new(AtomicBool::new(false));
+    let provider = start_provider_server(
+        provider_listener,
+        action_arguments,
+        Arc::clone(&confirmation_submitted),
+    );
+    provider
+        .ready
+        .recv_timeout(PTY_READ_TIMEOUT)
+        .expect("start provider request monitor before the CLI");
 
     let (master, slave) = open_pty();
     enable_terminal_interrupts(&slave).expect("enable terminal Ctrl-C");
@@ -152,26 +176,21 @@ fn terminal_sigint_cancels_full_access_host_process_group_before_another_model_r
         String::from_utf8_lossy(&terminal_output).contains("no process sandbox"),
         "the trusted terminal should describe Full Access risk before confirmation"
     );
-    assert!(
-        accept_before(&provider_listener, Duration::from_millis(100)).is_none(),
-        "the provider must not receive a request before Full Access is confirmed"
-    );
+    let (drained_sender, drained_receiver) = mpsc::channel();
+    provider
+        .control
+        .send(ProviderCommand::DrainBeforeConfirmation(drained_sender))
+        .expect("synchronize with the active provider monitor");
+    drained_receiver
+        .recv_timeout(PTY_READ_TIMEOUT)
+        .expect("drain any provider request queued before confirmation");
     let mut terminal = master.try_clone().expect("clone PTY master for input");
     terminal.write_all(b"yes\n").expect("confirm Full Access");
     terminal.flush().expect("flush Full Access confirmation");
+    // Keep the monitor in its pre-confirmation phase through the PTY write. A request
+    // accepted during that transition is conservatively counted as premature.
+    confirmation_submitted.store(true, Ordering::SeqCst);
 
-    let helper_executable = std::env::current_exe().expect("locate process fixture executable");
-    let action_arguments = json!({
-        "executable": helper_executable,
-        "argv": [
-            "--ignored",
-            "--exact",
-            "full_access_process_group_child_fixture",
-            "--nocapture"
-        ],
-        "working_directory": workspace
-    });
-    let (server, stop_server) = start_provider_server(provider_listener, action_arguments);
     wait_for_file(
         &leader_pid_path,
         &mut child.child,
@@ -198,8 +217,11 @@ fn terminal_sigint_cancels_full_access_host_process_group_before_another_model_r
     let reader_output = output_receiver.into_iter().flatten().collect::<Vec<_>>();
     terminal_output.extend(reader_output);
 
-    stop_server.send(()).expect("stop provider request monitor");
-    let requests = server.join().expect("join local provider fixture");
+    provider
+        .control
+        .send(ProviderCommand::Stop)
+        .expect("stop provider request monitor");
+    let requests = provider.server.join().expect("join local provider fixture");
     let output = String::from_utf8_lossy(&terminal_output);
     assert_eq!(status.code(), Some(130), "{output}");
     assert!(output.contains("Task state: cancelled"), "{output}");
@@ -216,6 +238,11 @@ fn terminal_sigint_cancels_full_access_host_process_group_before_another_model_r
         requests.len(),
         1,
         "cancellation must stop before another model request"
+    );
+    assert_eq!(
+        provider.premature_requests.load(Ordering::SeqCst),
+        0,
+        "the active provider monitor must see no request before confirmation is submitted"
     );
     assert!(String::from_utf8_lossy(&requests[0]).contains("full_access_host_process"));
 
@@ -396,52 +423,107 @@ fn wait_for_exit(
     }
 }
 
+enum ProviderCommand {
+    DrainBeforeConfirmation(mpsc::Sender<()>),
+    Stop,
+}
+
+struct ProviderFixture {
+    server: thread::JoinHandle<Vec<Vec<u8>>>,
+    control: mpsc::Sender<ProviderCommand>,
+    ready: Receiver<()>,
+    premature_requests: Arc<AtomicUsize>,
+}
+
 fn start_provider_server(
     listener: TcpListener,
     action_arguments: Value,
-) -> (thread::JoinHandle<Vec<Vec<u8>>>, mpsc::Sender<()>) {
-    let (stop_sender, stop_receiver) = mpsc::channel();
+    confirmation_submitted: Arc<AtomicBool>,
+) -> ProviderFixture {
+    let (control_sender, control_receiver) = mpsc::channel();
+    let (ready_sender, ready_receiver) = mpsc::channel();
+    let premature_requests = Arc::new(AtomicUsize::new(0));
+    let premature_for_server = Arc::clone(&premature_requests);
     let handle = thread::spawn(move || {
+        ready_sender
+            .send(())
+            .expect("report provider monitor readiness");
         let mut requests = Vec::new();
-        let Some(mut stream) = accept_before(&listener, Duration::from_secs(10)) else {
-            return requests;
-        };
-        let Ok(request) = read_http_request(&mut stream) else {
-            return requests;
-        };
-        requests.push(request);
-        write_http_response(
-            &mut stream,
-            tool_call_response("full_access_host_process", action_arguments),
-        );
-
-        let mut quiet_deadline = None;
+        let mut stop_deadline = None;
         loop {
-            if let Some(mut stream) = accept_before(&listener, Duration::from_millis(25)) {
-                if let Ok(request) = read_http_request(&mut stream) {
-                    requests.push(request);
-                    write_http_response(
-                        &mut stream,
-                        tool_call_response(
-                            "complete_task",
-                            json!({"result":"unexpected follow-up model request"}),
-                        ),
-                    );
-                    break;
+            match control_receiver.try_recv() {
+                Ok(ProviderCommand::DrainBeforeConfirmation(drained)) => {
+                    while let Some(stream) = accept_before(&listener, Duration::ZERO) {
+                        handle_provider_request(
+                            stream,
+                            &action_arguments,
+                            &confirmation_submitted,
+                            &premature_for_server,
+                            &mut requests,
+                        );
+                    }
+                    drained
+                        .send(())
+                        .expect("acknowledge provider request drain");
+                }
+                Ok(ProviderCommand::Stop) => {
+                    stop_deadline
+                        .get_or_insert_with(|| Instant::now() + Duration::from_millis(200));
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    stop_deadline
+                        .get_or_insert_with(|| Instant::now() + Duration::from_millis(200));
                 }
             }
-            if quiet_deadline.is_none()
-                && !matches!(stop_receiver.try_recv(), Err(mpsc::TryRecvError::Empty))
-            {
-                quiet_deadline = Some(Instant::now() + Duration::from_millis(200));
+
+            if let Some(stream) = accept_before(&listener, Duration::from_millis(5)) {
+                handle_provider_request(
+                    stream,
+                    &action_arguments,
+                    &confirmation_submitted,
+                    &premature_for_server,
+                    &mut requests,
+                );
             }
-            if quiet_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+
+            if stop_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                 break;
             }
         }
         requests
     });
-    (handle, stop_sender)
+    ProviderFixture {
+        server: handle,
+        control: control_sender,
+        ready: ready_receiver,
+        premature_requests,
+    }
+}
+
+fn handle_provider_request(
+    mut stream: TcpStream,
+    action_arguments: &Value,
+    confirmation_submitted: &AtomicBool,
+    premature_requests: &AtomicUsize,
+    requests: &mut Vec<Vec<u8>>,
+) {
+    if !confirmation_submitted.load(Ordering::SeqCst) {
+        premature_requests.fetch_add(1, Ordering::SeqCst);
+    }
+    let Ok(request) = read_http_request(&mut stream) else {
+        return;
+    };
+    requests.push(request);
+    let response = if requests.len() == 1 {
+        tool_call_response("full_access_host_process", action_arguments.clone())
+    } else {
+        tool_call_response(
+            "complete_task",
+            json!({"result":"unexpected follow-up model request"}),
+        )
+    };
+    write_http_response(&mut stream, response);
 }
 
 fn accept_before(listener: &TcpListener, timeout: Duration) -> Option<TcpStream> {
