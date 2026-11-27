@@ -3,7 +3,6 @@
 use super::action::execute_action_with_revision;
 use super::summarize_observation_activity;
 use super::types::{ActionExecution, TurnCompletionData};
-use crate::contracts::extensions::ExtensionEffect;
 use crate::contracts::goal_turn::{
     workspace_mutation_target, BoundedDecisionSource, DecisionSource, GoalTurnError,
     GoalTurnResult, GoalTurnStopReason, WorkspaceObservation,
@@ -46,7 +45,7 @@ impl<'a> ActionPermissionGate<'a> {
         task_id: Uuid,
         turn_id: Uuid,
         action: &super::WorkspaceAction,
-        extensions: Option<&TurnExtensions<'_>>,
+        _extensions: Option<&TurnExtensions<'_>>,
     ) -> Result<(), GoalTurnError> {
         use super::WorkspaceAction;
 
@@ -61,27 +60,11 @@ impl<'a> ActionPermissionGate<'a> {
             WorkspaceAction::Complete { .. }
             | WorkspaceAction::Continue
             | WorkspaceAction::Cancel => EffectClass::TaskControl,
-            WorkspaceAction::Extension { name, .. } => {
-                let Some(entry) = extensions.and_then(|extensions| {
-                    extensions
-                        .registry
-                        .iter()
-                        .find(|entry| entry.tool.descriptor.qualified_name() == name.as_str())
-                }) else {
-                    return Err(GoalTurnError::PermissionDenied {
-                        action: action_name,
-                    });
-                };
-                // A registered effect is a risk hint only. Extensions execute host handlers
-                // outside TaskSession's bounded workspace calls, so every extension needs an
-                // exact prompt and still passes its existing capability/schema gate afterward.
-                match entry.tool.descriptor.effect {
-                    ExtensionEffect::ReadWorkspace
-                    | ExtensionEffect::MutateWorkspace
-                    | ExtensionEffect::ExecuteProcess
-                    | ExtensionEffect::Network
-                    | ExtensionEffect::ExternalService => EffectClass::ExternalOrUnclassified,
-                }
+            WorkspaceAction::Extension { .. } => {
+                // A generic action prompt does not expose the exact extension intent.
+                return Err(GoalTurnError::PermissionPromptUnavailable {
+                    action: "registered extension",
+                });
             }
             WorkspaceAction::Unsupported { .. } => EffectClass::Unsupported,
             // The registry is the only source of effect classifications for executable tools.
@@ -135,6 +118,7 @@ pub struct TurnExtensions<'a> {
     pub context: crate::tools::capability_policy::CapabilityContext,
 }
 
+#[allow(clippy::too_many_arguments)] // Keeps both authorization gates visible at the shared dispatch boundary.
 fn execute_with_extensions(
     session: &TaskSession,
     task_id: Uuid,
@@ -143,35 +127,68 @@ fn execute_with_extensions(
     extensions: Option<&TurnExtensions<'_>>,
     expected_revision: Option<&str>,
     permission_gate: Option<&mut ActionPermissionGate<'_>>,
+    extension_approval: Option<&mut super::ExtensionApprovalGate<'_>>,
 ) -> Result<ActionExecution, GoalTurnError> {
-    if let Some(permission_gate) = permission_gate {
-        permission_gate.authorize(task_id, turn_id, action, extensions)?;
-    }
     if let (super::WorkspaceAction::Extension { name, arguments }, Some(extensions)) =
         (action, extensions)
     {
-        let result = super::dispatch_registered_extension_with_arguments_for_turn(
-            session,
-            task_id,
-            turn_id,
-            extensions.registry,
-            extensions.context,
-            name,
-            arguments,
-        );
-        return match result {
-            Ok(result) => Ok(ActionExecution::Observation(
-                super::WorkspaceObservation::ExtensionCompleted {
-                    name: name.clone(),
-                    result,
-                },
-            )),
-            Err(_) => {
-                execute_action_with_revision(session, task_id, turn_id, action, expected_revision)
-            }
+        let result = if let Some(approval) = extension_approval {
+            super::dispatch_registered_extension_with_approval_for_turn(
+                session,
+                task_id,
+                turn_id,
+                extensions.registry,
+                extensions.context,
+                approval,
+                name,
+                arguments,
+            )
+            .map_err(extension_dispatch_error_to_goal_turn)?
+        } else {
+            return Err(GoalTurnError::PermissionPromptUnavailable {
+                action: "registered extension",
+            });
         };
+        return Ok(ActionExecution::Observation(
+            super::WorkspaceObservation::ExtensionCompleted {
+                name: name.clone(),
+                result,
+            },
+        ));
+    }
+    if let Some(permission_gate) = permission_gate {
+        permission_gate.authorize(task_id, turn_id, action, extensions)?;
     }
     execute_action_with_revision(session, task_id, turn_id, action, expected_revision)
+}
+
+fn extension_dispatch_error_to_goal_turn(error: super::ExtensionDispatchError) -> GoalTurnError {
+    match error {
+        super::ExtensionDispatchError::Turn(error) => GoalTurnError::WorkspaceRead(error),
+        super::ExtensionDispatchError::ApprovalPromptFailed => {
+            GoalTurnError::PermissionPromptFailed {
+                action: "registered extension",
+            }
+        }
+        super::ExtensionDispatchError::ApprovalRequired => {
+            GoalTurnError::PermissionPromptUnavailable {
+                action: "registered extension",
+            }
+        }
+        super::ExtensionDispatchError::AuthorizationUnavailable
+        | super::ExtensionDispatchError::InvalidIntent => GoalTurnError::PermissionUnavailable {
+            action: "registered extension",
+        },
+        super::ExtensionDispatchError::TaskMismatch
+        | super::ExtensionDispatchError::Bridge(_)
+        | super::ExtensionDispatchError::ApprovalDenied
+        | super::ExtensionDispatchError::StaleAuthorization
+        | super::ExtensionDispatchError::StaleWorkspace
+        | super::ExtensionDispatchError::ExpiredApproval
+        | super::ExtensionDispatchError::InvalidApproval => GoalTurnError::PermissionDenied {
+            action: "registered extension",
+        },
+    }
 }
 
 /// Runs one decision-selected action for an already running, task-owned turn.
@@ -199,12 +216,62 @@ pub fn run_goal_turn_with_extensions<D: DecisionSource + ?Sized>(
     decision_source: &mut D,
     extensions: Option<&TurnExtensions<'_>>,
 ) -> Result<GoalTurnResult, GoalTurnError> {
+    run_goal_turn_with_extensions_and_approval(
+        session,
+        task_id,
+        turn_id,
+        goal,
+        decision_source,
+        extensions,
+        None,
+    )
+}
+
+/// Run the existing single-action turn with host-approved registered effects.
+pub fn run_goal_turn_with_approved_extensions<D: DecisionSource + ?Sized>(
+    session: &mut TaskSession,
+    task_id: Uuid,
+    turn_id: Uuid,
+    goal: &str,
+    decision_source: &mut D,
+    extensions: &TurnExtensions<'_>,
+    approval: &mut super::ExtensionApprovalGate<'_>,
+) -> Result<GoalTurnResult, GoalTurnError> {
+    run_goal_turn_with_extensions_and_approval(
+        session,
+        task_id,
+        turn_id,
+        goal,
+        decision_source,
+        Some(extensions),
+        Some(approval),
+    )
+}
+
+fn run_goal_turn_with_extensions_and_approval<D: DecisionSource + ?Sized>(
+    session: &mut TaskSession,
+    task_id: Uuid,
+    turn_id: Uuid,
+    goal: &str,
+    decision_source: &mut D,
+    extensions: Option<&TurnExtensions<'_>>,
+    extension_approval: Option<&mut super::ExtensionApprovalGate<'_>>,
+) -> Result<GoalTurnResult, GoalTurnError> {
     session
         .validate_running_turn(task_id, turn_id)
         .map_err(GoalTurnError::WorkspaceRead)?;
 
     let action = decision_source.choose_action(goal);
-    match execute_with_extensions(session, task_id, turn_id, &action, extensions, None, None)? {
+    match execute_with_extensions(
+        session,
+        task_id,
+        turn_id,
+        &action,
+        extensions,
+        None,
+        None,
+        extension_approval,
+    )? {
         ActionExecution::Complete(result) => finish_turn(
             session,
             task_id,
@@ -356,6 +423,32 @@ pub fn run_goal_turn_with_budget_and_extensions<D: BoundedDecisionSource + ?Size
         decision_source,
         extensions,
         None,
+        None,
+    )
+}
+
+/// Run a bounded turn with host-approved registered effects.
+#[allow(clippy::too_many_arguments)] // Mirrors the existing bounded-turn inputs while adding the approval gate.
+pub fn run_goal_turn_with_budget_and_approved_extensions<D: BoundedDecisionSource + ?Sized>(
+    session: &mut TaskSession,
+    task_id: Uuid,
+    turn_id: Uuid,
+    goal: &str,
+    max_actions: usize,
+    decision_source: &mut D,
+    extensions: &TurnExtensions<'_>,
+    approval: &mut super::ExtensionApprovalGate<'_>,
+) -> Result<GoalTurnResult, GoalTurnError> {
+    run_goal_turn_with_budget_and_gate(
+        session,
+        task_id,
+        turn_id,
+        goal,
+        max_actions,
+        decision_source,
+        Some(extensions),
+        None,
+        Some(approval),
     )
 }
 
@@ -381,6 +474,7 @@ pub(crate) fn run_goal_turn_with_budget_and_permission_gate<D: BoundedDecisionSo
         decision_source,
         None,
         Some(permission_gate),
+        None,
     )
 }
 
@@ -406,6 +500,7 @@ pub(crate) fn run_goal_turn_with_budget_and_extensions_and_gate<
         decision_source,
         extensions,
         permission_gate,
+        None,
     )
 }
 
@@ -419,6 +514,7 @@ fn run_goal_turn_with_budget_and_gate<D: BoundedDecisionSource + ?Sized>(
     decision_source: &mut D,
     extensions: Option<&TurnExtensions<'_>>,
     mut permission_gate: Option<&mut ActionPermissionGate<'_>>,
+    mut extension_approval: Option<&mut super::ExtensionApprovalGate<'_>>,
 ) -> Result<GoalTurnResult, GoalTurnError> {
     session
         .validate_running_turn(task_id, turn_id)
@@ -500,6 +596,7 @@ fn run_goal_turn_with_budget_and_gate<D: BoundedDecisionSource + ?Sized>(
             extensions,
             expected_revision.as_deref(),
             permission_gate.as_deref_mut(),
+            extension_approval.as_deref_mut(),
         )? {
             ActionExecution::Complete(result) => {
                 activity.push(TurnActivitySummary::Completed);

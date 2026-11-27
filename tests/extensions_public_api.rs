@@ -1,7 +1,8 @@
 use krypper::extensions::{
     authorize_dispatch, authorized_declarations, BridgeError, CapabilityContext, CapabilityDenial,
-    CapabilityGrant, ExtensionAuthority, ExtensionContractError, ExtensionDescriptor,
-    ExtensionEffect, ExtensionTool, EXTENSION_CONTRACT_VERSION,
+    CapabilityGrant, ExtensionApprovalGate, ExtensionApprovalRequest, ExtensionAuthority,
+    ExtensionContractError, ExtensionDescriptor, ExtensionEffect, ExtensionTool,
+    EXTENSION_CONTRACT_VERSION,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -45,4 +46,8 @@ fn extension_facade_keeps_contract_types_and_authorization_functions_available()
 
     let _contract_error: Option<ExtensionContractError> = None;
     let _capability_denial: Option<CapabilityDenial> = None;
+
+    let mut current_context = || Ok(context);
+    let mut prompt = |_: &ExtensionApprovalRequest| Ok(true);
+    let _approval_gate = ExtensionApprovalGate::new(&mut current_context, &mut prompt);
 }

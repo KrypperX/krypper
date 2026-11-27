@@ -6,7 +6,8 @@ use super::compatible::{compatible_chat_function_call, compatible_chat_response}
 use super::gemini::{gemini_function_call, gemini_response};
 use super::openai::openai_function_call;
 use crate::harness::execution::{
-    run_goal_turn_with_budget_and_extensions, BoundedDecisionSource, GoalTurnStopReason,
+    run_goal_turn_with_budget_and_approved_extensions, BoundedDecisionSource,
+    ExtensionApprovalGate, ExtensionApprovalRequest, GoalTurnError, GoalTurnStopReason,
     RegisteredExtensionWithArguments, TurnExtensions,
 };
 use crate::task_lifecycle::TaskSession;
@@ -85,18 +86,22 @@ fn assert_extension_call<S: BoundedDecisionSource>(
             task_authorized: true,
         },
     };
-    let result = run_goal_turn_with_budget_and_extensions(
+    let mut current_context = || Ok(extensions.context);
+    let mut prompt = |_: &ExtensionApprovalRequest| Ok(true);
+    let mut approval = ExtensionApprovalGate::new(&mut current_context, &mut prompt);
+    let result = run_goal_turn_with_budget_and_approved_extensions(
         session,
         task_id,
         turn_id,
         "Use an extension",
         2,
         source,
-        Some(&extensions),
-    )
-    .expect("extension result is recorded in the turn");
+        &extensions,
+        &mut approval,
+    );
     match expected {
         Expected::Success(result_text) => {
+            let result = result.expect("host-approved extension result is recorded in the turn");
             assert_eq!(result.stop_reason(), GoalTurnStopReason::Completed);
             assert_eq!(
                 result.outcome(),
@@ -112,13 +117,19 @@ fn assert_extension_call<S: BoundedDecisionSource>(
                 )
             }));
         }
-        Expected::Failure => {
-            assert_eq!(result.stop_reason(), GoalTurnStopReason::ActionFailed);
-            assert!(matches!(
-                result.outcome(),
-                Some(TurnOutcome::Failure { .. })
-            ));
-        }
+        Expected::Failure => match result {
+            Err(GoalTurnError::PermissionDenied {
+                action: "registered extension",
+            }) => {}
+            Ok(result) => {
+                assert_eq!(result.stop_reason(), GoalTurnStopReason::ActionFailed);
+                assert!(matches!(
+                    result.outcome(),
+                    Some(TurnOutcome::Failure { .. })
+                ));
+            }
+            other => panic!("unexpected fail-closed extension result: {other:?}"),
+        },
     }
 }
 

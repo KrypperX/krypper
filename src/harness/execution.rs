@@ -6,10 +6,11 @@
 //! `crate::harness::execution::*` path keeps working.
 //!
 //! Extension handlers stay host-owned: a provider supplies only a registered name and JSON
-//! arguments. Turn ownership, grants and schema are rechecked before a handler runs, denials
-//! fail closed, and observations keep the name without raw arguments. Callers that supply no
-//! registry retain built-in-only behavior; the new `WorkspaceAction::Extension` variant is the
-//! scoped public-action migration for downstream exhaustive matches.
+//! arguments. Turn ownership, grants and schema are rechecked before an effect runs, and only the
+//! prompt-aware API can approve it for one exact task/turn/workspace intent. Denials fail closed;
+//! observations keep the name without raw arguments. Callers that supply no registry retain
+//! built-in-only behavior; the `WorkspaceAction::Extension` variant is the scoped public-action
+//! migration for downstream exhaustive matches.
 
 mod action;
 mod brain_corrections;
@@ -41,6 +42,7 @@ pub(crate) use self::planned::{
 };
 pub use self::turn::{run_goal_turn, run_goal_turn_with_budget};
 pub use self::turn::{
+    run_goal_turn_with_approved_extensions, run_goal_turn_with_budget_and_approved_extensions,
     run_goal_turn_with_budget_and_extensions, run_goal_turn_with_extensions, TurnExtensions,
 };
 pub(crate) use self::turn::{run_goal_turn_with_budget_and_permission_gate, ActionPermissionGate};
@@ -51,7 +53,9 @@ pub use crate::contracts::goal_turn::{
 };
 
 pub use self::dispatch::{
-    dispatch_registered_extension_with_arguments_for_turn, ExtensionDispatchError,
-    RegisteredExtensionWithArguments,
+    dispatch_registered_extension_with_approval_for_turn,
+    dispatch_registered_extension_with_arguments_for_turn, CurrentExtensionContext,
+    ExtensionApprovalGate, ExtensionApprovalPrompt, ExtensionApprovalRequest,
+    ExtensionDispatchError, RegisteredExtensionWithArguments,
 };
 pub(crate) use crate::contracts::goal_turn::{workspace_action_name, workspace_mutation_target};

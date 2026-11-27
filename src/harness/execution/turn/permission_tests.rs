@@ -171,24 +171,26 @@ fn extension_approval_is_synchronous_action_bound_and_consumed_per_dispatch() {
         }
     };
     let approvals = Cell::new(0);
-    let mut prompt = |seen_task, seen_turn, seen_action: &super::super::WorkspaceAction| {
+    let mut current_context = || Ok(extensions.context);
+    let mut prompt = |request: &super::super::ExtensionApprovalRequest| {
         approvals.set(approvals.get() + 1);
-        assert_eq!(seen_task, task_id);
-        assert_eq!(seen_turn, turn_id);
-        assert_eq!(seen_action, &extension_action);
+        assert_eq!(request.task_id, task_id);
+        assert_eq!(request.turn_id, turn_id);
+        assert_eq!(request.qualified_name, "external_read");
+        assert_eq!(request.arguments, json!({}));
         Ok(true)
     };
-    let mut gate = ActionPermissionGate::new(PermissionMode::Ask, true, Some(&mut prompt));
+    let mut gate = super::super::ExtensionApprovalGate::new(&mut current_context, &mut prompt);
 
-    let result = run_goal_turn_with_budget_and_extensions_and_gate(
+    let result = super::super::run_goal_turn_with_budget_and_approved_extensions(
         &mut session,
         task_id,
         turn_id,
         "goal",
         3,
         &mut decide,
-        Some(&extensions),
-        Some(&mut gate),
+        &extensions,
+        &mut gate,
     )
     .expect("each explicit action has a matching one-shot approval");
 
@@ -207,7 +209,7 @@ fn extension_approval_is_synchronous_action_bound_and_consumed_per_dispatch() {
 }
 
 #[test]
-fn denied_extension_approval_does_not_invoke_the_handler() {
+fn generic_action_prompt_cannot_approve_a_registered_extension() {
     let (mut session, task_id, turn_id) = running_turn();
     let grant = CapabilityGrant {
         task_id,
@@ -227,93 +229,12 @@ fn denied_extension_approval_does_not_invoke_the_handler() {
         arguments: json!({}),
     };
     let mut decide = |_: &str, _: &[WorkspaceObservation]| action.clone();
-    let mut prompt = |_: Uuid, _: Uuid, _: &super::super::WorkspaceAction| Ok(false);
+    let prompt_calls = Cell::new(0);
+    let mut prompt = |_: Uuid, _: Uuid, _: &super::super::WorkspaceAction| {
+        prompt_calls.set(prompt_calls.get() + 1);
+        Ok(true)
+    };
     let mut gate = ActionPermissionGate::new(PermissionMode::Ask, true, Some(&mut prompt));
-
-    let result = run_goal_turn_with_budget_and_extensions_and_gate(
-        &mut session,
-        task_id,
-        turn_id,
-        "goal",
-        1,
-        &mut decide,
-        Some(&extensions),
-        Some(&mut gate),
-    );
-
-    assert!(matches!(
-        result,
-        Err(GoalTurnError::PermissionDenied {
-            action: "extension"
-        })
-    ));
-}
-
-#[test]
-fn prompt_error_fails_closed_before_registered_extension_dispatch() {
-    let (mut session, task_id, turn_id) = running_turn();
-    let grant = CapabilityGrant {
-        task_id,
-        namespace: "external".to_owned(),
-        operation: "read".to_owned(),
-        effect: ExtensionEffect::ReadWorkspace,
-        generation: 1,
-        host_approved: false,
-    };
-    let registry = extension_registry(&grant, extension_panics);
-    let extensions = TurnExtensions {
-        registry: &registry,
-        context: extension_context(task_id),
-    };
-    let action = super::super::WorkspaceAction::Extension {
-        name: "external_read".to_owned(),
-        arguments: json!({}),
-    };
-    let mut decide = |_: &str, _: &[WorkspaceObservation]| action.clone();
-    let mut prompt = |_: Uuid, _: Uuid, _: &super::super::WorkspaceAction| Err(());
-    let mut gate = ActionPermissionGate::new(PermissionMode::Ask, true, Some(&mut prompt));
-
-    let result = run_goal_turn_with_budget_and_extensions_and_gate(
-        &mut session,
-        task_id,
-        turn_id,
-        "goal",
-        1,
-        &mut decide,
-        Some(&extensions),
-        Some(&mut gate),
-    );
-
-    assert!(matches!(
-        result,
-        Err(GoalTurnError::PermissionPromptFailed {
-            action: "extension"
-        })
-    ));
-}
-
-#[test]
-fn missing_prompt_channel_fails_closed_before_registered_extension_dispatch() {
-    let (mut session, task_id, turn_id) = running_turn();
-    let grant = CapabilityGrant {
-        task_id,
-        namespace: "external".to_owned(),
-        operation: "read".to_owned(),
-        effect: ExtensionEffect::ReadWorkspace,
-        generation: 1,
-        host_approved: false,
-    };
-    let registry = extension_registry(&grant, extension_panics);
-    let extensions = TurnExtensions {
-        registry: &registry,
-        context: extension_context(task_id),
-    };
-    let action = super::super::WorkspaceAction::Extension {
-        name: "external_read".to_owned(),
-        arguments: json!({}),
-    };
-    let mut decide = |_: &str, _: &[WorkspaceObservation]| action.clone();
-    let mut gate = ActionPermissionGate::new(PermissionMode::Ask, true, None);
 
     let result = run_goal_turn_with_budget_and_extensions_and_gate(
         &mut session,
@@ -329,9 +250,10 @@ fn missing_prompt_channel_fails_closed_before_registered_extension_dispatch() {
     assert!(matches!(
         result,
         Err(GoalTurnError::PermissionPromptUnavailable {
-            action: "extension"
+            action: "registered extension"
         })
     ));
+    assert_eq!(prompt_calls.get(), 0);
 }
 
 #[test]
@@ -366,8 +288,8 @@ fn unregistered_extension_is_denied_without_prompting_or_dispatching() {
 
     assert!(matches!(
         result,
-        Err(GoalTurnError::PermissionDenied {
-            action: "extension"
+        Err(GoalTurnError::PermissionPromptUnavailable {
+            action: "registered extension"
         })
     ));
     assert_eq!(prompt_calls.get(), 0);

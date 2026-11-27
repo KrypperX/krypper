@@ -59,13 +59,21 @@ fn authorized_extension_runs_through_existing_goal_turn() {
         name: "external_read".to_owned(),
         arguments: serde_json::json!({}),
     };
-    let result = run_goal_turn_with_extensions(
+    let mut current_context = || Ok(extensions.context);
+    let mut prompt = |request: &super::super::ExtensionApprovalRequest| {
+        assert_eq!(request.qualified_name, "external_read");
+        assert_eq!(request.arguments, json!({}));
+        Ok(true)
+    };
+    let mut approval = super::super::ExtensionApprovalGate::new(&mut current_context, &mut prompt);
+    let result = run_goal_turn_with_approved_extensions(
         &mut session,
         task_id,
         turn_id,
         "goal",
         &mut choose,
-        Some(&extensions),
+        &extensions,
+        &mut approval,
     )
     .expect("authorized extension");
     assert_eq!(result.stop_reason(), GoalTurnStopReason::ActionCompleted);
@@ -76,6 +84,141 @@ fn authorized_extension_runs_through_existing_goal_turn() {
             result: "host-executed".to_owned()
         }]
     );
+}
+
+#[test]
+fn existing_ungated_turn_api_cannot_invoke_registered_extension() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static HANDLER_CALLS: AtomicUsize = AtomicUsize::new(0);
+    fn handler(_: &serde_json::Value) -> String {
+        HANDLER_CALLS.fetch_add(1, Ordering::SeqCst);
+        "unexpected".to_owned()
+    }
+
+    let (mut session, task_id, turn_id) = running_turn();
+    let grant = CapabilityGrant {
+        task_id,
+        namespace: "external".into(),
+        operation: "read".into(),
+        effect: ExtensionEffect::ReadWorkspace,
+        generation: 1,
+        host_approved: false,
+    };
+    let registry = [super::super::RegisteredExtensionWithArguments {
+        tool: ExtensionTool {
+            descriptor: ExtensionDescriptor {
+                version: EXTENSION_CONTRACT_VERSION,
+                namespace: "external",
+                name: "read",
+                effect: ExtensionEffect::ReadWorkspace,
+                authority: ExtensionAuthority::Task,
+            },
+            description: "Read",
+            parameters: json!({"type":"object","properties":{}}),
+            grant: &grant,
+        },
+        execute: handler,
+    }];
+    let extensions = TurnExtensions {
+        registry: &registry,
+        context: CapabilityContext {
+            task_id,
+            generation: 1,
+            task_authorized: true,
+        },
+    };
+    let mut choose = |_: &str| super::super::WorkspaceAction::Extension {
+        name: "external_read".to_owned(),
+        arguments: json!({}),
+    };
+    HANDLER_CALLS.store(0, Ordering::SeqCst);
+
+    assert!(matches!(
+        run_goal_turn_with_extensions(
+            &mut session,
+            task_id,
+            turn_id,
+            "goal",
+            &mut choose,
+            Some(&extensions),
+        ),
+        Err(GoalTurnError::PermissionPromptUnavailable {
+            action: "registered extension"
+        })
+    ));
+    assert_eq!(HANDLER_CALLS.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn bounded_approved_turn_prompts_for_each_registered_effect() {
+    use std::cell::Cell;
+
+    let (mut session, task_id, turn_id) = running_turn();
+    let grant = CapabilityGrant {
+        task_id,
+        namespace: "external".into(),
+        operation: "read".into(),
+        effect: ExtensionEffect::ReadWorkspace,
+        generation: 1,
+        host_approved: false,
+    };
+    let registry = [super::super::RegisteredExtensionWithArguments {
+        tool: ExtensionTool {
+            descriptor: ExtensionDescriptor {
+                version: EXTENSION_CONTRACT_VERSION,
+                namespace: "external",
+                name: "read",
+                effect: ExtensionEffect::ReadWorkspace,
+                authority: ExtensionAuthority::Task,
+            },
+            description: "Read",
+            parameters: json!({"type":"object","properties":{}}),
+            grant: &grant,
+        },
+        execute: |_: &serde_json::Value| "host-executed".to_owned(),
+    }];
+    let extensions = TurnExtensions {
+        registry: &registry,
+        context: CapabilityContext {
+            task_id,
+            generation: 1,
+            task_authorized: true,
+        },
+    };
+    let mut choose = |_: &str, observations: &[WorkspaceObservation]| {
+        if observations.is_empty() {
+            super::super::WorkspaceAction::Extension {
+                name: "external_read".to_owned(),
+                arguments: json!({}),
+            }
+        } else {
+            super::super::WorkspaceAction::Continue
+        }
+    };
+    let mut current_context = || Ok(extensions.context);
+    let prompt_calls = Cell::new(0);
+    let mut prompt = |request: &super::super::ExtensionApprovalRequest| {
+        assert_eq!(request.qualified_name, "external_read");
+        prompt_calls.set(prompt_calls.get() + 1);
+        Ok(true)
+    };
+    let mut approval = super::super::ExtensionApprovalGate::new(&mut current_context, &mut prompt);
+
+    let result = run_goal_turn_with_budget_and_approved_extensions(
+        &mut session,
+        task_id,
+        turn_id,
+        "goal",
+        3,
+        &mut choose,
+        &extensions,
+        &mut approval,
+    )
+    .expect("bounded extension turn");
+    assert_eq!(result.stop_reason(), GoalTurnStopReason::Continued);
+    assert_eq!(result.actions_taken(), 2);
+    assert_eq!(prompt_calls.get(), 1);
 }
 
 #[test]
@@ -129,12 +272,12 @@ fn required_extension_arguments_fail_closed_in_bounded_execution_loop() {
         1,
         &mut choose,
         Some(&extensions),
-    )
-    .expect("required arguments must fail closed");
-    assert_eq!(result.stop_reason(), GoalTurnStopReason::ActionFailed);
+    );
     assert!(matches!(
-        result.outcome(),
-        Some(TurnOutcome::Failure { .. })
+        result,
+        Err(GoalTurnError::PermissionPromptUnavailable {
+            action: "registered extension"
+        })
     ));
 }
 
@@ -185,12 +328,12 @@ fn revoked_extension_is_denied_in_bounded_execution_loop() {
         2,
         &mut choose,
         Some(&extensions),
-    )
-    .expect("denial recorded as failed turn");
-    assert_eq!(result.stop_reason(), GoalTurnStopReason::ActionFailed);
+    );
     assert!(matches!(
-        result.outcome(),
-        Some(TurnOutcome::Failure { .. })
+        result,
+        Err(GoalTurnError::PermissionPromptUnavailable {
+            action: "registered extension"
+        })
     ));
 }
 
@@ -271,7 +414,11 @@ fn wrong_task_context_never_invokes_extension() {
         1,
         &mut choose,
         Some(&extensions),
-    )
-    .expect("wrong task fails closed");
-    assert_eq!(result.stop_reason(), GoalTurnStopReason::ActionFailed);
+    );
+    assert!(matches!(
+        result,
+        Err(GoalTurnError::PermissionPromptUnavailable {
+            action: "registered extension"
+        })
+    ));
 }
