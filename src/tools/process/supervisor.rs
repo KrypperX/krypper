@@ -486,6 +486,7 @@ pub(super) fn record_raw_output(result: &mut ProcessResult, stdout: Vec<u8>, std
 mod isolation_evidence_tests {
     use super::from_runner;
     use crate::tools::process::outcome::{ProcessOutcome, ProcessResource};
+    use crate::ProcessExecutionProfile;
     use krypper_sandbox::{
         SandboxBackend, SandboxIsolationEvidence, SandboxOutcome, SandboxResource, SandboxRunResult,
     };
@@ -515,7 +516,7 @@ mod isolation_evidence_tests {
         let evidence = SandboxIsolationEvidence::new(Some(SandboxBackend::Bubblewrap));
         let raw = runner_result(Some(evidence.clone()));
         let run_id = raw.run_id;
-        let result = from_runner(raw, None);
+        let result = from_runner(raw, None, ProcessExecutionProfile::OfflineCargoTest);
 
         assert_eq!(result.run_id, run_id);
         assert_eq!(result.outcome, ProcessOutcome::Exited(7));
@@ -537,7 +538,11 @@ mod isolation_evidence_tests {
 
     #[test]
     fn absent_evidence_keeps_the_legacy_json_shape() {
-        let result = from_runner(runner_result(None), None);
+        let result = from_runner(
+            runner_result(None),
+            None,
+            ProcessExecutionProfile::OfflineCargoTest,
+        );
         let json = serde_json::to_value(result).expect("serialize process result");
 
         assert!(json.get("sandbox_evidence").is_none());

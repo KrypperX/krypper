@@ -2804,7 +2804,9 @@ mod task_test_verification_tests {
         TaskSession, TaskState, TurnActivityAction, TurnActivitySummary, TurnOutcome, TurnState,
     };
 
-    fn verification_for(activity: &[TurnActivitySummary]) -> ProcessTestVerificationStatus {
+    fn verification_status(
+        activity: &[TurnActivitySummary],
+    ) -> Option<ProcessTestVerificationStatus> {
         let mut session = TaskSession::new();
         let task_id = session.create_task("check test verification history").id();
         let task = session.get_task_mut(task_id).expect("created task");
@@ -2823,7 +2825,11 @@ mod task_test_verification_tests {
             )
             .expect("complete turn with activity");
 
-        task_test_verification(&session, task_id, None).expect("test history is present")
+        task_test_verification(&session, task_id, None)
+    }
+
+    fn verification_for(activity: &[TurnActivitySummary]) -> ProcessTestVerificationStatus {
+        verification_status(activity).expect("test history is present")
     }
 
     fn record_test(
@@ -2951,18 +2957,12 @@ mod task_test_verification_tests {
             output_bytes: 12,
         }];
 
-        assert_eq!(
-            verification_for(&activity),
-            ProcessTestVerificationStatus::NotRequested
-        );
+        assert_eq!(verification_status(&activity), None);
 
         let failed = [TurnActivitySummary::ActionFailed {
             action: TurnActivityAction::OfflineReadOnlyExec,
         }];
-        assert_eq!(
-            verification_for(&failed),
-            ProcessTestVerificationStatus::NotRequested
-        );
+        assert_eq!(verification_status(&failed), None);
     }
 
     #[test]

@@ -15,7 +15,6 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use uuid::Uuid;
 
 const LIBC_LOCK: &str = "version = 4\n\n[[package]]\nname = \"c3_fixture\"\nversion = \"0.1.0\"\ndependencies = [\n \"libc\",\n]\n\n[[package]]\nname = \"libc\"\nversion = \"0.2.191\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a\"\n";
 

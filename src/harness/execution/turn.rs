@@ -995,7 +995,7 @@ mod offline_read_only_exec_approval_tests {
 
         assert!(matches!(
             result,
-            Err(GoalTurnError::PermissionUnavailable {
+            Err(GoalTurnError::PermissionPromptUnavailable {
                 action: "offline_read_only_exec"
             })
         ));

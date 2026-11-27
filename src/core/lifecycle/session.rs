@@ -881,7 +881,8 @@ impl TaskSession {
             if !authorized {
                 return Ok(crate::ProcessResult::denied_read_only_exec());
             }
-            let Some(results) = self.test_process_results.borrow_mut().get_mut(&task_id) else {
+            let mut process_results = self.test_process_results.borrow_mut();
+            let Some(results) = process_results.get_mut(&task_id) else {
                 return Ok(crate::ProcessResult::denied_read_only_exec());
             };
             self.test_process_filters
@@ -991,7 +992,8 @@ impl TaskSession {
             if !authorized {
                 return Ok(crate::ProcessResult::denied_read_only_exec());
             }
-            let Some(results) = self.test_process_results.borrow_mut().get_mut(&task_id) else {
+            let mut process_results = self.test_process_results.borrow_mut();
+            let Some(results) = process_results.get_mut(&task_id) else {
                 return Ok(crate::ProcessResult::denied_read_only_exec());
             };
             self.test_process_filters
