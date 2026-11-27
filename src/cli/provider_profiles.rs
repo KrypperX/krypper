@@ -247,7 +247,9 @@ pub(super) fn remove_profile(
     let Some(index) = profiles.iter().position(|profile| profile.id == id) else {
         return Err("provider profile ID does not exist".to_owned());
     };
-    let mut credentials = load_credentials(credential_path)?.unwrap_or_else(CredentialStore::empty);
+    let mut credentials = load_credentials(credential_path)
+        .map_err(|error| error.to_string())?
+        .unwrap_or_else(CredentialStore::empty);
     credentials.remove(&credential_name(id));
     save_credentials(credential_path, &credentials)?;
     profiles.remove(index);

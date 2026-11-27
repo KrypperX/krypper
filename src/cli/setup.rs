@@ -549,7 +549,7 @@ fn configure(
     let mut credentials = match load_credentials(&paths.credentials) {
         Ok(Some(credentials)) => credentials,
         Ok(None) => CredentialStore::empty(),
-        Err(message) => return usage_error(error, Some("setup"), &message),
+        Err(message) => return usage_error(error, Some("setup"), &message.to_string()),
     };
     if existing_defaults.is_some() || !credentials.is_empty() {
         writeln!(
