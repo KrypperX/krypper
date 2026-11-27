@@ -19,21 +19,22 @@ use super::types::{
 
 const NESTED_GUIDANCE_MARKER: &str = "\n\n--- AGENTS.md: ";
 
-pub(crate) fn capture_workspace_root() -> Result<WorkspaceRoot, String> {
-    let descriptor = open_current_directory().map_err(|error| {
-        CliError::from_io(&error, "unable to open current directory")
-            .message()
-            .to_owned()
-    })?;
+pub(crate) fn capture_workspace_root() -> Result<WorkspaceRoot, CliError> {
+    let descriptor = open_current_directory()
+        .map_err(|error| CliError::from_io(&error, "unable to open current directory"))?;
     let path = fs::canonicalize(".")
-        .map_err(|error| format!("unable to resolve current directory: {error}"))?;
-    verify_root_descriptor(&descriptor, &path)
-        .map_err(|error| format!("unable to verify current directory: {}", error.message()))?;
+        .map_err(|error| CliError::new(format!("unable to resolve current directory: {error}")))?;
+    verify_root_descriptor(&descriptor, &path).map_err(|error| {
+        CliError::new(format!(
+            "unable to verify current directory: {}",
+            error.message()
+        ))
+    })?;
     Ok(WorkspaceRoot { descriptor, path })
 }
 
-pub(crate) fn capture_workspace_root_at(path: &Path) -> Result<WorkspaceRoot, String> {
-    capture_workspace_root_at_with_error(path).map_err(|error| error.message().to_owned())
+pub(crate) fn capture_workspace_root_at(path: &Path) -> Result<WorkspaceRoot, CliError> {
+    capture_workspace_root_at_with_error(path)
 }
 
 pub(crate) fn capture_workspace_root_at_with_error(path: &Path) -> Result<WorkspaceRoot, CliError> {

@@ -53,9 +53,11 @@ impl OfflineCargoPolicy {
     /// The toolchain contains real `bin/cargo` and `bin/rustc` executables (not rustup shims).
     pub fn new(_toolchain: &Path, _registry: &Path) -> Result<Self, String> {
         #[cfg(target_os = "linux")]
-        let toolchain = capture_workspace_root_at(_toolchain)?;
+        let toolchain =
+            capture_workspace_root_at(_toolchain).map_err(|error| error.message().to_owned())?;
         #[cfg(target_os = "linux")]
-        let registry = capture_workspace_root_at(_registry)?;
+        let registry =
+            capture_workspace_root_at(_registry).map_err(|error| error.message().to_owned())?;
         #[cfg(target_os = "linux")]
         {
             for binary in ["cargo", "rustc"] {
