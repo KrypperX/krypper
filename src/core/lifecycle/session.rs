@@ -47,6 +47,15 @@ pub struct TaskSession {
         std::cell::RefCell<std::collections::HashMap<Uuid, Vec<Option<String>>>>,
 }
 
+struct ProcessGrantSpec {
+    mode: GrantMode,
+    scope: GrantScope,
+    exact_filter: Option<String>,
+    expiry: Option<GrantExpiry>,
+    read_only_exec: Option<crate::tools::process::OfflineReadOnlyExecRequest>,
+    source_grant_id: Option<Uuid>,
+}
+
 /// An immutable view of the current identifiers and states in a task session.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TaskSessionSnapshot {
@@ -521,12 +530,14 @@ impl TaskSession {
         self.install_process_grant(
             task_id,
             Arc::new(policy),
-            GrantMode::Standing,
-            GrantScope::Session,
-            None,
-            None,
-            None,
-            None,
+            ProcessGrantSpec {
+                mode: GrantMode::Standing,
+                scope: GrantScope::Session,
+                exact_filter: None,
+                expiry: None,
+                read_only_exec: None,
+                source_grant_id: None,
+            },
         )
     }
 
@@ -543,12 +554,14 @@ impl TaskSession {
         self.install_process_grant(
             task_id,
             Arc::new(policy),
-            GrantMode::Standing,
-            GrantScope::ExactFilter,
-            exact_filter.map(str::to_owned),
-            Some(expiry),
-            None,
-            None,
+            ProcessGrantSpec {
+                mode: GrantMode::Standing,
+                scope: GrantScope::ExactFilter,
+                exact_filter: exact_filter.map(str::to_owned),
+                expiry: Some(expiry),
+                read_only_exec: None,
+                source_grant_id: None,
+            },
         )
     }
 
@@ -565,12 +578,14 @@ impl TaskSession {
         self.install_process_grant(
             task_id,
             Arc::new(policy),
-            GrantMode::OneShot,
-            GrantScope::ExactFilter,
-            exact_filter.map(str::to_owned),
-            Some(expiry),
-            None,
-            None,
+            ProcessGrantSpec {
+                mode: GrantMode::OneShot,
+                scope: GrantScope::ExactFilter,
+                exact_filter: exact_filter.map(str::to_owned),
+                expiry: Some(expiry),
+                read_only_exec: None,
+                source_grant_id: None,
+            },
         )
     }
 
@@ -587,12 +602,14 @@ impl TaskSession {
         self.install_process_grant(
             task_id,
             Arc::new(policy),
-            GrantMode::OneShot,
-            GrantScope::ExactIntent,
-            None,
-            Some(expiry),
-            Some(request),
-            None,
+            ProcessGrantSpec {
+                mode: GrantMode::OneShot,
+                scope: GrantScope::ExactIntent,
+                exact_filter: None,
+                expiry: Some(expiry),
+                read_only_exec: Some(request),
+                source_grant_id: None,
+            },
         )
     }
 
@@ -636,12 +653,14 @@ impl TaskSession {
         self.install_process_grant(
             task_id,
             Arc::new(policy),
-            GrantMode::OneShot,
-            GrantScope::ExactIntent,
-            None,
-            Some(expiry),
-            Some(request),
-            Some(source_grant_id),
+            ProcessGrantSpec {
+                mode: GrantMode::OneShot,
+                scope: GrantScope::ExactIntent,
+                exact_filter: None,
+                expiry: Some(expiry),
+                read_only_exec: Some(request),
+                source_grant_id: Some(source_grant_id),
+            },
         )
     }
 
@@ -675,13 +694,16 @@ impl TaskSession {
         &self,
         task_id: Uuid,
         policy: Arc<crate::OfflineCargoPolicy>,
-        mode: GrantMode,
-        scope: GrantScope,
-        exact_filter: Option<String>,
-        expiry: Option<GrantExpiry>,
-        read_only_exec: Option<crate::tools::process::OfflineReadOnlyExecRequest>,
-        source_grant_id: Option<Uuid>,
+        spec: ProcessGrantSpec,
     ) -> Result<(), &'static str> {
+        let ProcessGrantSpec {
+            mode,
+            scope,
+            exact_filter,
+            expiry,
+            read_only_exec,
+            source_grant_id,
+        } = spec;
         let task = self.get_task(task_id).ok_or("task not found")?;
         let root = task
             .workspace_root
@@ -1003,7 +1025,7 @@ impl TaskSession {
                 .push(None);
             let mut result = results
                 .pop_front()
-                .unwrap_or_else(|| crate::ProcessResult::denied_read_only_exec());
+                .unwrap_or_else(crate::ProcessResult::denied_read_only_exec);
             result.profile = crate::ProcessExecutionProfile::OfflineReadOnlyExecV1;
             return Ok(result);
         }

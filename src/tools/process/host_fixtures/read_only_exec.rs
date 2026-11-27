@@ -189,6 +189,7 @@ fn real_offline_read_only_exec_preserves_nested_cwd_and_confinement() {
         TcpStream::connect_timeout(&canary_address, Duration::from_millis(100)).is_ok(),
         "host loopback canary must be reachable before launch"
     );
+    // SAFETY: The invalid ptrace request and integer-only arguments do not pass pointers for the kernel to dereference.
     let ptrace = unsafe { libc::syscall(libc::SYS_ptrace, -1 as libc::c_long, 0, 0, 0) };
     assert!(
         !(ptrace == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)),

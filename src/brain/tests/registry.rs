@@ -69,6 +69,11 @@ fn workspace_registry_contains_only_existing_operations_and_schemas() {
                 "name":"offline_cargo_test",
                 "description":"Run the fixed offline locked Cargo test profile with an optional literal test-name filter.",
                 "parameters":{"type":"object","properties":{"test_filter":{"type":"string","minLength":1,"maxLength":256}},"required":[],"additionalProperties":false}
+            },
+            {
+                "name":"offline_read_only_exec",
+                "description":"Run bounded direct argv through the host-pinned Cargo or Rustc executable in the offline read-only workspace profile.",
+                "parameters":{"type":"object","properties":{"argv":{"type":"array","items":{"type":"string","minLength":1,"maxLength":1024},"minItems":1,"maxItems":32},"executable":{"type":"string","enum":["cargo","rustc"]},"working_directory":{"type":"string","minLength":1,"maxLength":4096}},"required":["argv","executable","working_directory"],"additionalProperties":false}
             }
         ])
     );
@@ -137,6 +142,7 @@ fn provider_request_builders_keep_their_formats_with_registry_tools() {
             "replace_text",
             "apply_patch",
             "offline_cargo_test",
+            "offline_read_only_exec",
             "complete_task"
         ]
     );

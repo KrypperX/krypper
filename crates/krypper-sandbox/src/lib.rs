@@ -782,7 +782,7 @@ impl DirectoryDescriptors {
         [&self.workspace, &self.toolchain, &self.registry]
             .iter()
             .all(|directory| directory.metadata().is_ok_and(|metadata| metadata.is_dir()))
-            && self.workspace_cwd.as_ref().map_or(true, |directory| {
+            && self.workspace_cwd.as_ref().is_none_or(|directory| {
                 directory.metadata().is_ok_and(|metadata| metadata.is_dir())
             })
     }

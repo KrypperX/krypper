@@ -168,6 +168,6 @@ fn ollama_plan_source_uses_a_local_fixture_and_keeps_control_on_the_existing_pat
             .as_array()
             .unwrap()
             .len(),
-        11
+        12
     );
 }

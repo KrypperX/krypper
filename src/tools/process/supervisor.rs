@@ -5,10 +5,12 @@ use super::policy::{validate_test_filter, OfflineCargoPolicy};
 use super::result::ProcessResult;
 use crate::tools::WorkspaceRoot;
 use crate::ProcessExecutionProfile;
+#[cfg(target_os = "linux")]
+use krypper_sandbox::run_process;
 use krypper_sandbox::{
-    run_offline_cargo, run_process, DirectoryDescriptors, LandlockRequirement,
-    OfflineReadOnlyExecRequest, RunLimits, SandboxOutcome, SandboxResource, SandboxRunRequest,
-    SandboxRunResult, SpawnAuthorizationGate,
+    run_offline_cargo, DirectoryDescriptors, LandlockRequirement, OfflineReadOnlyExecRequest,
+    RunLimits, SandboxOutcome, SandboxResource, SandboxRunRequest, SandboxRunResult,
+    SpawnAuthorizationGate,
 };
 #[cfg(target_os = "linux")]
 use std::path::Path;
