@@ -2768,8 +2768,9 @@ mod process_grant_tests {
 mod full_access_host_authorization_tests {
     use super::{
         full_access_host_spawn_gate, full_access_host_start_available, TaskPermissionSnapshot,
-        TaskState, TurnState,
     };
+    #[cfg(target_os = "linux")]
+    use super::{TaskState, TurnState};
     use crate::tools::permission_policy::PermissionMode;
     use krypper_sandbox::{SpawnAction, SpawnGateError};
     use std::process::Command;
