@@ -364,7 +364,11 @@ fn fixed_policy_and_descendant() {
         result.succeeded(),
         "syscall-filter Cargo fixture failed: {result:?}"
     );
-    assert_eq!(result.executed_tests, Some(1));
+    assert_eq!(
+        result.executed_tests,
+        Some(2),
+        "the parent policy test and its exec descendant probe must both run: {result:?}"
+    );
     assert!(result.cleanup_confirmed, "{result:?}");
     assert!(!result.recovery_hold, "{result:?}");
 }
