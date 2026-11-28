@@ -167,7 +167,8 @@ fn provider_readiness_for_default(
         .map_err(|error| error.to_string())?
         .unwrap_or_else(CredentialStore::empty);
     let Some(descriptor) = crate::brain::provider_descriptor_by_selector(provider) else {
-        let profiles = load_provider_profiles(&paths.provider_profiles)?;
+        let profiles =
+            load_provider_profiles(&paths.provider_profiles).map_err(|error| error.to_string())?;
         let Some(profile) = profiles.iter().find(|profile| profile.id == provider) else {
             return Ok(None);
         };

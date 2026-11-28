@@ -82,7 +82,7 @@ pub(super) enum SettingsIoAction {
 }
 
 impl SettingsIoAction {
-    fn verb(self) -> &'static str {
+    pub(super) fn verb(self) -> &'static str {
         match self {
             Self::Inspect => "inspect",
             Self::Read => "read",
@@ -1424,7 +1424,7 @@ pub(super) fn ensure_private_permissions(
         .map_err(|error| error.to_string())
 }
 
-fn ensure_private_permissions_with_source(
+pub(super) fn ensure_private_permissions_with_source(
     path: &Path,
     metadata: &fs::Metadata,
     description: &str,
