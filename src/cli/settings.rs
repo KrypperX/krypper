@@ -6,6 +6,7 @@ use super::config::{
 use super::credential_vault::{self, CredentialsEnvelope, MasterKeyStore, SecretBytes, VaultError};
 use crate::brain::{is_provider_credential_name, validate_model_name_for_provider, ModelProvider};
 use crate::tools::permission_policy::PermissionMode;
+use crate::OfflineCargoPolicy;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -23,10 +24,13 @@ const PROVIDER_PROFILES_FILE: &str = "provider-profiles.json";
 const MODEL_EVIDENCE_FILE: &str = "model-evidence.json";
 const MODEL_EVIDENCE_KEY_FILE: &str = "model-evidence.key";
 const PERMISSION_MODE_FILE: &str = "permission-mode";
+const OFFLINE_PROCESS_FILE: &str = "offline-process.json";
 const MAX_CREDENTIAL_BYTES: u64 = 96 * 1024;
 const MAX_CREDENTIAL_PLAINTEXT_BYTES: usize = 64 * 1024;
 const CREDENTIAL_TRANSACTION_VERSION: u8 = 1;
 const MAX_PERMISSION_MODE_BYTES: u64 = 128;
+const MAX_OFFLINE_PROCESS_BYTES: u64 = 4096;
+const OFFLINE_PROCESS_SETTINGS_VERSION: u32 = 1;
 static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 
 pub(super) struct CredentialStore {
@@ -497,6 +501,21 @@ pub(super) struct UserSettingsPaths {
     pub(super) provider_profiles: PathBuf,
     pub(super) model_evidence: PathBuf,
     pub(super) model_evidence_key: PathBuf,
+    pub(super) offline_process: PathBuf,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct OfflineProcessSettings {
+    version: u32,
+    toolchain_root: PathBuf,
+    registry_root: PathBuf,
+}
+
+pub(super) struct OfflineProcessConfiguration {
+    pub(super) toolchain_root: PathBuf,
+    pub(super) registry_root: PathBuf,
+    pub(super) policy: OfflineCargoPolicy,
 }
 
 /// Returns the ordinary per-user paths. This deliberately ignores
@@ -513,8 +532,239 @@ pub(super) fn user_settings_paths() -> Result<Option<UserSettingsPaths>, String>
         provider_profiles: model.with_file_name(PROVIDER_PROFILES_FILE),
         model_evidence: model.with_file_name(MODEL_EVIDENCE_FILE),
         model_evidence_key: model.with_file_name(MODEL_EVIDENCE_KEY_FILE),
+        offline_process: model.with_file_name(OFFLINE_PROCESS_FILE),
         model,
     }))
+}
+
+/// Validate and capture the two preprovisioned roots without installing or downloading anything.
+/// The returned policy pins the root identities for use by the current task.
+pub(super) fn prepare_offline_process_configuration(
+    toolchain_root: &Path,
+    registry_root: &Path,
+    private_settings_directory: &Path,
+) -> Result<OfflineProcessConfiguration, String> {
+    if !cfg!(target_os = "linux") {
+        return Err("the offline process profile is currently available only on Linux".to_owned());
+    }
+    if !toolchain_root.is_absolute() || !registry_root.is_absolute() {
+        return Err("toolchain and offline registry roots must be absolute paths".to_owned());
+    }
+    let toolchain_root = std::fs::canonicalize(toolchain_root)
+        .map_err(|error| format!("cannot resolve toolchain root: {}", error.kind()))?;
+    let registry_root = std::fs::canonicalize(registry_root)
+        .map_err(|error| format!("cannot resolve offline registry root: {}", error.kind()))?;
+    if crate::tools::process::paths_overlap_with_mounts(&toolchain_root, &registry_root)
+        .map_err(|_| "cannot verify offline process roots are disjoint".to_owned())?
+    {
+        return Err("toolchain and offline registry roots must be disjoint".to_owned());
+    }
+    let private_settings_directory =
+        resolve_private_settings_directory(private_settings_directory)?;
+    if crate::tools::process::paths_overlap_with_mounts(
+        &toolchain_root,
+        &private_settings_directory,
+    )
+    .map_err(|_| "cannot verify offline roots are disjoint from private user settings".to_owned())?
+        || crate::tools::process::paths_overlap_with_mounts(
+            &registry_root,
+            &private_settings_directory,
+        )
+        .map_err(|_| {
+            "cannot verify offline roots are disjoint from private user settings".to_owned()
+        })?
+    {
+        return Err(
+            "toolchain and offline registry roots must be disjoint from the private user settings directory"
+                .to_owned(),
+        );
+    }
+    let policy = OfflineCargoPolicy::new(&toolchain_root, &registry_root)
+        .map_err(|error| format!("offline process roots are unavailable: {error}"))?;
+    policy
+        .validate_roots_are_disjoint()
+        .map_err(|_| "toolchain and offline registry roots must be disjoint".to_owned())?;
+    Ok(OfflineProcessConfiguration {
+        toolchain_root,
+        registry_root,
+        policy,
+    })
+}
+
+/// Resolve the host-owned settings directory even before first setup creates it.
+/// Existing ancestors are canonicalized so symlink aliases cannot make a trusted
+/// process root appear separate from the directory that stores user secrets.
+fn resolve_private_settings_directory(path: &Path) -> Result<PathBuf, String> {
+    if !path.is_absolute() {
+        return Err("private user settings directory must be absolute".to_owned());
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                return Err("private user settings directory is not safely resolvable".to_owned());
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+
+    let mut candidate = normalized;
+    let mut missing_components = Vec::new();
+    loop {
+        match fs::symlink_metadata(&candidate) {
+            Ok(_) => {
+                let metadata = fs::metadata(&candidate).map_err(|error| {
+                    format!(
+                        "cannot resolve private user settings directory: {}",
+                        error.kind()
+                    )
+                })?;
+                if !metadata.is_dir() {
+                    return Err("private user settings path is not a directory".to_owned());
+                }
+                let mut resolved = fs::canonicalize(&candidate).map_err(|error| {
+                    format!(
+                        "cannot resolve private user settings directory: {}",
+                        error.kind()
+                    )
+                })?;
+                for component in missing_components.into_iter().rev() {
+                    resolved.push(component);
+                }
+                return Ok(resolved);
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let Some(name) = candidate.file_name() else {
+                    return Err(
+                        "private user settings directory is not safely resolvable".to_owned()
+                    );
+                };
+                missing_components.push(PathBuf::from(name));
+                candidate = candidate
+                    .parent()
+                    .ok_or_else(|| {
+                        "private user settings directory is not safely resolvable".to_owned()
+                    })?
+                    .to_path_buf();
+            }
+            Err(error) => {
+                return Err(format!(
+                    "cannot inspect private user settings directory: {}",
+                    error.kind()
+                ));
+            }
+        }
+    }
+}
+
+/// Load the host-owned configuration from its private per-user location. This path is never
+/// derived from `KRYPPER_CONFIG`, the current workspace, or a task argument.
+pub(super) fn load_offline_process_configuration(
+    path: &Path,
+) -> Result<Option<OfflineProcessConfiguration>, String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "cannot inspect offline process settings '{}': {}",
+                path.display(),
+                error.kind()
+            ))
+        }
+    };
+    if !metadata.file_type().is_file() {
+        return Err(format!(
+            "offline process settings '{}' are not a regular file",
+            path.display()
+        ));
+    }
+    let file = open_private_file(path).map_err(|error| {
+        format!(
+            "cannot read offline process settings '{}': {}",
+            path.display(),
+            error.kind()
+        )
+    })?;
+    let opened_metadata = file.metadata().map_err(|error| {
+        format!(
+            "cannot inspect offline process settings '{}': {}",
+            path.display(),
+            error.kind()
+        )
+    })?;
+    if !opened_metadata.is_file() {
+        return Err(format!(
+            "offline process settings '{}' are not a regular file",
+            path.display()
+        ));
+    }
+    ensure_private_permissions_with_source(path, &opened_metadata, "offline process settings")
+        .map_err(|error| error.to_string())?;
+    let mut bytes = Vec::new();
+    file.take(MAX_OFFLINE_PROCESS_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            format!(
+                "cannot read offline process settings '{}': {}",
+                path.display(),
+                error.kind()
+            )
+        })?;
+    if bytes.len() as u64 > MAX_OFFLINE_PROCESS_BYTES {
+        return Err(format!(
+            "offline process settings '{}' exceed {MAX_OFFLINE_PROCESS_BYTES} bytes",
+            path.display()
+        ));
+    }
+    let settings: OfflineProcessSettings = serde_json::from_slice(&bytes).map_err(|_| {
+        format!(
+            "offline process settings '{}' are invalid or unsupported",
+            path.display()
+        )
+    })?;
+    if settings.version != OFFLINE_PROCESS_SETTINGS_VERSION {
+        return Err(format!(
+            "offline process settings '{}' use an unsupported version",
+            path.display()
+        ));
+    }
+    let private_settings_directory = path.parent().ok_or_else(|| {
+        "offline process settings must be stored inside the private user settings directory"
+            .to_owned()
+    })?;
+    prepare_offline_process_configuration(
+        &settings.toolchain_root,
+        &settings.registry_root,
+        private_settings_directory,
+    )
+    .map(Some)
+}
+
+pub(super) fn save_offline_process_configuration(
+    path: &Path,
+    toolchain_root: &Path,
+    registry_root: &Path,
+) -> Result<(), String> {
+    let private_settings_directory = path.parent().ok_or_else(|| {
+        "offline process settings must be stored inside the private user settings directory"
+            .to_owned()
+    })?;
+    let configuration = prepare_offline_process_configuration(
+        toolchain_root,
+        registry_root,
+        private_settings_directory,
+    )?;
+    let settings = OfflineProcessSettings {
+        version: OFFLINE_PROCESS_SETTINGS_VERSION,
+        toolchain_root: configuration.toolchain_root,
+        registry_root: configuration.registry_root,
+    };
+    let contents = serde_json::to_vec(&settings)
+        .map_err(|_| "offline process settings could not be encoded".to_owned())?;
+    write_private_file(path, &contents, "offline process settings")
 }
 
 /// Load the permission preference from its dedicated per-user file.
@@ -936,6 +1186,7 @@ pub(super) fn remove_settings(paths: &UserSettingsPaths) -> Result<(), String> {
     remove_file_if_present(&paths.provider_profiles, "provider profiles")?;
     remove_file_if_present(&paths.model_evidence, "provider evidence")?;
     remove_file_if_present(&paths.model_evidence_key, "provider evidence key")?;
+    remove_file_if_present(&paths.offline_process, "offline process settings")?;
     remove_file_if_present(&paths.permission_mode, "permission settings")?;
     remove_file_if_present(
         &paths.model.with_file_name("model-catalog-cache.json"),
@@ -1704,6 +1955,7 @@ mod tests {
             provider_profiles: empty_directory.path().join(PROVIDER_PROFILES_FILE),
             model_evidence: empty_directory.path().join(MODEL_EVIDENCE_FILE),
             model_evidence_key: empty_directory.path().join(MODEL_EVIDENCE_KEY_FILE),
+            offline_process: empty_directory.path().join(OFFLINE_PROCESS_FILE),
         };
         remove_settings(&empty_paths).unwrap();
 
@@ -1720,6 +1972,7 @@ mod tests {
             provider_profiles: directory.path().join(PROVIDER_PROFILES_FILE),
             model_evidence: directory.path().join(MODEL_EVIDENCE_FILE),
             model_evidence_key: directory.path().join(MODEL_EVIDENCE_KEY_FILE),
+            offline_process: directory.path().join(OFFLINE_PROCESS_FILE),
         };
         fs::write(&paths.model, b"provider = 'ollama'\n").unwrap();
         fs::write(&paths.provider_profiles, b"profiles").unwrap();
@@ -1893,6 +2146,185 @@ mod tests {
                 path.display()
             )
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    fn offline_process_roots(directory: &Path) -> (PathBuf, PathBuf) {
+        let toolchain = directory.join("toolchain");
+        let bin = toolchain.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let executable = std::env::current_exe().unwrap();
+        fs::copy(&executable, bin.join("cargo")).unwrap();
+        fs::copy(&executable, bin.join("rustc")).unwrap();
+        let registry = directory.join("registry");
+        fs::create_dir_all(&registry).unwrap();
+        (toolchain, registry)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn offline_process_settings_round_trip_canonical_roots_in_a_private_versioned_file() {
+        let directory = TempDir::new();
+        let (toolchain, registry) = offline_process_roots(directory.path());
+        let settings_path = directory.path().join("config/offline-process.json");
+
+        save_offline_process_configuration(&settings_path, &toolchain, &registry).unwrap();
+        let loaded = load_offline_process_configuration(&settings_path)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(loaded.toolchain_root, fs::canonicalize(toolchain).unwrap());
+        assert_eq!(loaded.registry_root, fs::canonicalize(registry).unwrap());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(settings_path).unwrap().permissions().mode() & 0o077,
+                0
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn offline_process_settings_reject_unknown_duplicate_and_unsupported_fields() {
+        let directory = TempDir::new();
+        let (toolchain, registry) = offline_process_roots(directory.path());
+        let settings_path = directory.path().join("config/offline-process.json");
+        let toolchain = fs::canonicalize(toolchain).unwrap();
+        let registry = fs::canonicalize(registry).unwrap();
+        let toolchain = serde_json::to_string(&toolchain).unwrap();
+        let registry = serde_json::to_string(&registry).unwrap();
+
+        for contents in [
+            format!(r#"{{"version":2,"toolchain_root":{toolchain},"registry_root":{registry}}}"#),
+            format!(
+                r#"{{"version":1,"toolchain_root":{toolchain},"registry_root":{registry},"network":true}}"#
+            ),
+            format!(
+                r#"{{"version":1,"version":1,"toolchain_root":{toolchain},"registry_root":{registry}}}"#
+            ),
+        ] {
+            write_private_file(
+                &settings_path,
+                contents.as_bytes(),
+                "offline process settings",
+            )
+            .unwrap();
+            assert!(load_offline_process_configuration(&settings_path).is_err());
+            fs::remove_file(&settings_path).unwrap();
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn offline_process_settings_reject_overlapping_roots_before_capture() {
+        let directory = TempDir::new();
+        let parent = directory.path().join("roots");
+        let child = parent.join("registry");
+        fs::create_dir_all(&child).unwrap();
+
+        assert!(prepare_offline_process_configuration(&parent, &child, directory.path()).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn offline_process_settings_reject_roots_containing_home_settings_on_save_and_load() {
+        let directory = TempDir::new();
+        let home = directory.path().join("home");
+        let settings_directory = home.join(".config/krypper");
+        let settings_path = settings_directory.join(OFFLINE_PROCESS_FILE);
+        let registry = directory.path().join("registry");
+        fs::create_dir_all(&settings_directory).unwrap();
+        fs::create_dir_all(&registry).unwrap();
+
+        assert!(save_offline_process_configuration(&settings_path, &home, &registry).is_err());
+        let home_alias = directory.path().join("home-alias");
+        std::os::unix::fs::symlink(&home, &home_alias).unwrap();
+        assert!(
+            save_offline_process_configuration(&settings_path, &home_alias, &registry).is_err()
+        );
+
+        let raw = OfflineProcessSettings {
+            version: OFFLINE_PROCESS_SETTINGS_VERSION,
+            toolchain_root: home.clone(),
+            registry_root: registry,
+        };
+        write_private_file(
+            &settings_path,
+            &serde_json::to_vec(&raw).unwrap(),
+            "offline process settings",
+        )
+        .unwrap();
+        assert!(load_offline_process_configuration(&settings_path).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn offline_process_settings_reject_roots_inside_private_config_on_save_and_load() {
+        let directory = TempDir::new();
+        let home = directory.path().join("home");
+        let settings_directory = home.join(".config/krypper");
+        let settings_path = settings_directory.join(OFFLINE_PROCESS_FILE);
+        let toolchain = settings_directory.join("toolchain");
+        let registry = home.join("registry");
+        fs::create_dir_all(&toolchain).unwrap();
+        fs::create_dir_all(&settings_directory).unwrap();
+        fs::create_dir_all(&registry).unwrap();
+
+        assert!(save_offline_process_configuration(&settings_path, &toolchain, &registry).is_err());
+        let toolchain_alias = home.join("toolchain-alias");
+        std::os::unix::fs::symlink(&toolchain, &toolchain_alias).unwrap();
+        assert!(
+            save_offline_process_configuration(&settings_path, &toolchain_alias, &registry)
+                .is_err()
+        );
+
+        let raw = OfflineProcessSettings {
+            version: OFFLINE_PROCESS_SETTINGS_VERSION,
+            toolchain_root: toolchain.clone(),
+            registry_root: registry,
+        };
+        write_private_file(
+            &settings_path,
+            &serde_json::to_vec(&raw).unwrap(),
+            "offline process settings",
+        )
+        .unwrap();
+        assert!(load_offline_process_configuration(&settings_path).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn offline_process_settings_resolve_symlinked_roots_and_allow_home_siblings() {
+        use std::os::unix::fs::symlink;
+
+        let directory = TempDir::new();
+        let home = directory.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let (toolchain, registry) = offline_process_roots(&home);
+        let settings_directory = home.join(".config/krypper");
+        fs::create_dir_all(&settings_directory).unwrap();
+        let settings_path = settings_directory.join(OFFLINE_PROCESS_FILE);
+        let toolchain_alias = home.join("toolchain-alias");
+        symlink(&toolchain, &toolchain_alias).unwrap();
+
+        save_offline_process_configuration(&settings_path, &toolchain_alias, &registry).unwrap();
+        let loaded = load_offline_process_configuration(&settings_path)
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.toolchain_root, fs::canonicalize(toolchain).unwrap());
+        assert_eq!(loaded.registry_root, fs::canonicalize(registry).unwrap());
+
+        let config_alias = directory.path().join("config-alias");
+        symlink(home.join(".config"), &config_alias).unwrap();
+        let aliased_settings_path = config_alias.join("krypper").join(OFFLINE_PROCESS_FILE);
+        assert!(save_offline_process_configuration(
+            &aliased_settings_path,
+            &home,
+            &home.join("registry")
+        )
+        .is_err());
     }
 
     #[cfg(unix)]

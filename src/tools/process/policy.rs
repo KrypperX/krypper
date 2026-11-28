@@ -148,6 +148,71 @@ impl OfflineCargoPolicy {
         })
     }
 
+    /// Reject aliases or nested directories between the captured toolchain and registry roots.
+    /// Existing embedders may intentionally construct a policy with shared roots, so callers opt
+    /// into this stricter CLI setting invariant explicitly.
+    pub(crate) fn validate_roots_are_disjoint(&self) -> Result<(), &'static str> {
+        #[cfg(target_os = "linux")]
+        {
+            if captured_roots_overlap(&self.toolchain, &self.registry)? {
+                return Err("toolchain and offline registry roots must be disjoint");
+            }
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = self;
+            Err("offline process profile is unavailable on this platform")
+        }
+    }
+
+    /// Ensure the task cannot mutate the trusted settings that will provision a later process
+    /// policy. A workspace rooted at the user's home directory would otherwise contain this
+    /// private config file even though the toolchain and registry are disjoint.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn validate_profile_settings_outside_workspace_path(
+        &self,
+        workspace_path: &Path,
+        settings_path: &Path,
+    ) -> Result<(), &'static str> {
+        let workspace = capture_workspace_root_at(workspace_path)
+            .map_err(|_| "task workspace is unavailable")?;
+        self.validate_profile_settings_outside_captured_workspace(&workspace, settings_path)
+    }
+
+    /// Check settings-file containment against the exact root held by TaskSession.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn validate_profile_settings_outside_captured_workspace(
+        &self,
+        workspace: &WorkspaceRoot,
+        settings_path: &Path,
+    ) -> Result<(), &'static str> {
+        self.validate_captured_workspace_is_disjoint(workspace)?;
+        let settings_path = std::fs::canonicalize(settings_path)
+            .map_err(|_| "offline process settings are unavailable")?;
+        if crate::tools::process::paths_overlap_with_mounts(workspace.path(), &settings_path)
+            .map_err(|_| "offline process path disjointness cannot be verified")?
+        {
+            return Err("offline process settings must be outside the task workspace");
+        }
+        Ok(())
+    }
+
+    /// Verify disjointness against the exact workspace root already captured by TaskSession.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn validate_captured_workspace_is_disjoint(
+        &self,
+        workspace: &WorkspaceRoot,
+    ) -> Result<(), &'static str> {
+        if captured_roots_overlap(&self.toolchain, &self.registry)?
+            || captured_roots_overlap(&self.toolchain, workspace)?
+            || captured_roots_overlap(&self.registry, workspace)?
+        {
+            return Err("task workspace must be disjoint from offline process roots");
+        }
+        Ok(())
+    }
+
     /// Forks the captured host policy for a newly authorized grant.
     ///
     /// Directory descriptors and their identities remain pinned to the same trusted roots, but
@@ -266,6 +331,23 @@ impl OfflineCargoPolicy {
             registry_identity,
         })
     }
+}
+
+#[cfg(target_os = "linux")]
+fn captured_roots_overlap(
+    left: &WorkspaceRoot,
+    right: &WorkspaceRoot,
+) -> Result<bool, &'static str> {
+    let left_identity = left
+        .identity()
+        .map_err(|_| "offline process root identity is unavailable")?;
+    let right_identity = right
+        .identity()
+        .map_err(|_| "offline process root identity is unavailable")?;
+    let left_path = left.path();
+    let right_path = right.path();
+    Ok(left_identity == right_identity
+        || crate::tools::process::paths_overlap_with_mounts(left_path, right_path)?)
 }
 
 // No outcome except `Exited(0)` with complete output and confirmed cleanup is success.

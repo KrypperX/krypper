@@ -282,6 +282,30 @@ impl TaskSession {
             .map(|snapshot| Arc::clone(&snapshot.task_cancellation))
     }
 
+    /// Returns the cancellation flag for the current, valid process grant.
+    ///
+    /// The CLI uses this only to attach its scoped interrupt handler to the exact one-shot grant
+    /// that is about to be dispatched. Replaced, expired, consumed, or cancelled grants cannot
+    /// acquire a new handler.
+    pub(crate) fn offline_process_grant_cancellation(
+        &self,
+        task_id: Uuid,
+    ) -> Option<Arc<AtomicBool>> {
+        let state = self.process_grants.lock().ok()?.get(&task_id).cloned()?;
+        let state = state.lock().ok()?;
+        let grant = state.current.as_ref().filter(|grant| {
+            grant.task_id == task_id
+                && grant.epoch == state.epoch
+                && !grant.expired()
+                && !grant.consumed
+                && !grant
+                    .policy
+                    .cancellation()
+                    .load(std::sync::atomic::Ordering::SeqCst)
+        })?;
+        Some(grant.policy.cancellation())
+    }
+
     /// Reports whether the host has requested cancellation for this task.
     pub(crate) fn task_cancellation_requested(&self, task_id: Uuid) -> bool {
         self.task_cancellation_flag(task_id)
@@ -372,6 +396,19 @@ impl TaskSession {
     /// Returns a task in this session by identifier.
     pub fn get_task(&self, task_id: Uuid) -> Option<&Task> {
         self.tasks.iter().find(|task| task.id == task_id)
+    }
+
+    /// Returns the exact captured workspace root for trusted in-crate preflight checks.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn task_workspace_root(
+        &self,
+        task_id: Uuid,
+    ) -> Result<&WorkspaceRoot, &'static str> {
+        let task = self.get_task(task_id).ok_or("task not found")?;
+        task.workspace_root
+            .as_ref()
+            .map(Arc::as_ref)
+            .map_err(|_| "task workspace is unavailable")
     }
 
     /// Returns a mutable task in this session by identifier.

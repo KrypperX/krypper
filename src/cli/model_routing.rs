@@ -397,6 +397,7 @@ mod tests {
             provider_profiles: directory.path().join("provider-profiles.json"),
             model_evidence: directory.path().join("model-evidence.json"),
             model_evidence_key: directory.path().join("model-evidence.key"),
+            offline_process: directory.path().join("offline-process.json"),
         }
     }
 

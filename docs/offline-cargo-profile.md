@@ -30,8 +30,10 @@ matching; it is passed unchanged as one argument after Cargo's fixed `--`
 separator and cannot add Cargo or test-harness flags.
 Without a filter it runs exactly `cargo test --offline --locked --all-targets`.
 Requests cannot supply an executable, other arguments, cwd, environment,
-sandbox options, or higher limits. This is an embedding API capability; no CLI
-syntax or default CLI permission has been added.
+sandbox options, or higher limits. The CLI exposes this operation only after
+the user selects `--sandbox-profile offline` and configures private per-user
+toolchain and registry roots. Ask prompts for each exact filter; Risk-based
+continues to permit only the fixed profile when those trusted roots are ready.
 
 The host profile carries a version 2 validated requirements contract. It records
 the fixed Cargo executable and argv prefix, workspace-relative cwd, read-only
@@ -79,9 +81,34 @@ another direct-argv action or the fixed `offline_cargo_test` action. TaskSession
 has one active process-grant slot per task: installing the exact direct-argv
 approval replaces and revokes the prior grant, signals cancellation to work
 still using its policy, and leaves no standing Cargo authority behind. The
-current CLI does not provision a process policy or interactive prompt for this operation;
-it is available to embeddings that provide both through the existing host-owned
-TaskSession and Harness interfaces.
+CLI access requires `--sandbox-profile offline`, which loads and pins the
+versioned private user setting before the first provider request. `krypper
+setup --offline-process --toolchain-root PATH --registry-root PATH` validates
+and stores existing roots without installing anything. The setting is
+independent of workspace files and `KRYPPER_CONFIG`; the captured toolchain,
+registry and task workspace must be disjoint, and neither host root may overlap
+the private per-user settings directory that stores credentials and provider
+profiles. The private settings file must be outside the selected workspace.
+Bind mounts visible beneath the workspace, either trusted root, or private
+settings directory are included in these checks. Setup and task execution fail
+closed if Linux mount metadata cannot establish whether paths overlap. A
+workspace rooted at the user's home
+directory is rejected when it contains that settings file. `krypper setup
+--status` reports profile configuration and describes the settings-directory
+and workspace checks. The CLI asks on the controlling terminal
+for each exact direct-argv intent in Ask and Risk-based modes, then
+installs a fresh one-shot TaskSession grant. Missing TTY, decline, invalid
+settings or unsupported Linux controls fail closed. Checkpoint resume needs the
+explicit profile flag again and starts with no restored grants. Full Access
+does not authorize direct argv; fixed Cargo retains its mode behavior and still
+requires an exact per-action prompt in Full Access.
+The offline profile confines Krypper process actions only; it does not disable
+or isolate model/provider requests, which still use the selected provider and
+may send task data.
+
+The toolchain and registry are mounted read-only, but sandboxed Cargo/Rustc and
+model-controlled build code can still read their contents. Do not place secrets
+in either root.
 
 The existing `offline_cargo_test` behavior remains unchanged: its request still
 contains only the optional literal test filter and always uses the fixed Cargo
