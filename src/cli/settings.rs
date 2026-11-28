@@ -58,6 +58,30 @@ pub(super) enum CredentialStoreError {
 }
 
 #[derive(Debug)]
+pub(super) enum PermissionModeSettingsError {
+    Io {
+        action: PermissionModeIoAction,
+        path: PathBuf,
+        source: io::Error,
+    },
+    Permissions(String),
+    NotRegularFile(PathBuf),
+    TooLarge(PathBuf),
+    InvalidUtf8(PathBuf),
+    InvalidValue {
+        path: PathBuf,
+        reason: &'static str,
+    },
+    Write(CredentialFileWriteError),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) enum PermissionModeIoAction {
+    Inspect,
+    Read,
+}
+
+#[derive(Debug)]
 pub(super) enum CredentialStoreIoAction {
     Inspect,
     Read,
@@ -155,6 +179,71 @@ impl fmt::Display for CredentialStoreError {
 
 impl std::error::Error for CredentialStoreError {}
 
+impl PermissionModeSettingsError {
+    fn io(action: PermissionModeIoAction, path: &Path, source: io::Error) -> Self {
+        Self::Io {
+            action,
+            path: path.to_owned(),
+            source,
+        }
+    }
+}
+
+impl fmt::Display for PermissionModeSettingsError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io {
+                action,
+                path,
+                source,
+            } => {
+                let action = match action {
+                    PermissionModeIoAction::Inspect => "cannot inspect permission settings",
+                    PermissionModeIoAction::Read => "cannot read permission settings",
+                };
+                write!(
+                    formatter,
+                    "{action} '{}': {}",
+                    path.display(),
+                    source.kind()
+                )
+            }
+            Self::Permissions(message) => formatter.write_str(message),
+            Self::Write(error) => fmt::Display::fmt(error, formatter),
+            Self::NotRegularFile(path) => write!(
+                formatter,
+                "permission settings '{}' are not a regular file",
+                path.display()
+            ),
+            Self::TooLarge(path) => write!(
+                formatter,
+                "permission settings '{}' are larger than {MAX_PERMISSION_MODE_BYTES} bytes",
+                path.display()
+            ),
+            Self::InvalidUtf8(path) => write!(
+                formatter,
+                "permission settings '{}' are not valid UTF-8",
+                path.display()
+            ),
+            Self::InvalidValue { path, reason } => write!(
+                formatter,
+                "invalid permission settings '{}': {reason}",
+                path.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PermissionModeSettingsError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io { source, .. } => Some(source),
+            Self::Write(source) => Some(source),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CredentialTransaction {
@@ -169,10 +258,23 @@ enum ExistingCredentialDocument {
     Encrypted(CredentialsEnvelope),
 }
 
-enum CredentialFileWriteError {
+#[derive(Debug)]
+pub(super) enum CredentialFileWriteError {
     BeforeCommit(String),
     AfterCommit(String),
 }
+
+impl fmt::Display for CredentialFileWriteError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BeforeCommit(message) | Self::AfterCommit(message) => {
+                formatter.write_str(message)
+            }
+        }
+    }
+}
+
+impl std::error::Error for CredentialFileWriteError {}
 
 trait CredentialFileWriter {
     fn write_journal(&self, path: &Path, bytes: &[u8]) -> Result<(), String>;
@@ -330,65 +432,64 @@ pub(super) fn user_settings_paths() -> Result<Option<UserSettingsPaths>, String>
 ///
 /// This deliberately does not use `KRYPPER_CONFIG`, which may point into a
 /// project. A missing file means the conservative Ask mode.
-pub(super) fn load_permission_mode(path: &Path) -> Result<PermissionMode, String> {
+pub(super) fn load_permission_mode(
+    path: &Path,
+) -> Result<PermissionMode, PermissionModeSettingsError> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(cause) if cause.kind() == io::ErrorKind::NotFound => return Ok(PermissionMode::Ask),
         Err(cause) => {
-            return Err(file_error(
-                "cannot inspect permission settings",
+            return Err(PermissionModeSettingsError::io(
+                PermissionModeIoAction::Inspect,
                 path,
                 cause,
             ))
         }
     };
     if !metadata.file_type().is_file() {
-        return Err(format!(
-            "permission settings '{}' are not a regular file",
-            path.display()
-        ));
+        return Err(PermissionModeSettingsError::NotRegularFile(path.to_owned()));
     }
-    let file = open_private_file(path)
-        .map_err(|cause| file_error("cannot read permission settings", path, cause))?;
-    let opened_metadata = file
-        .metadata()
-        .map_err(|cause| file_error("cannot inspect permission settings", path, cause))?;
+    let file = open_private_file(path).map_err(|cause| {
+        PermissionModeSettingsError::io(PermissionModeIoAction::Read, path, cause)
+    })?;
+    let opened_metadata = file.metadata().map_err(|cause| {
+        PermissionModeSettingsError::io(PermissionModeIoAction::Inspect, path, cause)
+    })?;
     if !opened_metadata.is_file() {
-        return Err(format!(
-            "permission settings '{}' are not a regular file",
-            path.display()
-        ));
+        return Err(PermissionModeSettingsError::NotRegularFile(path.to_owned()));
     }
-    ensure_private_permissions(path, &opened_metadata, "permission settings")?;
+    ensure_private_permissions(path, &opened_metadata, "permission settings")
+        .map_err(PermissionModeSettingsError::Permissions)?;
     let mut bytes = Vec::new();
     file.take(MAX_PERMISSION_MODE_BYTES + 1)
         .read_to_end(&mut bytes)
-        .map_err(|cause| file_error("cannot read permission settings", path, cause))?;
+        .map_err(|cause| {
+            PermissionModeSettingsError::io(PermissionModeIoAction::Read, path, cause)
+        })?;
     if bytes.len() as u64 > MAX_PERMISSION_MODE_BYTES {
-        return Err(format!(
-            "permission settings '{}' are larger than {MAX_PERMISSION_MODE_BYTES} bytes",
-            path.display()
-        ));
+        return Err(PermissionModeSettingsError::TooLarge(path.to_owned()));
     }
     let value = std::str::from_utf8(&bytes)
-        .map_err(|_| {
-            format!(
-                "permission settings '{}' are not valid UTF-8",
-                path.display()
-            )
-        })?
+        .map_err(|_| PermissionModeSettingsError::InvalidUtf8(path.to_owned()))?
         .trim();
-    PermissionMode::parse(value).map_err(|message| {
-        format!(
-            "invalid permission settings '{}': {message}",
-            path.display()
-        )
+    PermissionMode::parse(value).map_err(|reason| PermissionModeSettingsError::InvalidValue {
+        path: path.to_owned(),
+        reason,
     })
 }
 
-pub(super) fn save_permission_mode(path: &Path, mode: PermissionMode) -> Result<(), String> {
+pub(super) fn save_permission_mode(
+    path: &Path,
+    mode: PermissionMode,
+) -> Result<(), PermissionModeSettingsError> {
     let contents = format!("{}\n", mode.as_str());
-    write_private_file(path, contents.as_bytes(), "permission settings")
+    write_private_file_with_outcome(
+        path,
+        contents.as_bytes(),
+        "permission settings",
+        sync_parent_directory,
+    )
+    .map_err(PermissionModeSettingsError::Write)
 }
 
 pub(super) fn load_credentials(
@@ -1514,9 +1615,100 @@ mod tests {
 
         let oversized = vec![b'a'; MAX_PERMISSION_MODE_BYTES as usize + 1];
         write_private_file(&path, &oversized, "permission settings").unwrap();
-        assert!(load_permission_mode(&path)
-            .unwrap_err()
-            .contains("larger than"));
+        let error = load_permission_mode(&path).unwrap_err();
+        assert!(matches!(
+            &error,
+            PermissionModeSettingsError::TooLarge(error_path) if error_path == &path
+        ));
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "permission settings '{}' are larger than {MAX_PERMISSION_MODE_BYTES} bytes",
+                path.display()
+            )
+        );
+    }
+
+    #[test]
+    fn permission_mode_settings_reject_invalid_utf8() {
+        let directory = TempDir::new();
+        let path = directory.path().join("krypper").join(PERMISSION_MODE_FILE);
+        write_private_file(&path, &[0xff], "permission settings").unwrap();
+
+        let error = load_permission_mode(&path).unwrap_err();
+        assert!(matches!(
+            &error,
+            PermissionModeSettingsError::InvalidUtf8(error_path) if error_path == &path
+        ));
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "permission settings '{}' are not valid UTF-8",
+                path.display()
+            )
+        );
+    }
+
+    #[test]
+    fn permission_mode_settings_reject_unknown_values() {
+        let directory = TempDir::new();
+        let path = directory.path().join("krypper").join(PERMISSION_MODE_FILE);
+        write_private_file(&path, b"unknown-mode\n", "permission settings").unwrap();
+        let expected_reason = PermissionMode::parse("unknown-mode").unwrap_err();
+
+        let error = load_permission_mode(&path).unwrap_err();
+        assert!(matches!(
+            &error,
+            PermissionModeSettingsError::InvalidValue {
+                path: error_path,
+                reason,
+            }
+                if error_path == &path && *reason == expected_reason
+        ));
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "invalid permission settings '{}': {expected_reason}",
+                path.display()
+            )
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permission_mode_settings_reject_insecure_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = TempDir::new();
+        let path = directory.path().join("krypper").join(PERMISSION_MODE_FILE);
+        save_permission_mode(&path, PermissionMode::Ask).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let error = load_permission_mode(&path).unwrap_err();
+        assert!(matches!(
+            &error,
+            PermissionModeSettingsError::Permissions(message)
+                if message.contains("accessible by other users")
+        ));
+        assert!(error
+            .to_string()
+            .contains("accessible by other users; restrict its permissions"));
+    }
+
+    #[test]
+    fn permission_mode_save_errors_have_a_write_category() {
+        let directory = TempDir::new();
+        let regular_file = directory.path().join("not-a-directory");
+        fs::write(&regular_file, b"file").unwrap();
+        let path = regular_file.join(PERMISSION_MODE_FILE);
+
+        let error = save_permission_mode(&path, PermissionMode::RiskBased).unwrap_err();
+        assert!(matches!(
+            &error,
+            PermissionModeSettingsError::Write(CredentialFileWriteError::BeforeCommit(_))
+        ));
+        assert!(std::error::Error::source(&error).is_some());
+        assert!(!error.to_string().is_empty());
     }
 
     #[cfg(unix)]
@@ -1532,9 +1724,46 @@ mod tests {
         fs::write(&target, b"risk-based\n").unwrap();
         symlink(&target, &path).unwrap();
 
-        assert!(load_permission_mode(&path)
-            .unwrap_err()
-            .contains("not a regular file"));
+        let error = load_permission_mode(&path).unwrap_err();
+        assert!(matches!(
+            &error,
+            PermissionModeSettingsError::NotRegularFile(error_path) if error_path == &path
+        ));
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "permission settings '{}' are not a regular file",
+                path.display()
+            )
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permission_mode_io_errors_preserve_the_source() {
+        let directory = TempDir::new();
+        let regular_file = directory.path().join("not-a-directory");
+        fs::write(&regular_file, b"file").unwrap();
+        let path = regular_file.join(PERMISSION_MODE_FILE);
+
+        let error = load_permission_mode(&path).unwrap_err();
+        assert!(matches!(
+            &error,
+            PermissionModeSettingsError::Io {
+                action: PermissionModeIoAction::Inspect,
+                path: error_path,
+                source,
+            } if error_path == &path && source.kind() == io::ErrorKind::NotADirectory
+        ));
+        assert!(std::error::Error::source(&error).is_some());
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "cannot inspect permission settings '{}': {}",
+                path.display(),
+                io::ErrorKind::NotADirectory
+            )
+        );
     }
 
     #[test]

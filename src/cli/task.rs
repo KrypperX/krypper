@@ -514,7 +514,7 @@ where
             .map(|paths| load_permission_mode(&paths.permission_mode))
         {
             Some(Ok(mode)) => mode,
-            Some(Err(message)) => return usage_error(error, Some("task"), &message),
+            Some(Err(cause)) => return usage_error(error, Some("task"), &cause.to_string()),
             None => PermissionMode::Ask,
         },
         None => PermissionMode::Ask,
