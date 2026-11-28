@@ -112,12 +112,27 @@ struct FullAccessCliNetworkFixture {
 
 impl FullAccessCliNetworkFixture {
     fn new(config_home: &Path, workspace: &Path, confirmation_submitted: Arc<AtomicBool>) -> Self {
+        Self::with_action(
+            config_home,
+            confirmation_submitted,
+            "full_access_host_process",
+            full_access_action_arguments(workspace),
+        )
+    }
+
+    fn with_action(
+        config_home: &Path,
+        confirmation_submitted: Arc<AtomicBool>,
+        action_name: &'static str,
+        action_arguments: Value,
+    ) -> Self {
         let (provider_listener, provider_address) = bind_loopback_listener();
         let (host_access_listener, host_access_address) = bind_loopback_listener();
         write_fixture_provider_profile(config_home, provider_address);
         let provider = start_provider_server(
             provider_listener,
-            full_access_action_arguments(workspace),
+            action_name,
+            action_arguments,
             confirmation_submitted,
         );
         provider
@@ -447,6 +462,118 @@ fn full_access_without_controlling_terminal_does_not_start_task_or_host_process(
         &leader_pid_path,
         &descendant_pid_path,
         Duration::from_millis(300),
+    );
+}
+
+#[test]
+fn full_access_does_not_authorize_fixed_offline_cargo_execution() {
+    let task_fixture = FullAccessCliWorkspaceFixture::new(b"krypper-full-access-cargo-canary");
+    let root = &task_fixture.root;
+    let workspace = &task_fixture.workspace;
+    let outside_file = &task_fixture.outside_file;
+    let config_home = &task_fixture.config_home;
+
+    let confirmation_submitted = Arc::new(AtomicBool::new(false));
+    let network_fixture = FullAccessCliNetworkFixture::with_action(
+        config_home,
+        Arc::clone(&confirmation_submitted),
+        "offline_cargo_test",
+        json!({"test_filter":"full_access_must_not_enable_cargo"}),
+    );
+    let host_access_address = network_fixture.host_access_address;
+
+    let (master, slave) = open_pty();
+    let leader_pid_path = workspace.join("leader.pid");
+    let descendant_pid_path = workspace.join("descendant.pid");
+    let cli_fixture = FullAccessCliFixture {
+        root,
+        workspace,
+        config_home,
+        leader_pid_path: &leader_pid_path,
+        descendant_pid_path: &descendant_pid_path,
+        outside_file,
+        host_access_address,
+    };
+    let child = spawn_full_access_cli(
+        &cli_fixture,
+        "Keep fixed offline Cargo authorization separate from Full Access",
+        &slave,
+    );
+    drop(slave);
+    let mut child = CliChildGuard::new(child, leader_pid_path.clone());
+    let output_receiver = start_terminal_reader(&master);
+
+    let mut terminal_output = Vec::new();
+    receive_until(
+        &output_receiver,
+        &mut terminal_output,
+        "Confirm Full Access for this task only?",
+        PTY_READ_TIMEOUT,
+    );
+    assert!(
+        String::from_utf8_lossy(&terminal_output).contains("no process sandbox"),
+        "the trusted terminal should describe Full Access risk before confirmation"
+    );
+    let mut terminal = master.try_clone().expect("clone PTY master for input");
+    terminal
+        .write_all(b"yes\n")
+        .expect("confirm Full Access for this task");
+    terminal.flush().expect("flush Full Access confirmation");
+    confirmation_submitted.store(true, Ordering::SeqCst);
+
+    let status = wait_for_exit(
+        &mut child.child,
+        &output_receiver,
+        &mut terminal_output,
+        PTY_READ_TIMEOUT,
+    );
+    drop(terminal);
+    drop(master);
+    terminal_output.extend(output_receiver.into_iter().flatten());
+
+    network_fixture
+        .provider
+        .control
+        .send(ProviderCommand::Stop)
+        .expect("stop local provider monitor");
+    let requests = network_fixture
+        .provider
+        .server
+        .join()
+        .expect("join local provider fixture");
+    let output = String::from_utf8_lossy(&terminal_output);
+
+    assert!(
+        !status.success(),
+        "unavailable Cargo authorization must fail the task"
+    );
+    assert!(
+        output.contains("required host capability is unavailable for action 'offline_cargo_test'"),
+        "the CLI should report missing authorization before dispatch: {output}"
+    );
+    assert_eq!(
+        requests.len(),
+        1,
+        "denied offline Cargo must not trigger a follow-up model request"
+    );
+    assert!(
+        !leader_pid_path.exists() && !descendant_pid_path.exists(),
+        "unavailable Cargo authorization must not start the host process fixture"
+    );
+    assert_eq!(
+        fs::read_dir(workspace)
+            .expect("inspect task workspace after the denied action")
+            .count(),
+        0,
+        "unavailable Cargo authorization must not create workspace files"
+    );
+    assert!(
+        accept_before(
+            &network_fixture.host_access_listener,
+            Duration::from_millis(150)
+        )
+        .is_none(),
+        "unavailable Cargo authorization must not connect to the host listener"
     );
 }
 
@@ -875,6 +1002,7 @@ struct ProviderFixture {
 
 fn start_provider_server(
     listener: TcpListener,
+    action_name: &'static str,
     action_arguments: Value,
     confirmation_submitted: Arc<AtomicBool>,
 ) -> ProviderFixture {
@@ -894,6 +1022,7 @@ fn start_provider_server(
                     while let Some(stream) = accept_before(&listener, Duration::ZERO) {
                         handle_provider_request(
                             stream,
+                            action_name,
                             &action_arguments,
                             &confirmation_submitted,
                             &premature_for_server,
@@ -918,6 +1047,7 @@ fn start_provider_server(
             if let Some(stream) = accept_before(&listener, Duration::from_millis(5)) {
                 handle_provider_request(
                     stream,
+                    action_name,
                     &action_arguments,
                     &confirmation_submitted,
                     &premature_for_server,
@@ -941,6 +1071,7 @@ fn start_provider_server(
 
 fn handle_provider_request(
     mut stream: TcpStream,
+    action_name: &str,
     action_arguments: &Value,
     confirmation_submitted: &AtomicBool,
     premature_requests: &AtomicUsize,
@@ -954,7 +1085,7 @@ fn handle_provider_request(
     };
     requests.push(request);
     let response = if requests.len() == 1 {
-        tool_call_response("full_access_host_process", action_arguments.clone())
+        tool_call_response(action_name, action_arguments.clone())
     } else {
         tool_call_response(
             "complete_task",
