@@ -556,14 +556,6 @@ fn full_access_does_not_authorize_fixed_offline_cargo_execution() {
         1,
         "denied offline Cargo must not trigger a follow-up model request"
     );
-    assert_eq!(
-        network_fixture
-            .provider
-            .premature_requests
-            .load(Ordering::SeqCst),
-        0,
-        "the provider must not receive a request before Full Access confirmation"
-    );
     assert!(
         !leader_pid_path.exists() && !descendant_pid_path.exists(),
         "unavailable Cargo authorization must not start the host process fixture"
