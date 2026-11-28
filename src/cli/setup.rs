@@ -1275,9 +1275,8 @@ fn escape_terminal_text(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::TempDir;
     #[cfg(target_os = "linux")]
-    use crate::test_support::{lock_environment, RestoreEnvironmentVariable};
+    use crate::test_support::{lock_environment, RestoreEnvironmentVariable, TempDir};
     use std::fs;
 
     fn settings_paths(directory: &crate::test_support::TempDir) -> UserSettingsPaths {
