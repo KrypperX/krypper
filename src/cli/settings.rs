@@ -37,7 +37,7 @@ pub(super) struct CredentialStore {
 #[derive(Debug)]
 pub(super) enum CredentialStoreError {
     Io {
-        action: CredentialStoreIoAction,
+        action: SettingsIoAction,
         path: PathBuf,
         kind: io::ErrorKind,
     },
@@ -60,11 +60,11 @@ pub(super) enum CredentialStoreError {
 #[derive(Debug)]
 pub(super) enum PermissionModeSettingsError {
     Io {
-        action: PermissionModeIoAction,
+        action: SettingsIoAction,
         path: PathBuf,
         source: io::Error,
     },
-    Permissions(String),
+    Permissions(PrivatePermissionsError),
     NotRegularFile(PathBuf),
     TooLarge(PathBuf),
     InvalidUtf8(PathBuf),
@@ -72,23 +72,80 @@ pub(super) enum PermissionModeSettingsError {
         path: PathBuf,
         reason: &'static str,
     },
-    Write(CredentialFileWriteError),
+    Write(PrivateFileWriteError),
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(super) enum PermissionModeIoAction {
+pub(super) enum SettingsIoAction {
     Inspect,
     Read,
+}
+
+impl SettingsIoAction {
+    fn verb(self) -> &'static str {
+        match self {
+            Self::Inspect => "inspect",
+            Self::Read => "read",
+        }
+    }
 }
 
 #[derive(Debug)]
-pub(super) enum CredentialStoreIoAction {
-    Inspect,
-    Read,
+pub(super) enum PrivatePermissionsError {
+    Message(String),
+    Io {
+        action: &'static str,
+        path: PathBuf,
+        source: io::Error,
+    },
+}
+
+impl PrivatePermissionsError {
+    fn io(action: &'static str, path: &Path, source: io::Error) -> Self {
+        Self::Io {
+            action,
+            path: path.to_owned(),
+            source,
+        }
+    }
+
+    fn into_io_source(self) -> Option<io::Error> {
+        match self {
+            Self::Io { source, .. } => Some(source),
+            Self::Message(_) => None,
+        }
+    }
+}
+
+impl fmt::Display for PrivatePermissionsError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Message(message) => formatter.write_str(message),
+            Self::Io {
+                action,
+                path,
+                source,
+            } => write!(
+                formatter,
+                "{action} '{}': {}",
+                path.display(),
+                source.kind()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PrivatePermissionsError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io { source, .. } => Some(source),
+            Self::Message(_) => None,
+        }
+    }
 }
 
 impl CredentialStoreError {
-    fn io(action: CredentialStoreIoAction, path: &Path, cause: io::Error) -> Self {
+    fn io(action: SettingsIoAction, path: &Path, cause: io::Error) -> Self {
         Self::Io {
             action,
             path: path.to_owned(),
@@ -101,13 +158,10 @@ impl fmt::Display for CredentialStoreError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io { action, path, kind } => {
-                let action = match action {
-                    CredentialStoreIoAction::Inspect => "cannot inspect",
-                    CredentialStoreIoAction::Read => "cannot read",
-                };
                 write!(
                     formatter,
-                    "{action} credential store '{}': {kind}",
+                    "cannot {} credential store '{}': {kind}",
+                    action.verb(),
                     path.display()
                 )
             }
@@ -180,7 +234,7 @@ impl fmt::Display for CredentialStoreError {
 impl std::error::Error for CredentialStoreError {}
 
 impl PermissionModeSettingsError {
-    fn io(action: PermissionModeIoAction, path: &Path, source: io::Error) -> Self {
+    fn io(action: SettingsIoAction, path: &Path, source: io::Error) -> Self {
         Self::Io {
             action,
             path: path.to_owned(),
@@ -197,18 +251,15 @@ impl fmt::Display for PermissionModeSettingsError {
                 path,
                 source,
             } => {
-                let action = match action {
-                    PermissionModeIoAction::Inspect => "cannot inspect permission settings",
-                    PermissionModeIoAction::Read => "cannot read permission settings",
-                };
                 write!(
                     formatter,
-                    "{action} '{}': {}",
+                    "cannot {} permission settings '{}': {}",
+                    action.verb(),
                     path.display(),
                     source.kind()
                 )
             }
-            Self::Permissions(message) => formatter.write_str(message),
+            Self::Permissions(error) => fmt::Display::fmt(error, formatter),
             Self::Write(error) => fmt::Display::fmt(error, formatter),
             Self::NotRegularFile(path) => write!(
                 formatter,
@@ -238,6 +289,7 @@ impl std::error::Error for PermissionModeSettingsError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io { source, .. } => Some(source),
+            Self::Permissions(source) => Some(source),
             Self::Write(source) => Some(source),
             _ => None,
         }
@@ -259,26 +311,63 @@ enum ExistingCredentialDocument {
 }
 
 #[derive(Debug)]
-pub(super) enum CredentialFileWriteError {
-    BeforeCommit(String),
-    AfterCommit(String),
+pub(super) enum PrivateFileWriteError {
+    BeforeCommit {
+        message: String,
+        source: Option<io::Error>,
+    },
+    AfterCommit {
+        message: String,
+        source: Option<io::Error>,
+    },
 }
 
-impl fmt::Display for CredentialFileWriteError {
+impl PrivateFileWriteError {
+    fn before(message: impl Into<String>) -> Self {
+        Self::BeforeCommit {
+            message: message.into(),
+            source: None,
+        }
+    }
+
+    fn before_io(action: &str, path: &Path, source: io::Error) -> Self {
+        let message = format!("{action} '{}': {}", path.display(), source.kind());
+        Self::BeforeCommit {
+            message,
+            source: Some(source),
+        }
+    }
+
+    fn before_permissions(error: PrivatePermissionsError) -> Self {
+        let message = error.to_string();
+        let source = error.into_io_source();
+        Self::BeforeCommit { message, source }
+    }
+}
+
+impl fmt::Display for PrivateFileWriteError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::BeforeCommit(message) | Self::AfterCommit(message) => {
+            Self::BeforeCommit { message, .. } | Self::AfterCommit { message, .. } => {
                 formatter.write_str(message)
             }
         }
     }
 }
 
-impl std::error::Error for CredentialFileWriteError {}
+impl std::error::Error for PrivateFileWriteError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::BeforeCommit { source, .. } | Self::AfterCommit { source, .. } => source
+                .as_ref()
+                .map(|source| source as &(dyn std::error::Error + 'static)),
+        }
+    }
+}
 
 trait CredentialFileWriter {
     fn write_journal(&self, path: &Path, bytes: &[u8]) -> Result<(), String>;
-    fn write_document(&self, path: &Path, bytes: &[u8]) -> Result<(), CredentialFileWriteError>;
+    fn write_document(&self, path: &Path, bytes: &[u8]) -> Result<(), PrivateFileWriteError>;
 }
 
 struct PrivateCredentialFileWriter;
@@ -288,7 +377,7 @@ impl CredentialFileWriter for PrivateCredentialFileWriter {
         write_private_file(path, bytes, "credential transaction journal")
     }
 
-    fn write_document(&self, path: &Path, bytes: &[u8]) -> Result<(), CredentialFileWriteError> {
+    fn write_document(&self, path: &Path, bytes: &[u8]) -> Result<(), PrivateFileWriteError> {
         write_private_file_with_outcome(path, bytes, "credential store", sync_parent_directory)
     }
 }
@@ -300,10 +389,10 @@ impl CredentialFileLock {
         let parent = path
             .parent()
             .ok_or_else(|| CredentialStoreError::InvalidValue(path.to_owned()))?;
-        create_private_directory(parent).map_err(|cause| {
-            CredentialStoreError::io(CredentialStoreIoAction::Inspect, parent, cause)
-        })?;
-        set_private_directory_permissions(parent).map_err(CredentialStoreError::Permissions)?;
+        create_private_directory(parent)
+            .map_err(|cause| CredentialStoreError::io(SettingsIoAction::Inspect, parent, cause))?;
+        set_private_directory_permissions(parent)
+            .map_err(|error| CredentialStoreError::Permissions(error.to_string()))?;
         let lock_path = path.with_file_name(CREDENTIAL_LOCK_FILE);
         let mut options = OpenOptions::new();
         options.read(true).write(true).create(true);
@@ -315,10 +404,10 @@ impl CredentialFileLock {
                 .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
         }
         let file = options.open(&lock_path).map_err(|cause| {
-            CredentialStoreError::io(CredentialStoreIoAction::Inspect, &lock_path, cause)
+            CredentialStoreError::io(SettingsIoAction::Inspect, &lock_path, cause)
         })?;
         let metadata = file.metadata().map_err(|cause| {
-            CredentialStoreError::io(CredentialStoreIoAction::Inspect, &lock_path, cause)
+            CredentialStoreError::io(SettingsIoAction::Inspect, &lock_path, cause)
         })?;
         if !metadata.is_file() {
             return Err(CredentialStoreError::NotRegularFile(lock_path));
@@ -326,7 +415,7 @@ impl CredentialFileLock {
         ensure_private_permissions(&lock_path, &metadata, "credential transaction lock")
             .map_err(CredentialStoreError::Permissions)?;
         FileExt::lock_exclusive(&file).map_err(|cause| {
-            CredentialStoreError::io(CredentialStoreIoAction::Inspect, &lock_path, cause)
+            CredentialStoreError::io(SettingsIoAction::Inspect, &lock_path, cause)
         })?;
         Ok(Self(file))
     }
@@ -440,7 +529,7 @@ pub(super) fn load_permission_mode(
         Err(cause) if cause.kind() == io::ErrorKind::NotFound => return Ok(PermissionMode::Ask),
         Err(cause) => {
             return Err(PermissionModeSettingsError::io(
-                PermissionModeIoAction::Inspect,
+                SettingsIoAction::Inspect,
                 path,
                 cause,
             ))
@@ -449,23 +538,20 @@ pub(super) fn load_permission_mode(
     if !metadata.file_type().is_file() {
         return Err(PermissionModeSettingsError::NotRegularFile(path.to_owned()));
     }
-    let file = open_private_file(path).map_err(|cause| {
-        PermissionModeSettingsError::io(PermissionModeIoAction::Read, path, cause)
-    })?;
-    let opened_metadata = file.metadata().map_err(|cause| {
-        PermissionModeSettingsError::io(PermissionModeIoAction::Inspect, path, cause)
-    })?;
+    let file = open_private_file(path)
+        .map_err(|cause| PermissionModeSettingsError::io(SettingsIoAction::Read, path, cause))?;
+    let opened_metadata = file
+        .metadata()
+        .map_err(|cause| PermissionModeSettingsError::io(SettingsIoAction::Inspect, path, cause))?;
     if !opened_metadata.is_file() {
         return Err(PermissionModeSettingsError::NotRegularFile(path.to_owned()));
     }
-    ensure_private_permissions(path, &opened_metadata, "permission settings")
+    ensure_private_permissions_with_source(path, &opened_metadata, "permission settings")
         .map_err(PermissionModeSettingsError::Permissions)?;
     let mut bytes = Vec::new();
     file.take(MAX_PERMISSION_MODE_BYTES + 1)
         .read_to_end(&mut bytes)
-        .map_err(|cause| {
-            PermissionModeSettingsError::io(PermissionModeIoAction::Read, path, cause)
-        })?;
+        .map_err(|cause| PermissionModeSettingsError::io(SettingsIoAction::Read, path, cause))?;
     if bytes.len() as u64 > MAX_PERMISSION_MODE_BYTES {
         return Err(PermissionModeSettingsError::TooLarge(path.to_owned()));
     }
@@ -771,13 +857,13 @@ fn save_credentials_using(
             recover_credential_transaction(path, key_store, open_private_file, writer)
                 .map_err(|_| CredentialStoreError::TransactionInterrupted(path.to_owned()))
         }
-        Err(CredentialFileWriteError::BeforeCommit(_message)) => {
+        Err(PrivateFileWriteError::BeforeCommit { .. }) => {
             recover_credential_transaction(path, key_store, open_private_file, writer)?;
             Err(CredentialStoreError::TransactionInterrupted(
                 path.to_owned(),
             ))
         }
-        Err(CredentialFileWriteError::AfterCommit(_message)) => {
+        Err(PrivateFileWriteError::AfterCommit { .. }) => {
             credentials.key_reference = Some(new_key_reference);
             Err(CredentialStoreError::TransactionInterrupted(
                 path.to_owned(),
@@ -866,7 +952,7 @@ fn credential_file_or_journal_exists(path: &Path) -> Result<bool, CredentialStor
             Err(cause) if cause.kind() == io::ErrorKind::NotFound => {}
             Err(cause) => {
                 return Err(CredentialStoreError::io(
-                    CredentialStoreIoAction::Inspect,
+                    SettingsIoAction::Inspect,
                     &candidate,
                     cause,
                 ));
@@ -886,7 +972,7 @@ fn read_private_bytes(
         Err(cause) if cause.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(cause) => {
             return Err(CredentialStoreError::io(
-                CredentialStoreIoAction::Inspect,
+                SettingsIoAction::Inspect,
                 path,
                 cause,
             ));
@@ -896,10 +982,10 @@ fn read_private_bytes(
         return Err(CredentialStoreError::NotRegularFile(path.to_owned()));
     }
     let file = open_file(path)
-        .map_err(|cause| CredentialStoreError::io(CredentialStoreIoAction::Read, path, cause))?;
+        .map_err(|cause| CredentialStoreError::io(SettingsIoAction::Read, path, cause))?;
     let opened_metadata = file
         .metadata()
-        .map_err(|cause| CredentialStoreError::io(CredentialStoreIoAction::Inspect, path, cause))?;
+        .map_err(|cause| CredentialStoreError::io(SettingsIoAction::Inspect, path, cause))?;
     if !opened_metadata.is_file() {
         return Err(CredentialStoreError::NotRegularFile(path.to_owned()));
     }
@@ -908,7 +994,7 @@ fn read_private_bytes(
     let mut bytes = Vec::new();
     file.take(maximum_bytes + 1)
         .read_to_end(&mut bytes)
-        .map_err(|cause| CredentialStoreError::io(CredentialStoreIoAction::Read, path, cause))?;
+        .map_err(|cause| CredentialStoreError::io(SettingsIoAction::Read, path, cause))?;
     if bytes.len() as u64 > maximum_bytes {
         bytes.zeroize();
         return Err(CredentialStoreError::TooLarge(path.to_owned()));
@@ -1195,8 +1281,8 @@ fn write_private_file_with_directory_sync(
 ) -> Result<(), String> {
     write_private_file_with_outcome(path, bytes, description, sync_directory).map_err(|error| {
         match error {
-            CredentialFileWriteError::BeforeCommit(message)
-            | CredentialFileWriteError::AfterCommit(message) => message,
+            PrivateFileWriteError::BeforeCommit { message, .. }
+            | PrivateFileWriteError::AfterCommit { message, .. } => message,
         }
     })
 }
@@ -1206,37 +1292,37 @@ fn write_private_file_with_outcome(
     bytes: &[u8],
     description: &str,
     sync_directory: impl FnOnce(&Path) -> io::Result<()>,
-) -> Result<(), CredentialFileWriteError> {
+) -> Result<(), PrivateFileWriteError> {
     let parent = path.parent().ok_or_else(|| {
-        CredentialFileWriteError::BeforeCommit(format!(
+        PrivateFileWriteError::before(format!(
             "cannot locate the user configuration directory for {description}"
         ))
     })?;
     create_private_directory(parent).map_err(|cause| {
-        CredentialFileWriteError::BeforeCommit(file_error(
+        PrivateFileWriteError::before_io(
             "cannot create user configuration directory",
             parent,
             cause,
-        ))
+        )
     })?;
     let metadata = fs::symlink_metadata(parent).map_err(|cause| {
-        CredentialFileWriteError::BeforeCommit(file_error(
+        PrivateFileWriteError::before_io(
             "cannot inspect user configuration directory",
             parent,
             cause,
-        ))
+        )
     })?;
     if !metadata.file_type().is_dir() {
-        return Err(CredentialFileWriteError::BeforeCommit(format!(
+        return Err(PrivateFileWriteError::before(format!(
             "user configuration path '{}' is not a directory",
             parent.display()
         )));
     }
-    set_private_directory_permissions(parent).map_err(CredentialFileWriteError::BeforeCommit)?;
+    set_private_directory_permissions(parent).map_err(PrivateFileWriteError::before_permissions)?;
 
     if let Ok(existing) = fs::symlink_metadata(path) {
         if !existing.file_type().is_file() {
-            return Err(CredentialFileWriteError::BeforeCommit(format!(
+            return Err(PrivateFileWriteError::before(format!(
                 "cannot replace {description} '{}': it is not a regular file",
                 path.display()
             )));
@@ -1252,35 +1338,32 @@ fn write_private_file_with_outcome(
         options.mode(0o600);
     }
     let mut file = options.open(&temp_path).map_err(|cause| {
-        CredentialFileWriteError::BeforeCommit(file_error(
-            "cannot create temporary settings file",
-            &temp_path,
-            cause,
-        ))
+        PrivateFileWriteError::before_io("cannot create temporary settings file", &temp_path, cause)
     })?;
     if let Err(cause) = file.write_all(bytes).and_then(|()| file.sync_all()) {
         let _ = fs::remove_file(&temp_path);
-        return Err(CredentialFileWriteError::BeforeCommit(file_error(
+        return Err(PrivateFileWriteError::before_io(
             "cannot write settings file",
             &temp_path,
             cause,
-        )));
+        ));
     }
-    if let Err(message) = set_private_file_permissions(&temp_path) {
+    if let Err(error) = set_private_file_permissions(&temp_path) {
         let _ = fs::remove_file(&temp_path);
-        return Err(CredentialFileWriteError::BeforeCommit(message));
+        return Err(PrivateFileWriteError::before_permissions(error));
     }
     drop(file);
     fs::rename(&temp_path, path).map_err(|cause| {
         let _ = fs::remove_file(&temp_path);
-        CredentialFileWriteError::BeforeCommit(file_error("cannot save settings file", path, cause))
+        PrivateFileWriteError::before_io("cannot save settings file", path, cause)
     })?;
-    sync_directory(parent).map_err(|cause| {
-        CredentialFileWriteError::AfterCommit(format!(
+    sync_directory(parent).map_err(|cause| PrivateFileWriteError::AfterCommit {
+        message: format!(
             "saved {description} to '{}', but could not sync its parent directory: {}",
             path.display(),
             cause.kind()
-        ))
+        ),
+        source: Some(cause),
     })
 }
 
@@ -1337,29 +1420,48 @@ pub(super) fn ensure_private_permissions(
     metadata: &fs::Metadata,
     description: &str,
 ) -> Result<(), String> {
+    ensure_private_permissions_with_source(path, metadata, description)
+        .map_err(|error| error.to_string())
+}
+
+fn ensure_private_permissions_with_source(
+    path: &Path,
+    metadata: &fs::Metadata,
+    description: &str,
+) -> Result<(), PrivatePermissionsError> {
     #[cfg(unix)]
     {
         let current_uid = current_user_id();
-        ensure_private_metadata_for_user(path, metadata, current_uid, description)?;
+        ensure_private_metadata_for_user(path, metadata, current_uid, description)
+            .map_err(PrivatePermissionsError::Message)?;
         if let Some(parent) = path.parent() {
             let parent_directory = open_private_directory(parent).map_err(|cause| {
-                file_error("cannot inspect user configuration directory", parent, cause)
+                PrivatePermissionsError::io(
+                    "cannot inspect user configuration directory",
+                    parent,
+                    cause,
+                )
             })?;
             let parent_metadata = parent_directory.metadata().map_err(|cause| {
-                file_error("cannot inspect user configuration directory", parent, cause)
+                PrivatePermissionsError::io(
+                    "cannot inspect user configuration directory",
+                    parent,
+                    cause,
+                )
             })?;
             if !parent_metadata.is_dir() {
-                return Err(format!(
+                return Err(PrivatePermissionsError::Message(format!(
                     "user configuration directory '{}' must be private to the current user",
                     parent.display()
-                ));
+                )));
             }
             ensure_private_metadata_for_user(
                 parent,
                 &parent_metadata,
                 current_uid,
                 "user configuration directory",
-            )?;
+            )
+            .map_err(PrivatePermissionsError::Message)?;
         }
     }
     #[cfg(not(unix))]
@@ -1398,33 +1500,38 @@ fn current_user_id() -> u32 {
     unsafe { libc::geteuid() }
 }
 
-fn set_private_directory_permissions(path: &Path) -> Result<(), String> {
+fn set_private_directory_permissions(path: &Path) -> Result<(), PrivatePermissionsError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
         use std::os::unix::fs::PermissionsExt;
 
-        let directory = open_private_directory(path)
-            .map_err(|cause| file_error("cannot open user configuration directory", path, cause))?;
+        let directory = open_private_directory(path).map_err(|cause| {
+            PrivatePermissionsError::io("cannot open user configuration directory", path, cause)
+        })?;
         let metadata = directory.metadata().map_err(|cause| {
-            file_error("cannot inspect user configuration directory", path, cause)
+            PrivatePermissionsError::io("cannot inspect user configuration directory", path, cause)
         })?;
         if !metadata.is_dir() {
-            return Err(format!(
+            return Err(PrivatePermissionsError::Message(format!(
                 "user configuration path '{}' is not a directory",
                 path.display()
-            ));
+            )));
         }
         if metadata.uid() != current_user_id() {
-            return Err(format!(
+            return Err(PrivatePermissionsError::Message(format!(
                 "user configuration directory '{}' is not owned by the current user",
                 path.display()
-            ));
+            )));
         }
         directory
             .set_permissions(fs::Permissions::from_mode(0o700))
             .map_err(|cause| {
-                file_error("cannot restrict user configuration directory", path, cause)
+                PrivatePermissionsError::io(
+                    "cannot restrict user configuration directory",
+                    path,
+                    cause,
+                )
             })?;
     }
     #[cfg(not(unix))]
@@ -1432,12 +1539,12 @@ fn set_private_directory_permissions(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn set_private_file_permissions(path: &Path) -> Result<(), String> {
+fn set_private_file_permissions(path: &Path) -> Result<(), PrivatePermissionsError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|cause| {
-            file_error("cannot restrict settings file permissions", path, cause)
+            PrivatePermissionsError::io("cannot restrict settings file permissions", path, cause)
         })?;
     }
     let _ = path;
@@ -1544,13 +1651,9 @@ mod tests {
             PrivateCredentialFileWriter.write_journal(path, bytes)
         }
 
-        fn write_document(
-            &self,
-            _path: &Path,
-            _bytes: &[u8],
-        ) -> Result<(), CredentialFileWriteError> {
-            Err(CredentialFileWriteError::BeforeCommit(
-                "simulated interruption before replacement".to_owned(),
+        fn write_document(&self, _path: &Path, _bytes: &[u8]) -> Result<(), PrivateFileWriteError> {
+            Err(PrivateFileWriteError::before(
+                "simulated interruption before replacement",
             ))
         }
     }
@@ -1562,16 +1665,13 @@ mod tests {
             PrivateCredentialFileWriter.write_journal(path, bytes)
         }
 
-        fn write_document(
-            &self,
-            path: &Path,
-            bytes: &[u8],
-        ) -> Result<(), CredentialFileWriteError> {
+        fn write_document(&self, path: &Path, bytes: &[u8]) -> Result<(), PrivateFileWriteError> {
             write_private_file(path, bytes, "credential store")
-                .map_err(CredentialFileWriteError::BeforeCommit)?;
-            Err(CredentialFileWriteError::AfterCommit(
-                "simulated directory sync failure".to_owned(),
-            ))
+                .map_err(PrivateFileWriteError::before)?;
+            Err(PrivateFileWriteError::AfterCommit {
+                message: "simulated directory sync failure".to_owned(),
+                source: None,
+            })
         }
     }
 
@@ -1687,7 +1787,7 @@ mod tests {
         let error = load_permission_mode(&path).unwrap_err();
         assert!(matches!(
             &error,
-            PermissionModeSettingsError::Permissions(message)
+            PermissionModeSettingsError::Permissions(PrivatePermissionsError::Message(message))
                 if message.contains("accessible by other users")
         ));
         assert!(error
@@ -1705,9 +1805,14 @@ mod tests {
         let error = save_permission_mode(&path, PermissionMode::RiskBased).unwrap_err();
         assert!(matches!(
             &error,
-            PermissionModeSettingsError::Write(CredentialFileWriteError::BeforeCommit(_))
+            PermissionModeSettingsError::Write(PrivateFileWriteError::BeforeCommit { .. })
         ));
-        assert!(std::error::Error::source(&error).is_some());
+        assert!(
+            std::error::Error::source(std::error::Error::source(&error).unwrap())
+                .unwrap()
+                .downcast_ref::<io::Error>()
+                .is_some()
+        );
         assert!(!error.to_string().is_empty());
     }
 
@@ -1750,7 +1855,7 @@ mod tests {
         assert!(matches!(
             &error,
             PermissionModeSettingsError::Io {
-                action: PermissionModeIoAction::Inspect,
+                action: SettingsIoAction::Inspect,
                 path: error_path,
                 source,
             } if error_path == &path && source.kind() == io::ErrorKind::NotADirectory
@@ -1764,6 +1869,36 @@ mod tests {
                 io::ErrorKind::NotADirectory
             )
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permission_mode_parent_inspection_errors_preserve_the_source() {
+        use std::os::unix::fs::symlink;
+
+        let directory = TempDir::new();
+        let actual_directory = directory.path().join("actual");
+        fs::create_dir(&actual_directory).unwrap();
+        let actual_path = actual_directory.join(PERMISSION_MODE_FILE);
+        save_permission_mode(&actual_path, PermissionMode::Ask).unwrap();
+        let parent_alias = directory.path().join("alias");
+        symlink(&actual_directory, &parent_alias).unwrap();
+        let path = parent_alias.join(PERMISSION_MODE_FILE);
+
+        let error = load_permission_mode(&path).unwrap_err();
+        assert!(matches!(
+            &error,
+            PermissionModeSettingsError::Permissions(PrivatePermissionsError::Io {
+                action: "cannot inspect user configuration directory",
+                path: error_path,
+                ..
+            }) if error_path == &parent_alias
+        ));
+        let permission_source = std::error::Error::source(&error).unwrap();
+        assert!(std::error::Error::source(permission_source)
+            .unwrap()
+            .downcast_ref::<io::Error>()
+            .is_some());
     }
 
     #[test]
