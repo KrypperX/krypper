@@ -19,6 +19,9 @@ const FULL_ACCESS_LEADER_PID: &str = "KRYPPER_TEST_FULL_ACCESS_LEADER_PID";
 const FULL_ACCESS_DESCENDANT_PID: &str = "KRYPPER_TEST_FULL_ACCESS_DESCENDANT_PID";
 const FULL_ACCESS_OUTSIDE_FILE: &str = "KRYPPER_TEST_FULL_ACCESS_OUTSIDE_FILE";
 const FULL_ACCESS_LOOPBACK_ADDRESS: &str = "KRYPPER_TEST_FULL_ACCESS_LOOPBACK_ADDRESS";
+const FULL_ACCESS_PUBLIC_EGRESS_STARTED: &str = "KRYPPER_TEST_FULL_ACCESS_PUBLIC_EGRESS_STARTED";
+const FULL_ACCESS_PUBLIC_EGRESS_STATUS: &str = "KRYPPER_TEST_FULL_ACCESS_PUBLIC_EGRESS_STATUS";
+const FULL_ACCESS_PUBLIC_EGRESS_URL: &str = "https://www.google.com/generate_204";
 const PTY_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[test]
@@ -53,6 +56,39 @@ fn full_access_process_group_child_fixture() {
     drop(listener);
     fs::write(descendant_path, descendant.id().to_string()).expect("write descendant pid");
     let _ = descendant.wait();
+}
+
+#[test]
+#[ignore = "requires direct public DNS and HTTPS egress on a Linux host"]
+fn full_access_public_https_probe_fixture() {
+    let (Ok(leader_path), Ok(started_path), Ok(status_path)) = (
+        std::env::var(FULL_ACCESS_LEADER_PID),
+        std::env::var(FULL_ACCESS_PUBLIC_EGRESS_STARTED),
+        std::env::var(FULL_ACCESS_PUBLIC_EGRESS_STATUS),
+    ) else {
+        return;
+    };
+
+    fs::write(leader_path, std::process::id().to_string()).expect("write host process pid");
+    fs::write(started_path, "started").expect("write public-egress probe start marker");
+
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .proxy(None)
+        .https_only(true)
+        .http_status_as_error(false)
+        .max_redirects(0)
+        .timeout_resolve(Some(Duration::from_secs(4)))
+        .timeout_connect(Some(Duration::from_secs(4)))
+        .timeout_global(Some(Duration::from_secs(8)))
+        .user_agent("")
+        .build()
+        .into();
+    let status = agent
+        .get(FULL_ACCESS_PUBLIC_EGRESS_URL)
+        .call()
+        .map(|response| response.status().as_u16().to_string())
+        .unwrap_or_else(|_| "unavailable".to_owned());
+    fs::write(status_path, status).expect("write public-egress HTTP status");
 }
 
 fn bind_loopback_listener() -> (TcpListener, SocketAddr) {
@@ -98,6 +134,21 @@ fn full_access_action_arguments(workspace: &Path) -> Value {
             "--ignored",
             "--exact",
             "full_access_process_group_child_fixture",
+            "--nocapture"
+        ],
+        "working_directory": workspace
+    })
+}
+
+fn full_access_public_egress_action_arguments(workspace: &Path) -> Value {
+    let helper_executable =
+        std::env::current_exe().expect("locate public-egress fixture executable");
+    json!({
+        "executable": helper_executable,
+        "argv": [
+            "--ignored",
+            "--exact",
+            "full_access_public_https_probe_fixture",
             "--nocapture"
         ],
         "working_directory": workspace
@@ -273,6 +324,14 @@ fn configured_full_access_cli(fixture: &FullAccessCliFixture<'_>, goal: &str) ->
         .env(
             FULL_ACCESS_LOOPBACK_ADDRESS,
             fixture.host_access_address.to_string(),
+        )
+        .env(
+            FULL_ACCESS_PUBLIC_EGRESS_STARTED,
+            fixture.workspace.join("public-egress-started"),
+        )
+        .env(
+            FULL_ACCESS_PUBLIC_EGRESS_STATUS,
+            fixture.workspace.join("public-egress-status"),
         );
     command
 }
@@ -462,6 +521,136 @@ fn full_access_without_controlling_terminal_does_not_start_task_or_host_process(
         &leader_pid_path,
         &descendant_pid_path,
         Duration::from_millis(300),
+    );
+}
+
+#[test]
+#[ignore = "requires direct public DNS and HTTPS egress on a Linux host"]
+fn full_access_host_process_reaches_public_https_only_after_confirmation() {
+    let task_fixture = FullAccessCliWorkspaceFixture::new(b"krypper-full-access-egress-canary");
+    let root = &task_fixture.root;
+    let workspace = &task_fixture.workspace;
+    let outside_file = &task_fixture.outside_file;
+    let config_home = &task_fixture.config_home;
+    let probe_started_path = workspace.join("public-egress-started");
+    let probe_status_path = workspace.join("public-egress-status");
+
+    let confirmation_submitted = Arc::new(AtomicBool::new(false));
+    let network_fixture = FullAccessCliNetworkFixture::with_action(
+        config_home,
+        Arc::clone(&confirmation_submitted),
+        "full_access_host_process",
+        full_access_public_egress_action_arguments(workspace),
+    );
+    let host_access_address = network_fixture.host_access_address;
+
+    let (master, slave) = open_pty();
+    let leader_pid_path = workspace.join("leader.pid");
+    let descendant_pid_path = workspace.join("descendant.pid");
+    let cli_fixture = FullAccessCliFixture {
+        root,
+        workspace,
+        config_home,
+        leader_pid_path: &leader_pid_path,
+        descendant_pid_path: &descendant_pid_path,
+        outside_file,
+        host_access_address,
+    };
+    let child = spawn_full_access_cli(
+        &cli_fixture,
+        "Verify public HTTPS is available only after Full Access confirmation",
+        &slave,
+    );
+    drop(slave);
+    let mut child = CliChildGuard::new(child, leader_pid_path.clone());
+    let output_receiver = start_terminal_reader(&master);
+
+    let mut terminal_output = Vec::new();
+    receive_until(
+        &output_receiver,
+        &mut terminal_output,
+        "Confirm Full Access for this task only?",
+        PTY_READ_TIMEOUT,
+    );
+    assert!(
+        String::from_utf8_lossy(&terminal_output).contains("no process sandbox"),
+        "the trusted terminal should describe Full Access risk before confirmation"
+    );
+    assert_no_host_process_side_effects(
+        &network_fixture.host_access_listener,
+        &leader_pid_path,
+        &descendant_pid_path,
+        Duration::from_millis(150),
+    );
+    assert!(
+        !probe_started_path.exists() && !probe_status_path.exists(),
+        "the public DNS/HTTPS probe must not start while confirmation is pending"
+    );
+
+    let mut terminal = master.try_clone().expect("clone PTY master for input");
+    terminal.write_all(b"yes\n").expect("confirm Full Access");
+    terminal.flush().expect("flush Full Access confirmation");
+    confirmation_submitted.store(true, Ordering::SeqCst);
+
+    wait_for_file(
+        &probe_started_path,
+        &mut child.child,
+        &output_receiver,
+        &mut terminal_output,
+    );
+    wait_for_file(
+        &probe_status_path,
+        &mut child.child,
+        &output_receiver,
+        &mut terminal_output,
+    );
+    let status = wait_for_exit(
+        &mut child.child,
+        &output_receiver,
+        &mut terminal_output,
+        Duration::from_secs(15),
+    );
+    drop(terminal);
+    drop(master);
+    terminal_output.extend(output_receiver.into_iter().flatten());
+
+    network_fixture
+        .provider
+        .control
+        .send(ProviderCommand::Stop)
+        .expect("stop local provider request monitor");
+    let requests = network_fixture
+        .provider
+        .server
+        .join()
+        .expect("join local provider request monitor");
+    let output = String::from_utf8_lossy(&terminal_output);
+
+    assert!(
+        status.success(),
+        "Full Access public HTTPS probe failed: {output}"
+    );
+    assert_eq!(
+        fs::read_to_string(&probe_status_path).expect("read public-egress HTTP status"),
+        "204",
+        "the confirmed process should complete the fixed direct HTTPS request to {FULL_ACCESS_PUBLIC_EGRESS_URL}"
+    );
+    assert_eq!(
+        requests.len(),
+        2,
+        "the successful process action should be followed by one completion request"
+    );
+    assert!(
+        String::from_utf8_lossy(&requests[0]).contains("full_access_host_process"),
+        "the local model should request the Full Access process action"
+    );
+    assert!(
+        String::from_utf8_lossy(&requests[1]).contains("complete_task"),
+        "the local model should complete after the process action"
+    );
+    assert!(
+        !process_exists(read_pid(&leader_pid_path)),
+        "the public-egress process must be gone when task execution finishes"
     );
 }
 
