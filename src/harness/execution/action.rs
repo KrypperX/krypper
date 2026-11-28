@@ -6,6 +6,7 @@ use crate::task_lifecycle::{
     TaskSession, WorkspaceCreateDirectoryError, WorkspaceListError, WorkspaceReadError,
     WorkspaceReplaceError, WorkspaceSearchError, WorkspaceWriteError,
 };
+use std::fmt;
 use uuid::Uuid;
 
 pub(super) fn execute_action_with_revision(
@@ -95,11 +96,16 @@ pub(super) fn execute_action_with_revision(
             max_lines,
         } => {
             let result = validate_read_range(*start_line, *max_lines)
-                .map_err(|message| WorkspaceReadError::File { message })
+                .map_err(|error| WorkspaceReadError::File {
+                    message: error.to_string(),
+                })
                 .and_then(|()| session.read_workspace_file(task_id, turn_id, path))
                 .and_then(|contents| {
-                    select_read_range(&contents, *start_line, *max_lines)
-                        .map_err(|message| WorkspaceReadError::File { message })
+                    select_read_range(&contents, *start_line, *max_lines).map_err(|error| {
+                        WorkspaceReadError::File {
+                            message: error.to_string(),
+                        }
+                    })
                 });
             match result {
                 Ok((start_line, end_line, excerpt)) => Ok(ActionExecution::Observation(
@@ -317,15 +323,45 @@ pub(super) fn execute_action_with_revision(
         }
     }
 }
-pub(super) fn validate_read_range(start_line: usize, max_lines: usize) -> Result<(), String> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ReadRangeError {
+    StartLineMustBePositive,
+    LineCountMustBePositive,
+    LineCountExceedsLimit,
+    StartLineDoesNotExist { requested: usize },
+    ExcerptExceedsByteLimit,
+}
+
+impl fmt::Display for ReadRangeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::StartLineMustBePositive => formatter.write_str("starting line must be positive"),
+            Self::LineCountMustBePositive => formatter.write_str("line count must be positive"),
+            Self::LineCountExceedsLimit => {
+                formatter.write_str("requested line count exceeds 200 lines")
+            }
+            Self::StartLineDoesNotExist { requested } => {
+                write!(formatter, "starting line {requested} does not exist")
+            }
+            Self::ExcerptExceedsByteLimit => formatter.write_str("selected excerpt exceeds 64 KiB"),
+        }
+    }
+}
+
+impl std::error::Error for ReadRangeError {}
+
+pub(super) fn validate_read_range(
+    start_line: usize,
+    max_lines: usize,
+) -> Result<(), ReadRangeError> {
     if start_line == 0 {
-        return Err("starting line must be positive".to_owned());
+        return Err(ReadRangeError::StartLineMustBePositive);
     }
     if max_lines == 0 {
-        return Err("line count must be positive".to_owned());
+        return Err(ReadRangeError::LineCountMustBePositive);
     }
     if max_lines > MAX_READ_RANGE_LINES {
-        return Err("requested line count exceeds 200 lines".to_owned());
+        return Err(ReadRangeError::LineCountExceedsLimit);
     }
     Ok(())
 }
@@ -333,20 +369,58 @@ pub(super) fn select_read_range(
     contents: &str,
     start_line: usize,
     max_lines: usize,
-) -> Result<(usize, usize, String), String> {
+) -> Result<(usize, usize, String), ReadRangeError> {
     let lines = contents
         .lines()
         .skip(start_line - 1)
         .take(max_lines)
         .collect::<Vec<_>>();
     if lines.is_empty() {
-        return Err(format!("starting line {start_line} does not exist"));
+        return Err(ReadRangeError::StartLineDoesNotExist {
+            requested: start_line,
+        });
     }
 
     let excerpt = lines.join("\n");
     if excerpt.len() > MAX_READ_RANGE_BYTES {
-        return Err("selected excerpt exceeds 64 KiB".to_owned());
+        return Err(ReadRangeError::ExcerptExceedsByteLimit);
     }
     let end_line = start_line + lines.len() - 1;
     Ok((start_line, end_line, excerpt))
+}
+
+#[cfg(test)]
+mod read_range_error_tests {
+    use super::{select_read_range, validate_read_range, ReadRangeError};
+    use super::{MAX_READ_RANGE_BYTES, MAX_READ_RANGE_LINES};
+
+    #[test]
+    fn range_validation_returns_typed_errors() {
+        assert_eq!(
+            validate_read_range(0, 1),
+            Err(ReadRangeError::StartLineMustBePositive)
+        );
+        assert_eq!(
+            validate_read_range(1, 0),
+            Err(ReadRangeError::LineCountMustBePositive)
+        );
+        assert_eq!(
+            validate_read_range(1, MAX_READ_RANGE_LINES + 1),
+            Err(ReadRangeError::LineCountExceedsLimit)
+        );
+    }
+
+    #[test]
+    fn range_selection_returns_typed_errors() {
+        assert_eq!(
+            select_read_range("one\n", 2, 1),
+            Err(ReadRangeError::StartLineDoesNotExist { requested: 2 })
+        );
+
+        let oversized = "x".repeat(MAX_READ_RANGE_BYTES + 1);
+        assert_eq!(
+            select_read_range(&oversized, 1, 1),
+            Err(ReadRangeError::ExcerptExceedsByteLimit)
+        );
+    }
 }
