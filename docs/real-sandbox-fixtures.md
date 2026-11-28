@@ -39,7 +39,11 @@ setup if the installed build rejects an option; ordinary CI does not establish h
 
 `KRYPPER_TEST_TOOLCHAIN` and `KRYPPER_TEST_REGISTRY` must also point at preprovisioned
 directories; `OfflineCargoPolicy::new` validates that `bin/cargo` and `bin/rustc` are real ELF
-executables. These variables configure the test harness only. They are never product request
+executables. The toolchain must also supply any native compiler/linker needed by a fixture
+workspace (for example, `cc`) under its `bin/` directory, or that executable must be available
+in `/usr/bin` or `/bin`, which are the only system directories in the sandbox's fixed `PATH`.
+Host-only `PATH` entries are not forwarded into the sandbox, and the gate does not probe linker
+availability. These variables configure the test harness only. They are never product request
 fields and are never forwarded into the sandbox.
 
 ## Running them
@@ -55,7 +59,7 @@ cargo build --bins --locked
 KRYPPER_REAL_SANDBOX=1 \
 KRYPPER_TEST_TOOLCHAIN=/opt/rust-toolchain \
 KRYPPER_TEST_REGISTRY=/opt/cargo-registry \
-cargo test --locked --lib real_ -- --ignored --nocapture --test-threads=1
+cargo test --locked --offline --lib real_ -- --ignored --nocapture --test-threads=1
 ```
 
 `--test-threads=1` is required: the supervisor holds one exclusive host lease, so concurrent
@@ -104,14 +108,6 @@ normal recovery path to reconcile.
 
 Nothing in this module grants authority, adds a profile, changes the CLI, or weakens the fixed
 policy. A failing fixture is a host or product regression, never something to skip.
-
-## Legacy fixtures
-
-`src/tools/process/tests.rs` still contains the earlier monolithic
-`real_offline_profile_is_confined_and_cleans_up` and `real_product_workspace_runs_the_fixed_profile`
-fixtures. They remain `#[ignore]`d and unchanged as historical local evidence; they do not read
-`KRYPPER_REAL_SANDBOX`. Prefer the fixtures above for new host evidence, and follow up by removing
-the legacy pair once the gated suite has been exercised on a provisioned host.
 
 ## What is still unproven
 

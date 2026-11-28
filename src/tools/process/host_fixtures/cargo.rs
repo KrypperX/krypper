@@ -57,4 +57,21 @@ fn real_offline_cargo_behavior_is_preserved_through_the_harness() {
     assert!(result.succeeded(), "{result:?}");
     assert_eq!(result.test_filter.as_deref(), Some("selected_test"));
     assert_eq!(result.executed_tests, Some(1));
+
+    let recorded_turn = session.get_task(task).unwrap().get_turn(turn).unwrap();
+    assert_eq!(
+        recorded_turn.state(),
+        crate::task_lifecycle::TurnState::Succeeded
+    );
+    assert_eq!(recorded_turn.outcome(), execution.outcome());
+    assert!(recorded_turn
+        .activity_history()
+        .iter()
+        .any(|summary| matches!(
+            summary,
+            crate::task_lifecycle::TurnActivitySummary::ProcessFinished {
+                succeeded: true,
+                ..
+            }
+        )));
 }

@@ -41,8 +41,6 @@ use std::fs;
 #[cfg(all(test, target_os = "linux"))]
 use std::path::{Path, PathBuf};
 #[cfg(all(test, target_os = "linux"))]
-use std::sync::atomic::Ordering;
-#[cfg(all(test, target_os = "linux"))]
 use std::time::Duration;
 #[cfg(all(test, target_os = "linux"))]
 use uuid::Uuid;
