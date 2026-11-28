@@ -1,12 +1,15 @@
 //! Private, task-scoped routing snapshots and bounded fallback checkpoints.
 
 use super::settings::{
-    ensure_private_permissions, open_private_file, remove_file_if_present, write_private_file,
-    UserSettingsPaths,
+    ensure_private_permissions_with_source, open_private_file, write_private_file,
+    PrivatePermissionsError, UserSettingsPaths,
 };
+use crate::fallback::FallbackPolicyError;
 use crate::fallback::{FallbackCheckpoint, FallbackLimits, FallbackPolicy};
 use crate::routing::{AutomaticRoutingRequest, RoutingCandidate};
 use serde::{Deserialize, Serialize};
+use std::error::Error;
+use std::fmt;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -16,6 +19,100 @@ use uuid::Uuid;
 const STATE_VERSION: u32 = 1;
 const MAX_STATE_BYTES: u64 = 8 * 1024 * 1024;
 const STATE_PREFIX: &str = "task-routing-";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum TaskRoutingStateIoAction {
+    Inspect,
+    Read,
+    InspectDirectory,
+    Remove,
+}
+
+impl TaskRoutingStateIoAction {
+    fn description(self) -> &'static str {
+        match self {
+            Self::Inspect => "cannot inspect task routing state",
+            Self::Read => "cannot read task routing state",
+            Self::InspectDirectory => "cannot inspect task routing state directory",
+            Self::Remove => "cannot remove task routing state",
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(super) enum TaskRoutingStateError {
+    Io {
+        action: TaskRoutingStateIoAction,
+        path: PathBuf,
+        source: io::Error,
+    },
+    Permissions(PrivatePermissionsError),
+    NotRegularFile(PathBuf),
+    TooLarge,
+    InvalidFormat(serde_json::Error),
+    UnsupportedVersion,
+    InconsistentDocument,
+    FallbackPolicy(FallbackPolicyError),
+}
+
+impl TaskRoutingStateError {
+    fn io(action: TaskRoutingStateIoAction, path: &Path, source: io::Error) -> Self {
+        Self::Io {
+            action,
+            path: path.to_owned(),
+            source,
+        }
+    }
+}
+
+impl fmt::Display for TaskRoutingStateError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io {
+                action,
+                path,
+                source,
+            } => write!(
+                formatter,
+                "{} '{}': {}",
+                action.description(),
+                path.display(),
+                source.kind()
+            ),
+            Self::Permissions(error) => error.fmt(formatter),
+            Self::NotRegularFile(path) => write!(
+                formatter,
+                "task routing state '{}' is not a regular file",
+                path.display()
+            ),
+            Self::TooLarge => formatter.write_str("task routing state exceeds its storage limit"),
+            Self::InvalidFormat(_) => {
+                formatter.write_str("task routing state is invalid or unsupported")
+            }
+            Self::UnsupportedVersion | Self::InconsistentDocument => {
+                formatter.write_str("task routing state is inconsistent or unsupported")
+            }
+            Self::FallbackPolicy(error) => {
+                write!(formatter, "invalid bounded fallback configuration: {error}")
+            }
+        }
+    }
+}
+
+impl Error for TaskRoutingStateError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Io { source, .. } => Some(source),
+            Self::Permissions(error) => Some(error),
+            Self::InvalidFormat(error) => Some(error),
+            Self::FallbackPolicy(error) => Some(error),
+            Self::NotRegularFile(_)
+            | Self::TooLarge
+            | Self::UnsupportedVersion
+            | Self::InconsistentDocument => None,
+        }
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -93,7 +190,10 @@ pub(super) struct TaskRoutingStateStore {
 }
 
 impl TaskRoutingStateStore {
-    pub(super) fn open(paths: &UserSettingsPaths, task_id: Uuid) -> Result<(Self, bool), String> {
+    pub(super) fn open(
+        paths: &UserSettingsPaths,
+        task_id: Uuid,
+    ) -> Result<(Self, bool), TaskRoutingStateError> {
         let path = state_path(paths, task_id);
         let (document, exists) = match read_document(&path)? {
             Some(document) => (document, true),
@@ -160,8 +260,8 @@ impl TaskRoutingStateStore {
 pub(super) fn enabled_fallback_policy(
     aggregate_budget_micro_usd: u64,
     allow_cross_provider_data_transfer: bool,
-) -> Result<FallbackPolicy, String> {
-    FallbackPolicy::opt_in(FallbackLimits {
+) -> Result<FallbackPolicy, TaskRoutingStateError> {
+    fallback_policy_from_limits(FallbackLimits {
         max_additional_attempts: 2,
         max_total_provider_requests: 3,
         max_total_estimated_cost_micro_usd: aggregate_budget_micro_usd,
@@ -169,54 +269,79 @@ pub(super) fn enabled_fallback_policy(
         maximum_backoff: Duration::from_secs(2),
         allow_cross_provider_data_transfer,
     })
-    .map_err(|error| format!("invalid bounded fallback configuration: {error}"))
 }
 
-pub(super) fn remove_task_routing_states(paths: &UserSettingsPaths) -> Result<(), String> {
+fn fallback_policy_from_limits(
+    limits: FallbackLimits,
+) -> Result<FallbackPolicy, TaskRoutingStateError> {
+    FallbackPolicy::opt_in(limits).map_err(TaskRoutingStateError::FallbackPolicy)
+}
+
+pub(super) fn remove_task_routing_states(
+    paths: &UserSettingsPaths,
+) -> Result<(), TaskRoutingStateError> {
     let Some(parent) = paths.model.parent() else {
         return Ok(());
     };
     let entries = match fs::read_dir(parent) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
-            return Err(format!(
-                "cannot inspect task routing state directory '{}': {}",
-                parent.display(),
-                error.kind()
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(TaskRoutingStateError::io(
+                TaskRoutingStateIoAction::InspectDirectory,
+                parent,
+                source,
             ))
         }
     };
+    remove_task_routing_state_entries(parent, entries)
+}
+
+fn remove_task_routing_state_entries<I>(
+    parent: &Path,
+    entries: I,
+) -> Result<(), TaskRoutingStateError>
+where
+    I: IntoIterator<Item = io::Result<fs::DirEntry>>,
+{
     for entry in entries {
-        let entry = entry.map_err(|error| {
-            format!(
-                "cannot inspect task routing state directory '{}': {}",
-                parent.display(),
-                error.kind()
-            )
+        let entry = entry.map_err(|source| {
+            TaskRoutingStateError::io(TaskRoutingStateIoAction::InspectDirectory, parent, source)
         })?;
         let name = entry.file_name();
         let Some(name) = name.to_str() else {
             continue;
         };
         if name.starts_with(STATE_PREFIX) && name.ends_with(".json") {
-            remove_file_if_present(&entry.path(), "task routing state")?;
+            remove_state_file_if_present(&entry.path())?;
         }
     }
     Ok(())
 }
 
+fn remove_state_file_if_present(path: &Path) -> Result<(), TaskRoutingStateError> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(TaskRoutingStateError::io(
+            TaskRoutingStateIoAction::Remove,
+            path,
+            source,
+        )),
+    }
+}
+
 pub(super) fn remove_task_routing_state(
     paths: &UserSettingsPaths,
     task_id: Uuid,
-) -> Result<(), String> {
-    remove_file_if_present(&state_path(paths, task_id), "task routing state")
+) -> Result<(), TaskRoutingStateError> {
+    remove_state_file_if_present(&state_path(paths, task_id))
 }
 
 pub(super) fn has_task_routing_state(
     paths: &UserSettingsPaths,
     task_id: Uuid,
-) -> Result<bool, String> {
+) -> Result<bool, TaskRoutingStateError> {
     read_document(&state_path(paths, task_id)).map(|document| document.is_some())
 }
 
@@ -226,62 +351,81 @@ fn state_path(paths: &UserSettingsPaths, task_id: Uuid) -> PathBuf {
         .with_file_name(format!("{STATE_PREFIX}{task_id}.json"))
 }
 
-fn read_document(path: &Path) -> Result<Option<TaskRoutingDocument>, String> {
-    let metadata = match fs::symlink_metadata(path) {
+fn read_document(path: &Path) -> Result<Option<TaskRoutingDocument>, TaskRoutingStateError> {
+    read_document_with(
+        path,
+        |path| fs::symlink_metadata(path),
+        open_private_file,
+        fs::File::metadata,
+        validate_state_permissions,
+        read_state_bytes,
+    )
+}
+
+fn validate_state_permissions(
+    path: &Path,
+    metadata: &fs::Metadata,
+) -> Result<(), PrivatePermissionsError> {
+    ensure_private_permissions_with_source(path, metadata, "task routing state")
+}
+
+fn read_state_bytes(file: fs::File, limit: u64) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    file.take(limit).read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn read_document_with<M, O, FM, P, R>(
+    path: &Path,
+    symlink_metadata: M,
+    open_file: O,
+    opened_file_metadata: FM,
+    validate_permissions: P,
+    read_bounded: R,
+) -> Result<Option<TaskRoutingDocument>, TaskRoutingStateError>
+where
+    M: FnOnce(&Path) -> io::Result<fs::Metadata>,
+    O: FnOnce(&Path) -> io::Result<fs::File>,
+    FM: FnOnce(&fs::File) -> io::Result<fs::Metadata>,
+    P: FnOnce(&Path, &fs::Metadata) -> Result<(), PrivatePermissionsError>,
+    R: FnOnce(fs::File, u64) -> io::Result<Vec<u8>>,
+{
+    let metadata = match symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(format!(
-                "cannot inspect task routing state '{}': {}",
-                path.display(),
-                error.kind()
+        Err(source) => {
+            return Err(TaskRoutingStateError::io(
+                TaskRoutingStateIoAction::Inspect,
+                path,
+                source,
             ))
         }
     };
     if !metadata.file_type().is_file() {
-        return Err(format!(
-            "task routing state '{}' is not a regular file",
-            path.display()
-        ));
+        return Err(TaskRoutingStateError::NotRegularFile(path.to_owned()));
     }
-    let file = open_private_file(path).map_err(|error| {
-        format!(
-            "cannot read task routing state '{}': {}",
-            path.display(),
-            error.kind()
-        )
+    let file = open_file(path).map_err(|source| {
+        TaskRoutingStateError::io(TaskRoutingStateIoAction::Read, path, source)
     })?;
-    let opened_metadata = file.metadata().map_err(|error| {
-        format!(
-            "cannot inspect task routing state '{}': {}",
-            path.display(),
-            error.kind()
-        )
+    let opened_metadata = opened_file_metadata(&file).map_err(|source| {
+        TaskRoutingStateError::io(TaskRoutingStateIoAction::Inspect, path, source)
     })?;
     if !opened_metadata.is_file() {
-        return Err(format!(
-            "task routing state '{}' is not a regular file",
-            path.display()
-        ));
+        return Err(TaskRoutingStateError::NotRegularFile(path.to_owned()));
     }
-    ensure_private_permissions(path, &opened_metadata, "task routing state")?;
-    let mut bytes = Vec::new();
-    file.take(MAX_STATE_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| {
-            format!(
-                "cannot read task routing state '{}': {}",
-                path.display(),
-                error.kind()
-            )
-        })?;
+    validate_permissions(path, &opened_metadata).map_err(TaskRoutingStateError::Permissions)?;
+    let bytes = read_bounded(file, MAX_STATE_BYTES + 1).map_err(|source| {
+        TaskRoutingStateError::io(TaskRoutingStateIoAction::Read, path, source)
+    })?;
     if bytes.len() as u64 > MAX_STATE_BYTES {
-        return Err("task routing state exceeds its storage limit".to_owned());
+        return Err(TaskRoutingStateError::TooLarge);
     }
-    let document: TaskRoutingDocument = serde_json::from_slice(&bytes)
-        .map_err(|_| "task routing state is invalid or unsupported".to_owned())?;
-    if document.version != STATE_VERSION
-        || document.checkpoint.is_some() != document.snapshot.is_some()
+    let document: TaskRoutingDocument =
+        serde_json::from_slice(&bytes).map_err(TaskRoutingStateError::InvalidFormat)?;
+    if document.version != STATE_VERSION {
+        return Err(TaskRoutingStateError::UnsupportedVersion);
+    }
+    if document.checkpoint.is_some() != document.snapshot.is_some()
         || document.snapshot.as_ref().is_some_and(|snapshot| {
             snapshot.candidates.is_empty()
                 || snapshot
@@ -290,7 +434,7 @@ fn read_document(path: &Path) -> Result<Option<TaskRoutingDocument>, String> {
                     .is_some_and(|id| id.is_empty() || id.len() > 128)
         })
     {
-        return Err("task routing state is inconsistent or unsupported".to_owned());
+        return Err(TaskRoutingStateError::InconsistentDocument);
     }
     Ok(Some(document))
 }
@@ -305,8 +449,16 @@ mod tests {
         SelectionReasonCode,
     };
     use crate::test_support::TempDir;
+    use std::error::Error;
+    use std::fs::File;
 
     fn paths(directory: &TempDir) -> UserSettingsPaths {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        }
+
         UserSettingsPaths {
             model: directory.path().join("config.toml"),
             credentials: directory.path().join("credentials.json"),
@@ -347,6 +499,436 @@ mod tests {
             observed_latency_ms: Some(50),
             quality_score_basis_points: None,
         }
+    }
+
+    fn write_state(directory: &TempDir, task_id: Uuid, bytes: &[u8]) -> PathBuf {
+        let path = state_path(&paths(directory), task_id);
+        fs::write(&path, bytes).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        path
+    }
+
+    fn expect_error<T>(result: Result<T, TaskRoutingStateError>) -> TaskRoutingStateError {
+        match result {
+            Err(error) => error,
+            Ok(_) => panic!("operation unexpectedly succeeded"),
+        }
+    }
+
+    fn error_source(error: &TaskRoutingStateError) -> Option<&(dyn Error + 'static)> {
+        error.source()
+    }
+
+    #[test]
+    fn read_document_with_preserves_io_error_classification_and_causes() {
+        let directory = TempDir::new();
+        let task_id = Uuid::new_v4();
+        let path = write_state(
+            &directory,
+            task_id,
+            br#"{"version":1,"snapshot":null,"checkpoint":null}"#,
+        );
+
+        let error = read_document_with(
+            &path,
+            |_| Err(io::Error::other("metadata probe")),
+            open_private_file,
+            File::metadata,
+            validate_state_permissions,
+            read_state_bytes,
+        )
+        .unwrap_err();
+        assert_state_io_error(
+            &error,
+            TaskRoutingStateIoAction::Inspect,
+            &path,
+            io::ErrorKind::Other,
+            &format!(
+                "cannot inspect task routing state '{}': {}",
+                path.display(),
+                io::ErrorKind::Other
+            ),
+        );
+
+        let error = read_document_with(
+            &path,
+            |path| fs::symlink_metadata(path),
+            |_| Err(io::Error::other("open probe")),
+            File::metadata,
+            validate_state_permissions,
+            read_state_bytes,
+        )
+        .unwrap_err();
+        assert_state_io_error(
+            &error,
+            TaskRoutingStateIoAction::Read,
+            &path,
+            io::ErrorKind::Other,
+            &format!(
+                "cannot read task routing state '{}': {}",
+                path.display(),
+                io::ErrorKind::Other
+            ),
+        );
+
+        let error = read_document_with(
+            &path,
+            |path| fs::symlink_metadata(path),
+            open_private_file,
+            |_| Err(io::Error::other("opened metadata probe")),
+            validate_state_permissions,
+            read_state_bytes,
+        )
+        .unwrap_err();
+        assert_state_io_error(
+            &error,
+            TaskRoutingStateIoAction::Inspect,
+            &path,
+            io::ErrorKind::Other,
+            &format!(
+                "cannot inspect task routing state '{}': {}",
+                path.display(),
+                io::ErrorKind::Other
+            ),
+        );
+
+        let error = read_document_with(
+            &path,
+            |path| fs::symlink_metadata(path),
+            open_private_file,
+            File::metadata,
+            validate_state_permissions,
+            |_, _| Err(io::Error::other("read probe")),
+        )
+        .unwrap_err();
+        assert_state_io_error(
+            &error,
+            TaskRoutingStateIoAction::Read,
+            &path,
+            io::ErrorKind::Other,
+            &format!(
+                "cannot read task routing state '{}': {}",
+                path.display(),
+                io::ErrorKind::Other
+            ),
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_document_with_preserves_permission_errors_and_symlink_failures_closed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = TempDir::new();
+        let task_id = Uuid::new_v4();
+        let path = write_state(
+            &directory,
+            task_id,
+            br#"{"version":1,"snapshot":null,"checkpoint":null}"#,
+        );
+        let error = read_document_with(
+            &path,
+            |path| fs::symlink_metadata(path),
+            open_private_file,
+            File::metadata,
+            |path, _| {
+                Err(PrivatePermissionsError::Io {
+                    action: "probe private permissions",
+                    path: path.to_owned(),
+                    source: io::Error::other("permission probe"),
+                })
+            },
+            read_state_bytes,
+        )
+        .unwrap_err();
+        assert!(matches!(error, TaskRoutingStateError::Permissions(_)));
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "probe private permissions '{}': {}",
+                path.display(),
+                io::ErrorKind::Other
+            )
+        );
+        let source = error_source(&error).unwrap();
+        assert!(source.downcast_ref::<PrivatePermissionsError>().is_some());
+        assert_eq!(
+            source
+                .source()
+                .and_then(|source| source.downcast_ref::<io::Error>())
+                .map(io::Error::kind),
+            Some(io::ErrorKind::Other)
+        );
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let error = TaskRoutingStateStore::open(&paths(&directory), task_id)
+            .err()
+            .unwrap();
+        assert!(matches!(error, TaskRoutingStateError::Permissions(_)));
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "task routing state '{}' is accessible by other users; restrict its permissions or run `krypper setup --reset`",
+                path.display()
+            )
+        );
+
+        let symlink = directory.path().join("task-routing-symlink.json");
+        std::os::unix::fs::symlink(&path, &symlink).unwrap();
+        let mut open_called = false;
+        let error = read_document_with(
+            &symlink,
+            |path| fs::symlink_metadata(path),
+            |_| {
+                open_called = true;
+                open_private_file(&path)
+            },
+            File::metadata,
+            validate_state_permissions,
+            read_state_bytes,
+        )
+        .unwrap_err();
+        assert!(!open_called);
+        assert!(matches!(error, TaskRoutingStateError::NotRegularFile(_)));
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "task routing state '{}' is not a regular file",
+                symlink.display()
+            )
+        );
+        assert!(error_source(&error).is_none());
+    }
+
+    #[test]
+    fn read_document_classifies_file_type_size_format_version_and_consistency() {
+        let directory = TempDir::new();
+        let task_id = Uuid::new_v4();
+        let path = state_path(&paths(&directory), task_id);
+        fs::create_dir(&path).unwrap();
+        let error = TaskRoutingStateStore::open(&paths(&directory), task_id)
+            .err()
+            .unwrap();
+        assert!(matches!(error, TaskRoutingStateError::NotRegularFile(_)));
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "task routing state '{}' is not a regular file",
+                path.display()
+            )
+        );
+        assert!(error_source(&error).is_none());
+        fs::remove_dir(&path).unwrap();
+
+        let task_id = Uuid::new_v4();
+        let malformed = write_state(&directory, task_id, b"{");
+        let error = expect_error(read_document(&malformed));
+        assert!(matches!(error, TaskRoutingStateError::InvalidFormat(_)));
+        assert_eq!(
+            error.to_string(),
+            "task routing state is invalid or unsupported"
+        );
+        assert!(error_source(&error).is_some());
+
+        let unknown_field = write_state(
+            &directory,
+            Uuid::new_v4(),
+            br#"{"version":1,"snapshot":null,"checkpoint":null,"extra":true}"#,
+        );
+        let error = expect_error(read_document(&unknown_field));
+        assert!(matches!(error, TaskRoutingStateError::InvalidFormat(_)));
+        assert_eq!(
+            error.to_string(),
+            "task routing state is invalid or unsupported"
+        );
+        assert!(error_source(&error).is_some());
+
+        let oversized = write_state(
+            &directory,
+            Uuid::new_v4(),
+            &vec![b'!'; MAX_STATE_BYTES as usize + 1],
+        );
+        let error = expect_error(read_document(&oversized));
+        assert!(matches!(error, TaskRoutingStateError::TooLarge));
+        assert_eq!(
+            error.to_string(),
+            "task routing state exceeds its storage limit"
+        );
+        assert!(error_source(&error).is_none());
+
+        let unsupported = write_state(
+            &directory,
+            Uuid::new_v4(),
+            br#"{"version":2,"snapshot":null,"checkpoint":null}"#,
+        );
+        let error = expect_error(read_document(&unsupported));
+        assert!(matches!(error, TaskRoutingStateError::UnsupportedVersion));
+        assert_eq!(
+            error.to_string(),
+            "task routing state is inconsistent or unsupported"
+        );
+        assert!(error_source(&error).is_none());
+
+        let task_id = Uuid::new_v4();
+        let paths = paths(&directory);
+        let (mut store, _) = TaskRoutingStateStore::open(&paths, task_id).unwrap();
+        assert!(store.persist_routing_snapshot(
+            &AutomaticRoutingRequest::default(),
+            &[candidate()],
+            enabled_fallback_policy(1_000_000, false).unwrap(),
+            None,
+        ));
+        let path = state_path(&paths, task_id);
+        let mut document: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        document["snapshot"]["candidates"] = serde_json::json!([]);
+        write_state(&directory, task_id, &serde_json::to_vec(&document).unwrap());
+        let error = TaskRoutingStateStore::open(&paths, task_id).err().unwrap();
+        assert!(matches!(error, TaskRoutingStateError::InconsistentDocument));
+        assert_eq!(
+            error.to_string(),
+            "task routing state is inconsistent or unsupported"
+        );
+        assert!(error_source(&error).is_none());
+    }
+
+    #[test]
+    fn directory_removal_errors_preserve_paths_kinds_and_sources() {
+        let directory = TempDir::new();
+        let settings_paths = paths(&directory);
+        let task_id = Uuid::new_v4();
+        remove_task_routing_state(&settings_paths, task_id).unwrap();
+        remove_task_routing_states(&settings_paths).unwrap();
+
+        let parent_file = directory.path().join("not-a-directory");
+        fs::write(&parent_file, b"file").unwrap();
+        let mut invalid_parent_paths = paths(&directory);
+        invalid_parent_paths.model = parent_file.join("config.toml");
+        let expected_kind = fs::read_dir(&parent_file).unwrap_err().kind();
+        let error = remove_task_routing_states(&invalid_parent_paths).unwrap_err();
+        assert_state_io_error(
+            &error,
+            TaskRoutingStateIoAction::InspectDirectory,
+            &parent_file,
+            expected_kind,
+            &format!(
+                "cannot inspect task routing state directory '{}': {expected_kind}",
+                parent_file.display()
+            ),
+        );
+
+        let error = remove_task_routing_state_entries(
+            directory.path(),
+            [Err(io::Error::other("entry probe"))],
+        )
+        .unwrap_err();
+        assert_state_io_error(
+            &error,
+            TaskRoutingStateIoAction::InspectDirectory,
+            directory.path(),
+            io::ErrorKind::Other,
+            &format!(
+                "cannot inspect task routing state directory '{}': {}",
+                directory.path().display(),
+                io::ErrorKind::Other
+            ),
+        );
+
+        let blocked_path = state_path(&settings_paths, task_id);
+        fs::create_dir(&blocked_path).unwrap();
+        let expected_kind = fs::remove_file(&blocked_path).unwrap_err().kind();
+        let error = remove_task_routing_state(&settings_paths, task_id).unwrap_err();
+        assert_state_io_error(
+            &error,
+            TaskRoutingStateIoAction::Remove,
+            &blocked_path,
+            expected_kind,
+            &format!(
+                "cannot remove task routing state '{}': {expected_kind}",
+                blocked_path.display()
+            ),
+        );
+        let expected_kind = fs::remove_file(&blocked_path).unwrap_err().kind();
+        let error = remove_task_routing_states(&settings_paths).unwrap_err();
+        assert_state_io_error(
+            &error,
+            TaskRoutingStateIoAction::Remove,
+            &blocked_path,
+            expected_kind,
+            &format!(
+                "cannot remove task routing state '{}': {expected_kind}",
+                blocked_path.display()
+            ),
+        );
+
+        let corrupt_id = Uuid::new_v4();
+        write_state(&directory, corrupt_id, b"{");
+        let error = has_task_routing_state(&settings_paths, corrupt_id).unwrap_err();
+        assert!(matches!(error, TaskRoutingStateError::InvalidFormat(_)));
+        assert_eq!(
+            error.to_string(),
+            "task routing state is invalid or unsupported"
+        );
+        assert!(error_source(&error).is_some());
+    }
+
+    #[test]
+    fn fallback_policy_errors_keep_their_type_source_and_display() {
+        let error = fallback_policy_from_limits(FallbackLimits {
+            max_additional_attempts: 0,
+            max_total_provider_requests: 3,
+            max_total_estimated_cost_micro_usd: 1_000,
+            initial_backoff: Duration::from_millis(250),
+            maximum_backoff: Duration::from_secs(2),
+            allow_cross_provider_data_transfer: false,
+        })
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            TaskRoutingStateError::FallbackPolicy(
+                crate::fallback::FallbackPolicyError::InvalidAttemptLimit
+            )
+        ));
+        assert_eq!(
+            error.to_string(),
+            "invalid bounded fallback configuration: fallback attempt limit must be from 1 through 5"
+        );
+        assert_eq!(
+            error_source(&error)
+                .and_then(|source| source.downcast_ref::<crate::fallback::FallbackPolicyError>()),
+            Some(&crate::fallback::FallbackPolicyError::InvalidAttemptLimit)
+        );
+    }
+
+    fn assert_state_io_error(
+        error: &TaskRoutingStateError,
+        expected_action: TaskRoutingStateIoAction,
+        expected_path: &Path,
+        expected_kind: io::ErrorKind,
+        expected_display: &str,
+    ) {
+        match error {
+            TaskRoutingStateError::Io {
+                action,
+                path,
+                source,
+            } => {
+                assert_eq!(*action, expected_action);
+                assert_eq!(path, expected_path);
+                assert_eq!(source.kind(), expected_kind);
+            }
+            error => panic!("expected state I/O error, got {error:?}"),
+        }
+        assert_eq!(error.to_string(), expected_display);
+        let source = error_source(error).expect("I/O source preserved");
+        assert_eq!(
+            source.downcast_ref::<io::Error>().map(io::Error::kind),
+            Some(expected_kind)
+        );
     }
 
     #[test]

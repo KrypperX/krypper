@@ -941,7 +941,8 @@ pub(super) fn remove_settings(paths: &UserSettingsPaths) -> Result<(), String> {
         &paths.model.with_file_name("model-catalog-cache.json"),
         "model catalog cache",
     )?;
-    super::task_routing_state::remove_task_routing_states(paths)?;
+    super::task_routing_state::remove_task_routing_states(paths)
+        .map_err(|error| error.to_string())?;
     remove_file_if_present(&paths.model, "model configuration")
 }
 
@@ -1686,6 +1687,57 @@ mod tests {
             Err(error) => error,
             Ok(_) => panic!("credential operation unexpectedly succeeded"),
         }
+    }
+
+    #[test]
+    fn remove_settings_preserves_bulk_state_error_text_and_partial_progress() {
+        let empty_directory = TempDir::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(empty_directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let empty_paths = UserSettingsPaths {
+            model: empty_directory.path().join("config.toml"),
+            credentials: empty_directory.path().join("credentials.json"),
+            permission_mode: empty_directory.path().join(PERMISSION_MODE_FILE),
+            provider_profiles: empty_directory.path().join(PROVIDER_PROFILES_FILE),
+            model_evidence: empty_directory.path().join(MODEL_EVIDENCE_FILE),
+            model_evidence_key: empty_directory.path().join(MODEL_EVIDENCE_KEY_FILE),
+        };
+        remove_settings(&empty_paths).unwrap();
+
+        let directory = TempDir::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let paths = UserSettingsPaths {
+            model: directory.path().join("config.toml"),
+            credentials: directory.path().join("credentials.json"),
+            permission_mode: directory.path().join(PERMISSION_MODE_FILE),
+            provider_profiles: directory.path().join(PROVIDER_PROFILES_FILE),
+            model_evidence: directory.path().join(MODEL_EVIDENCE_FILE),
+            model_evidence_key: directory.path().join(MODEL_EVIDENCE_KEY_FILE),
+        };
+        fs::write(&paths.model, b"provider = 'ollama'\n").unwrap();
+        fs::write(&paths.provider_profiles, b"profiles").unwrap();
+        let blocked_state = paths.model.with_file_name("task-routing-blocked.json");
+        fs::create_dir(&blocked_state).unwrap();
+        let expected_kind = fs::remove_file(&blocked_state).unwrap_err().kind();
+
+        let error = remove_settings(&paths).unwrap_err();
+        assert_eq!(
+            error,
+            format!(
+                "cannot remove task routing state '{}': {expected_kind}",
+                blocked_state.display()
+            )
+        );
+        assert!(!paths.provider_profiles.exists());
+        assert!(paths.model.exists());
+        assert!(blocked_state.is_dir());
     }
 
     #[test]
