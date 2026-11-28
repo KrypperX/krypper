@@ -1692,6 +1692,11 @@ mod tests {
     #[test]
     fn remove_settings_preserves_bulk_state_error_text_and_partial_progress() {
         let empty_directory = TempDir::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(empty_directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        }
         let empty_paths = UserSettingsPaths {
             model: empty_directory.path().join("config.toml"),
             credentials: empty_directory.path().join("credentials.json"),
@@ -1703,6 +1708,11 @@ mod tests {
         remove_settings(&empty_paths).unwrap();
 
         let directory = TempDir::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        }
         let paths = UserSettingsPaths {
             model: directory.path().join("config.toml"),
             credentials: directory.path().join("credentials.json"),

@@ -1619,6 +1619,12 @@ mod task_routing_state_error_tests {
     use uuid::Uuid;
 
     fn paths(directory: &TempDir) -> UserSettingsPaths {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        }
+
         UserSettingsPaths {
             model: directory.path().join("config.toml"),
             credentials: directory.path().join("credentials.json"),

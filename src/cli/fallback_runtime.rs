@@ -483,6 +483,11 @@ mod tests {
     #[test]
     fn runtime_construction_fails_closed_and_preserves_saved_state_error() {
         let directory = TempDir::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        }
         let paths = UserSettingsPaths {
             model: directory.path().join("config.toml"),
             credentials: directory.path().join("credentials.json"),
