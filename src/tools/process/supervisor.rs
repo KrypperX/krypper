@@ -70,10 +70,10 @@ pub(crate) fn run_read_only_exec(
             request.working_directory(),
         ) {
             Ok(directories) => directories,
-            Err(message) => {
+            Err(error) => {
                 let mut result =
                     ProcessResult::empty_read_only_exec(ProcessOutcome::SandboxSetupFailed);
-                result.diagnostic = Some(message);
+                result.diagnostic = Some(error.to_string());
                 return result;
             }
         };
@@ -263,7 +263,7 @@ fn run_with_bounds_and_options(
     let output_limit = output;
     let directories = match directory_descriptors(root, policy) {
         Ok(directories) => Some(directories),
-        Err(error) => return setup_failed(test_filter, error, output_limit),
+        Err(error) => return setup_failed(test_filter, error.to_string(), output_limit),
     };
     execute(
         policy,
@@ -279,18 +279,11 @@ fn run_with_bounds_and_options(
 fn directory_descriptors(
     root: &WorkspaceRoot,
     policy: &OfflineCargoPolicy,
-) -> Result<DirectoryDescriptors, String> {
+) -> std::io::Result<DirectoryDescriptors> {
     Ok(DirectoryDescriptors::new(
-        root.process_descriptor()
-            .map_err(|error| error.to_string())?,
-        policy
-            .toolchain
-            .process_descriptor()
-            .map_err(|error| error.to_string())?,
-        policy
-            .registry
-            .process_descriptor()
-            .map_err(|error| error.to_string())?,
+        root.process_descriptor()?,
+        policy.toolchain.process_descriptor()?,
+        policy.registry.process_descriptor()?,
     ))
 }
 
@@ -299,25 +292,15 @@ fn directory_descriptors_for_read_only_exec(
     root: &WorkspaceRoot,
     policy: &OfflineCargoPolicy,
     cwd: &str,
-) -> Result<DirectoryDescriptors, String> {
-    let workspace = root
-        .process_descriptor()
-        .map_err(|error| error.to_string())?;
-    let toolchain = policy
-        .toolchain
-        .process_descriptor()
-        .map_err(|error| error.to_string())?;
-    let registry = policy
-        .registry
-        .process_descriptor()
-        .map_err(|error| error.to_string())?;
+) -> std::io::Result<DirectoryDescriptors> {
+    let workspace = root.process_descriptor()?;
+    let toolchain = policy.toolchain.process_descriptor()?;
+    let registry = policy.registry.process_descriptor()?;
     let directories = DirectoryDescriptors::new(workspace, toolchain, registry);
     if cwd == "." {
         Ok(directories)
     } else {
-        let workspace_cwd = root
-            .process_subdirectory_descriptor(cwd)
-            .map_err(|error| error.to_string())?;
+        let workspace_cwd = root.process_subdirectory_descriptor(cwd)?;
         Ok(directories.with_workspace_cwd(workspace_cwd))
     }
 }
@@ -548,5 +531,32 @@ mod isolation_evidence_tests {
         let json = serde_json::to_value(result).expect("serialize process result");
 
         assert!(json.get("sandbox_evidence").is_none());
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod directory_descriptor_error_tests {
+    use super::directory_descriptors_for_read_only_exec;
+    use crate::test_support::TempDir;
+    use crate::tools::capture_workspace_root_at;
+    use crate::tools::process::OfflineCargoPolicy;
+    use std::fs;
+    use std::io::ErrorKind;
+
+    #[test]
+    fn read_only_exec_preserves_invalid_workspace_directory_error_kind() {
+        let workspace = TempDir::with_prefix("krypper-supervisor-workspace-");
+        let runtime = TempDir::with_prefix("krypper-supervisor-runtime-");
+        fs::create_dir_all(runtime.join("bin")).unwrap();
+        for binary in ["cargo", "rustc"] {
+            fs::write(runtime.join("bin").join(binary), b"\x7fELF").unwrap();
+        }
+        let policy = OfflineCargoPolicy::new(runtime.path(), runtime.path()).unwrap();
+        let root = capture_workspace_root_at(workspace.path()).unwrap();
+
+        let error = directory_descriptors_for_read_only_exec(&root, &policy, "missing")
+            .expect_err("missing workspace directory must fail before process launch");
+
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
     }
 }
