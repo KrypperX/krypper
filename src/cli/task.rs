@@ -930,7 +930,10 @@ where
                     .is_some_and(|defaults| defaults.allow_cross_provider_data_transfer);
                 let policy = match enabled_fallback_policy(budget, cross_provider) {
                     Ok(policy) => policy,
-                    Err(message) => return usage_error(error, Some("task"), &message),
+                    Err(cause) => {
+                        let message = cause.to_string();
+                        return usage_error(error, Some("task"), &message);
+                    }
                 };
                 let runtime = match CliFallbackRuntime::new(CliFallbackRuntimeConfig {
                     paths: &paths,
@@ -944,7 +947,10 @@ where
                     observation_context_budget_bytes,
                 }) {
                     Ok(runtime) => runtime,
-                    Err(message) => return usage_error(error, Some("task"), &message),
+                    Err(cause) => {
+                        let message = cause.to_string();
+                        return usage_error(error, Some("task"), &message);
+                    }
                 };
                 let fallback = match crate::fallback::FallbackDecisionSource::new(
                     policy,
@@ -1597,3 +1603,99 @@ pub(super) fn snapshot_task_and_turn_state(
 #[cfg(test)]
 #[path = "task_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod task_routing_state_error_tests {
+    use super::super::fallback_runtime::CliFallbackRuntimeError;
+    use super::super::help::usage_error;
+    use super::super::settings::UserSettingsPaths;
+    use super::super::task_routing_state::{
+        has_task_routing_state, remove_task_routing_state, TaskRoutingStateError,
+    };
+    use crate::test_support::TempDir;
+    use std::error::Error;
+    use std::fs;
+    use std::io;
+    use uuid::Uuid;
+
+    fn paths(directory: &TempDir) -> UserSettingsPaths {
+        UserSettingsPaths {
+            model: directory.path().join("config.toml"),
+            credentials: directory.path().join("credentials.json"),
+            permission_mode: directory.path().join("permission-mode"),
+            provider_profiles: directory.path().join("provider-profiles.json"),
+            model_evidence: directory.path().join("model-evidence.json"),
+            model_evidence_key: directory.path().join("model-evidence.key"),
+        }
+    }
+
+    #[test]
+    fn state_presence_and_removal_keep_typed_sources_through_io_errors() {
+        let directory = TempDir::new();
+        let paths = paths(&directory);
+        let task_id = Uuid::new_v4();
+        let corrupt_path = paths
+            .model
+            .with_file_name(format!("task-routing-{task_id}.json"));
+        fs::write(&corrupt_path, b"{").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&corrupt_path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        let presence_error = has_task_routing_state(&paths, task_id)
+            .map_err(io::Error::other)
+            .unwrap_err();
+        let state_error = presence_error
+            .get_ref()
+            .and_then(|source| source.downcast_ref::<TaskRoutingStateError>())
+            .expect("io error preserves the typed presence cause");
+        assert!(matches!(
+            state_error,
+            TaskRoutingStateError::InvalidFormat(_)
+        ));
+        assert_eq!(
+            state_error.to_string(),
+            "task routing state is invalid or unsupported"
+        );
+        assert!(state_error.source().is_some());
+
+        let removal_id = Uuid::new_v4();
+        let removal_path = paths
+            .model
+            .with_file_name(format!("task-routing-{removal_id}.json"));
+        fs::create_dir(&removal_path).unwrap();
+        let removal_error = remove_task_routing_state(&paths, removal_id)
+            .map_err(io::Error::other)
+            .unwrap_err();
+        let state_error = removal_error
+            .get_ref()
+            .and_then(|source| source.downcast_ref::<TaskRoutingStateError>())
+            .expect("io error preserves the typed removal cause");
+        assert!(matches!(
+            state_error,
+            TaskRoutingStateError::Io {
+                action: super::super::task_routing_state::TaskRoutingStateIoAction::Remove,
+                ..
+            }
+        ));
+        assert!(state_error.source().is_some());
+    }
+
+    #[test]
+    fn fallback_runtime_error_keeps_the_existing_cli_diagnostic() {
+        let parse_error = serde_json::from_slice::<serde_json::Value>(b"{").unwrap_err();
+        let runtime_error = CliFallbackRuntimeError::TaskRoutingState(
+            TaskRoutingStateError::InvalidFormat(parse_error),
+        );
+        let message = runtime_error.to_string();
+        let mut output = Vec::new();
+        assert_eq!(usage_error(&mut output, Some("task"), &message).unwrap(), 2);
+        let output = String::from_utf8(output).unwrap();
+        assert!(
+            output.ends_with("krypper task: error: task routing state is invalid or unsupported\n")
+        );
+        assert!(!output.contains("EOF while parsing"));
+    }
+}

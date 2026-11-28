@@ -2,7 +2,7 @@
 
 use super::model_selection::{prepare_model_source_for_selection, ProviderSelection};
 use super::settings::UserSettingsPaths;
-use super::task_routing_state::TaskRoutingStateStore;
+use super::task_routing_state::{TaskRoutingStateError, TaskRoutingStateStore};
 use crate::agent_loop::{
     BoundedDecisionSource, DecisionFailureCode, WorkspaceAction, WorkspaceObservation,
 };
@@ -14,6 +14,8 @@ use crate::fallback::{
 use crate::harness::context::ObservationCompactionReport;
 use crate::routing::{AutomaticRoutingRequest, RoutingCandidate, RoutingSelection};
 use serde_json::Value;
+use std::error::Error;
+use std::fmt;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -40,6 +42,30 @@ pub(super) struct CliFallbackRuntime {
     cancellation: Arc<AtomicBool>,
 }
 
+#[derive(Debug)]
+pub(super) enum CliFallbackRuntimeError {
+    TaskRoutingState(TaskRoutingStateError),
+    CancellationRegistration(String),
+}
+
+impl fmt::Display for CliFallbackRuntimeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TaskRoutingState(error) => error.fmt(formatter),
+            Self::CancellationRegistration(message) => formatter.write_str(message),
+        }
+    }
+}
+
+impl Error for CliFallbackRuntimeError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::TaskRoutingState(error) => Some(error),
+            Self::CancellationRegistration(_) => None,
+        }
+    }
+}
+
 pub(super) struct CliFallbackRuntimeConfig<'a> {
     pub(super) paths: &'a UserSettingsPaths,
     pub(super) task_id: Uuid,
@@ -53,9 +79,13 @@ pub(super) struct CliFallbackRuntimeConfig<'a> {
 }
 
 impl CliFallbackRuntime {
-    pub(super) fn new(config: CliFallbackRuntimeConfig<'_>) -> Result<Self, String> {
-        let (store, _) = TaskRoutingStateStore::open(config.paths, config.task_id)?;
-        let cancellation = task_cancellation_signal()?;
+    pub(super) fn new(
+        config: CliFallbackRuntimeConfig<'_>,
+    ) -> Result<Self, CliFallbackRuntimeError> {
+        let (store, _) = TaskRoutingStateStore::open(config.paths, config.task_id)
+            .map_err(CliFallbackRuntimeError::TaskRoutingState)?;
+        let cancellation = task_cancellation_signal()
+            .map_err(CliFallbackRuntimeError::CancellationRegistration)?;
         Ok(Self {
             store,
             task_state: if config.resumed {
@@ -425,6 +455,9 @@ fn action_matches_observation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::TempDir;
+    use std::error::Error;
+    use std::fs;
 
     #[test]
     fn cancellable_wait_returns_when_cancelled_and_completes_when_not_cancelled() {
@@ -445,5 +478,75 @@ mod tests {
             &cancellation,
             Duration::from_millis(1)
         ));
+    }
+
+    #[test]
+    fn runtime_construction_fails_closed_and_preserves_saved_state_error() {
+        let directory = TempDir::new();
+        let paths = UserSettingsPaths {
+            model: directory.path().join("config.toml"),
+            credentials: directory.path().join("credentials.json"),
+            permission_mode: directory.path().join("permission-mode"),
+            provider_profiles: directory.path().join("provider-profiles.json"),
+            model_evidence: directory.path().join("model-evidence.json"),
+            model_evidence_key: directory.path().join("model-evidence.key"),
+        };
+        let task_id = Uuid::new_v4();
+        let state_path = paths
+            .model
+            .with_file_name(format!("task-routing-{task_id}.json"));
+        fs::write(&state_path, b"{").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&state_path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let source = prepare_model_source_for_selection(
+            Some("qwen2.5:0.5b".to_owned()),
+            Some(ProviderSelection::BuiltIn(ModelProvider::Ollama)),
+            1,
+            SocketAddr::from(([127, 0, 0, 1], 11434)),
+            false,
+        )
+        .unwrap()
+        .unwrap();
+        let error = CliFallbackRuntime::new(CliFallbackRuntimeConfig {
+            paths: &paths,
+            task_id,
+            resumed: true,
+            initial_selection: RoutingSelection {
+                provider: Some("ollama".to_owned()),
+                model: "qwen2.5:0.5b".to_owned(),
+                reason: crate::routing::SelectionReasonCode::OnlyEligibleCandidate,
+            },
+            initial_source: source,
+            action_budget: 1,
+            ollama_endpoint: SocketAddr::from(([127, 0, 0, 1], 11434)),
+            repository_context: None,
+            observation_context_budget_bytes: None,
+        })
+        .err()
+        .unwrap();
+
+        assert!(matches!(
+            error,
+            CliFallbackRuntimeError::TaskRoutingState(TaskRoutingStateError::InvalidFormat(_))
+        ));
+        assert_eq!(
+            error.to_string(),
+            "task routing state is invalid or unsupported"
+        );
+        let state_error = error
+            .source()
+            .and_then(|source| source.downcast_ref::<TaskRoutingStateError>())
+            .expect("runtime error preserves task-state source");
+        assert!(state_error.source().is_some());
+    }
+
+    #[test]
+    fn cancellation_registration_error_is_an_exact_message_without_source() {
+        let error = CliFallbackRuntimeError::CancellationRegistration("probe message".to_owned());
+        assert_eq!(error.to_string(), "probe message");
+        assert!(error.source().is_none());
     }
 }
