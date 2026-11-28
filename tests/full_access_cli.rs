@@ -104,6 +104,35 @@ fn full_access_action_arguments(workspace: &Path) -> Value {
     })
 }
 
+struct FullAccessCliNetworkFixture {
+    host_access_listener: TcpListener,
+    host_access_address: SocketAddr,
+    provider: ProviderFixture,
+}
+
+impl FullAccessCliNetworkFixture {
+    fn new(config_home: &Path, workspace: &Path, confirmation_submitted: Arc<AtomicBool>) -> Self {
+        let (provider_listener, provider_address) = bind_loopback_listener();
+        let (host_access_listener, host_access_address) = bind_loopback_listener();
+        write_fixture_provider_profile(config_home, provider_address);
+        let provider = start_provider_server(
+            provider_listener,
+            full_access_action_arguments(workspace),
+            confirmation_submitted,
+        );
+        provider
+            .ready
+            .recv_timeout(PTY_READ_TIMEOUT)
+            .expect("start provider request monitor before the CLI");
+
+        Self {
+            host_access_listener,
+            host_access_address,
+            provider,
+        }
+    }
+}
+
 struct FullAccessCliFixture<'a> {
     root: &'a TempDir,
     workspace: &'a Path,
@@ -114,11 +143,92 @@ struct FullAccessCliFixture<'a> {
     host_access_address: SocketAddr,
 }
 
+struct FullAccessCliWorkspaceFixture {
+    root: TempDir,
+    workspace: PathBuf,
+    outside_file: PathBuf,
+    config_home: PathBuf,
+}
+
+impl FullAccessCliWorkspaceFixture {
+    fn new(outside_file_contents: &[u8]) -> Self {
+        let root = TempDir::new().expect("create fixture root");
+        let workspace = root.path().join("workspace");
+        fs::create_dir(&workspace).expect("create workspace");
+        let outside_file = root.path().join("outside-workspace-canary.txt");
+        fs::write(&outside_file, outside_file_contents).expect("write outside-workspace canary");
+        let config_home = root.path().join("config-home");
+        fs::create_dir(&config_home).expect("create configuration home");
+        set_private_directory(&config_home);
+
+        Self {
+            root,
+            workspace,
+            outside_file,
+            config_home,
+        }
+    }
+}
+
 fn spawn_full_access_cli(
     fixture: &FullAccessCliFixture<'_>,
     goal: &str,
     slave: &fs::File,
 ) -> Child {
+    let mut command = configured_full_access_cli(fixture, goal);
+    command
+        .stdin(Stdio::from(
+            slave.try_clone().expect("clone PTY slave for stdin"),
+        ))
+        .stdout(Stdio::from(
+            slave.try_clone().expect("clone PTY slave for stdout"),
+        ))
+        .stderr(Stdio::from(
+            slave.try_clone().expect("clone PTY slave for stderr"),
+        ));
+    // The CLI needs a controlling terminal for confirmation and terminal signals.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            if libc::ioctl(0, libc::TIOCSCTTY as libc::c_ulong, 0) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            if libc::tcsetpgrp(0, libc::getpgrp()) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    command.spawn().expect("start Krypper in a controlling PTY")
+}
+
+fn spawn_full_access_cli_without_controlling_terminal(
+    fixture: &FullAccessCliFixture<'_>,
+    goal: &str,
+) -> Child {
+    let mut command = configured_full_access_cli(fixture, goal);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // A new session has no controlling terminal. The child's standard streams are
+    // pipes, so it cannot acquire a terminal through an inherited descriptor.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    command
+        .spawn()
+        .expect("start Krypper in a session without a controlling terminal")
+}
+
+fn configured_full_access_cli(fixture: &FullAccessCliFixture<'_>, goal: &str) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_krypper"));
     command
         .args(["task", "--goal", goal, "--max-actions", "2", "--workspace"])
@@ -148,71 +258,36 @@ fn spawn_full_access_cli(
         .env(
             FULL_ACCESS_LOOPBACK_ADDRESS,
             fixture.host_access_address.to_string(),
-        )
-        .stdin(Stdio::from(
-            slave.try_clone().expect("clone PTY slave for stdin"),
-        ))
-        .stdout(Stdio::from(
-            slave.try_clone().expect("clone PTY slave for stdout"),
-        ))
-        .stderr(Stdio::from(
-            slave.try_clone().expect("clone PTY slave for stderr"),
-        ));
-    // The CLI needs a controlling terminal for confirmation and terminal signals.
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(io::Error::last_os_error());
-            }
-            if libc::ioctl(0, libc::TIOCSCTTY as libc::c_ulong, 0) == -1 {
-                return Err(io::Error::last_os_error());
-            }
-            if libc::tcsetpgrp(0, libc::getpgrp()) == -1 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    command.spawn().expect("start Krypper in a controlling PTY")
+        );
+    command
 }
 
 #[test]
 fn declining_full_access_does_not_start_model_or_host_process() {
-    let root = TempDir::new().expect("create fixture root");
-    let workspace = root.path().join("workspace");
-    fs::create_dir(&workspace).expect("create workspace");
-    let outside_file = root.path().join("outside-workspace-canary.txt");
-    fs::write(&outside_file, b"krypper-full-access-decline-canary")
-        .expect("write outside-workspace canary");
-    let config_home = root.path().join("config-home");
-    fs::create_dir(&config_home).expect("create configuration home");
-    set_private_directory(&config_home);
+    let task_fixture = FullAccessCliWorkspaceFixture::new(b"krypper-full-access-decline-canary");
+    let root = &task_fixture.root;
+    let workspace = &task_fixture.workspace;
+    let outside_file = &task_fixture.outside_file;
+    let config_home = &task_fixture.config_home;
 
-    let (provider_listener, provider_address) = bind_loopback_listener();
-    let (host_access_listener, host_access_address) = bind_loopback_listener();
-    write_fixture_provider_profile(&config_home, provider_address);
-    let action_arguments = full_access_action_arguments(&workspace);
     let confirmation_submitted = Arc::new(AtomicBool::new(false));
-    let provider = start_provider_server(
-        provider_listener,
-        action_arguments,
+    let network_fixture = FullAccessCliNetworkFixture::new(
+        config_home,
+        workspace,
         Arc::clone(&confirmation_submitted),
     );
-    provider
-        .ready
-        .recv_timeout(PTY_READ_TIMEOUT)
-        .expect("start provider request monitor before the CLI");
+    let host_access_address = network_fixture.host_access_address;
 
     let (master, slave) = open_pty();
     let leader_pid_path = workspace.join("leader.pid");
     let descendant_pid_path = workspace.join("descendant.pid");
     let cli_fixture = FullAccessCliFixture {
-        root: &root,
-        workspace: &workspace,
-        config_home: &config_home,
+        root,
+        workspace,
+        config_home,
         leader_pid_path: &leader_pid_path,
         descendant_pid_path: &descendant_pid_path,
-        outside_file: &outside_file,
+        outside_file,
         host_access_address,
     };
     let child = spawn_full_access_cli(
@@ -249,11 +324,16 @@ fn declining_full_access_does_not_start_model_or_host_process() {
     drop(master);
     terminal_output.extend(output_receiver.into_iter().flatten());
 
-    provider
+    network_fixture
+        .provider
         .control
         .send(ProviderCommand::Stop)
         .expect("stop provider request monitor");
-    let requests = provider.server.join().expect("join local provider fixture");
+    let requests = network_fixture
+        .provider
+        .server
+        .join()
+        .expect("join local provider fixture");
     let output = String::from_utf8_lossy(&terminal_output);
     assert!(
         !status.success(),
@@ -265,7 +345,10 @@ fn declining_full_access_does_not_start_model_or_host_process() {
     );
     assert!(requests.is_empty(), "declining must send no model request");
     assert_eq!(
-        provider.premature_requests.load(Ordering::SeqCst),
+        network_fixture
+            .provider
+            .premature_requests
+            .load(Ordering::SeqCst),
         0,
         "the model provider must not receive a request before confirmation"
     );
@@ -274,49 +357,127 @@ fn declining_full_access_does_not_start_model_or_host_process() {
         "declining must not start the host process fixture"
     );
     assert!(
-        accept_before(&host_access_listener, Duration::from_millis(150)).is_none(),
+        accept_before(
+            &network_fixture.host_access_listener,
+            Duration::from_millis(150)
+        )
+        .is_none(),
         "declining must not connect to the controlled host listener"
     );
 }
 
 #[test]
-fn terminal_sigint_cancels_full_access_host_process_group_before_another_model_request() {
-    let root = TempDir::new().expect("create fixture root");
-    let workspace = root.path().join("workspace");
-    fs::create_dir(&workspace).expect("create workspace");
-    let outside_file = root.path().join("outside-workspace-canary.txt");
-    let synthetic_content = b"krypper-full-access-host-canary-7b13f0";
-    fs::write(&outside_file, synthetic_content).expect("write outside-workspace canary");
-    let config_home = root.path().join("config-home");
-    fs::create_dir(&config_home).expect("create configuration home");
-    set_private_directory(&config_home);
+fn full_access_without_controlling_terminal_does_not_start_task_or_host_process() {
+    let task_fixture =
+        FullAccessCliWorkspaceFixture::new(b"krypper-full-access-no-terminal-canary");
+    let root = &task_fixture.root;
+    let workspace = &task_fixture.workspace;
+    let outside_file = &task_fixture.outside_file;
+    let config_home = &task_fixture.config_home;
 
-    let (provider_listener, provider_address) = bind_loopback_listener();
-    let (host_access_listener, host_access_address) = bind_loopback_listener();
-    write_fixture_provider_profile(&config_home, provider_address);
-    let action_arguments = full_access_action_arguments(&workspace);
     let confirmation_submitted = Arc::new(AtomicBool::new(false));
-    let provider = start_provider_server(
-        provider_listener,
-        action_arguments,
+    let network_fixture = FullAccessCliNetworkFixture::new(
+        config_home,
+        workspace,
         Arc::clone(&confirmation_submitted),
     );
-    provider
-        .ready
-        .recv_timeout(PTY_READ_TIMEOUT)
-        .expect("start provider request monitor before the CLI");
+    let host_access_address = network_fixture.host_access_address;
+
+    let leader_pid_path = workspace.join("leader.pid");
+    let descendant_pid_path = workspace.join("descendant.pid");
+    let cli_fixture = FullAccessCliFixture {
+        root,
+        workspace,
+        config_home,
+        leader_pid_path: &leader_pid_path,
+        descendant_pid_path: &descendant_pid_path,
+        outside_file,
+        host_access_address,
+    };
+    let child = spawn_full_access_cli_without_controlling_terminal(
+        &cli_fixture,
+        "Reject Full Access when no controlling terminal is available",
+    );
+    let mut child = CliChildGuard::new(child, leader_pid_path.clone());
+    let output_receiver = start_child_output_reader(&mut child.child);
+
+    let mut output = Vec::new();
+    let status = wait_for_exit(
+        &mut child.child,
+        &output_receiver,
+        &mut output,
+        PTY_READ_TIMEOUT,
+    );
+    receive_output_until_closed(&output_receiver, &mut output, PTY_READ_TIMEOUT);
+
+    network_fixture
+        .provider
+        .control
+        .send(ProviderCommand::Stop)
+        .expect("stop provider request monitor");
+    let requests = network_fixture
+        .provider
+        .server
+        .join()
+        .expect("join local provider fixture");
+    let output = String::from_utf8_lossy(&output);
+    assert!(
+        !status.success(),
+        "Full Access without a controlling terminal must fail the task"
+    );
+    assert!(
+        output.contains("Full Access needs a trusted controlling-terminal confirmation (")
+            && output.contains("no task was started"),
+        "missing terminal should report the trusted-confirmation failure and that no task started: {output}"
+    );
+    assert!(
+        requests.is_empty(),
+        "missing terminal must send no model request"
+    );
+    assert_eq!(
+        network_fixture
+            .provider
+            .premature_requests
+            .load(Ordering::SeqCst),
+        0,
+        "the provider must receive no connection before terminal confirmation"
+    );
+    assert_no_host_process_side_effects(
+        &network_fixture.host_access_listener,
+        &leader_pid_path,
+        &descendant_pid_path,
+        Duration::from_millis(300),
+    );
+}
+
+#[test]
+fn terminal_sigint_cancels_full_access_host_process_group_before_another_model_request() {
+    let synthetic_content = b"krypper-full-access-host-canary-7b13f0";
+    let task_fixture = FullAccessCliWorkspaceFixture::new(synthetic_content);
+    let root = &task_fixture.root;
+    let workspace = &task_fixture.workspace;
+    let outside_file = &task_fixture.outside_file;
+    let config_home = &task_fixture.config_home;
+
+    let confirmation_submitted = Arc::new(AtomicBool::new(false));
+    let network_fixture = FullAccessCliNetworkFixture::new(
+        config_home,
+        workspace,
+        Arc::clone(&confirmation_submitted),
+    );
+    let host_access_address = network_fixture.host_access_address;
 
     let (master, slave) = open_pty();
     enable_terminal_interrupts(&slave).expect("enable terminal Ctrl-C");
     let leader_pid_path = workspace.join("leader.pid");
     let descendant_pid_path = workspace.join("descendant.pid");
     let cli_fixture = FullAccessCliFixture {
-        root: &root,
-        workspace: &workspace,
-        config_home: &config_home,
+        root,
+        workspace,
+        config_home,
         leader_pid_path: &leader_pid_path,
         descendant_pid_path: &descendant_pid_path,
-        outside_file: &outside_file,
+        outside_file,
         host_access_address,
     };
     let child = spawn_full_access_cli(
@@ -340,7 +501,8 @@ fn terminal_sigint_cancels_full_access_host_process_group_before_another_model_r
         "the trusted terminal should describe Full Access risk before confirmation"
     );
     let (drained_sender, drained_receiver) = mpsc::channel();
-    provider
+    network_fixture
+        .provider
         .control
         .send(ProviderCommand::DrainBeforeConfirmation(drained_sender))
         .expect("synchronize with the active provider monitor");
@@ -352,7 +514,11 @@ fn terminal_sigint_cancels_full_access_host_process_group_before_another_model_r
         "the host process fixture must not create PID markers before confirmation"
     );
     assert!(
-        accept_before(&host_access_listener, Duration::from_millis(150)).is_none(),
+        accept_before(
+            &network_fixture.host_access_listener,
+            Duration::from_millis(150)
+        )
+        .is_none(),
         "the host process fixture must not connect to the controlled loopback listener before confirmation"
     );
     assert!(
@@ -378,8 +544,9 @@ fn terminal_sigint_cancels_full_access_host_process_group_before_another_model_r
         &output_receiver,
         &mut terminal_output,
     );
-    let observed_host_payload = receive_loopback_payload(&host_access_listener, PTY_READ_TIMEOUT)
-        .expect("host process fixture should send the outside-file bytes after confirmation");
+    let observed_host_payload =
+        receive_loopback_payload(&network_fixture.host_access_listener, PTY_READ_TIMEOUT)
+            .expect("host process fixture should send the outside-file bytes after confirmation");
     assert!(
         observed_host_payload == synthetic_content,
         "the controlled listener should receive exactly the outside-file bytes"
@@ -398,11 +565,16 @@ fn terminal_sigint_cancels_full_access_host_process_group_before_another_model_r
     let reader_output = output_receiver.into_iter().flatten().collect::<Vec<_>>();
     terminal_output.extend(reader_output);
 
-    provider
+    network_fixture
+        .provider
         .control
         .send(ProviderCommand::Stop)
         .expect("stop provider request monitor");
-    let requests = provider.server.join().expect("join local provider fixture");
+    let requests = network_fixture
+        .provider
+        .server
+        .join()
+        .expect("join local provider fixture");
     let output = String::from_utf8_lossy(&terminal_output);
     assert_eq!(status.code(), Some(130), "{output}");
     assert!(output.contains("Task state: cancelled"), "{output}");
@@ -421,7 +593,10 @@ fn terminal_sigint_cancels_full_access_host_process_group_before_another_model_r
         "cancellation must stop before another model request"
     );
     assert_eq!(
-        provider.premature_requests.load(Ordering::SeqCst),
+        network_fixture
+            .provider
+            .premature_requests
+            .load(Ordering::SeqCst),
         0,
         "the active provider monitor must see no request before confirmation is submitted"
     );
@@ -521,21 +696,41 @@ fn enable_terminal_interrupts(slave: &fs::File) -> io::Result<()> {
 }
 
 fn start_terminal_reader(master: &fs::File) -> Receiver<Vec<u8>> {
-    let mut reader = master.try_clone().expect("clone PTY master for output");
+    start_output_reader([
+        Box::new(master.try_clone().expect("clone PTY master for output")) as Box<dyn Read + Send>,
+    ])
+}
+
+fn start_child_output_reader(child: &mut Child) -> Receiver<Vec<u8>> {
+    let stdout = child.stdout.take().expect("capture CLI stdout");
+    let stderr = child.stderr.take().expect("capture CLI stderr");
+    start_output_reader([
+        Box::new(stdout) as Box<dyn Read + Send>,
+        Box::new(stderr) as Box<dyn Read + Send>,
+    ])
+}
+
+fn start_output_reader(
+    readers: impl IntoIterator<Item = Box<dyn Read + Send>>,
+) -> Receiver<Vec<u8>> {
     let (sender, receiver) = mpsc::channel();
-    thread::spawn(move || {
-        let mut buffer = [0_u8; 4096];
-        loop {
-            match reader.read(&mut buffer) {
-                Ok(0) | Err(_) => break,
-                Ok(length) => {
-                    if sender.send(buffer[..length].to_vec()).is_err() {
-                        break;
+    for mut reader in readers {
+        let sender = sender.clone();
+        thread::spawn(move || {
+            let mut buffer = [0_u8; 4096];
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(length) => {
+                        if sender.send(buffer[..length].to_vec()).is_err() {
+                            break;
+                        }
                     }
                 }
             }
-        }
-    });
+        });
+    }
+    drop(sender);
     receiver
 }
 
@@ -614,6 +809,56 @@ fn wait_for_exit(
             output.extend(bytes);
         }
     }
+}
+
+fn receive_output_until_closed(
+    receiver: &Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    timeout: Duration,
+) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "CLI output streams did not close before the timeout"
+        );
+        match receiver.recv_timeout(remaining) {
+            Ok(bytes) => output.extend(bytes),
+            Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                panic!("CLI output streams did not close before the timeout")
+            }
+        }
+    }
+}
+
+fn assert_no_host_process_side_effects(
+    host_access_listener: &TcpListener,
+    leader_pid_path: &Path,
+    descendant_pid_path: &Path,
+    observation_window: Duration,
+) {
+    let deadline = Instant::now() + observation_window;
+    while Instant::now() < deadline {
+        assert!(
+            !leader_pid_path.exists() && !descendant_pid_path.exists(),
+            "missing terminal must not create either host process PID marker"
+        );
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            accept_before(
+                host_access_listener,
+                remaining.min(Duration::from_millis(10))
+            )
+            .is_none(),
+            "missing terminal must not connect to the controlled host listener"
+        );
+    }
+    assert!(
+        !leader_pid_path.exists() && !descendant_pid_path.exists(),
+        "missing terminal must not create either host process PID marker"
+    );
 }
 
 enum ProviderCommand {
