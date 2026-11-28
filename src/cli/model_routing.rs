@@ -118,7 +118,8 @@ fn resolve_automatic_route(
     compatible_only: bool,
     create_revision_key: bool,
 ) -> Result<RouteResolution, String> {
-    let catalog = load_catalog(Some(&cache_path_for_user_settings(&paths.model)))?;
+    let catalog = load_catalog(Some(&cache_path_for_user_settings(&paths.model)))
+        .map_err(|error| error.to_string())?;
     let credentials = load_credentials(&paths.credentials)
         .map_err(|error| error.to_string())?
         .unwrap_or_else(CredentialStore::empty);
