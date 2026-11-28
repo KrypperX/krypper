@@ -117,8 +117,8 @@ fn set_permission_mode(
             "cannot find a user configuration directory; set XDG_CONFIG_HOME or HOME",
         );
     };
-    if let Err(message) = save_permission_mode(&paths.permission_mode, mode) {
-        return usage_error(error, Some("setup"), &message);
+    if let Err(cause) = save_permission_mode(&paths.permission_mode, mode) {
+        return usage_error(error, Some("setup"), &cause.to_string());
     }
     writeln!(
         output,
@@ -329,8 +329,8 @@ fn show_status(output: &mut dyn Write, json: bool) -> io::Result<i32> {
     let credential_count = credentials.as_ref().map_or(0, |store| store.len());
     let permission_mode = match load_permission_mode(&paths.permission_mode) {
         Ok(mode) => mode,
-        Err(message) => {
-            writeln!(output, "krypper setup: {message}")?;
+        Err(cause) => {
+            writeln!(output, "krypper setup: {cause}")?;
             return Ok(2);
         }
     };
