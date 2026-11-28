@@ -3,6 +3,7 @@ use super::{
     TaskCancellationSignal,
 };
 use crate::task_lifecycle::{TaskSession, TaskState, TurnActivitySummary, TurnOutcome, TurnState};
+#[cfg(target_os = "linux")]
 use crate::test_support::{lock_environment, RestoreEnvironmentVariable};
 use serde_json::{json, Value};
 use std::ffi::OsString;

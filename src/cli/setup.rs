@@ -8,10 +8,11 @@ use super::help::{usage_error, write_setup_help};
 use super::model_catalog::{cache_path_for_user_settings, load_catalog, CatalogOrigin};
 use super::model_routing::ModelRoutingService;
 use super::provider_profiles::load_provider_profiles;
+#[cfg(target_os = "linux")]
+use super::settings::load_offline_process_configuration;
 use super::settings::{
-    load_credentials, load_legacy_credentials, load_offline_process_configuration,
-    load_permission_mode, remove_settings, save_credentials,
-    save_credentials_after_approved_migration, save_model_configuration,
+    load_credentials, load_legacy_credentials, load_permission_mode, remove_settings,
+    save_credentials, save_credentials_after_approved_migration, save_model_configuration,
     save_offline_process_configuration, save_permission_mode, user_settings_paths,
     valid_credential, CredentialStore, CredentialStoreError, UserSettingsPaths,
 };
@@ -1274,7 +1275,9 @@ fn escape_terminal_text(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{lock_environment, RestoreEnvironmentVariable, TempDir};
+    use crate::test_support::TempDir;
+    #[cfg(target_os = "linux")]
+    use crate::test_support::{lock_environment, RestoreEnvironmentVariable};
     use std::fs;
 
     fn settings_paths(directory: &crate::test_support::TempDir) -> UserSettingsPaths {

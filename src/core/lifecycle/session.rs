@@ -399,6 +399,7 @@ impl TaskSession {
     }
 
     /// Returns the exact captured workspace root for trusted in-crate preflight checks.
+    #[cfg(target_os = "linux")]
     pub(crate) fn task_workspace_root(
         &self,
         task_id: Uuid,
