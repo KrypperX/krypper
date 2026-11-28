@@ -17,14 +17,18 @@ use tempfile::TempDir;
 
 const FULL_ACCESS_LEADER_PID: &str = "KRYPPER_TEST_FULL_ACCESS_LEADER_PID";
 const FULL_ACCESS_DESCENDANT_PID: &str = "KRYPPER_TEST_FULL_ACCESS_DESCENDANT_PID";
+const FULL_ACCESS_OUTSIDE_FILE: &str = "KRYPPER_TEST_FULL_ACCESS_OUTSIDE_FILE";
+const FULL_ACCESS_LOOPBACK_ADDRESS: &str = "KRYPPER_TEST_FULL_ACCESS_LOOPBACK_ADDRESS";
 const PTY_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[test]
 #[ignore = "spawned as a direct-argv Full Access fixture"]
 fn full_access_process_group_child_fixture() {
-    let (Ok(leader_path), Ok(descendant_path)) = (
+    let (Ok(leader_path), Ok(descendant_path), Ok(outside_file), Ok(loopback_address)) = (
         std::env::var(FULL_ACCESS_LEADER_PID),
         std::env::var(FULL_ACCESS_DESCENDANT_PID),
+        std::env::var(FULL_ACCESS_OUTSIDE_FILE),
+        std::env::var(FULL_ACCESS_LOOPBACK_ADDRESS),
     ) else {
         return;
     };
@@ -34,6 +38,19 @@ fn full_access_process_group_child_fixture() {
         .arg("30")
         .spawn()
         .expect("start same-group descendant");
+    let content = fs::read(outside_file).expect("read outside-workspace fixture canary");
+    let address = loopback_address
+        .parse()
+        .expect("parse controlled host-access listener address");
+    let mut listener = TcpStream::connect_timeout(&address, Duration::from_secs(5))
+        .expect("connect to controlled host-access listener");
+    listener
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .expect("bound the loopback fixture write");
+    listener
+        .write_all(&content)
+        .expect("send outside-workspace fixture bytes to the listener");
+    drop(listener);
     fs::write(descendant_path, descendant.id().to_string()).expect("write descendant pid");
     let _ = descendant.wait();
 }
@@ -43,6 +60,9 @@ fn terminal_sigint_cancels_full_access_host_process_group_before_another_model_r
     let root = TempDir::new().expect("create fixture root");
     let workspace = root.path().join("workspace");
     fs::create_dir(&workspace).expect("create workspace");
+    let outside_file = root.path().join("outside-workspace-canary.txt");
+    let synthetic_content = b"krypper-full-access-host-canary-7b13f0";
+    fs::write(&outside_file, synthetic_content).expect("write outside-workspace canary");
     let config_home = root.path().join("config-home");
     fs::create_dir(&config_home).expect("create configuration home");
     set_private_directory(&config_home);
@@ -57,6 +77,14 @@ fn terminal_sigint_cancels_full_access_host_process_group_before_another_model_r
     let provider_address = provider_listener
         .local_addr()
         .expect("read provider address");
+    let host_access_listener =
+        TcpListener::bind(("127.0.0.1", 0)).expect("bind controlled host-access listener");
+    host_access_listener
+        .set_nonblocking(true)
+        .expect("make controlled host-access listener nonblocking");
+    let host_access_address = host_access_listener
+        .local_addr()
+        .expect("read controlled host-access listener address");
     let profiles = json!({
         "version": 1,
         "profiles": [{
@@ -134,6 +162,11 @@ fn terminal_sigint_cancels_full_access_host_process_group_before_another_model_r
         .env("KRYPPER_PROVIDER_FIXTURE_API_KEY", "local-test-key")
         .env(FULL_ACCESS_LEADER_PID, &leader_pid_path)
         .env(FULL_ACCESS_DESCENDANT_PID, &descendant_pid_path)
+        .env(FULL_ACCESS_OUTSIDE_FILE, &outside_file)
+        .env(
+            FULL_ACCESS_LOOPBACK_ADDRESS,
+            host_access_address.to_string(),
+        )
         .stdin(Stdio::from(
             slave.try_clone().expect("clone PTY slave for stdin"),
         ))
@@ -184,6 +217,18 @@ fn terminal_sigint_cancels_full_access_host_process_group_before_another_model_r
     drained_receiver
         .recv_timeout(PTY_READ_TIMEOUT)
         .expect("drain any provider request queued before confirmation");
+    assert!(
+        !leader_pid_path.exists() && !descendant_pid_path.exists(),
+        "the host process fixture must not create PID markers before confirmation"
+    );
+    assert!(
+        accept_before(&host_access_listener, Duration::from_millis(150)).is_none(),
+        "the host process fixture must not connect to the controlled loopback listener before confirmation"
+    );
+    assert!(
+        !leader_pid_path.exists() && !descendant_pid_path.exists(),
+        "the host process fixture must remain unstarted while confirmation is pending"
+    );
     let mut terminal = master.try_clone().expect("clone PTY master for input");
     terminal.write_all(b"yes\n").expect("confirm Full Access");
     terminal.flush().expect("flush Full Access confirmation");
@@ -202,6 +247,12 @@ fn terminal_sigint_cancels_full_access_host_process_group_before_another_model_r
         &mut child.child,
         &output_receiver,
         &mut terminal_output,
+    );
+    let observed_host_payload = receive_loopback_payload(&host_access_listener, PTY_READ_TIMEOUT)
+        .expect("host process fixture should send the outside-file bytes after confirmation");
+    assert!(
+        observed_host_payload == synthetic_content,
+        "the controlled listener should receive exactly the outside-file bytes"
     );
 
     terminal.write_all(&[0x03]).expect("send terminal Ctrl-C");
@@ -245,6 +296,18 @@ fn terminal_sigint_cancels_full_access_host_process_group_before_another_model_r
         "the active provider monitor must see no request before confirmation is submitted"
     );
     assert!(String::from_utf8_lossy(&requests[0]).contains("full_access_host_process"));
+    assert!(
+        !terminal_output
+            .windows(synthetic_content.len())
+            .any(|window| window == synthetic_content),
+        "synthetic outside-file contents must not be printed to child stdout"
+    );
+    assert!(
+        requests.iter().all(|request| !request
+            .windows(synthetic_content.len())
+            .any(|window| window == synthetic_content)),
+        "synthetic outside-file contents must not be sent in model requests"
+    );
 
     let leader_pid = read_pid(&leader_pid_path);
     let descendant_pid = read_pid(&descendant_pid_path);
@@ -540,6 +603,29 @@ fn accept_before(listener: &TcpListener, timeout: Duration) -> Option<TcpStream>
             Err(_) => return None,
         }
     }
+}
+
+fn receive_loopback_payload(listener: &TcpListener, timeout: Duration) -> io::Result<Vec<u8>> {
+    const MAX_PAYLOAD_BYTES: usize = 64 * 1024;
+
+    let stream = accept_before(listener, timeout).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            "no connection reached the controlled loopback listener",
+        )
+    })?;
+    stream.set_read_timeout(Some(timeout))?;
+    let mut payload = Vec::new();
+    stream
+        .take((MAX_PAYLOAD_BYTES + 1) as u64)
+        .read_to_end(&mut payload)?;
+    if payload.len() > MAX_PAYLOAD_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "loopback fixture payload exceeded its read bound",
+        ));
+    }
+    Ok(payload)
 }
 
 fn read_http_request(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
