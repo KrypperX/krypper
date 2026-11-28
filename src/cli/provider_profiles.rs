@@ -1,6 +1,9 @@
 //! Trusted, per-user provider profile definitions.
 
-use super::settings::{ensure_private_permissions, open_private_file};
+use super::settings::{
+    ensure_private_permissions_with_source, open_private_file, PrivatePermissionsError,
+    SettingsIoAction,
+};
 #[cfg(test)]
 use super::settings::{
     load_credentials, remove_file_if_present, save_credentials, write_private_file, CredentialStore,
@@ -11,9 +14,10 @@ use crate::brain::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::fmt;
 use std::fs;
 use std::io::{self, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const MAX_PROVIDER_PROFILE_BYTES: u64 = 64 * 1024;
 const MAX_PROVIDER_PROFILES: usize = 16;
@@ -97,79 +101,128 @@ struct ProviderProfileDocument {
     profiles: Vec<ProviderProfile>,
 }
 
-pub(super) fn load_provider_profiles(path: &Path) -> Result<Vec<ProviderProfile>, String> {
+#[derive(Debug)]
+pub(super) enum ProviderProfilesLoadError {
+    Io {
+        action: SettingsIoAction,
+        path: PathBuf,
+        source: io::Error,
+    },
+    Permissions(PrivatePermissionsError),
+    NotRegularFile(PathBuf),
+    TooLarge(PathBuf),
+    InvalidJson(PathBuf),
+    UnsupportedVersion(PathBuf),
+    InvalidProfile(PathBuf),
+}
+
+impl ProviderProfilesLoadError {
+    fn io(action: SettingsIoAction, path: &Path, source: io::Error) -> Self {
+        Self::Io {
+            action,
+            path: path.to_owned(),
+            source,
+        }
+    }
+}
+
+impl fmt::Display for ProviderProfilesLoadError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io {
+                action,
+                path,
+                source,
+            } => write!(
+                formatter,
+                "cannot {} provider profiles '{}': {}",
+                action.verb(),
+                path.display(),
+                source.kind()
+            ),
+            Self::Permissions(error) => fmt::Display::fmt(error, formatter),
+            Self::NotRegularFile(path) => write!(
+                formatter,
+                "provider profiles '{}' is not a regular file",
+                path.display()
+            ),
+            Self::TooLarge(path) => write!(
+                formatter,
+                "provider profiles '{}' exceeds {MAX_PROVIDER_PROFILE_BYTES} bytes",
+                path.display()
+            ),
+            Self::InvalidJson(path) => write!(
+                formatter,
+                "provider profiles '{}' is invalid JSON or has unsupported fields",
+                path.display()
+            ),
+            Self::UnsupportedVersion(path) => write!(
+                formatter,
+                "provider profiles '{}' has an unsupported version",
+                path.display()
+            ),
+            Self::InvalidProfile(path) => write!(
+                formatter,
+                "provider profiles '{}' contains an invalid profile",
+                path.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ProviderProfilesLoadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io { source, .. } => Some(source),
+            Self::Permissions(source) => Some(source),
+            _ => None,
+        }
+    }
+}
+
+pub(super) fn load_provider_profiles(
+    path: &Path,
+) -> Result<Vec<ProviderProfile>, ProviderProfilesLoadError> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(cause) if cause.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(cause) => {
-            return Err(format!(
-                "cannot inspect provider profiles '{}': {}",
-                path.display(),
-                cause.kind()
+            return Err(ProviderProfilesLoadError::io(
+                SettingsIoAction::Inspect,
+                path,
+                cause,
             ))
         }
     };
     if !metadata.file_type().is_file() {
-        return Err(format!(
-            "provider profiles '{}' is not a regular file",
-            path.display()
-        ));
+        return Err(ProviderProfilesLoadError::NotRegularFile(path.to_owned()));
     }
-    let file = open_private_file(path).map_err(|cause| {
-        format!(
-            "cannot read provider profiles '{}': {}",
-            path.display(),
-            cause.kind()
-        )
-    })?;
-    let opened_metadata = file.metadata().map_err(|cause| {
-        format!(
-            "cannot inspect provider profiles '{}': {}",
-            path.display(),
-            cause.kind()
-        )
-    })?;
+    let file = open_private_file(path)
+        .map_err(|cause| ProviderProfilesLoadError::io(SettingsIoAction::Read, path, cause))?;
+    let opened_metadata = file
+        .metadata()
+        .map_err(|cause| ProviderProfilesLoadError::io(SettingsIoAction::Inspect, path, cause))?;
     if !opened_metadata.is_file() {
-        return Err(format!(
-            "provider profiles '{}' is not a regular file",
-            path.display()
-        ));
+        return Err(ProviderProfilesLoadError::NotRegularFile(path.to_owned()));
     }
-    ensure_private_permissions(path, &opened_metadata, "provider profiles")?;
+    ensure_private_permissions_with_source(path, &opened_metadata, "provider profiles")
+        .map_err(ProviderProfilesLoadError::Permissions)?;
     let mut bytes = Vec::new();
     file.take(MAX_PROVIDER_PROFILE_BYTES + 1)
         .read_to_end(&mut bytes)
-        .map_err(|cause| {
-            format!(
-                "cannot read provider profiles '{}': {}",
-                path.display(),
-                cause.kind()
-            )
-        })?;
+        .map_err(|cause| ProviderProfilesLoadError::io(SettingsIoAction::Read, path, cause))?;
     if bytes.len() as u64 > MAX_PROVIDER_PROFILE_BYTES {
-        return Err(format!(
-            "provider profiles '{}' exceeds {MAX_PROVIDER_PROFILE_BYTES} bytes",
-            path.display()
-        ));
+        return Err(ProviderProfilesLoadError::TooLarge(path.to_owned()));
     }
-    let document: ProviderProfileDocument = serde_json::from_slice(&bytes).map_err(|_| {
-        format!(
-            "provider profiles '{}' is invalid JSON or has unsupported fields",
-            path.display()
-        )
-    })?;
+    let document: ProviderProfileDocument = serde_json::from_slice(&bytes)
+        .map_err(|_| ProviderProfilesLoadError::InvalidJson(path.to_owned()))?;
     if document.version != 1 {
-        return Err(format!(
-            "provider profiles '{}' has an unsupported version",
-            path.display()
+        return Err(ProviderProfilesLoadError::UnsupportedVersion(
+            path.to_owned(),
         ));
     }
-    validate_profiles(&document.profiles).map_err(|_| {
-        format!(
-            "provider profiles '{}' contains an invalid profile",
-            path.display()
-        )
-    })?;
+    validate_profiles(&document.profiles)
+        .map_err(|_| ProviderProfilesLoadError::InvalidProfile(path.to_owned()))?;
     let mut profiles = document.profiles;
     profiles.sort_by(|left, right| left.id.cmp(&right.id));
     Ok(profiles)
@@ -203,7 +256,7 @@ pub(super) fn save_provider_profiles(
 #[cfg(test)]
 pub(super) fn add_profile(path: &Path, profile: ProviderProfile) -> Result<(), String> {
     validate_profile(&profile).map_err(str::to_owned)?;
-    let mut profiles = load_provider_profiles(path)?;
+    let mut profiles = load_provider_profiles(path).map_err(|error| error.to_string())?;
     if profiles.len() >= MAX_PROVIDER_PROFILES {
         return Err(format!(
             "at most {MAX_PROVIDER_PROFILES} profiles are supported"
@@ -219,7 +272,7 @@ pub(super) fn add_profile(path: &Path, profile: ProviderProfile) -> Result<(), S
 #[cfg(test)]
 pub(super) fn replace_profile(path: &Path, profile: ProviderProfile) -> Result<(), String> {
     validate_profile(&profile).map_err(str::to_owned)?;
-    let mut profiles = load_provider_profiles(path)?;
+    let mut profiles = load_provider_profiles(path).map_err(|error| error.to_string())?;
     let Some(existing) = profiles.iter_mut().find(|entry| entry.id == profile.id) else {
         return Err("provider profile ID does not exist".to_owned());
     };
@@ -229,7 +282,7 @@ pub(super) fn replace_profile(path: &Path, profile: ProviderProfile) -> Result<(
 
 #[cfg(test)]
 pub(super) fn set_profile_enabled(path: &Path, id: &str, enabled: bool) -> Result<(), String> {
-    let mut profiles = load_provider_profiles(path)?;
+    let mut profiles = load_provider_profiles(path).map_err(|error| error.to_string())?;
     let Some(profile) = profiles.iter_mut().find(|profile| profile.id == id) else {
         return Err("provider profile ID does not exist".to_owned());
     };
@@ -243,7 +296,7 @@ pub(super) fn remove_profile(
     credential_path: &Path,
     id: &str,
 ) -> Result<(), String> {
-    let mut profiles = load_provider_profiles(profile_path)?;
+    let mut profiles = load_provider_profiles(profile_path).map_err(|error| error.to_string())?;
     let Some(index) = profiles.iter().position(|profile| profile.id == id) else {
         return Err("provider profile ID does not exist".to_owned());
     };
@@ -401,13 +454,24 @@ mod tests {
             ],
         )
         .unwrap_err();
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(
+        write_private_file(
             &path,
             br#"{"version":1,"profiles":[],"arbitrary_headers":{}}"#,
+            "provider profiles",
         )
         .unwrap();
-        assert!(load_provider_profiles(&path).is_err());
+        let error = load_provider_profiles(&path).unwrap_err();
+        assert!(matches!(
+            &error,
+            ProviderProfilesLoadError::InvalidJson(error_path) if error_path == &path
+        ));
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "provider profiles '{}' is invalid JSON or has unsupported fields",
+                path.display()
+            )
+        );
         assert!(validate_profile(&compatible_profile(
             "unsafe",
             "https://user:pass@example.invalid/v1/chat/completions"
@@ -418,6 +482,129 @@ mod tests {
             "https://example.invalid/v1/chat/completions?key=secret"
         ))
         .is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provider_profile_io_errors_preserve_the_source() {
+        let directory = TempDir::new();
+        let regular_file = directory.path().join("not-a-directory");
+        fs::write(&regular_file, b"file").unwrap();
+        let path = regular_file.join("provider-profiles.json");
+
+        let error = load_provider_profiles(&path).unwrap_err();
+        assert!(matches!(
+            &error,
+            ProviderProfilesLoadError::Io {
+                action: SettingsIoAction::Inspect,
+                path: error_path,
+                source,
+            } if error_path == &path && source.kind() == io::ErrorKind::NotADirectory
+        ));
+        assert!(std::error::Error::source(&error).is_some());
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "cannot inspect provider profiles '{}': {}",
+                path.display(),
+                io::ErrorKind::NotADirectory
+            )
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provider_profile_parent_inspection_errors_preserve_the_source() {
+        use std::os::unix::fs::symlink;
+
+        let directory = TempDir::new();
+        let actual_directory = directory.path().join("actual");
+        fs::create_dir(&actual_directory).unwrap();
+        let actual_path = actual_directory.join("provider-profiles.json");
+        save_provider_profiles(
+            &actual_path,
+            &[compatible_profile(
+                "test",
+                "https://test.example/v1/chat/completions",
+            )],
+        )
+        .unwrap();
+        let parent_alias = directory.path().join("alias");
+        symlink(&actual_directory, &parent_alias).unwrap();
+        let path = parent_alias.join("provider-profiles.json");
+
+        let error = load_provider_profiles(&path).unwrap_err();
+        assert!(matches!(
+            &error,
+            ProviderProfilesLoadError::Permissions(PrivatePermissionsError::Io {
+                action: "cannot inspect user configuration directory",
+                path: error_path,
+                ..
+            }) if error_path == &parent_alias
+        ));
+        let permission_source = std::error::Error::source(&error).unwrap();
+        assert!(std::error::Error::source(permission_source)
+            .unwrap()
+            .downcast_ref::<io::Error>()
+            .is_some());
+    }
+
+    #[test]
+    fn provider_profile_load_errors_classify_invalid_and_bounded_inputs() {
+        let directory = TempDir::new();
+        let missing_path = directory.path().join("missing.json");
+        assert!(load_provider_profiles(&missing_path).unwrap().is_empty());
+
+        let directory_path = directory.path().join("profiles-directory");
+        fs::create_dir(&directory_path).unwrap();
+        assert!(matches!(
+            load_provider_profiles(&directory_path),
+            Err(ProviderProfilesLoadError::NotRegularFile(error_path))
+                if error_path == directory_path
+        ));
+
+        let oversized_path = directory.path().join("oversized.json");
+        write_private_file(
+            &oversized_path,
+            &vec![b' '; MAX_PROVIDER_PROFILE_BYTES as usize + 1],
+            "provider profiles",
+        )
+        .unwrap();
+        assert!(matches!(
+            load_provider_profiles(&oversized_path),
+            Err(ProviderProfilesLoadError::TooLarge(error_path))
+                if error_path == oversized_path
+        ));
+
+        let version_path = directory.path().join("unsupported-version.json");
+        write_private_file(
+            &version_path,
+            br#"{"version":2,"profiles":[]}"#,
+            "provider profiles",
+        )
+        .unwrap();
+        assert!(matches!(
+            load_provider_profiles(&version_path),
+            Err(ProviderProfilesLoadError::UnsupportedVersion(error_path))
+                if error_path == version_path
+        ));
+
+        let invalid_profile_path = directory.path().join("invalid-profile.json");
+        let invalid_profile = compatible_profile(
+            "invalid",
+            "https://user:pass@example.invalid/v1/chat/completions",
+        );
+        let bytes = serde_json::to_vec(&ProviderProfileDocument {
+            version: 1,
+            profiles: vec![invalid_profile],
+        })
+        .unwrap();
+        write_private_file(&invalid_profile_path, &bytes, "provider profiles").unwrap();
+        assert!(matches!(
+            load_provider_profiles(&invalid_profile_path),
+            Err(ProviderProfilesLoadError::InvalidProfile(error_path))
+                if error_path == invalid_profile_path
+        ));
     }
 
     #[test]
