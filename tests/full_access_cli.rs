@@ -3,7 +3,7 @@
 use serde_json::{json, Value};
 use std::fs;
 use std::io::{self, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -55,36 +55,21 @@ fn full_access_process_group_child_fixture() {
     let _ = descendant.wait();
 }
 
-#[test]
-fn terminal_sigint_cancels_full_access_host_process_group_before_another_model_request() {
-    let root = TempDir::new().expect("create fixture root");
-    let workspace = root.path().join("workspace");
-    fs::create_dir(&workspace).expect("create workspace");
-    let outside_file = root.path().join("outside-workspace-canary.txt");
-    let synthetic_content = b"krypper-full-access-host-canary-7b13f0";
-    fs::write(&outside_file, synthetic_content).expect("write outside-workspace canary");
-    let config_home = root.path().join("config-home");
-    fs::create_dir(&config_home).expect("create configuration home");
-    set_private_directory(&config_home);
+fn bind_loopback_listener() -> (TcpListener, SocketAddr) {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback fixture");
+    listener
+        .set_nonblocking(true)
+        .expect("make loopback listener nonblocking");
+    let address = listener
+        .local_addr()
+        .expect("read loopback fixture address");
+    (listener, address)
+}
+
+fn write_fixture_provider_profile(config_home: &Path, provider_address: SocketAddr) {
     let profile_directory = config_home.join("krypper");
     fs::create_dir_all(&profile_directory).expect("create per-user settings directory");
     set_private_directory(&profile_directory);
-
-    let provider_listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind provider fixture");
-    provider_listener
-        .set_nonblocking(true)
-        .expect("make provider listener nonblocking");
-    let provider_address = provider_listener
-        .local_addr()
-        .expect("read provider address");
-    let host_access_listener =
-        TcpListener::bind(("127.0.0.1", 0)).expect("bind controlled host-access listener");
-    host_access_listener
-        .set_nonblocking(true)
-        .expect("make controlled host-access listener nonblocking");
-    let host_access_address = host_access_listener
-        .local_addr()
-        .expect("read controlled host-access listener address");
     let profiles = json!({
         "version": 1,
         "profiles": [{
@@ -103,9 +88,11 @@ fn terminal_sigint_cancels_full_access_host_process_group_before_another_model_r
     )
     .expect("write provider profile");
     set_private_file(&profiles_path);
+}
 
+fn full_access_action_arguments(workspace: &Path) -> Value {
     let helper_executable = std::env::current_exe().expect("locate process fixture executable");
-    let action_arguments = json!({
+    json!({
         "executable": helper_executable,
         "argv": [
             "--ignored",
@@ -114,7 +101,200 @@ fn terminal_sigint_cancels_full_access_host_process_group_before_another_model_r
             "--nocapture"
         ],
         "working_directory": workspace
-    });
+    })
+}
+
+struct FullAccessCliFixture<'a> {
+    root: &'a TempDir,
+    workspace: &'a Path,
+    config_home: &'a Path,
+    leader_pid_path: &'a Path,
+    descendant_pid_path: &'a Path,
+    outside_file: &'a Path,
+    host_access_address: SocketAddr,
+}
+
+fn spawn_full_access_cli(
+    fixture: &FullAccessCliFixture<'_>,
+    goal: &str,
+    slave: &fs::File,
+) -> Child {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_krypper"));
+    command
+        .args(["task", "--goal", goal, "--max-actions", "2", "--workspace"])
+        .arg(fixture.workspace)
+        .args([
+            "--model",
+            "fixture-model",
+            "--provider",
+            "fixture",
+            "--permission-mode",
+            "full-access",
+            "--no-config",
+        ])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", fixture.root.path().join("home"))
+        .env("USERPROFILE", fixture.root.path().join("home"))
+        .env("XDG_CONFIG_HOME", fixture.config_home)
+        .env(
+            "KRYPPER_CONFIG",
+            fixture.root.path().join("unused-model-config.toml"),
+        )
+        .env("KRYPPER_PROVIDER_FIXTURE_API_KEY", "local-test-key")
+        .env(FULL_ACCESS_LEADER_PID, fixture.leader_pid_path)
+        .env(FULL_ACCESS_DESCENDANT_PID, fixture.descendant_pid_path)
+        .env(FULL_ACCESS_OUTSIDE_FILE, fixture.outside_file)
+        .env(
+            FULL_ACCESS_LOOPBACK_ADDRESS,
+            fixture.host_access_address.to_string(),
+        )
+        .stdin(Stdio::from(
+            slave.try_clone().expect("clone PTY slave for stdin"),
+        ))
+        .stdout(Stdio::from(
+            slave.try_clone().expect("clone PTY slave for stdout"),
+        ))
+        .stderr(Stdio::from(
+            slave.try_clone().expect("clone PTY slave for stderr"),
+        ));
+    // The CLI needs a controlling terminal for confirmation and terminal signals.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            if libc::ioctl(0, libc::TIOCSCTTY as libc::c_ulong, 0) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            if libc::tcsetpgrp(0, libc::getpgrp()) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    command.spawn().expect("start Krypper in a controlling PTY")
+}
+
+#[test]
+fn declining_full_access_does_not_start_model_or_host_process() {
+    let root = TempDir::new().expect("create fixture root");
+    let workspace = root.path().join("workspace");
+    fs::create_dir(&workspace).expect("create workspace");
+    let outside_file = root.path().join("outside-workspace-canary.txt");
+    fs::write(&outside_file, b"krypper-full-access-decline-canary")
+        .expect("write outside-workspace canary");
+    let config_home = root.path().join("config-home");
+    fs::create_dir(&config_home).expect("create configuration home");
+    set_private_directory(&config_home);
+
+    let (provider_listener, provider_address) = bind_loopback_listener();
+    let (host_access_listener, host_access_address) = bind_loopback_listener();
+    write_fixture_provider_profile(&config_home, provider_address);
+    let action_arguments = full_access_action_arguments(&workspace);
+    let confirmation_submitted = Arc::new(AtomicBool::new(false));
+    let provider = start_provider_server(
+        provider_listener,
+        action_arguments,
+        Arc::clone(&confirmation_submitted),
+    );
+    provider
+        .ready
+        .recv_timeout(PTY_READ_TIMEOUT)
+        .expect("start provider request monitor before the CLI");
+
+    let (master, slave) = open_pty();
+    let leader_pid_path = workspace.join("leader.pid");
+    let descendant_pid_path = workspace.join("descendant.pid");
+    let cli_fixture = FullAccessCliFixture {
+        root: &root,
+        workspace: &workspace,
+        config_home: &config_home,
+        leader_pid_path: &leader_pid_path,
+        descendant_pid_path: &descendant_pid_path,
+        outside_file: &outside_file,
+        host_access_address,
+    };
+    let child = spawn_full_access_cli(
+        &cli_fixture,
+        "Decline Full Access and ensure no task starts",
+        &slave,
+    );
+    drop(slave);
+    let mut child = CliChildGuard::new(child, leader_pid_path.clone());
+    let output_receiver = start_terminal_reader(&master);
+
+    let mut terminal_output = Vec::new();
+    receive_until(
+        &output_receiver,
+        &mut terminal_output,
+        "Confirm Full Access for this task only?",
+        PTY_READ_TIMEOUT,
+    );
+    assert!(
+        String::from_utf8_lossy(&terminal_output).contains("no process sandbox"),
+        "the trusted terminal should describe Full Access risk before confirmation"
+    );
+    let mut terminal = master.try_clone().expect("clone PTY master for input");
+    terminal.write_all(b"no\n").expect("decline Full Access");
+    terminal.flush().expect("flush Full Access decline");
+
+    let status = wait_for_exit(
+        &mut child.child,
+        &output_receiver,
+        &mut terminal_output,
+        PTY_READ_TIMEOUT,
+    );
+    drop(terminal);
+    drop(master);
+    terminal_output.extend(output_receiver.into_iter().flatten());
+
+    provider
+        .control
+        .send(ProviderCommand::Stop)
+        .expect("stop provider request monitor");
+    let requests = provider.server.join().expect("join local provider fixture");
+    let output = String::from_utf8_lossy(&terminal_output);
+    assert!(
+        !status.success(),
+        "declining Full Access must fail the task"
+    );
+    assert!(
+        output.contains("Full Access was not confirmed; no task was started"),
+        "declining Full Access should explain that the task was not started: {output}"
+    );
+    assert!(requests.is_empty(), "declining must send no model request");
+    assert_eq!(
+        provider.premature_requests.load(Ordering::SeqCst),
+        0,
+        "the model provider must not receive a request before confirmation"
+    );
+    assert!(
+        !leader_pid_path.exists() && !descendant_pid_path.exists(),
+        "declining must not start the host process fixture"
+    );
+    assert!(
+        accept_before(&host_access_listener, Duration::from_millis(150)).is_none(),
+        "declining must not connect to the controlled host listener"
+    );
+}
+
+#[test]
+fn terminal_sigint_cancels_full_access_host_process_group_before_another_model_request() {
+    let root = TempDir::new().expect("create fixture root");
+    let workspace = root.path().join("workspace");
+    fs::create_dir(&workspace).expect("create workspace");
+    let outside_file = root.path().join("outside-workspace-canary.txt");
+    let synthetic_content = b"krypper-full-access-host-canary-7b13f0";
+    fs::write(&outside_file, synthetic_content).expect("write outside-workspace canary");
+    let config_home = root.path().join("config-home");
+    fs::create_dir(&config_home).expect("create configuration home");
+    set_private_directory(&config_home);
+
+    let (provider_listener, provider_address) = bind_loopback_listener();
+    let (host_access_listener, host_access_address) = bind_loopback_listener();
+    write_fixture_provider_profile(&config_home, provider_address);
+    let action_arguments = full_access_action_arguments(&workspace);
     let confirmation_submitted = Arc::new(AtomicBool::new(false));
     let provider = start_provider_server(
         provider_listener,
@@ -130,71 +310,21 @@ fn terminal_sigint_cancels_full_access_host_process_group_before_another_model_r
     enable_terminal_interrupts(&slave).expect("enable terminal Ctrl-C");
     let leader_pid_path = workspace.join("leader.pid");
     let descendant_pid_path = workspace.join("descendant.pid");
-    let mut command = Command::new(env!("CARGO_BIN_EXE_krypper"));
-    command
-        .args([
-            "task",
-            "--goal",
-            "Run one direct-argv process and cancel it from the terminal",
-            "--max-actions",
-            "2",
-            "--workspace",
-        ])
-        .arg(&workspace)
-        .args([
-            "--model",
-            "fixture-model",
-            "--provider",
-            "fixture",
-            "--permission-mode",
-            "full-access",
-            "--no-config",
-        ])
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env("HOME", root.path().join("home"))
-        .env("USERPROFILE", root.path().join("home"))
-        .env("XDG_CONFIG_HOME", &config_home)
-        .env(
-            "KRYPPER_CONFIG",
-            root.path().join("unused-model-config.toml"),
-        )
-        .env("KRYPPER_PROVIDER_FIXTURE_API_KEY", "local-test-key")
-        .env(FULL_ACCESS_LEADER_PID, &leader_pid_path)
-        .env(FULL_ACCESS_DESCENDANT_PID, &descendant_pid_path)
-        .env(FULL_ACCESS_OUTSIDE_FILE, &outside_file)
-        .env(
-            FULL_ACCESS_LOOPBACK_ADDRESS,
-            host_access_address.to_string(),
-        )
-        .stdin(Stdio::from(
-            slave.try_clone().expect("clone PTY slave for stdin"),
-        ))
-        .stdout(Stdio::from(
-            slave.try_clone().expect("clone PTY slave for stdout"),
-        ))
-        .stderr(Stdio::from(
-            slave.try_clone().expect("clone PTY slave for stderr"),
-        ));
-    // The CLI must own a new session and controlling terminal so a byte-level Ctrl-C
-    // sent to the PTY becomes SIGINT for the foreground CLI process group.
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(io::Error::last_os_error());
-            }
-            if libc::ioctl(0, libc::TIOCSCTTY as libc::c_ulong, 0) == -1 {
-                return Err(io::Error::last_os_error());
-            }
-            if libc::tcsetpgrp(0, libc::getpgrp()) == -1 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
+    let cli_fixture = FullAccessCliFixture {
+        root: &root,
+        workspace: &workspace,
+        config_home: &config_home,
+        leader_pid_path: &leader_pid_path,
+        descendant_pid_path: &descendant_pid_path,
+        outside_file: &outside_file,
+        host_access_address,
+    };
+    let child = spawn_full_access_cli(
+        &cli_fixture,
+        "Run one direct-argv process and cancel it from the terminal",
+        &slave,
+    );
     drop(slave);
-    let child = command.spawn().expect("start Krypper in a controlling PTY");
-    drop(command);
     let mut child = CliChildGuard::new(child, leader_pid_path.clone());
     let output_receiver = start_terminal_reader(&master);
 
