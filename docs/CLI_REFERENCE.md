@@ -93,8 +93,11 @@ does not install files. The configuration ignores `KRYPPER_CONFIG` and
 workspace contents. The task workspace and both host roots must be disjoint,
 and neither host root may overlap the private per-user settings directory that
 stores credentials and provider profiles. The private settings file must also
-be outside the selected workspace. Mounted toolchain and registry contents are
-read-only but remain readable by sandboxed Cargo/Rustc and model-controlled
+be outside the selected workspace. Bind mounts beneath the workspace, either
+trusted root, or private settings directory are included in these checks. Setup
+and task execution fail closed if Linux mount metadata cannot establish whether
+paths overlap. Mounted toolchain and registry contents are read-only but remain
+readable by sandboxed Cargo/Rustc and model-controlled
 build code; do not put secrets in those roots. A
 workspace rooted at the user's home directory is therefore rejected when it
 contains that settings file. `krypper setup --status` reports whether the

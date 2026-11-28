@@ -4,6 +4,8 @@
 //! to the fixed offline Cargo sandbox crate while preserving existing imports.
 
 mod host;
+#[cfg(target_os = "linux")]
+mod mount_info;
 mod outcome;
 mod policy;
 mod result;
@@ -29,6 +31,24 @@ pub use self::policy::{OfflineCargoPolicy, OfflineCargoPolicyError};
 pub use self::result::ProcessResult;
 pub(crate) use self::supervisor::{run, run_read_only_exec};
 pub use krypper_sandbox::{OfflineReadOnlyExecRequest, SandboxExecutable};
+
+/// Check whether two paths overlap directly or through a Linux bind-mount alias.
+///
+/// Offline process roots and private settings are host-owned paths; on Linux their
+/// disjointness must account for mounts visible to the current process.
+pub(crate) fn paths_overlap_with_mounts(
+    left: &std::path::Path,
+    right: &std::path::Path,
+) -> Result<bool, &'static str> {
+    #[cfg(target_os = "linux")]
+    {
+        mount_info::paths_overlap_with_mounts(left, right)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(left == right || left.starts_with(right) || right.starts_with(left))
+    }
+}
 
 #[cfg(all(test, target_os = "linux"))]
 use self::policy::cargo_command_args;

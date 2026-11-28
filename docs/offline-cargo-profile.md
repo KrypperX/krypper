@@ -88,7 +88,10 @@ and stores existing roots without installing anything. The setting is
 independent of workspace files and `KRYPPER_CONFIG`; the captured toolchain,
 registry and task workspace must be disjoint, and neither host root may overlap
 the private per-user settings directory that stores credentials and provider
-profiles. The private settings file must be outside the selected workspace. A
+profiles. The private settings file must be outside the selected workspace.
+Bind mounts visible beneath the workspace, either trusted root, or private
+settings directory are included in these checks. Setup and task execution fail
+closed if Linux mount metadata cannot establish whether paths overlap. A
 workspace rooted at the user's home
 directory is rejected when it contains that settings file. `krypper setup
 --status` reports profile configuration and describes the settings-directory

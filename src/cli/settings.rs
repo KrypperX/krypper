@@ -554,13 +554,25 @@ pub(super) fn prepare_offline_process_configuration(
         .map_err(|error| format!("cannot resolve toolchain root: {}", error.kind()))?;
     let registry_root = std::fs::canonicalize(registry_root)
         .map_err(|error| format!("cannot resolve offline registry root: {}", error.kind()))?;
-    if path_roots_overlap(&toolchain_root, &registry_root) {
+    if crate::tools::process::paths_overlap_with_mounts(&toolchain_root, &registry_root)
+        .map_err(|_| "cannot verify offline process roots are disjoint".to_owned())?
+    {
         return Err("toolchain and offline registry roots must be disjoint".to_owned());
     }
     let private_settings_directory =
         resolve_private_settings_directory(private_settings_directory)?;
-    if path_roots_overlap(&toolchain_root, &private_settings_directory)
-        || path_roots_overlap(&registry_root, &private_settings_directory)
+    if crate::tools::process::paths_overlap_with_mounts(
+        &toolchain_root,
+        &private_settings_directory,
+    )
+    .map_err(|_| "cannot verify offline roots are disjoint from private user settings".to_owned())?
+        || crate::tools::process::paths_overlap_with_mounts(
+            &registry_root,
+            &private_settings_directory,
+        )
+        .map_err(|_| {
+            "cannot verify offline roots are disjoint from private user settings".to_owned()
+        })?
     {
         return Err(
             "toolchain and offline registry roots must be disjoint from the private user settings directory"
@@ -753,10 +765,6 @@ pub(super) fn save_offline_process_configuration(
     let contents = serde_json::to_vec(&settings)
         .map_err(|_| "offline process settings could not be encoded".to_owned())?;
     write_private_file(path, &contents, "offline process settings")
-}
-
-fn path_roots_overlap(left: &Path, right: &Path) -> bool {
-    left == right || left.starts_with(right) || right.starts_with(left)
 }
 
 /// Load the permission preference from its dedicated per-user file.

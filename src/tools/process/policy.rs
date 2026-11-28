@@ -190,7 +190,9 @@ impl OfflineCargoPolicy {
         self.validate_captured_workspace_is_disjoint(workspace)?;
         let settings_path = std::fs::canonicalize(settings_path)
             .map_err(|_| "offline process settings are unavailable")?;
-        if settings_path.starts_with(workspace.path()) {
+        if crate::tools::process::paths_overlap_with_mounts(workspace.path(), &settings_path)
+            .map_err(|_| "offline process path disjointness cannot be verified")?
+        {
             return Err("offline process settings must be outside the task workspace");
         }
         Ok(())
@@ -345,9 +347,7 @@ fn captured_roots_overlap(
     let left_path = left.path();
     let right_path = right.path();
     Ok(left_identity == right_identity
-        || left_path == right_path
-        || left_path.starts_with(right_path)
-        || right_path.starts_with(left_path))
+        || crate::tools::process::paths_overlap_with_mounts(left_path, right_path)?)
 }
 
 // No outcome except `Exited(0)` with complete output and confirmed cleanup is success.
