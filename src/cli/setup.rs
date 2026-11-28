@@ -9,10 +9,11 @@ use super::model_catalog::{cache_path_for_user_settings, load_catalog, CatalogOr
 use super::model_routing::ModelRoutingService;
 use super::provider_profiles::load_provider_profiles;
 use super::settings::{
-    load_credentials, load_legacy_credentials, load_permission_mode, remove_settings,
-    save_credentials, save_credentials_after_approved_migration, save_model_configuration,
-    save_permission_mode, user_settings_paths, valid_credential, CredentialStore,
-    CredentialStoreError, UserSettingsPaths,
+    load_credentials, load_legacy_credentials, load_offline_process_configuration,
+    load_permission_mode, remove_settings, save_credentials,
+    save_credentials_after_approved_migration, save_model_configuration,
+    save_offline_process_configuration, save_permission_mode, user_settings_paths,
+    valid_credential, CredentialStore, CredentialStoreError, UserSettingsPaths,
 };
 use super::setup_probe::test_connection;
 use crate::brain::{
@@ -54,6 +55,13 @@ pub(super) fn run(
         return set_permission_mode(arguments, output, error);
     }
 
+    if arguments
+        .iter()
+        .any(|argument| argument == "--offline-process")
+    {
+        return set_offline_process_configuration(arguments, output, error);
+    }
+
     let (mode, status_json) = match arguments {
         [] => (SetupMode::Configure, false),
         [argument] if argument == "--status" => (SetupMode::Status, false),
@@ -89,6 +97,98 @@ pub(super) fn run(
         return reset_settings(&paths, input, output, error);
     }
     configure(&paths, input, output, error)
+}
+
+fn set_offline_process_configuration(
+    arguments: &[OsString],
+    output: &mut dyn Write,
+    error: &mut dyn Write,
+) -> io::Result<i32> {
+    if arguments
+        .first()
+        .is_none_or(|argument| argument != "--offline-process")
+    {
+        return usage_error(
+            error,
+            Some("setup"),
+            "use --offline-process --toolchain-root PATH --registry-root PATH",
+        );
+    }
+    if !cfg!(target_os = "linux") {
+        return usage_error(
+            error,
+            Some("setup"),
+            "the offline process profile is currently available only on Linux",
+        );
+    }
+    let mut toolchain_root = None;
+    let mut registry_root = None;
+    let mut index = 1;
+    while index < arguments.len() {
+        let Some(option) = arguments[index].to_str() else {
+            return usage_error(
+                error,
+                Some("setup"),
+                "offline process options must be valid UTF-8",
+            );
+        };
+        let slot = match option {
+            "--toolchain-root" if toolchain_root.is_none() => &mut toolchain_root,
+            "--registry-root" if registry_root.is_none() => &mut registry_root,
+            _ => {
+                return usage_error(
+                    error,
+                    Some("setup"),
+                    "use --offline-process --toolchain-root PATH --registry-root PATH without duplicate options",
+                )
+            }
+        };
+        index += 1;
+        let Some(value) = arguments.get(index) else {
+            return usage_error(
+                error,
+                Some("setup"),
+                "offline process root path is required",
+            );
+        };
+        if value.to_str().is_none() {
+            return usage_error(
+                error,
+                Some("setup"),
+                "offline process root paths must be valid UTF-8",
+            );
+        }
+        *slot = Some(std::path::PathBuf::from(value));
+        index += 1;
+    }
+    let (Some(toolchain_root), Some(registry_root)) = (toolchain_root, registry_root) else {
+        return usage_error(
+            error,
+            Some("setup"),
+            "--offline-process needs both --toolchain-root and --registry-root",
+        );
+    };
+    let Some(paths) = user_settings_paths().map_err(io::Error::other)? else {
+        return usage_error(
+            error,
+            Some("setup"),
+            "cannot find a user configuration directory; set XDG_CONFIG_HOME or HOME",
+        );
+    };
+    if let Err(message) =
+        save_offline_process_configuration(&paths.offline_process, &toolchain_root, &registry_root)
+    {
+        return usage_error(error, Some("setup"), &message);
+    }
+    writeln!(
+        output,
+        "Saved the preprovisioned offline process profile for this user."
+    )?;
+    writeln!(
+        output,
+        "No toolchain or registry files were installed or downloaded."
+    )?;
+    Ok(0)
 }
 
 fn set_permission_mode(
@@ -341,6 +441,17 @@ fn show_status(output: &mut dyn Write, json: bool) -> io::Result<i32> {
             return Ok(2);
         }
     };
+    #[cfg(target_os = "linux")]
+    let offline_process_configured =
+        match load_offline_process_configuration(&paths.offline_process) {
+            Ok(configuration) => configuration.is_some(),
+            Err(message) => {
+                writeln!(output, "krypper setup: {message}")?;
+                return Ok(2);
+            }
+        };
+    #[cfg(not(target_os = "linux"))]
+    let offline_process_configured = false;
 
     let readiness = match defaults.as_ref() {
         Some(defaults) => match model_routing.provider_readiness_for_default(defaults) {
@@ -388,6 +499,13 @@ fn show_status(output: &mut dyn Write, json: bool) -> io::Result<i32> {
             "credential_count": credential_count,
             "provider_profile_count": profile_count,
             "permission_mode": permission_mode.as_str(),
+            "offline_process_profile": {
+                "configured": offline_process_configured,
+                "available": cfg!(target_os = "linux"),
+                "settings_file": paths.offline_process,
+                "roots_must_be_disjoint_from_private_settings_directory": true,
+                "settings_file_must_be_outside_task_workspace": true,
+            },
             "full_access_available": cfg!(target_os = "linux"),
             "full_access_task_confirmation_required": true,
             "config_override": has_config_override(),
@@ -406,6 +524,23 @@ fn show_status(output: &mut dyn Write, json: bool) -> io::Result<i32> {
         has_config_override(),
     )?;
     writeln!(output, "Permission mode: {}", permission_mode.as_str())?;
+    writeln!(
+        output,
+        "Offline process profile: {}",
+        if cfg!(target_os = "linux") {
+            if offline_process_configured {
+                "configured"
+            } else {
+                "not configured"
+            }
+        } else {
+            "unavailable on this platform"
+        }
+    )?;
+    writeln!(
+        output,
+        "Offline profile roots must be disjoint from each other and the private settings directory; each task also requires disjoint roots and the settings file outside its workspace."
+    )?;
     writeln!(
         output,
         "Full Access: Linux direct-argv host process; per-task terminal confirmation required"
@@ -1139,6 +1274,7 @@ fn escape_terminal_text(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{lock_environment, RestoreEnvironmentVariable, TempDir};
     use std::fs;
 
     fn settings_paths(directory: &crate::test_support::TempDir) -> UserSettingsPaths {
@@ -1150,7 +1286,172 @@ mod tests {
             provider_profiles: config.join("provider-profiles.json"),
             model_evidence: config.join("model-evidence.json"),
             model_evidence_key: config.join("model-evidence.key"),
+            offline_process: config.join("offline-process.json"),
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn create_offline_process_roots(directory: &TempDir) -> (PathBuf, PathBuf) {
+        let toolchain = directory.path().join("toolchain");
+        fs::create_dir_all(toolchain.join("bin")).expect("create toolchain bin directory");
+        for executable in ["cargo", "rustc"] {
+            fs::write(toolchain.join("bin").join(executable), b"\x7fELF")
+                .expect("write toolchain identity fixture");
+        }
+        let registry = directory.path().join("registry");
+        fs::create_dir_all(&registry).expect("create registry root");
+        (toolchain, registry)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn tree_snapshot(root: &std::path::Path) -> Vec<(PathBuf, bool, Vec<u8>)> {
+        fn collect(
+            root: &std::path::Path,
+            directory: &std::path::Path,
+            snapshot: &mut Vec<(PathBuf, bool, Vec<u8>)>,
+        ) {
+            for entry in fs::read_dir(directory).expect("read fixture tree") {
+                let entry = entry.expect("read fixture entry");
+                let path = entry.path();
+                let relative = path
+                    .strip_prefix(root)
+                    .expect("fixture path is below root")
+                    .to_path_buf();
+                let file_type = entry.file_type().expect("read fixture file type");
+                if file_type.is_dir() {
+                    snapshot.push((relative, true, Vec::new()));
+                    collect(root, &path, snapshot);
+                } else {
+                    snapshot.push((relative, false, fs::read(path).expect("read fixture file")));
+                }
+            }
+        }
+
+        let mut snapshot = Vec::new();
+        collect(root, root, &mut snapshot);
+        snapshot.sort_by(|left, right| left.0.cmp(&right.0));
+        snapshot
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn offline_process_setup_saves_private_roots_without_installing_and_status_reads_them() {
+        let _environment_lock = lock_environment();
+        let directory = TempDir::new();
+        let _restore_config_home =
+            RestoreEnvironmentVariable::set("XDG_CONFIG_HOME", directory.path());
+        let (toolchain, registry) = create_offline_process_roots(&directory);
+        let toolchain_before = tree_snapshot(&toolchain);
+        let registry_before = tree_snapshot(&registry);
+        let paths = settings_paths(&directory);
+
+        let arguments = vec![
+            OsString::from("--offline-process"),
+            OsString::from("--toolchain-root"),
+            toolchain.as_os_str().to_owned(),
+            OsString::from("--registry-root"),
+            registry.as_os_str().to_owned(),
+        ];
+        let mut input = &b""[..];
+        let mut output = Vec::new();
+        let mut error = Vec::new();
+        assert_eq!(
+            run(&arguments, &mut input, &mut output, &mut error).unwrap(),
+            0
+        );
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("Saved the preprovisioned offline process profile"));
+        assert!(output.contains("No toolchain or registry files were installed or downloaded"));
+        assert_eq!(tree_snapshot(&toolchain), toolchain_before);
+        assert_eq!(tree_snapshot(&registry), registry_before);
+        assert!(
+            super::super::settings::load_offline_process_configuration(&paths.offline_process)
+                .unwrap()
+                .is_some()
+        );
+
+        let arguments = ["--status", "--json"].map(OsString::from);
+        let mut output = Vec::new();
+        let mut error = Vec::new();
+        assert_eq!(
+            run(&arguments, &mut input, &mut output, &mut error).unwrap(),
+            0
+        );
+        let status: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(
+            status["offline_process_profile"]["configured"],
+            serde_json::Value::Bool(true)
+        );
+        let expected_settings_path = paths.offline_process.to_string_lossy().into_owned();
+        assert_eq!(
+            status["offline_process_profile"]["settings_file"].as_str(),
+            Some(expected_settings_path.as_str())
+        );
+        assert_eq!(
+            status["offline_process_profile"]["settings_file_must_be_outside_task_workspace"],
+            serde_json::Value::Bool(true)
+        );
+        assert_eq!(
+            status["offline_process_profile"]
+                ["roots_must_be_disjoint_from_private_settings_directory"],
+            serde_json::Value::Bool(true)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn offline_process_setup_rejects_missing_and_invalid_roots_without_writing_settings() {
+        let _environment_lock = lock_environment();
+        let directory = TempDir::new();
+        let _restore_config_home =
+            RestoreEnvironmentVariable::set("XDG_CONFIG_HOME", directory.path());
+        let (toolchain, _registry) = create_offline_process_roots(&directory);
+        let settings_path = settings_paths(&directory).offline_process;
+        let mut input = &b""[..];
+
+        let cases = [
+            (
+                vec![
+                    OsString::from("--offline-process"),
+                    OsString::from("--toolchain-root"),
+                    toolchain.as_os_str().to_owned(),
+                ],
+                "needs both --toolchain-root and --registry-root",
+            ),
+            (
+                vec![
+                    OsString::from("--offline-process"),
+                    OsString::from("--toolchain-root"),
+                    toolchain.as_os_str().to_owned(),
+                    OsString::from("--registry-root"),
+                    OsString::from("relative/registry"),
+                ],
+                "toolchain and offline registry roots must be absolute paths",
+            ),
+            (
+                vec![
+                    OsString::from("--offline-process"),
+                    OsString::from("--toolchain-root"),
+                    toolchain.as_os_str().to_owned(),
+                    OsString::from("--registry-root"),
+                    directory.path().join("missing-registry").into_os_string(),
+                ],
+                "cannot resolve offline registry root",
+            ),
+        ];
+
+        for (arguments, expected_error) in cases {
+            let mut output = Vec::new();
+            let mut error = Vec::new();
+            assert_eq!(
+                run(&arguments, &mut input, &mut output, &mut error).unwrap(),
+                2
+            );
+            assert!(String::from_utf8(error).unwrap().contains(expected_error));
+            assert!(output.is_empty());
+            assert!(!settings_path.exists());
+        }
+        assert!(!directory.path().join("missing-registry").exists());
     }
 
     #[test]
@@ -1372,6 +1673,7 @@ mod tests {
             provider_profiles: PathBuf::from("/user/config/krypper/provider-profiles.json"),
             model_evidence: PathBuf::from("/user/config/krypper/model-evidence.json"),
             model_evidence_key: PathBuf::from("/user/config/krypper/model-evidence.key"),
+            offline_process: PathBuf::from("/user/config/krypper/offline-process.json"),
         };
         let defaults = ModelDefaults {
             model: "test-model".to_owned(),
@@ -1408,6 +1710,7 @@ mod tests {
             provider_profiles: PathBuf::from("/user/config/krypper/provider-profiles.json"),
             model_evidence: PathBuf::from("/user/config/krypper/model-evidence.json"),
             model_evidence_key: PathBuf::from("/user/config/krypper/model-evidence.key"),
+            offline_process: PathBuf::from("/user/config/krypper/offline-process.json"),
         };
         let provider = provider_descriptors()
             .iter()

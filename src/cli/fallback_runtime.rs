@@ -495,6 +495,7 @@ mod tests {
             provider_profiles: directory.path().join("provider-profiles.json"),
             model_evidence: directory.path().join("model-evidence.json"),
             model_evidence_key: directory.path().join("model-evidence.key"),
+            offline_process: directory.path().join("offline-process.json"),
         };
         let task_id = Uuid::new_v4();
         let state_path = paths

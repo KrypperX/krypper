@@ -68,7 +68,9 @@ for one task:
 krypper setup --permission-mode ask
 krypper setup --permission-mode risk-based
 krypper setup --permission-mode full-access
+krypper setup --offline-process --toolchain-root /opt/krypper/toolchain --registry-root /opt/krypper/cargo/registry
 krypper task --goal "Review this workspace" --max-actions 5 --permission-mode ask
+krypper task --goal "Review and test this workspace" --max-actions 5 --sandbox-profile offline
 ```
 
 The permission preference is stored in a separate per-user file, independent of
@@ -83,10 +85,36 @@ The host policy asks before process or external effects in Ask mode. Risk-based
 automatically permits bounded workspace actions and the fixed offline Cargo
 profile only when its trusted host configuration is present. Ask requires a
 trusted exact-action prompt where an effect supports one; unknown Full Access
-effects remain unavailable. The current CLI has no trusted host
-toolchain/registry setting for offline Cargo and no generic external-file or
-network tool. `krypper setup --status` reports the selected mode and whether
-the Linux host-process path is available.
+effects remain unavailable. Offline process tools stay unavailable unless the
+task opts in with `--sandbox-profile offline`. Configure private user-level
+toolchain and offline registry roots with `krypper setup --offline-process
+--toolchain-root PATH --registry-root PATH`; setup validates existing roots but
+does not install files. The configuration ignores `KRYPPER_CONFIG` and
+workspace contents. The task workspace and both host roots must be disjoint,
+and neither host root may overlap the private per-user settings directory that
+stores credentials and provider profiles. The private settings file must also
+be outside the selected workspace. Mounted toolchain and registry contents are
+read-only but remain readable by sandboxed Cargo/Rustc and model-controlled
+build code; do not put secrets in those roots. A
+workspace rooted at the user's home directory is therefore rejected when it
+contains that settings file. `krypper setup --status` reports whether the
+profile is configured and describes the settings-directory and per-task
+workspace checks. This process profile is Linux-only.
+Here, `offline` applies only to Krypper process actions; model/provider
+requests still use the selected provider and may send task data.
+
+With the offline profile selected, each `offline_read_only_exec` request is
+shown as a closed executable identity, separately escaped argv items, and a
+workspace-relative working directory. Ask and Risk-based both require a fresh
+controlling-terminal `yes` for each direct-argv action. The fixed
+`offline_cargo_test` keeps its mode behavior: Ask prompts for that exact filter,
+while Risk-based permits only the fixed offline profile when the user roots
+are configured. Missing TTY or denied approval prevents dispatch. Full Access
+does not auto-grant either sandbox process action: fixed Cargo still requires
+its exact per-action prompt, and direct argv remains unavailable in Full Access.
+A resumed task needs the profile flag again and receives new one-shot grants.
+`krypper setup --status`
+continues to report the selected permission mode and Linux host-process path.
 
 Full Access is Linux-only and applies to the registered direct-argv host
 process action. Before provider startup, the CLI displays the risk and requires
@@ -639,8 +667,9 @@ trusted host handlers rechecked against their grant, schema and active turn at
 dispatch; they do not add a model-controlled path to the Tools registry.
 See [extension bridge safety](extension-bridge-safety.md) for the threat-model
 and backward-compatibility notes.
-The registered `offline_cargo_test` profile is denied unless trusted embedding
-code explicitly grants it to the task; the CLI grants no such permission.
+The registered `offline_cargo_test` and `offline_read_only_exec` profiles are
+denied by default. The CLI grants access only after explicit task opt-in and
+the existing one-shot authorization path.
 See [the opt-in Linux profile](offline-cargo-profile.md). See Ollama's
 [tool-calling API example](https://github.com/ollama/ollama/blob/main/docs/capabilities/tool-calling.mdx)
 for its local chat tool-call format.

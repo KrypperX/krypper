@@ -45,7 +45,9 @@ pub use self::turn::{
     run_goal_turn_with_approved_extensions, run_goal_turn_with_budget_and_approved_extensions,
     run_goal_turn_with_budget_and_extensions, run_goal_turn_with_extensions, TurnExtensions,
 };
-pub(crate) use self::turn::{run_goal_turn_with_budget_and_permission_gate, ActionPermissionGate};
+pub(crate) use self::turn::{
+    run_goal_turn_with_budget_and_permission_gate, ActionPermissionGate, ProcessInterruptRegistrar,
+};
 pub(crate) use crate::contracts::goal_turn::summarize_observation_activity;
 pub use crate::contracts::goal_turn::{
     BoundedDecisionSource, DecisionFailureCode, DecisionSource, GoalTurnError, GoalTurnResult,

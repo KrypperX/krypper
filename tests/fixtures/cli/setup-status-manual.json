@@ -21,6 +21,13 @@
   "full_access_available": "<dynamic>",
   "full_access_task_confirmation_required": true,
   "model": "gpt-4.1",
+  "offline_process_profile": {
+    "available": "<dynamic>",
+    "configured": false,
+    "roots_must_be_disjoint_from_private_settings_directory": true,
+    "settings_file": "<dynamic>",
+    "settings_file_must_be_outside_task_workspace": true
+  },
   "permission_mode": "ask",
   "provider": "openai",
   "provider_profile_count": 0,

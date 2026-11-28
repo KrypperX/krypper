@@ -3,6 +3,7 @@ use super::{
     TaskCancellationSignal,
 };
 use crate::task_lifecycle::{TaskSession, TaskState, TurnActivitySummary, TurnOutcome, TurnState};
+use crate::test_support::{lock_environment, RestoreEnvironmentVariable};
 use serde_json::{json, Value};
 use std::ffi::OsString;
 use std::fs;
@@ -53,6 +54,19 @@ impl TempWorkspace {
     fn path(&self) -> &Path {
         &self.workspace
     }
+}
+
+#[cfg(target_os = "linux")]
+fn create_offline_profile_roots(base: &Path) -> (PathBuf, PathBuf) {
+    let toolchain = base.join("trusted-toolchain");
+    fs::create_dir_all(toolchain.join("bin")).expect("create toolchain bin");
+    for executable in ["cargo", "rustc"] {
+        fs::write(toolchain.join("bin").join(executable), b"\x7fELF")
+            .expect("create ELF identity fixture");
+    }
+    let registry = base.join("trusted-registry");
+    fs::create_dir_all(&registry).expect("create offline registry");
+    (toolchain, registry)
 }
 
 fn model_tool(name: &str, arguments: Value) -> String {
@@ -1042,6 +1056,195 @@ fn task_without_verified_mode_keeps_the_existing_caller_directed_flow() {
         fs::read(fixture.path().join("output.txt")).unwrap(),
         b"original behavior"
     );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn offline_profile_ignores_project_config_and_fails_before_model_selection() {
+    let _environment_lock = lock_environment();
+    let fixture = TempWorkspace::new();
+    let user_config_home = fixture.root.join("user-config");
+    fs::create_dir_all(&user_config_home).expect("create separate user config home");
+    let _restore_config_home =
+        RestoreEnvironmentVariable::set("XDG_CONFIG_HOME", &user_config_home);
+    let project_config = fixture.root.join("project-settings.toml");
+    fs::write(
+        &project_config,
+        "model = \"fixture-model\"\nprovider = \"ollama\"\n",
+    )
+    .expect("write hostile project model config");
+    let (toolchain, registry) = create_offline_profile_roots(&fixture.root);
+    let project_profile = project_config.with_file_name("offline-process.json");
+    fs::write(
+        &project_profile,
+        serde_json::to_vec(&json!({
+            "version": 1,
+            "toolchain_root": toolchain,
+            "registry_root": registry,
+        }))
+        .unwrap(),
+    )
+    .expect("write project-side process settings");
+    fs::write(
+        fixture.path().join("offline-process.json"),
+        fs::read(&project_profile).unwrap(),
+    )
+    .expect("write workspace process settings");
+    let _restore_project_config =
+        RestoreEnvironmentVariable::set("KRYPPER_CONFIG", project_config.as_os_str());
+
+    let mut arguments = vec![
+        "--goal",
+        "Check that the host profile stays private",
+        "--max-actions",
+        "1",
+        "--workspace",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect::<Vec<_>>();
+    arguments.push(fixture.path().as_os_str().to_owned());
+    arguments.extend(
+        ["--sandbox-profile", "offline"]
+            .into_iter()
+            .map(OsString::from),
+    );
+    let selection_calls = std::cell::Cell::new(0);
+    let mut input = Cursor::new(Vec::<u8>::new());
+    let mut output = Vec::new();
+    let mut error = Vec::new();
+    let code = run_task_with_selection_loader(
+        &arguments,
+        &mut input,
+        &mut output,
+        &mut error,
+        SocketAddr::from(([127, 0, 0, 1], 0)),
+        true,
+        |_| {
+            selection_calls.set(selection_calls.get() + 1);
+            Err("model selection must not run before offline profile preflight".to_owned())
+        },
+    )
+    .expect("missing host profile should be a CLI usage error");
+
+    assert_eq!(code, 2);
+    assert!(String::from_utf8(error)
+        .unwrap()
+        .contains("the offline sandbox profile is not configured"));
+    assert!(output.is_empty());
+    assert_eq!(selection_calls.get(), 0);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn offline_profile_rejects_a_workspace_that_contains_its_private_settings_file() {
+    let _environment_lock = lock_environment();
+    let fixture = TempWorkspace::new();
+    let _restore_home = RestoreEnvironmentVariable::set("HOME", fixture.path());
+    let _restore_config_home = RestoreEnvironmentVariable::remove("XDG_CONFIG_HOME");
+    let _restore_project_config = RestoreEnvironmentVariable::remove("KRYPPER_CONFIG");
+    let (toolchain, registry) = create_offline_profile_roots(&fixture.root);
+    let settings_path = fixture.path().join(".config/krypper/offline-process.json");
+    super::super::settings::save_offline_process_configuration(
+        &settings_path,
+        &toolchain,
+        &registry,
+    )
+    .expect("write private offline process settings into workspace");
+
+    let mut arguments = vec![
+        "--goal",
+        "Reject a workspace that can edit trusted settings",
+        "--max-actions",
+        "1",
+        "--workspace",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect::<Vec<_>>();
+    arguments.push(fixture.path().as_os_str().to_owned());
+    arguments.extend(
+        ["--sandbox-profile", "offline"]
+            .into_iter()
+            .map(OsString::from),
+    );
+    let selection_calls = std::cell::Cell::new(0);
+    let mut input = Cursor::new(Vec::<u8>::new());
+    let mut output = Vec::new();
+    let mut error = Vec::new();
+    let code = run_task_with_selection_loader(
+        &arguments,
+        &mut input,
+        &mut output,
+        &mut error,
+        SocketAddr::from(([127, 0, 0, 1], 0)),
+        true,
+        |_| {
+            selection_calls.set(selection_calls.get() + 1);
+            Err("model/provider selection must not run for an overlapping settings file".to_owned())
+        },
+    )
+    .expect("overlapping settings file should be a CLI usage error");
+
+    assert_eq!(code, 2);
+    assert!(String::from_utf8(error)
+        .unwrap()
+        .contains("offline process settings must be outside the task workspace"));
+    assert!(output.is_empty());
+    assert_eq!(selection_calls.get(), 0);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn offline_profile_allows_a_project_under_home_when_user_settings_are_outside_it() {
+    let _environment_lock = lock_environment();
+    let fixture = TempWorkspace::new();
+    let _restore_home = RestoreEnvironmentVariable::set("HOME", &fixture.root);
+    let _restore_config_home = RestoreEnvironmentVariable::remove("XDG_CONFIG_HOME");
+    let _restore_project_config = RestoreEnvironmentVariable::remove("KRYPPER_CONFIG");
+    let (toolchain, registry) = create_offline_profile_roots(&fixture.root);
+    let settings_path = fixture.root.join(".config/krypper/offline-process.json");
+    super::super::settings::save_offline_process_configuration(
+        &settings_path,
+        &toolchain,
+        &registry,
+    )
+    .expect("write private user settings outside the project");
+
+    let mut arguments = vec![
+        "--goal",
+        "Complete a nested project task",
+        "--max-actions",
+        "1",
+        "--workspace",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect::<Vec<_>>();
+    arguments.push(fixture.path().as_os_str().to_owned());
+    arguments.extend(
+        ["--sandbox-profile", "offline"]
+            .into_iter()
+            .map(OsString::from),
+    );
+    let mut input = Cursor::new(b"complete task safely\n".to_vec());
+    let mut output = Vec::new();
+    let mut error = Vec::new();
+    let code = run_task_with_selection_loader(
+        &arguments,
+        &mut input,
+        &mut output,
+        &mut error,
+        SocketAddr::from(([127, 0, 0, 1], 0)),
+        false,
+        |_| panic!("caller-directed task must not select a model"),
+    )
+    .expect("nested project should not overlap user settings");
+
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&error));
+    assert!(String::from_utf8(output)
+        .unwrap()
+        .contains("Task outcome: succeeded"));
 }
 
 #[test]

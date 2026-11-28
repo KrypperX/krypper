@@ -12,7 +12,9 @@ use super::model_selection::{
     ProviderSelection,
 };
 use super::outcome::{write_observation, write_turn_outcome};
-use super::settings::{load_permission_mode, user_settings_paths};
+use super::settings::{
+    load_offline_process_configuration, load_permission_mode, user_settings_paths,
+};
 use super::task_args::parse_task_action;
 use super::task_routing_state::{
     enabled_fallback_policy, has_task_routing_state, remove_task_routing_state,
@@ -33,6 +35,7 @@ use crate::harness::context::{
 };
 use crate::harness::execution::{
     run_goal_turn_with_budget_and_permission_gate, workspace_action_name, ActionPermissionGate,
+    ProcessInterruptRegistrar,
 };
 use crate::harness::recovery::{
     prepare_checkpoint_for_pause, prepare_resumed_session, ResumeError,
@@ -177,6 +180,7 @@ where
     let mut model = None;
     let mut provider = None::<ProviderSelection>;
     let mut requested_permission_mode = None;
+    let mut sandbox_profile_offline = false;
     let mut workspace = None;
     let mut checkpoint_out = None;
     let mut resume = None;
@@ -214,6 +218,27 @@ where
                     Ok(mode) => Some(mode),
                     Err(message) => return usage_error(error, Some("task"), message),
                 };
+                position += 1;
+            }
+            "--sandbox-profile" => {
+                if sandbox_profile_offline {
+                    return usage_error(
+                        error,
+                        Some("task"),
+                        "--sandbox-profile may be provided only once",
+                    );
+                }
+                let Some(value) = arguments.get(position).and_then(|value| value.to_str()) else {
+                    return usage_error(error, Some("task"), "--sandbox-profile needs offline");
+                };
+                if value != "offline" {
+                    return usage_error(
+                        error,
+                        Some("task"),
+                        "the only supported sandbox profile is offline",
+                    );
+                }
+                sandbox_profile_offline = true;
                 position += 1;
             }
             "--goal" => {
@@ -504,6 +529,55 @@ where
                     &format!("unrecognized arguments: {option}"),
                 );
             }
+        }
+    }
+
+    let (offline_process_configuration, offline_process_settings_path) = if sandbox_profile_offline
+    {
+        if !cfg!(target_os = "linux") {
+            return usage_error(
+                error,
+                Some("task"),
+                "the offline sandbox profile is currently available only on Linux; no task was started",
+            );
+        }
+        let Some(paths) = user_settings_paths().map_err(io::Error::other)? else {
+            return usage_error(
+                error,
+                Some("task"),
+                "the offline sandbox profile needs a per-user settings directory; configure HOME or XDG_CONFIG_HOME",
+            );
+        };
+        let configuration = match load_offline_process_configuration(&paths.offline_process) {
+            Ok(Some(configuration)) => configuration,
+            Ok(None) => {
+                return usage_error(
+                    error,
+                    Some("task"),
+                    "the offline sandbox profile is not configured; run `krypper setup --offline-process --toolchain-root PATH --registry-root PATH`",
+                )
+            }
+            Err(message) => return usage_error(error, Some("task"), &message),
+        };
+        (Some(configuration), Some(paths.offline_process))
+    } else {
+        (None, None)
+    };
+    #[cfg(not(target_os = "linux"))]
+    let _ = &offline_process_settings_path;
+    #[cfg(target_os = "linux")]
+    if let (Some(configuration), Some(settings_path)) = (
+        offline_process_configuration.as_ref(),
+        offline_process_settings_path.as_deref(),
+    ) {
+        if let Err(message) = configuration
+            .policy
+            .validate_profile_settings_outside_workspace_path(
+                workspace.as_deref().unwrap_or_else(|| Path::new(".")),
+                settings_path,
+            )
+        {
+            return usage_error(error, Some("task"), message);
         }
     }
 
@@ -861,15 +935,30 @@ where
         };
         (session, task_id, turn_id, goal)
     };
+    #[cfg(target_os = "linux")]
+    if let (Some(configuration), Some(settings_path)) = (
+        offline_process_configuration.as_ref(),
+        offline_process_settings_path.as_deref(),
+    ) {
+        let workspace_root = session
+            .task_workspace_root(task_id)
+            .map_err(io::Error::other)?;
+        if let Err(message) = configuration
+            .policy
+            .validate_profile_settings_outside_captured_workspace(workspace_root, settings_path)
+        {
+            return usage_error(error, Some("task"), message);
+        }
+    }
     session
         .set_task_permission_mode(task_id, permission_mode, full_access_confirmed)
         .map_err(io::Error::other)?;
     let task_cancellation = session.task_cancellation_flag(task_id);
-    let _task_cancellation_signal = if full_access_confirmed {
+    let _task_cancellation_signal = if full_access_confirmed
+        || offline_process_configuration.is_some()
+    {
         let Some(cancellation) = task_cancellation.as_ref().cloned() else {
-            return Err(io::Error::other(
-                "Full Access task cancellation state was unavailable",
-            ));
+            return Err(io::Error::other("task cancellation state was unavailable"));
         };
         match TaskCancellationSignal::register(cancellation) {
             Ok(registration) => Some(registration),
@@ -878,7 +967,7 @@ where
                     error,
                     Some("task"),
                     &format!(
-                        "cannot register Full Access cancellation handling ({cause}); no model request was made"
+                        "cannot register task cancellation handling ({cause}); no model request was made"
                     ),
                 );
             }
@@ -985,9 +1074,37 @@ where
     // The emitter's sequence is scoped to this CLI invocation, not TaskSession history.
     let mut stream_event_sequence = 1_u64;
     let mut last_stream_positions = Vec::new();
-    // This CLI currently has no trusted process toolchain/registry configuration or
-    // confirmation UI for effects outside the bounded workspace API.
-    let mut permission_gate = ActionPermissionGate::new(permission_mode, false, None);
+    let mut offline_terminal = if offline_process_configuration.is_some() {
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/tty")
+            .ok()
+    } else {
+        None
+    };
+    let mut offline_permission_prompt = |_, _, action: &WorkspaceAction| {
+        confirm_offline_profile_action_with_terminal(
+            offline_terminal
+                .as_mut()
+                .map(|terminal| terminal as &mut dyn ReadWrite),
+            action,
+        )
+        .map_err(|_| ())
+    };
+    let mut offline_interrupt_registrar: &mut ProcessInterruptRegistrar<'_> = &mut |cancellation| {
+        TaskCancellationSignal::register(cancellation)
+            .map(|registration| Box::new(registration) as Box<dyn std::any::Any>)
+    };
+    let mut permission_gate = match offline_process_configuration.as_ref() {
+        Some(configuration) => ActionPermissionGate::with_offline_policy(
+            permission_mode,
+            &configuration.policy,
+            Some(&mut offline_permission_prompt),
+        )
+        .with_process_interrupt_registrar(&mut offline_interrupt_registrar),
+        None => ActionPermissionGate::new(permission_mode, false, None),
+    };
     writeln!(
         output,
         "Permission mode: {}",
@@ -1497,6 +1614,79 @@ fn confirm_full_access_for_task() -> io::Result<bool> {
     confirm_full_access_with_terminal(Some(&mut terminal))
 }
 
+fn confirm_offline_profile_action_with_terminal(
+    terminal: Option<&mut dyn ReadWrite>,
+    action: &WorkspaceAction,
+) -> io::Result<bool> {
+    let Some(terminal) = terminal else {
+        return Err(io::Error::new(
+            io::ErrorKind::NotConnected,
+            "no controlling terminal is available",
+        ));
+    };
+    match action {
+        WorkspaceAction::OfflineReadOnlyExec { request } => {
+            use crate::tools::process::SandboxExecutable;
+            let executable = match request.executable() {
+                SandboxExecutable::Cargo => "cargo",
+                SandboxExecutable::Rustc => "rustc",
+            };
+            writeln!(terminal, "Approve one sandboxed offline process action?")?;
+            writeln!(terminal, "Executable: {executable}")?;
+            writeln!(terminal, "Arguments (passed directly, one item per line):")?;
+            for (index, argument) in request.arguments().iter().enumerate() {
+                writeln!(
+                    terminal,
+                    "  [{index}] \"{}\"",
+                    escape_terminal_argument(argument)
+                )?;
+            }
+            writeln!(
+                terminal,
+                "Workspace-relative working directory: \"{}\"",
+                escape_terminal_argument(request.working_directory())
+            )?;
+        }
+        WorkspaceAction::OfflineCargoTest { test_filter } => {
+            writeln!(
+                terminal,
+                "Approve one fixed sandboxed offline Cargo test action?"
+            )?;
+            match test_filter {
+                Some(filter) => writeln!(
+                    terminal,
+                    "Exact test filter: \"{}\"",
+                    escape_terminal_argument(filter)
+                )?,
+                None => writeln!(terminal, "Exact test filter: none")?,
+            }
+        }
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "action is not an offline process profile request",
+            ));
+        }
+    }
+    write!(terminal, "Type yes to approve this action only: ")?;
+    terminal.flush()?;
+    let mut answer = Vec::with_capacity(4);
+    let mut byte = [0_u8; 1];
+    while answer.len() < 16 {
+        match terminal.read(&mut byte)? {
+            0 => break,
+            _ if byte[0] == b'\n' => break,
+            _ if byte[0] == b'\r' => continue,
+            _ => answer.push(byte[0]),
+        }
+    }
+    Ok(answer.eq_ignore_ascii_case(b"yes"))
+}
+
+fn escape_terminal_argument(value: &str) -> String {
+    value.escape_debug().to_string()
+}
+
 #[cfg(test)]
 mod full_access_confirmation_tests {
     use super::confirm_full_access_with_terminal;
@@ -1546,6 +1736,79 @@ mod full_access_confirmation_tests {
         let warning = String::from_utf8_lossy(&terminal.output);
         assert!(warning.contains("network egress restriction"));
         assert!(warning.contains("may be sent to the selected AI provider"));
+    }
+}
+
+#[cfg(test)]
+mod offline_profile_prompt_tests {
+    use super::confirm_offline_profile_action_with_terminal;
+    use crate::agent_loop::WorkspaceAction;
+    use crate::tools::process::{OfflineReadOnlyExecRequest, SandboxExecutable};
+    use std::io::{self, Cursor, Read, Write};
+
+    struct ScriptedTerminal {
+        input: Cursor<Vec<u8>>,
+        output: Vec<u8>,
+    }
+
+    impl Read for ScriptedTerminal {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            self.input.read(buffer)
+        }
+    }
+
+    impl Write for ScriptedTerminal {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.output.extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn direct_argv_prompt_shows_each_escaped_argument_and_requires_exact_yes() {
+        let request = OfflineReadOnlyExecRequest::new(
+            SandboxExecutable::Cargo,
+            vec!["test".to_owned(), "line\"quote\\slash".to_owned()],
+            "crates/example",
+        )
+        .expect("valid direct-argv fixture");
+        let action = WorkspaceAction::OfflineReadOnlyExec { request };
+        let mut terminal = ScriptedTerminal {
+            input: Cursor::new(b"yes\n".to_vec()),
+            output: Vec::new(),
+        };
+
+        assert!(
+            confirm_offline_profile_action_with_terminal(Some(&mut terminal), &action).unwrap()
+        );
+        let prompt = String::from_utf8(terminal.output).unwrap();
+        assert!(prompt.contains("Executable: cargo"));
+        assert!(prompt.contains("[0] \"test\""));
+        assert!(prompt.contains(r#"line\"quote\\slash"#));
+        assert!(prompt.contains("Workspace-relative working directory: \"crates/example\""));
+        assert!(!prompt.contains(r#"line"quote\slash"#));
+    }
+
+    #[test]
+    fn unavailable_terminal_and_decline_do_not_approve_an_action() {
+        let action = WorkspaceAction::OfflineCargoTest {
+            test_filter: Some("exact_case".to_owned()),
+        };
+        assert!(confirm_offline_profile_action_with_terminal(None, &action).is_err());
+        let mut terminal = ScriptedTerminal {
+            input: Cursor::new(b"no\n".to_vec()),
+            output: Vec::new(),
+        };
+        assert!(
+            !confirm_offline_profile_action_with_terminal(Some(&mut terminal), &action).unwrap()
+        );
+        assert!(String::from_utf8(terminal.output)
+            .unwrap()
+            .contains("Exact test filter: \"exact_case\""));
     }
 }
 
@@ -1632,6 +1895,7 @@ mod task_routing_state_error_tests {
             provider_profiles: directory.path().join("provider-profiles.json"),
             model_evidence: directory.path().join("model-evidence.json"),
             model_evidence_key: directory.path().join("model-evidence.key"),
+            offline_process: directory.path().join("offline-process.json"),
         }
     }
 

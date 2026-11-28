@@ -11,10 +11,14 @@ use crate::task_lifecycle::{TaskSession, TurnActivitySummary, TurnOutcome};
 use crate::tools::permission_policy::{
     classify_registered_operation, decide, EffectClass, PermissionDecision, PermissionMode,
 };
+use std::any::Any;
+use std::io;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
-const READ_ONLY_EXEC_APPROVAL_LIFETIME: Duration = Duration::from_secs(60);
+const OFFLINE_PROCESS_APPROVAL_LIFETIME: Duration = Duration::from_secs(60);
 
 fn process_result_summary(result: &crate::ProcessResult) -> String {
     match result.profile {
@@ -35,13 +39,20 @@ fn process_result_summary(result: &crate::ProcessResult) -> String {
 pub(crate) type PermissionPrompt<'a> =
     dyn FnMut(Uuid, Uuid, &super::WorkspaceAction) -> Result<bool, ()> + 'a;
 
+/// Installs a host-owned interrupt handler for one exact offline process grant and returns an
+/// opaque RAII guard that remains alive only until that action dispatch finishes.
+pub(crate) type ProcessInterruptRegistrar<'a> =
+    dyn FnMut(Arc<AtomicBool>) -> io::Result<Box<dyn Any>> + 'a;
+
 /// Host-owned per-turn action gate. The process capability flag describes whether the embedding
 /// has provisioned the inputs used by the offline profiles; TaskSession remains the final grant
 /// authority for each process request.
 pub(crate) struct ActionPermissionGate<'a> {
     mode: PermissionMode,
     offline_process_available: bool,
+    offline_policy: Option<&'a crate::OfflineCargoPolicy>,
     prompt: Option<&'a mut PermissionPrompt<'a>>,
+    interrupt_registrar: Option<&'a mut ProcessInterruptRegistrar<'a>>,
 }
 
 impl<'a> ActionPermissionGate<'a> {
@@ -53,8 +64,36 @@ impl<'a> ActionPermissionGate<'a> {
         Self {
             mode,
             offline_process_available,
+            offline_policy: None,
             prompt,
+            interrupt_registrar: None,
         }
+    }
+
+    /// Build the CLI gate around a captured host policy. It forks that immutable template into a
+    /// new one-shot grant only after each process action passes this gate.
+    pub(crate) fn with_offline_policy(
+        mode: PermissionMode,
+        offline_policy: &'a crate::OfflineCargoPolicy,
+        prompt: Option<&'a mut PermissionPrompt<'a>>,
+    ) -> Self {
+        Self {
+            mode,
+            offline_process_available: true,
+            offline_policy: Some(offline_policy),
+            prompt,
+            interrupt_registrar: None,
+        }
+    }
+
+    /// Attach the CLI's scoped signal handler. Embedders can continue to manage cancellation
+    /// through `TaskSession` directly without installing process-global signal handlers.
+    pub(crate) fn with_process_interrupt_registrar(
+        mut self,
+        registrar: &'a mut ProcessInterruptRegistrar<'a>,
+    ) -> Self {
+        self.interrupt_registrar = Some(registrar);
+        self
     }
 
     fn authorize(
@@ -75,7 +114,7 @@ impl<'a> ActionPermissionGate<'a> {
         turn_id: Uuid,
         action: &super::WorkspaceAction,
         extensions: Option<&TurnExtensions<'_>>,
-    ) -> Result<(), GoalTurnError> {
+    ) -> Result<Option<Box<dyn Any>>, GoalTurnError> {
         if let super::WorkspaceAction::FullAccessHostProcess { .. } = action {
             if self.mode != PermissionMode::FullAccess
                 || !session.task_has_confirmed_full_access(task_id)
@@ -84,29 +123,90 @@ impl<'a> ActionPermissionGate<'a> {
                     action: "full_access_host_process",
                 });
             }
-            return self.authorize(task_id, turn_id, action, extensions);
+            return self
+                .authorize(task_id, turn_id, action, extensions)
+                .map(|()| None);
         }
-        if !matches!(action, super::WorkspaceAction::OfflineReadOnlyExec { .. }) {
-            return self.authorize(task_id, turn_id, action, extensions);
-        }
-        let host_approved = self.authorize_decision(task_id, turn_id, action)?;
-        if let super::WorkspaceAction::OfflineReadOnlyExec { request } = action {
-            if !host_approved {
-                return Err(GoalTurnError::PermissionUnavailable {
-                    action: "offline_read_only_exec",
-                });
-            }
-            session
-                .authorize_offline_read_only_exec_once_from_current_policy(
-                    task_id,
-                    request.clone(),
-                    READ_ONLY_EXEC_APPROVAL_LIFETIME,
-                )
-                .map_err(|_| GoalTurnError::PermissionUnavailable {
+        match action {
+            super::WorkspaceAction::OfflineReadOnlyExec { request } => {
+                let host_approved = self.authorize_decision(task_id, turn_id, action)?;
+                if !host_approved {
+                    return Err(GoalTurnError::PermissionUnavailable {
+                        action: "offline_read_only_exec",
+                    });
+                }
+                let authorization = if let Some(policy) = self.offline_policy {
+                    let policy = policy.fork_for_new_grant().map_err(|_| {
+                        GoalTurnError::PermissionUnavailable {
+                            action: "offline_read_only_exec",
+                        }
+                    })?;
+                    session.authorize_offline_read_only_exec_once(
+                        task_id,
+                        policy,
+                        request.clone(),
+                        OFFLINE_PROCESS_APPROVAL_LIFETIME,
+                    )
+                } else {
+                    session.authorize_offline_read_only_exec_once_from_current_policy(
+                        task_id,
+                        request.clone(),
+                        OFFLINE_PROCESS_APPROVAL_LIFETIME,
+                    )
+                };
+                authorization.map_err(|_| GoalTurnError::PermissionUnavailable {
                     action: "offline_read_only_exec",
                 })?;
+                self.register_interrupt_for_grant(session, task_id, "offline_read_only_exec")
+            }
+            super::WorkspaceAction::OfflineCargoTest { test_filter } => {
+                self.authorize_decision(task_id, turn_id, action)?;
+                if let Some(policy) = self.offline_policy {
+                    let policy = policy.fork_for_new_grant().map_err(|_| {
+                        GoalTurnError::PermissionUnavailable {
+                            action: "offline_cargo_test",
+                        }
+                    })?;
+                    session
+                        .authorize_offline_cargo_test_once(
+                            task_id,
+                            policy,
+                            test_filter.as_deref(),
+                            OFFLINE_PROCESS_APPROVAL_LIFETIME,
+                        )
+                        .map_err(|_| GoalTurnError::PermissionUnavailable {
+                            action: "offline_cargo_test",
+                        })?;
+                }
+                self.register_interrupt_for_grant(session, task_id, "offline_cargo_test")
+            }
+            _ => self
+                .authorize(task_id, turn_id, action, extensions)
+                .map(|()| None),
         }
-        Ok(())
+    }
+
+    fn register_interrupt_for_grant(
+        &mut self,
+        session: &TaskSession,
+        task_id: Uuid,
+        action: &'static str,
+    ) -> Result<Option<Box<dyn Any>>, GoalTurnError> {
+        let Some(registrar) = self.interrupt_registrar.as_mut() else {
+            return Ok(None);
+        };
+        let Some(cancellation) = session.offline_process_grant_cancellation(task_id) else {
+            let _ = session.revoke_offline_cargo_tests(task_id);
+            return Err(GoalTurnError::PermissionUnavailable { action });
+        };
+        match registrar(Arc::clone(&cancellation)) {
+            Ok(registration) => Ok(Some(registration)),
+            Err(_) => {
+                cancellation.store(true, std::sync::atomic::Ordering::SeqCst);
+                let _ = session.revoke_offline_cargo_tests(task_id);
+                Err(GoalTurnError::PermissionUnavailable { action })
+            }
+        }
     }
 
     fn authorize_decision(
@@ -227,9 +327,11 @@ fn execute_with_extensions(
             },
         ));
     }
-    if let Some(permission_gate) = permission_gate {
-        permission_gate.authorize_for_dispatch(session, task_id, turn_id, action, extensions)?;
-    }
+    let _process_interrupt_registration = if let Some(permission_gate) = permission_gate {
+        permission_gate.authorize_for_dispatch(session, task_id, turn_id, action, extensions)?
+    } else {
+        None
+    };
     execute_action_with_revision(session, task_id, turn_id, action, expected_revision)
 }
 
@@ -932,7 +1034,17 @@ mod offline_read_only_exec_approval_tests {
     use crate::{OfflineCargoPolicy, ProcessExecutionProfile, ProcessOutcome, ProcessResult};
     use std::fs;
     use std::path::Path;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
     use uuid::Uuid;
+
+    struct TestInterruptRegistration(signal_hook::SigId);
+
+    impl Drop for TestInterruptRegistration {
+        fn drop(&mut self) {
+            signal_hook::low_level::unregister(self.0);
+        }
+    }
 
     fn running_turn(workspace: &Path) -> (TaskSession, Uuid, Uuid) {
         let mut session = TaskSession::new_in_workspace(workspace).expect("workspace session");
@@ -959,6 +1071,112 @@ mod offline_read_only_exec_approval_tests {
             ".",
         )
         .expect("bounded direct argv request")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn interrupt_registration_targets_only_the_current_grant_and_is_scoped() {
+        let workspace = crate::test_support::TempDir::with_prefix("direct-exec-cancel-workspace-");
+        let toolchain = crate::test_support::TempDir::with_prefix("direct-exec-cancel-toolchain-");
+        let (session, task_id, turn_id) = running_turn(workspace.path());
+        session
+            .set_task_permission_mode(task_id, PermissionMode::Ask, false)
+            .expect("permission mode");
+        let task_cancellation = session
+            .task_cancellation_flag(task_id)
+            .expect("task cancellation flag");
+        let policy = policy(toolchain.path());
+        let action = WorkspaceAction::OfflineReadOnlyExec { request: request() };
+        let mut prompt = |_, _, _: &WorkspaceAction| Ok(true);
+        let registered_cancellation = std::cell::RefCell::new(None);
+        let mut registrar = |cancellation: Arc<AtomicBool>| {
+            signal_hook::flag::register(signal_hook::consts::SIGUSR2, Arc::clone(&cancellation))
+                .map(|registration| {
+                    registered_cancellation.replace(Some(Arc::clone(&cancellation)));
+                    Box::new(TestInterruptRegistration(registration)) as Box<dyn std::any::Any>
+                })
+        };
+        let mut gate = ActionPermissionGate::with_offline_policy(
+            PermissionMode::Ask,
+            &policy,
+            Some(&mut prompt),
+        )
+        .with_process_interrupt_registrar(&mut registrar);
+
+        let registration = gate
+            .authorize_for_dispatch(&session, task_id, turn_id, &action, None)
+            .expect("offline action authorized")
+            .expect("interrupt registration");
+        let grant_cancellation = session
+            .offline_process_grant_cancellation(task_id)
+            .expect("current grant cancellation flag");
+        let registered_cancellation = registered_cancellation
+            .borrow()
+            .as_ref()
+            .cloned()
+            .expect("registered cancellation flag");
+        assert!(Arc::ptr_eq(&grant_cancellation, &registered_cancellation));
+        assert!(!Arc::ptr_eq(&grant_cancellation, &task_cancellation));
+
+        // SAFETY: this test registered SIGUSR2 above; the handler only sets the grant flag.
+        unsafe {
+            libc::raise(signal_hook::consts::SIGUSR2);
+        }
+        assert!(grant_cancellation.load(Ordering::SeqCst));
+        assert!(!task_cancellation.load(Ordering::SeqCst));
+
+        drop(registration);
+        grant_cancellation.store(false, Ordering::SeqCst);
+        // SAFETY: the scoped registration was dropped, so SIGUSR2 has no grant handler now.
+        unsafe {
+            libc::raise(signal_hook::consts::SIGUSR2);
+        }
+        assert!(!grant_cancellation.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn interrupt_registration_failure_revokes_grant_before_process_dispatch() {
+        let workspace = crate::test_support::TempDir::with_prefix("direct-exec-no-hook-workspace-");
+        let toolchain = crate::test_support::TempDir::with_prefix("direct-exec-no-hook-toolchain-");
+        let (mut session, task_id, turn_id) = running_turn(workspace.path());
+        session.queue_offline_cargo_results_for_test(
+            task_id,
+            [ProcessResult::empty(ProcessOutcome::Exited(0))],
+        );
+        let policy = policy(toolchain.path());
+        let action = WorkspaceAction::OfflineReadOnlyExec { request: request() };
+        let mut decisions = |_: &str, _: &[WorkspaceObservation]| action.clone();
+        let mut prompt = |_, _, _: &WorkspaceAction| Ok(true);
+        let mut registrar = |_cancellation: Arc<AtomicBool>| {
+            Err(std::io::Error::other("signal registration unavailable"))
+        };
+        let mut gate = ActionPermissionGate::with_offline_policy(
+            PermissionMode::Ask,
+            &policy,
+            Some(&mut prompt),
+        )
+        .with_process_interrupt_registrar(&mut registrar);
+
+        let result = run_goal_turn_with_budget_and_permission_gate(
+            &mut session,
+            task_id,
+            turn_id,
+            "inspect metadata",
+            1,
+            &mut decisions,
+            &mut gate,
+        );
+
+        assert!(matches!(
+            result,
+            Err(GoalTurnError::PermissionUnavailable {
+                action: "offline_read_only_exec"
+            })
+        ));
+        assert!(session.offline_cargo_filters_for_test(task_id).is_empty());
+        assert!(session
+            .offline_process_grant_cancellation(task_id)
+            .is_none());
     }
 
     #[test]
@@ -1128,5 +1346,240 @@ mod offline_read_only_exec_approval_tests {
                 action: "offline_read_only_exec"
             })
         ));
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod offline_profile_permission_tests {
+    use super::{run_goal_turn_with_budget_and_permission_gate, ActionPermissionGate};
+    use crate::contracts::goal_turn::{GoalTurnError, WorkspaceAction, WorkspaceObservation};
+    use crate::task_lifecycle::{TaskSession, TaskState, TurnState};
+    use crate::tools::permission_policy::PermissionMode;
+    use crate::tools::process::{OfflineReadOnlyExecRequest, SandboxExecutable};
+    use crate::{OfflineCargoPolicy, ProcessOutcome, ProcessResult};
+    use std::cell::Cell;
+    use std::fs;
+    use std::path::Path;
+    use uuid::Uuid;
+
+    fn running_turn(workspace: &Path) -> (TaskSession, Uuid, Uuid) {
+        let mut session = TaskSession::new_in_workspace(workspace).expect("workspace session");
+        let task_id = session.create_task("offline profile permission gate").id();
+        let task = session.get_task_mut(task_id).expect("task");
+        task.transition(TaskState::Running).expect("running task");
+        let turn_id = task.create_turn().expect("turn");
+        task.transition_turn(turn_id, TurnState::Running)
+            .expect("running turn");
+        (session, task_id, turn_id)
+    }
+
+    fn captured_policy() -> (crate::test_support::TempDir, OfflineCargoPolicy) {
+        let toolchain = crate::test_support::TempDir::with_prefix("offline-profile-toolchain-");
+        let registry = crate::test_support::TempDir::with_prefix("offline-profile-registry-");
+        fs::create_dir_all(toolchain.path().join("bin")).expect("toolchain bin");
+        for executable in ["cargo", "rustc"] {
+            fs::write(toolchain.path().join("bin").join(executable), b"\x7fELF")
+                .expect("fake ELF identity");
+        }
+        let policy = OfflineCargoPolicy::new(toolchain.path(), registry.path())
+            .expect("captured offline process policy");
+        policy
+            .validate_roots_are_disjoint()
+            .expect("separate trusted roots");
+        (toolchain, policy)
+    }
+
+    fn direct_request() -> OfflineReadOnlyExecRequest {
+        OfflineReadOnlyExecRequest::new(
+            SandboxExecutable::Cargo,
+            vec!["metadata".into(), "--offline".into()],
+            ".",
+        )
+        .expect("bounded direct argv request")
+    }
+
+    #[test]
+    fn direct_argv_requires_a_fresh_prompt_in_ask_and_risk_based_modes() {
+        for mode in [PermissionMode::Ask, PermissionMode::RiskBased] {
+            let workspace = crate::test_support::TempDir::with_prefix("offline-profile-workspace-");
+            let (_toolchain, policy) = captured_policy();
+            let (mut session, task_id, turn_id) = running_turn(workspace.path());
+            session.queue_offline_cargo_results_for_test(
+                task_id,
+                [ProcessResult::empty(ProcessOutcome::Exited(0))],
+            );
+            let action = WorkspaceAction::OfflineReadOnlyExec {
+                request: direct_request(),
+            };
+            let mut decisions = |_: &str, _: &[WorkspaceObservation]| action.clone();
+            let prompt_calls = Cell::new(0);
+            let mut prompt = |_, _, seen_action: &WorkspaceAction| {
+                assert_eq!(seen_action, &action);
+                prompt_calls.set(prompt_calls.get() + 1);
+                Ok(true)
+            };
+            let mut gate =
+                ActionPermissionGate::with_offline_policy(mode, &policy, Some(&mut prompt));
+
+            let result = run_goal_turn_with_budget_and_permission_gate(
+                &mut session,
+                task_id,
+                turn_id,
+                "inspect metadata",
+                1,
+                &mut decisions,
+                &mut gate,
+            )
+            .expect("approved direct argv should receive a one-shot grant");
+
+            assert_eq!(
+                prompt_calls.get(),
+                1,
+                "{mode:?} must require exact approval"
+            );
+            assert!(matches!(
+                result.observations().first(),
+                Some(WorkspaceObservation::ProcessFinished { result })
+                    if result.outcome == ProcessOutcome::Exited(0)
+            ));
+        }
+    }
+
+    #[test]
+    fn fixed_cargo_preserves_ask_and_risk_based_modes_and_requires_a_new_grant_per_action() {
+        for (mode, expected_prompt_calls) in
+            [(PermissionMode::Ask, 1), (PermissionMode::RiskBased, 0)]
+        {
+            let workspace = crate::test_support::TempDir::with_prefix("offline-profile-workspace-");
+            let (_toolchain, policy) = captured_policy();
+            let (mut session, task_id, turn_id) = running_turn(workspace.path());
+            session.queue_offline_cargo_results_for_test(
+                task_id,
+                [ProcessResult::empty(ProcessOutcome::Exited(0))],
+            );
+            let action = WorkspaceAction::OfflineCargoTest {
+                test_filter: Some("selected_case".to_owned()),
+            };
+            let mut decisions = |_: &str, _: &[WorkspaceObservation]| action.clone();
+            let prompt_calls = Cell::new(0);
+            let mut prompt = |_, _, seen_action: &WorkspaceAction| {
+                assert_eq!(seen_action, &action);
+                prompt_calls.set(prompt_calls.get() + 1);
+                Ok(true)
+            };
+            let mut gate =
+                ActionPermissionGate::with_offline_policy(mode, &policy, Some(&mut prompt));
+
+            let result = run_goal_turn_with_budget_and_permission_gate(
+                &mut session,
+                task_id,
+                turn_id,
+                "run fixed cargo test",
+                1,
+                &mut decisions,
+                &mut gate,
+            )
+            .expect("fixed Cargo keeps its existing mode semantics");
+
+            assert_eq!(prompt_calls.get(), expected_prompt_calls);
+            assert!(matches!(
+                result.observations().first(),
+                Some(WorkspaceObservation::ProcessFinished { result })
+                    if result.outcome == ProcessOutcome::Exited(0)
+            ));
+            assert_eq!(
+                session.offline_cargo_filters_for_test(task_id),
+                vec![Some("selected_case".to_owned())]
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_cargo_requires_a_fresh_ask_approval_after_the_previous_one_shot_is_consumed() {
+        let workspace = crate::test_support::TempDir::with_prefix("offline-profile-workspace-");
+        let (_toolchain, policy) = captured_policy();
+        let (mut session, task_id, turn_id) = running_turn(workspace.path());
+        session.queue_offline_cargo_results_for_test(
+            task_id,
+            [ProcessResult::empty(ProcessOutcome::Exited(0))],
+        );
+        let action = WorkspaceAction::OfflineCargoTest {
+            test_filter: Some("selected_case".to_owned()),
+        };
+        let mut decisions = |_: &str, _: &[WorkspaceObservation]| action.clone();
+        let prompt_calls = Cell::new(0);
+        let mut prompt = |_, _, seen_action: &WorkspaceAction| {
+            assert_eq!(seen_action, &action);
+            let call = prompt_calls.get() + 1;
+            prompt_calls.set(call);
+            Ok(call == 1)
+        };
+        let mut gate = ActionPermissionGate::with_offline_policy(
+            PermissionMode::Ask,
+            &policy,
+            Some(&mut prompt),
+        );
+
+        let result = run_goal_turn_with_budget_and_permission_gate(
+            &mut session,
+            task_id,
+            turn_id,
+            "repeat fixed cargo action",
+            2,
+            &mut decisions,
+            &mut gate,
+        );
+
+        assert!(matches!(
+            result,
+            Err(GoalTurnError::PermissionDenied {
+                action: "offline_cargo_test"
+            })
+        ));
+        assert_eq!(prompt_calls.get(), 2);
+        assert_eq!(
+            session.offline_cargo_filters_for_test(task_id),
+            vec![Some("selected_case".to_owned())],
+            "the declined second action must not replay or dispatch"
+        );
+    }
+
+    #[test]
+    fn full_access_does_not_silently_authorize_direct_argv_profile_actions() {
+        let workspace = crate::test_support::TempDir::with_prefix("offline-profile-workspace-");
+        let (_toolchain, policy) = captured_policy();
+        let (mut session, task_id, turn_id) = running_turn(workspace.path());
+        let action = WorkspaceAction::OfflineReadOnlyExec {
+            request: direct_request(),
+        };
+        let mut decisions = |_: &str, _: &[WorkspaceObservation]| action.clone();
+        let prompt_calls = Cell::new(0);
+        let mut prompt = |_, _, _: &WorkspaceAction| {
+            prompt_calls.set(prompt_calls.get() + 1);
+            Ok(true)
+        };
+        let mut gate = ActionPermissionGate::with_offline_policy(
+            PermissionMode::FullAccess,
+            &policy,
+            Some(&mut prompt),
+        );
+
+        let result = run_goal_turn_with_budget_and_permission_gate(
+            &mut session,
+            task_id,
+            turn_id,
+            "run direct argv with Full Access",
+            1,
+            &mut decisions,
+            &mut gate,
+        );
+
+        assert!(matches!(
+            result,
+            Err(GoalTurnError::PermissionUnavailable {
+                action: "offline_read_only_exec"
+            })
+        ));
+        assert_eq!(prompt_calls.get(), 0);
     }
 }
