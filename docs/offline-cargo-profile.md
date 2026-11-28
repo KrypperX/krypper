@@ -367,22 +367,10 @@ matching and unmatched filters; only test-harness per-test result lines count.
 It does not
 pretend to validate real namespaces on a runner without prerequisites.
 
-The ignored `real_offline_profile_is_confined_and_cleans_up` host fixture is
-run explicitly from a delegated user service with `KRYPPER_TEST_TOOLCHAIN`
-and `KRYPPER_TEST_REGISTRY` pointing to preprovisioned directories. These two
-variables configure only the test harness; they are not product request fields
-and are never forwarded to workspace code. The fixture uses a dependency-free
-locked Cargo workspace, an outside canary, and the actual production sandbox
-and supervisor. It dispatches the registered profile through WorkspacePlan and
-Harness with a literal filter, verifies that the selected test ran while an
-unrelated test was filtered, checks the selected filter and execution evidence
-in the process observation, and confirms that a filter matching no tests is a
-typed failure. It also asserts the successful turn outcome, lifecycle state
-and metadata record. It covers absent secrets/control sockets, denial of a live
-host-loopback listener (reachable from the host before and after the run),
-escape denial, nonzero exit, timeout, output bounds,
-cancellation, CPU/memory/process ceilings and cleanup. Lower-only private test
-bounds make timeout/output tests short; public profile limits are fixed.
+Real-host sandbox evidence is maintained in the [gated fixture guide](real-sandbox-fixtures.md).
+The suite contains a real-host prerequisite check and focused fixtures that exercise production
+sandbox and supervisor behavior. Each fixture documents one boundary, its host requirements, and
+what its result does not establish; run them serially on a prepared Linux host.
 
 The ignored `local_model_task_patches_then_runs_a_filtered_offline_cargo_test`
 and `local_model_task_cannot_complete_after_a_zero_match_offline_cargo_test`
@@ -392,8 +380,8 @@ matching case checks that the bounded completion prompt contains the literal
 filter and one executed test before accepting `complete_task`, while the
 companion case checks the typed `no_tests_matched` failure stops before task
 control can complete. Both use a disposable dependency-free workspace and
-verify an outside-workspace canary remains unchanged. They use the same
-preprovisioned toolchain and registry settings as the host fixture above.
+verify an outside-workspace canary remains unchanged. They use the same preprovisioned
+toolchain and registry requirements described in the gated fixture guide.
 
 The broader [process safety design](process-execution-safety.md) remains a
 historical proposal and requirements reference. See
@@ -402,13 +390,10 @@ for the implemented architecture and its evidence classes. This implementation
 provides no generic shell, interactive process session, new provider, deployment
 path, network-enabled profile, macOS/Windows backend, or persistent build cache.
 
-The additional ignored `real_product_workspace_runs_the_fixed_profile` fixture
-accepts `KRYPPER_TEST_WORKSPACE` in the trusted test harness only, and runs that
-selected repository through the unchanged fixed production profile. On the
-provisioned host recorded on 2026-11-27, a minimal locked workspace with the
-Rustix 1.1.6 dependency completed successfully after the `/dev/null` write rule
-was added. Running the entire Product workspace stopped at the profile's
-120-second aggregate CPU limit before any Product tests ran. The Rustix build
-script behavior is verified on this host; the full Product workspace remains
-unverified under the current fixed resource limits. This local host evidence is
-separate from required GitHub Verify and independent code review.
+The prior ignored `real_product_workspace_runs_the_fixed_profile` host fixture was retired
+when the monolithic host evidence was replaced by the 12 focused fixtures above. Its recorded
+2026-11-27 run showed that a minimal locked workspace containing Rustix 1.1.6 completed after
+the `/dev/null` rule was added, while the entire Product workspace reached the profile's
+120-second aggregate CPU limit before Product tests started. The focused fixtures do not claim
+the full Product test suite fits within that fixed sandbox budget; ordinary all-target CI runs
+outside this host profile.
